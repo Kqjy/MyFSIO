@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
 from flask import Blueprint, Response, current_app, jsonify, request
@@ -468,7 +468,17 @@ def _generate_presigned_url(
         "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
     }
     canonical_query = _encode_query_params(query_params)
-    host = request.host
+
+    # Determine host and scheme from config or request
+    api_base = current_app.config.get("API_BASE_URL")
+    if api_base:
+        parsed = urlparse(api_base)
+        host = parsed.netloc
+        scheme = parsed.scheme
+    else:
+        host = request.host
+        scheme = request.scheme or "http"
+
     canonical_headers = f"host:{host}\n"
     canonical_request = "\n".join(
         [
@@ -492,7 +502,6 @@ def _generate_presigned_url(
     signing_key = _derive_signing_key(secret_key, date_stamp, region, service)
     signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
     query_with_sig = canonical_query + f"&X-Amz-Signature={signature}"
-    scheme = request.scheme or "http"
     return f"{scheme}://{host}{_canonical_uri(bucket_name, object_key)}?{query_with_sig}"
 
 

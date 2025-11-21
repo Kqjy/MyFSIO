@@ -66,6 +66,25 @@ class ReplicationManager:
             del self._rules[bucket_name]
             self.save_rules()
 
+    def create_remote_bucket(self, connection_id: str, bucket_name: str) -> None:
+        """Create a bucket on the remote connection."""
+        connection = self.connections.get(connection_id)
+        if not connection:
+            raise ValueError(f"Connection {connection_id} not found")
+
+        try:
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=connection.endpoint_url,
+                aws_access_key_id=connection.access_key,
+                aws_secret_access_key=connection.secret_key,
+                region_name=connection.region,
+            )
+            s3.create_bucket(Bucket=bucket_name)
+        except ClientError as e:
+            logger.error(f"Failed to create remote bucket {bucket_name}: {e}")
+            raise
+
     def trigger_replication(self, bucket_name: str, object_key: str) -> None:
         rule = self.get_rule(bucket_name)
         if not rule or not rule.enabled:

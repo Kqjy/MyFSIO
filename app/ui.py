@@ -1105,6 +1105,16 @@ def update_bucket_replication(bucket_name: str):
         if not target_conn_id or not target_bucket:
             flash("Target connection and bucket are required", "danger")
         else:
+            # Check if user wants to create the remote bucket
+            create_remote = request.form.get("create_remote_bucket") == "on"
+            if create_remote:
+                try:
+                    _replication().create_remote_bucket(target_conn_id, target_bucket)
+                    flash(f"Created remote bucket '{target_bucket}'", "success")
+                except Exception as e:
+                    flash(f"Failed to create remote bucket: {e}", "warning")
+                    # We continue to set the rule even if creation fails (maybe it exists?)
+
             rule = ReplicationRule(
                 bucket_name=bucket_name,
                 target_connection_id=target_conn_id,
