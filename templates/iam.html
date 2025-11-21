@@ -1,0 +1,557 @@
+{% extends "base.html" %}
+{% block content %}
+{% set iam_disabled = 'disabled' if iam_locked else '' %}
+<div class="page-header d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <p class="text-uppercase text-muted small mb-1">Identity & Access Management</p>
+    <h1 class="h3 mb-1">IAM Configuration</h1>
+  </div>
+  <div class="d-flex gap-2">
+    {% if not iam_locked %}
+    <button class="btn btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#configPreview" aria-expanded="false" aria-controls="configPreview">
+      View Config JSON
+    </button>
+    {% endif %}
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createUserModal" {{ iam_disabled }}>
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-person-plus me-1" viewBox="0 0 16 16">
+        <path d="M12.5 16a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm.5-5v1h1a.5.5 0 0 1 0 1h-1v1a.5.5 0 0 1-1 0v-1h-1a.5.5 0 0 1 0-1h1v-1a.5.5 0 0 1 1 0Zm-2-6a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM8 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/>
+        <path d="M8.256 14a4.474 4.474 0 0 1-.229-1.004H3c.001-.246.154-.986.832-1.664C4.484 10.68 5.711 10 8 10c.26 0 .507.009.74.025.226-.341.496-.65.804-.918C9.077 9.038 8.564 9 8 9c-5 0-6 3-6 4s1 1 1 1h5.256Z"/>
+      </svg>
+      Create User
+    </button>
+  </div>
+</div>
+
+{% if iam_locked %}
+<div class="alert alert-warning" role="alert">
+  <div class="fw-semibold mb-1">Administrator permissions required</div>
+  <p class="mb-0">You need the <code>iam:list_users</code> action to edit users or policies. {{ locked_reason or "Sign in with an admin identity to continue." }}</p>
+</div>
+{% endif %}
+
+{% if disclosed_secret %}
+<div class="alert alert-info border-0 shadow-sm mb-4" role="alert">
+  <div class="d-flex align-items-start gap-2 mb-2">
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-key flex-shrink-0 mt-1" viewBox="0 0 16 16">
+      <path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/>
+      <path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+    </svg>
+    <div class="flex-grow-1">
+      <div class="fw-semibold">
+        {% if disclosed_secret.operation == 'rotate' %}
+        Secret rotated for <code>{{ disclosed_secret.access_key }}</code>
+        {% else %}
+        New user created: <code>{{ disclosed_secret.access_key }}</code>
+        {% endif %}
+      </div>
+      <p class="mb-2 small">⚠️ This secret is only shown once. Copy it now and store it securely.</p>
+    </div>
+  </div>
+  <div class="input-group">
+    <span class="input-group-text"><strong>Secret key</strong></span>
+    <input class="form-control font-monospace" type="text" value="{{ disclosed_secret.secret_key }}" readonly id="disclosedSecretValue" />
+    <button class="btn btn-outline-primary" type="button" data-secret-copy>
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-clipboard" viewBox="0 0 16 16">
+        <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+        <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+      </svg>
+      Copy
+    </button>
+  </div>
+</div>
+{% endif %}
+
+{% if not iam_locked %}
+<div class="collapse mb-4" id="configPreview">
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span class="fw-semibold">Configuration Preview</span>
+      <span class="badge text-bg-secondary">{{ config_summary.user_count }} users</span>
+    </div>
+    <div class="card-body">
+      <div class="position-relative">
+        <pre class="policy-preview mb-0" id="iamConfigPreview">{{ config_document }}</pre>
+        <button class="btn btn-outline-light btn-sm config-copy" type="button" data-copy-target="iamConfigPreview">Copy JSON</button>
+      </div>
+      <p class="text-muted small mt-2 mb-0">Secrets are masked above. Access <code>{{ config_summary.path }}</code> directly to view full credentials.</p>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card shadow-sm">
+  <div class="card-header bg-body d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">Users</span>
+    {% if iam_locked %}<span class="badge text-bg-warning">View only</span>{% endif %}
+  </div>
+  {% if iam_locked %}
+  <div class="card-body">
+    <p class="text-muted mb-0">Sign in with an administrator to list or edit IAM users.</p>
+  </div>
+  {% else %}
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th scope="col">Access Key</th>
+          <th scope="col">Display Name</th>
+          <th scope="col">Policies</th>
+          <th scope="col" class="text-end">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for user in users %}
+        <tr>
+          <td class="font-monospace">{{ user.access_key }}</td>
+          <td>{{ user.display_name }}</td>
+          <td>
+            {% for policy in user.policies %}
+              <span class="badge text-bg-light border text-dark mb-1">
+                {{ policy.bucket }}
+                {% if '*' in policy.actions %}
+                  <span class="text-muted">(*)</span>
+                {% else %}
+                  <span class="text-muted">({{ policy.actions|length }})</span>
+                {% endif %}
+              </span>
+            {% endfor %}
+          </td>
+          <td class="text-end">
+            <div class="btn-group btn-group-sm" role="group">
+              <button class="btn btn-outline-primary" type="button" data-rotate-user="{{ user.access_key }}" title="Rotate Secret">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-arrow-repeat" viewBox="0 0 16 16">
+                  <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
+                  <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
+                </svg>
+              </button>
+              <button class="btn btn-outline-secondary" type="button" data-edit-user="{{ user.access_key }}" data-display-name="{{ user.display_name }}" title="Edit User">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-pencil" viewBox="0 0 16 16">
+                  <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.378.378-.106 5-5-.378-.378-5 5z"/>
+                </svg>
+              </button>
+              <button class="btn btn-outline-secondary" type="button" data-policy-editor data-access-key="{{ user.access_key }}" title="Edit Policies">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-pencil-square" viewBox="0 0 16 16">
+                  <path d="M15.502 1.94a.5.5 0 0 1 0 .706L14.459 3.69l-2-2L13.502.646a.5.5 0 0 1 .707 0l1.293 1.293zm-1.75 2.456-2-2L4.939 9.21a.5.5 0 0 0-.121.196l-.805 2.414a.25.25 0 0 0 .316.316l2.414-.805a.5.5 0 0 0 .196-.12l6.813-6.814z"/>
+                  <path fill-rule="evenodd" d="M1 13.5A1.5 1.5 0 0 0 2.5 15h11a1.5 1.5 0 0 0 1.5-1.5v-6a.5.5 0 0 0-1 0v6a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-11a.5.5 0 0 1 .5-.5H9a.5.5 0 0 0 0-1H2.5A1.5 1.5 0 0 0 1 2.5v11z"/>
+                </svg>
+              </button>
+              <button class="btn btn-outline-danger" type="button" data-delete-user="{{ user.access_key }}" title="Delete User">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16">
+                  <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
+                  <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                </svg>
+              </button>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="4" class="text-center text-muted py-4">No IAM users defined.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Create User Modal -->
+<div class="modal fade" id="createUserModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Create IAM User</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="{{ url_for('ui.create_iam_user') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Display Name</label>
+            <input class="form-control" type="text" name="display_name" placeholder="Analytics Team" required />
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Initial Policies (JSON)</label>
+            <textarea class="form-control font-monospace" name="policies" rows="6" spellcheck="false" placeholder='[
+  {"bucket": "*", "actions": ["list", "read"]}
+]'></textarea>
+            <div class="form-text">Leave blank to grant full control (for bootstrap admins only).</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Create User</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Policy Editor Modal -->
+<div class="modal fade" id="policyEditorModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Edit Policies: <span id="policyEditorUserLabel" class="font-monospace"></span></h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <form
+          id="policyEditorForm"
+          method="post"
+          data-action-template="{{ url_for('ui.update_iam_policies', access_key='ACCESS_KEY_PLACEHOLDER') }}"
+          class="d-flex flex-column gap-3"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" id="policyEditorUser" name="access_key" />
+          
+          <div>
+            <label class="form-label">Inline Policies (JSON array)</label>
+            <textarea class="form-control font-monospace" id="policyEditorDocument" name="policies" rows="12" spellcheck="false"></textarea>
+            <div class="form-text">Use standard MyFSIO policy format. Validation happens server-side.</div>
+          </div>
+          <div class="d-flex flex-wrap gap-2">
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="full">Full Control</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="readonly">Read-Only</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="writer">Read + Write</button>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary" type="submit" form="policyEditorForm">Save Policies</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Edit User Modal -->
+<div class="modal fade" id="editUserModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Edit User</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" id="editUserForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Display Name</label>
+            <input class="form-control" type="text" name="display_name" id="editUserDisplayName" required />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Save Changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Delete User Modal -->
+<div class="modal fade" id="deleteUserModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Delete User</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to delete user <strong id="deleteUserLabel"></strong>?</p>
+        <div id="deleteSelfWarning" class="alert alert-danger d-none">
+          <strong>Warning:</strong> You are deleting your own account. You will be logged out immediately and will lose access to this session.
+        </div>
+        <p class="text-danger mb-0">This action cannot be undone.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <form method="post" id="deleteUserForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <button class="btn btn-danger" type="submit">Delete User</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Rotate Secret Modal -->
+<div class="modal fade" id="rotateSecretModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Rotate Secret Key</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="rotateSecretConfirm">
+        <p>Are you sure you want to rotate the secret key for <strong id="rotateUserLabel"></strong>?</p>
+        <div id="rotateSelfWarning" class="alert alert-warning d-none">
+          <strong>Warning:</strong> You are rotating your own secret key. You will need to sign in again with the new key.
+        </div>
+        <div class="alert alert-warning mb-0">
+            The old secret key will stop working immediately. Any applications using it must be updated.
+        </div>
+      </div>
+      <div class="modal-body d-none" id="rotateSecretResult">
+        <p class="mb-2">Secret rotated successfully!</p>
+        <div class="input-group mb-3">
+            <input type="text" class="form-control font-monospace" id="newSecretKey" readonly>
+            <button class="btn btn-outline-primary" type="button" id="copyNewSecret">Copy</button>
+        </div>
+        <p class="small text-muted mb-0">Copy this now. It will not be shown again.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="rotateCancelBtn">Cancel</button>
+        <button type="button" class="btn btn-primary" id="confirmRotateBtn">Rotate Key</button>
+        <button type="button" class="btn btn-primary d-none" data-bs-dismiss="modal" id="rotateDoneBtn">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="iamUsersJson" type="application/json">{{ users | tojson }}</script>
+{% endblock %}
+
+{% block extra_scripts %}
+{{ super() }}
+<script>
+  (function () {
+    const currentUserKey = {{ principal.access_key | tojson }};
+    const configCopyButtons = document.querySelectorAll('.config-copy');
+    configCopyButtons.forEach((button) => {
+      button.addEventListener('click', async () => {
+        const targetId = button.dataset.copyTarget;
+        const target = document.getElementById(targetId);
+        if (!target) return;
+        const text = target.innerText;
+        try {
+          await navigator.clipboard.writeText(text);
+          button.textContent = 'Copied!';
+          setTimeout(() => {
+            button.textContent = 'Copy JSON';
+          }, 1500);
+        } catch (err) {
+          console.error('Unable to copy IAM config', err);
+        }
+      });
+    });
+
+    const secretCopyButton = document.querySelector('[data-secret-copy]');
+    if (secretCopyButton) {
+      secretCopyButton.addEventListener('click', async () => {
+        const secretInput = document.getElementById('disclosedSecretValue');
+        if (!secretInput) return;
+        try {
+          await navigator.clipboard.writeText(secretInput.value);
+          secretCopyButton.textContent = 'Copied!';
+          setTimeout(() => {
+            secretCopyButton.textContent = 'Copy';
+          }, 1500);
+        } catch (err) {
+          console.error('Unable to copy IAM secret', err);
+        }
+      });
+    }
+
+    const iamUsersData = document.getElementById('iamUsersJson');
+    const users = iamUsersData ? JSON.parse(iamUsersData.textContent || '[]') : [];
+    
+    // Policy Editor Logic
+    const policyModalEl = document.getElementById('policyEditorModal');
+    const policyModal = new bootstrap.Modal(policyModalEl);
+    const userLabelEl = document.getElementById('policyEditorUserLabel');
+    const userInputEl = document.getElementById('policyEditorUser');
+    const textareaEl = document.getElementById('policyEditorDocument');
+    const formEl = document.getElementById('policyEditorForm');
+    const templateButtons = document.querySelectorAll('[data-policy-template]');
+    const iamLocked = {{ iam_locked | tojson }};
+
+    if (iamLocked) return;
+
+    const userPolicies = (accessKey) => {
+      const target = users.find((user) => user.access_key === accessKey);
+      return target ? JSON.stringify(target.policies, null, 2) : '';
+    };
+
+    const applyTemplate = (name) => {
+      const templates = {
+        full: [
+          {
+            bucket: '*',
+            actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'iam:list_users', 'iam:*'],
+          },
+        ],
+        readonly: [
+          {
+            bucket: '*',
+            actions: ['list', 'read'],
+          },
+        ],
+        writer: [
+          {
+            bucket: '*',
+            actions: ['list', 'read', 'write'],
+          },
+        ],
+      };
+      if (templates[name]) {
+        textareaEl.value = JSON.stringify(templates[name], null, 2);
+      }
+    };
+
+    templateButtons.forEach((button) => {
+      button.addEventListener('click', () => applyTemplate(button.dataset.policyTemplate));
+    });
+
+    formEl?.addEventListener('submit', (event) => {
+      const key = userInputEl.value;
+      if (!key) {
+        event.preventDefault();
+        return;
+      }
+      const template = formEl.dataset.actionTemplate;
+      formEl.action = template.replace('ACCESS_KEY_PLACEHOLDER', key);
+    });
+
+    document.querySelectorAll('[data-policy-editor]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const key = button.getAttribute('data-access-key');
+        if (!key) return;
+        
+        userLabelEl.textContent = key;
+        userInputEl.value = key;
+        textareaEl.value = userPolicies(key);
+        
+        policyModal.show();
+      });
+    });
+
+    // Edit User Logic
+    const editUserModal = new bootstrap.Modal(document.getElementById('editUserModal'));
+    const editUserForm = document.getElementById('editUserForm');
+    const editUserDisplayName = document.getElementById('editUserDisplayName');
+    
+    document.querySelectorAll('[data-edit-user]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const key = btn.dataset.editUser;
+            const name = btn.dataset.displayName;
+            editUserDisplayName.value = name;
+            editUserForm.action = "{{ url_for('ui.update_iam_user', access_key='ACCESS_KEY') }}".replace('ACCESS_KEY', key);
+            editUserModal.show();
+        });
+    });
+
+    // Delete User Logic
+    const deleteUserModal = new bootstrap.Modal(document.getElementById('deleteUserModal'));
+    const deleteUserForm = document.getElementById('deleteUserForm');
+    const deleteUserLabel = document.getElementById('deleteUserLabel');
+    const deleteSelfWarning = document.getElementById('deleteSelfWarning');
+
+    document.querySelectorAll('[data-delete-user]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const key = btn.dataset.deleteUser;
+            deleteUserLabel.textContent = key;
+            deleteUserForm.action = "{{ url_for('ui.delete_iam_user', access_key='ACCESS_KEY') }}".replace('ACCESS_KEY', key);
+            
+            if (key === currentUserKey) {
+                deleteSelfWarning.classList.remove('d-none');
+            } else {
+                deleteSelfWarning.classList.add('d-none');
+            }
+            
+            deleteUserModal.show();
+        });
+    });
+
+    // Rotate Secret Logic
+    const rotateSecretModal = new bootstrap.Modal(document.getElementById('rotateSecretModal'));
+    const rotateUserLabel = document.getElementById('rotateUserLabel');
+    const confirmRotateBtn = document.getElementById('confirmRotateBtn');
+    const rotateCancelBtn = document.getElementById('rotateCancelBtn');
+    const rotateDoneBtn = document.getElementById('rotateDoneBtn');
+    const rotateSecretConfirm = document.getElementById('rotateSecretConfirm');
+    const rotateSecretResult = document.getElementById('rotateSecretResult');
+    const newSecretKeyInput = document.getElementById('newSecretKey');
+    const copyNewSecretBtn = document.getElementById('copyNewSecret');
+    const rotateSelfWarning = document.getElementById('rotateSelfWarning');
+    let currentRotateKey = null;
+
+    document.querySelectorAll('[data-rotate-user]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentRotateKey = btn.dataset.rotateUser;
+            rotateUserLabel.textContent = currentRotateKey;
+            
+            if (currentRotateKey === currentUserKey) {
+                rotateSelfWarning.classList.remove('d-none');
+            } else {
+                rotateSelfWarning.classList.add('d-none');
+            }
+
+            // Reset Modal State
+            rotateSecretConfirm.classList.remove('d-none');
+            rotateSecretResult.classList.add('d-none');
+            confirmRotateBtn.classList.remove('d-none');
+            rotateCancelBtn.classList.remove('d-none');
+            rotateDoneBtn.classList.add('d-none');
+            
+            rotateSecretModal.show();
+        });
+    });
+
+    confirmRotateBtn.addEventListener('click', async () => {
+        if (!currentRotateKey) return;
+        
+        confirmRotateBtn.disabled = true;
+        confirmRotateBtn.textContent = "Rotating...";
+        
+        try {
+            const url = "{{ url_for('ui.rotate_iam_secret', access_key='ACCESS_KEY') }}".replace('ACCESS_KEY', currentRotateKey);
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Accept': 'application/json',
+                    'X-CSRFToken': "{{ csrf_token() }}"
+                }
+            });
+            
+            if (!response.ok) {
+                const data = await response.json();
+                throw new Error(data.error || 'Failed to rotate secret');
+            }
+            
+            const data = await response.json();
+            newSecretKeyInput.value = data.secret_key;
+            
+            // Show Result
+            rotateSecretConfirm.classList.add('d-none');
+            rotateSecretResult.classList.remove('d-none');
+            confirmRotateBtn.classList.add('d-none');
+            rotateCancelBtn.classList.add('d-none');
+            rotateDoneBtn.classList.remove('d-none');
+            
+        } catch (err) {
+            alert(err.message);
+            rotateSecretModal.hide();
+        } finally {
+            confirmRotateBtn.disabled = false;
+            confirmRotateBtn.textContent = "Rotate Key";
+        }
+    });
+
+    copyNewSecretBtn.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(newSecretKeyInput.value);
+            copyNewSecretBtn.textContent = 'Copied!';
+            setTimeout(() => copyNewSecretBtn.textContent = 'Copy', 1500);
+        } catch (err) {
+            console.error('Failed to copy', err);
+        }
+    });
+    
+    rotateDoneBtn.addEventListener('click', () => {
+        window.location.reload();
+    });
+  })();
+</script>
+{% endblock %}

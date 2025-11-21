@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}Connections - S3 Compatible Storage{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-md-12">
+        <h2>Remote Connections</h2>
+        <p class="text-muted">Manage connections to other S3-compatible services for replication.</p>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                Add New Connection
+            </div>
+            <div class="card-body">
+                <form method="POST" action="{{ url_for('ui.create_connection') }}">
+                    <div class="mb-3">
+                        <label for="name" class="form-label">Name</label>
+                        <input type="text" class="form-control" id="name" name="name" required placeholder="e.g. Production Backup">
+                    </div>
+                    <div class="mb-3">
+                        <label for="endpoint_url" class="form-label">Endpoint URL</label>
+                        <input type="url" class="form-control" id="endpoint_url" name="endpoint_url" required placeholder="https://s3.us-east-1.amazonaws.com">
+                    </div>
+                    <div class="mb-3">
+                        <label for="region" class="form-label">Region</label>
+                        <input type="text" class="form-control" id="region" name="region" value="us-east-1">
+                    </div>
+                    <div class="mb-3">
+                        <label for="access_key" class="form-label">Access Key</label>
+                        <input type="text" class="form-control" id="access_key" name="access_key" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="secret_key" class="form-label">Secret Key</label>
+                        <input type="password" class="form-control" id="secret_key" name="secret_key" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Add Connection</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                Existing Connections
+            </div>
+            <div class="card-body">
+                {% if connections %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Endpoint</th>
+                                <th>Region</th>
+                                <th>Access Key</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for conn in connections %}
+                            <tr>
+                                <td>{{ conn.name }}</td>
+                                <td>{{ conn.endpoint_url }}</td>
+                                <td>{{ conn.region }}</td>
+                                <td><code>{{ conn.access_key }}</code></td>
+                                <td>
+                                    <form method="POST" action="{{ url_for('ui.delete_connection', connection_id=conn.id) }}" onsubmit="return confirm('Are you sure?');" style="display: inline;">
+                                        <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted text-center my-4">No remote connections configured.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

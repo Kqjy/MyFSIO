@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    <title>MyFSIO Console</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/MyFISO.png') }}" />
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/MyFISO.ico') }}" />
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+      integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN"
+      crossorigin="anonymous"
+    />
+    <script>
+      (function () {
+        try {
+          const stored = localStorage.getItem('myfsio-theme');
+          const theme = stored === 'dark' ? 'dark' : 'light';
+          document.documentElement.dataset.bsTheme = theme;
+          document.documentElement.dataset.theme = theme;
+        } catch (err) {
+          document.documentElement.dataset.bsTheme = 'light';
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+  </head>
+  <body>
+    <nav class="navbar navbar-expand-lg myfsio-nav shadow-sm">
+      <div class="container-fluid">
+        <a class="navbar-brand fw-semibold" href="{{ url_for('ui.buckets_overview') }}">
+          <img
+            src="{{ url_for('static', filename='images/MyFISO.png') }}"
+            alt="MyFSIO logo"
+            class="myfsio-logo"
+            width="32"
+            height="32"
+            decoding="async"
+          />
+          <span class="myfsio-title">MyFSIO</span>
+        </a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navContent" aria-controls="navContent" aria-expanded="false" aria-label="Toggle navigation">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navContent">
+          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+            {% if principal %}
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('ui.buckets_overview') }}">Buckets</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {% if not can_manage_iam %}nav-link-muted{% endif %}" href="{{ url_for('ui.iam_dashboard') }}">
+                IAM
+                {% if not can_manage_iam %}<span class="badge ms-2 text-bg-warning">Restricted</span>{% endif %}
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {% if not can_manage_iam %}nav-link-muted{% endif %}" href="{{ url_for('ui.connections_dashboard') }}">
+                Connections
+                {% if not can_manage_iam %}<span class="badge ms-2 text-bg-warning">Restricted</span>{% endif %}
+              </a>
+            </li>
+            {% endif %}
+            {% if principal %}
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('ui.docs_page') }}">Docs</a>
+            </li>
+            {% endif %}
+          </ul>
+          <div class="ms-lg-auto d-flex align-items-center gap-3 text-light flex-wrap">
+            <button
+              class="btn btn-outline-light btn-sm theme-toggle"
+              type="button"
+              id="themeToggle"
+              aria-pressed="false"
+              aria-label="Toggle dark mode"
+            >
+              <span id="themeToggleLabel" class="visually-hidden">Toggle dark mode</span>
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                fill="currentColor"
+                class="theme-icon"
+                id="themeToggleSun"
+                viewBox="0 0 16 16"
+                aria-hidden="true"
+              >
+                <path
+                  d="M8 11.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm0 1.5a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM8 0a.5.5 0 0 1 .5.5v1.555a.5.5 0 0 1-1 0V.5A.5.5 0 0 1 8 0zm0 12.945a.5.5 0 0 1 .5.5v2.055a.5.5 0 0 1-1 0v-2.055a.5.5 0 0 1 .5-.5zM2.343 2.343a.5.5 0 0 1 .707 0l1.1 1.1a.5.5 0 1 1-.708.707l-1.1-1.1a.5.5 0 0 1 0-.707zm9.507 9.507a.5.5 0 0 1 .707 0l1.1 1.1a.5.5 0 1 1-.707.708l-1.1-1.1a.5.5 0 0 1 0-.708zM0 8a.5.5 0 0 1 .5-.5h1.555a.5.5 0 0 1 0 1H.5A.5.5 0 0 1 0 8zm12.945 0a.5.5 0 0 1 .5-.5H15.5a.5.5 0 0 1 0 1h-2.055a.5.5 0 0 1-.5-.5zM2.343 13.657a.5.5 0 0 1 0-.707l1.1-1.1a.5.5 0 1 1 .708.707l-1.1 1.1a.5.5 0 0 1-.708 0zm9.507-9.507a.5.5 0 0 1 0-.707l1.1-1.1a.5.5 0 0 1 .707.708l-1.1 1.1a.5.5 0 0 1-.707 0z"
+                />
+              </svg>
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                fill="currentColor"
+                class="theme-icon d-none"
+                id="themeToggleMoon"
+                viewBox="0 0 16 16"
+                aria-hidden="true"
+              >
+                <path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/>
+                <path d="M10.794 3.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387a1.734 1.734 0 0 0-1.097 1.097l-.387 1.162a.217.217 0 0 1-.412 0l-.387-1.162A1.734 1.734 0 0 0 9.31 6.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387a1.734 1.734 0 0 0 1.097-1.097l.387-1.162zM13.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.156 1.156 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.156 1.156 0 0 0-.732-.732l-.774-.258a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732L13.863.1z"/>
+              </svg>
+            </button>
+            {% if principal %}
+            <div class="text-end small">
+              <div class="fw-semibold" title="{{ principal.display_name }}">{{ principal.display_name | truncate(20, true) }}</div>
+              <div class="opacity-75">{{ principal.access_key }}</div>
+            </div>
+            <form method="post" action="{{ url_for('ui.logout') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+              <button class="btn btn-outline-light btn-sm" type="submit">Sign out</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </nav>
+    <main class="container py-4">
+      {% block content %}{% endblock %}
+    </main>
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+      <div id="liveToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="toast-header">
+          <strong class="me-auto" id="toastTitle">Notification</strong>
+          <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>
+        <div class="toast-body" id="toastMessage">
+          Hello, world! This is a toast message.
+        </div>
+      </div>
+    </div>
+    <script
+      src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"
+      integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL"
+      crossorigin="anonymous"
+    ></script>
+    <script>
+      window.myfsioCsrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+      window.getCsrfToken = () => window.myfsioCsrfToken;
+      (function () {
+        const originalFetch = window.fetch;
+        window.fetch = function (input, init) {
+          init = init || {};
+          const method = (init.method || 'GET').toUpperCase();
+          if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+            const headers = new Headers(init.headers || {});
+            if (window.myfsioCsrfToken) {
+              headers.set('X-CSRFToken', window.myfsioCsrfToken);
+            }
+            init.headers = headers;
+          }
+          return originalFetch.call(this, input, init);
+        };
+      })();
+    </script>
+    <script>
+      (function () {
+        const storageKey = 'myfsio-theme';
+        const toggle = document.getElementById('themeToggle');
+        const label = document.getElementById('themeToggleLabel');
+        const sunIcon = document.getElementById('themeToggleSun');
+        const moonIcon = document.getElementById('themeToggleMoon');
+
+        const applyTheme = (theme) => {
+          document.documentElement.dataset.bsTheme = theme;
+          document.documentElement.dataset.theme = theme;
+          try {
+            localStorage.setItem(storageKey, theme);
+          } catch (err) {
+            /* localStorage unavailable */
+          }
+          if (label) {
+            label.textContent = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+          }
+          if (toggle) {
+            toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+            toggle.setAttribute('title', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+            toggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+          }
+          if (sunIcon && moonIcon) {
+            const isDark = theme === 'dark';
+            sunIcon.classList.toggle('d-none', !isDark);
+            moonIcon.classList.toggle('d-none', isDark);
+          }
+        };
+
+        const current = document.documentElement.dataset.bsTheme || 'light';
+        applyTheme(current);
+
+        toggle?.addEventListener('click', () => {
+          const next = document.documentElement.dataset.bsTheme === 'dark' ? 'light' : 'dark';
+          applyTheme(next);
+        });
+      })();
+    </script>
+    <script>
+      // Toast utility
+      window.showToast = function(message, title = 'Notification', type = 'info') {
+        const toastEl = document.getElementById('liveToast');
+        const toastTitle = document.getElementById('toastTitle');
+        const toastMessage = document.getElementById('toastMessage');
+        
+        toastTitle.textContent = title;
+        toastMessage.textContent = message;
+        
+        // Reset classes
+        toastEl.classList.remove('text-bg-primary', 'text-bg-success', 'text-bg-danger', 'text-bg-warning');
+        
+        if (type === 'success') toastEl.classList.add('text-bg-success');
+        if (type === 'error') toastEl.classList.add('text-bg-danger');
+        if (type === 'warning') toastEl.classList.add('text-bg-warning');
+        
+        const toast = new bootstrap.Toast(toastEl);
+        toast.show();
+      };
+    </script>
+    <script>
+      (function () {
+        // Show flashed messages as toasts
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            // Map Flask categories to Toast types
+            // Flask: success, danger, warning, info
+            // Toast: success, error, warning, info
+            var type = "{{ category }}";
+            if (type === "danger") type = "error";
+            window.showToast({{ message | tojson | safe }}, "Notification", type);
+          {% endfor %}
+        {% endif %}
+        {% endwith %}
+      })();
+    </script>
+    {% block extra_scripts %}{% endblock %}
+  </body>
+</html>

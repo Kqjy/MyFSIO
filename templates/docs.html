@@ -1,0 +1,376 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="docs-hero p-4 p-md-5 rounded-4 mb-4">
+  <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+    <div>
+      <p class="text-uppercase fw-semibold small text-white-50 mb-2">Documentation</p>
+      <h1 class="display-6 fw-semibold mb-2">Your guide to MyFSIO</h1>
+      <p class="lead mb-0 text-light">Follow these steps to install, authenticate, master the console, and automate everything through the API.</p>
+    </div>
+    <div class="docs-callout text-light">
+      <div class="small text-uppercase opacity-75">API base URL</div>
+      <code class="fs-6 text-wrap">{{ api_base }}</code>
+    </div>
+  </div>
+</section>
+<div class="row g-4">
+  <div class="col-xl-8">
+    <article id="setup" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">01</span>
+          <h2 class="h4 mb-0">Set up &amp; run locally</h2>
+        </div>
+        <p class="text-muted">Prepare a virtual environment, install dependencies, and launch both servers for a complete console + API experience.</p>
+        <ol class="docs-steps">
+          <li>Install Python 3.11+ plus system build tools.</li>
+          <li>Create a virtual environment and install <code>requirements.txt</code>.</li>
+          <li>Start the services with <code>python run.py</code>.</li>
+        </ol>
+<pre class="mb-3"><code class="language-bash">python -m venv .venv
+. .venv/Scripts/activate      # PowerShell: .\\.venv\\Scripts\\Activate.ps1
+pip install -r requirements.txt
+
+# Run both API and UI
+python run.py
+
+# Or run individually
+python run.py --mode api
+python run.py --mode ui
+</code></pre>
+        <p class="small text-muted mb-0">Configuration lives in <code>app/config.py</code>; override variables via the shell (e.g., <code>STORAGE_ROOT</code>, <code>API_BASE_URL</code>, <code>SECRET_KEY</code>, <code>MAX_UPLOAD_SIZE</code>).</p>
+      </div>
+    </article>
+    <article id="auth" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">02</span>
+          <h2 class="h4 mb-0">Authenticate &amp; manage IAM</h2>
+        </div>
+        <p class="text-muted">MyFSIO seeds <code>data/.myfsio.sys/config/iam.json</code> with <code>localadmin/localadmin</code>. Sign in once, rotate it, then grant least-privilege access to teammates and tools.</p>
+        <div class="docs-highlight mb-3">
+          <ol class="mb-0">
+            <li>Visit <code>/ui/login</code>, enter the bootstrap credentials, and rotate them immediately from the IAM page.</li>
+            <li>Create additional users with descriptive display names and AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>).</li>
+            <li>Rotate secrets when sharing with CI jobs—new secrets display once and persist to <code>data/.myfsio.sys/config/iam.json</code>.</li>
+            <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
+          </ol>
+        </div>
+        <p class="mb-0 text-muted">All API calls require <code>X-Access-Key</code> and <code>X-Secret-Key</code> headers. The UI stores them in the Flask session after you log in.</p>
+      </div>
+    </article>
+    <article id="console" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">03</span>
+          <h2 class="h4 mb-0">Use the console effectively</h2>
+        </div>
+        <p class="text-muted">Each workspace models an S3 workflow so you can administer buckets end-to-end.</p>
+        <div class="docs-pill-list">
+          <div>
+            <h3 class="h6 text-uppercase text-muted">Buckets</h3>
+            <ul>
+              <li>Create/delete buckets from the overview. Badges reveal IAM-only, public-read, or custom-policy states.</li>
+              <li>Summary stats show live object counts and total capacity; click through for inventories.</li>
+            </ul>
+          </div>
+          <div>
+            <h3 class="h6 text-uppercase text-muted">Uploads</h3>
+            <ul>
+              <li>Drag and drop folders or files into the upload modal. Objects above 16&nbsp;MB switch to multipart automatically.</li>
+              <li>Progress rows highlight retries, throughput, and completion even if you close the modal.</li>
+            </ul>
+          </div>
+          <div>
+            <h3 class="h6 text-uppercase text-muted">Object details</h3>
+            <ul>
+              <li>Selecting an object opens the preview card with metadata, inline viewers, presign generator, and version history.</li>
+              <li>Trigger downloads, deletes, restores, or metadata refreshes without leaving the panel.</li>
+            </ul>
+          </div>
+          <div>
+            <h3 class="h6 text-uppercase text-muted">Policies &amp; versioning</h3>
+            <ul>
+              <li>Toggle versioning (requires write access). Archived-only keys are flagged so you can restore them quickly.</li>
+              <li>The policy editor saves drafts, ships with presets, and hot-reloads <code>data/.myfsio.sys/config/bucket_policies.json</code>.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="automation" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">04</span>
+          <h2 class="h4 mb-0">Automate with CLI &amp; tools</h2>
+        </div>
+        <p class="text-muted">Point standard S3 clients at {{ api_base }} and reuse the same IAM credentials.</p>
+        <div class="mb-4">
+          <h3 class="h6 text-uppercase text-muted">AWS CLI</h3>
+<pre class="mb-3"><code class="language-bash">aws configure set aws_access_key_id &lt;access_key&gt;
+aws configure set aws_secret_access_key &lt;secret_key&gt;
+aws configure set default.region us-east-1
+
+aws --endpoint-url {{ api_base }} s3 ls
+aws --endpoint-url {{ api_base }} s3api create-bucket --bucket demo
+aws --endpoint-url {{ api_base }} s3 cp ./sample.txt s3://demo/sample.txt
+</code></pre>
+        </div>
+        <div class="mb-4">
+          <h3 class="h6 text-uppercase text-muted">s3cmd</h3>
+<pre class="mb-3"><code class="language-bash">cat &gt; ~/.s3cfg-myfsio &lt;&lt;'EOF'
+host_base = {{ api_host }}
+host_bucket = %(bucket)s.{{ api_host }}
+access_key = &lt;access_key&gt;
+secret_key = &lt;secret_key&gt;
+use_https = False
+signature_v2 = False
+EOF
+
+s3cmd --config ~/.s3cfg-myfsio ls
+s3cmd --config ~/.s3cfg-myfsio put notes.txt s3://demo/notes.txt
+</code></pre>
+        </div>
+        <div>
+          <h3 class="h6 text-uppercase text-muted">curl / HTTPie</h3>
+<pre class="mb-0"><code class="language-bash">curl {{ api_base }}/ \
+  -H "X-Access-Key: &lt;access_key&gt;" \
+  -H "X-Secret-Key: &lt;secret_key&gt;"
+
+curl -X PUT {{ api_base }}/demo/notes.txt \
+  -H "X-Access-Key: &lt;access_key&gt;" \
+  -H "X-Secret-Key: &lt;secret_key&gt;" \
+  --data-binary @notes.txt
+
+curl -X POST {{ api_base }}/presign/demo/notes.txt \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;access_key&gt;" \
+  -H "X-Secret-Key: &lt;secret_key&gt;" \
+  -d '{"method":"GET", "expires_in": 900}'
+</code></pre>
+        </div>
+      </div>
+    </article>
+    <article id="api" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">05</span>
+          <h2 class="h4 mb-0">Key REST endpoints</h2>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-borderless align-middle docs-table mb-0">
+            <thead>
+              <tr>
+                <th scope="col">Method</th>
+                <th scope="col">Path</th>
+                <th scope="col">Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>GET</td>
+                <td><code>/</code></td>
+                <td>List buckets accessible to the caller.</td>
+              </tr>
+              <tr>
+                <td>PUT</td>
+                <td><code>/&lt;bucket&gt;</code></td>
+                <td>Create a bucket.</td>
+              </tr>
+              <tr>
+                <td>DELETE</td>
+                <td><code>/&lt;bucket&gt;</code></td>
+                <td>Delete a bucket (must be empty).</td>
+              </tr>
+              <tr>
+                <td>GET</td>
+                <td><code>/&lt;bucket&gt;</code></td>
+                <td>List objects (supports <code>prefix</code> / <code>max-keys</code> queries).</td>
+              </tr>
+              <tr>
+                <td>PUT</td>
+                <td><code>/&lt;bucket&gt;/&lt;key&gt;</code></td>
+                <td>Upload or overwrite an object; UI helper handles multipart flows.</td>
+              </tr>
+              <tr>
+                <td>GET</td>
+                <td><code>/&lt;bucket&gt;/&lt;key&gt;</code></td>
+                <td>Download an object (UI adds <code>?download=1</code> to force attachment).</td>
+              </tr>
+              <tr>
+                <td>DELETE</td>
+                <td><code>/&lt;bucket&gt;/&lt;key&gt;</code></td>
+                <td>Delete an object.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT/DELETE</td>
+                <td><code>/bucket-policy/&lt;bucket&gt;</code></td>
+                <td>Fetch, upsert, or remove a bucket policy.</td>
+              </tr>
+              <tr>
+                <td>POST</td>
+                <td><code>/presign/&lt;bucket&gt;/&lt;key&gt;</code></td>
+                <td>Generate SigV4 URLs for GET/PUT/DELETE with custom expiry.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small text-muted mt-3 mb-0">All responses include <code>X-Request-Id</code> for tracing. Logs land in <code>logs/api.log</code> and <code>logs/ui.log</code>.</p>
+      </div>
+    </article>
+    <article id="examples" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">06</span>
+          <h2 class="h4 mb-0">API Examples</h2>
+        </div>
+        <p class="text-muted">Common operations using boto3.</p>
+        
+        <h5 class="mt-4">Multipart Upload</h5>
+<pre><code class="language-python">import boto3
+
+s3 = boto3.client('s3', endpoint_url='{{ api_base }}')
+
+# Initiate
+response = s3.create_multipart_upload(Bucket='mybucket', Key='large.bin')
+upload_id = response['UploadId']
+
+# Upload parts
+parts = []
+chunks = [b'chunk1', b'chunk2'] # Example data chunks
+for part_number, chunk in enumerate(chunks, start=1):
+    response = s3.upload_part(
+        Bucket='mybucket',
+        Key='large.bin',
+        PartNumber=part_number,
+        UploadId=upload_id,
+        Body=chunk
+    )
+    parts.append({'PartNumber': part_number, 'ETag': response['ETag']})
+
+# Complete
+s3.complete_multipart_upload(
+    Bucket='mybucket',
+    Key='large.bin',
+    UploadId=upload_id,
+    MultipartUpload={'Parts': parts}
+)</code></pre>
+      </div>
+    </article>
+    <article id="replication" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">07</span>
+          <h2 class="h4 mb-0">Site Replication</h2>
+        </div>
+        <p class="text-muted">Automatically copy new objects to another MyFSIO instance or S3-compatible service for backup or disaster recovery.</p>
+        
+        <h3 class="h6 text-uppercase text-muted mt-4">Setup Guide</h3>
+        <ol class="docs-steps mb-3">
+            <li>
+                <strong>Prepare Target:</strong> On the destination server, create a bucket (e.g., <code>backup-bucket</code>) and an IAM user with write permissions.
+            </li>
+            <li>
+                <strong>Connect Source:</strong> On this server, go to <a href="{{ url_for('ui.connections_dashboard') }}">Connections</a> and add the target's API URL and credentials.
+            </li>
+            <li>
+                <strong>Enable Rule:</strong> Go to the source bucket's <strong>Replication</strong> tab, select the connection, and enter the target bucket name.
+            </li>
+        </ol>
+
+        <div class="alert alert-light border mb-0">
+            <div class="d-flex gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1" viewBox="0 0 16 16">
+                  <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
+                  <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
+                </svg>
+                <div>
+                    <strong>Headless Target Setup?</strong>
+                    <p class="small text-muted mb-0">If your target server has no UI, use the Python API directly to bootstrap credentials. See <code>docs.md</code> in the project root for the <code>setup_target.py</code> script.</p>
+                </div>
+            </div>
+        </div>
+      </div>
+    </article>
+    <article id="troubleshooting" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">08</span>
+          <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle docs-table mb-0">
+            <thead>
+              <tr>
+                <th scope="col">Symptom</th>
+                <th scope="col">Likely cause</th>
+                <th scope="col">Fix</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>403 from API despite Public preset</td>
+                <td>Policy not saved or ARN mismatch</td>
+                <td>Reapply the preset and confirm <code>arn:aws:s3:::bucket/*</code> matches the bucket name.</td>
+              </tr>
+              <tr>
+                <td>UI shows stale policy/object data</td>
+                <td>Browser cached prior state</td>
+                <td>Refresh; the server hot-reloads <code>data/.myfsio.sys/config/bucket_policies.json</code> and storage metadata.</td>
+              </tr>
+              <tr>
+                <td>Presign dialog returns 403</td>
+                <td>User lacks required <code>read/write/delete</code> action or bucket policy denies</td>
+                <td>Update IAM inline policies or remove conflicting deny statements.</td>
+              </tr>
+              <tr>
+                <td>Large uploads fail instantly</td>
+                <td><code>MAX_UPLOAD_SIZE</code> exceeded</td>
+                <td>Raise the env var or split the object.</td>
+              </tr>
+              <tr>
+                <td>Requests hit the wrong host</td>
+                <td><code>API_BASE_URL</code> not updated after tunneling/forwarding</td>
+                <td>Set <code>API_BASE_URL</code> in your shell or <code>.env</code> to match the published host.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </article>
+  </div>
+  <div class="col-xl-4">
+    <aside class="card shadow-sm docs-sidebar">
+      <div class="card-body">
+        <h3 class="h6 text-uppercase text-muted mb-3">On this page</h3>
+        <ul class="list-unstyled docs-toc mb-4">
+          <li><a href="#setup">Set up &amp; run</a></li>
+          <li><a href="#auth">Authentication &amp; IAM</a></li>
+          <li><a href="#console">Console tour</a></li>
+          <li><a href="#automation">Automation / CLI</a></li>
+          <li><a href="#api">REST endpoints</a></li>
+          <li><a href="#replication">Site Replication</a></li>
+          <li><a href="#troubleshooting">Troubleshooting</a></li>
+        </ul>
+        <div class="docs-sidebar-callouts">
+          <div>
+            <div class="small text-uppercase text-muted">API base</div>
+            <code class="d-block">{{ api_base }}</code>
+          </div>
+          <div>
+            <div class="small text-uppercase text-muted">Sample user</div>
+            <code class="d-block">localadmin / localadmin</code>
+          </div>
+          <div>
+            <div class="small text-uppercase text-muted">Logs</div>
+            <span class="text-muted small">logs/api.log · logs/ui.log</span>
+          </div>
+        </div>
+        <div class="mt-4">
+          <p class="small text-muted mb-1">Need more automation? Extend <code>app/s3_api.py</code> or wrap <code>run_api.py</code> with gunicorn for production-style deployments.</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+{% endblock %}

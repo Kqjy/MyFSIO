@@ -1,0 +1,58 @@
+"""Helper script to run the API server, UI server, or both."""
+from __future__ import annotations
+
+import argparse
+import os
+import warnings
+from multiprocessing import Process
+
+from app import create_api_app, create_ui_app
+
+
+def _server_host() -> str:
+    """Return the bind host for API and UI servers."""
+    return os.getenv("APP_HOST", "0.0.0.0")
+
+
+def _is_debug_enabled() -> bool:
+    return os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
+
+
+def serve_api(port: int) -> None:
+    app = create_api_app()
+    debug = _is_debug_enabled()
+    if debug:
+        warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
+    app.run(host=_server_host(), port=port, debug=debug)
+
+
+def serve_ui(port: int) -> None:
+    app = create_ui_app()
+    debug = _is_debug_enabled()
+    if debug:
+        warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
+    app.run(host=_server_host(), port=port, debug=debug)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the S3 clone services.")
+    parser.add_argument("--mode", choices=["api", "ui", "both"], default="both")
+    parser.add_argument("--api-port", type=int, default=5000)
+    parser.add_argument("--ui-port", type=int, default=5100)
+    args = parser.parse_args()
+
+    if args.mode in {"api", "both"}:
+        print(f"Starting API server on port {args.api_port}...")
+        api_proc = Process(target=serve_api, args=(args.api_port,), daemon=True)
+        api_proc.start()
+    else:
+        api_proc = None
+
+    if args.mode in {"ui", "both"}:
+        print(f"Starting UI server on port {args.ui_port}...")
+        serve_ui(args.ui_port)
+    elif api_proc:
+        try:
+            api_proc.join()
+        except KeyboardInterrupt:
+            pass

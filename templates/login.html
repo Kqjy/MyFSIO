@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row align-items-center mt-5 g-4">
+  <div class="col-lg-6">
+    <h1 class="display-6 mb-3">Welcome to <span class="text-primary">MyFSIO</span></h1>
+    <p class="lead text-muted">A developer-friendly object storage solution for prototyping and local development.</p>
+    <p class="text-muted mb-0">Need help getting started? Review the project README and docs for bootstrap credentials, IAM walkthroughs, and bucket policy samples.</p>
+  </div>
+  <div class="col-lg-5 ms-auto">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h2 class="h4 mb-3">Sign in</h2>
+        <form method="post" action="{{ url_for('ui.login') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <div class="mb-3">
+            <label class="form-label">Access key</label>
+            <input class="form-control" type="text" name="access_key" required autofocus />
+          </div>
+          <div class="mb-4">
+            <label class="form-label">Secret key</label>
+            <input class="form-control" type="password" name="secret_key" required />
+          </div>
+          <button class="btn btn-primary w-100" type="submit">Continue</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,937 @@
+:root {
+	--myfsio-body-bg: #f5f6fa;
+	--myfsio-text: #0f172a;
+	--myfsio-card-bg: #ffffff;
+	--myfsio-card-border: #e2e8f0;
+	--myfsio-muted: #475569;
+	--myfsio-input-bg: #ffffff;
+	--myfsio-input-border: #cbd5f5;
+	--myfsio-nav-gradient: linear-gradient(90deg, #0f172a, #1d4ed8);
+	--myfsio-nav-link: rgba(255, 255, 255, 0.85);
+	--myfsio-nav-link-hover: #ffffff;
+	--myfsio-preview-bg: #f8f9fb;
+	--myfsio-policy-bg: #0f172a;
+	--myfsio-policy-fg: #e2e8f0;
+	--myfsio-hover-bg: rgba(59, 130, 246, 0.12);
+}
+
+[data-theme='dark'] {
+	--myfsio-body-bg: #0b1120;
+	--myfsio-text: #e2e8f0;
+	--myfsio-card-bg: #1a1f2e;
+	--myfsio-card-border: #2d3548;
+	--myfsio-muted: #94a3b8;
+	--myfsio-input-bg: #111827;
+	--myfsio-input-border: #374151;
+	--myfsio-nav-gradient: linear-gradient(90deg, #020617, #1e3a8a);
+	--myfsio-nav-link: rgba(248, 250, 252, 0.85);
+	--myfsio-nav-link-hover: #ffffff;
+	--myfsio-preview-bg: #1f2937;
+	--myfsio-policy-bg: #0f1419;
+	--myfsio-policy-fg: #f8fafc;
+	--myfsio-hover-bg: rgba(59, 130, 246, 0.2);
+}
+
+[data-theme='dark'] body,
+[data-theme='dark'] html {
+	color-scheme: dark;
+}
+
+body {
+	background-color: var(--myfsio-body-bg);
+	color: var(--myfsio-text);
+	transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+html, body {
+	min-height: 100%;
+}
+
+main {
+	color: var(--myfsio-text);
+	background-color: var(--myfsio-body-bg);
+}
+
+html {
+	background-color: var(--myfsio-body-bg);
+	scroll-behavior: smooth;
+}
+
+.text-muted,
+.form-text {
+	color: var(--myfsio-muted) !important;
+}
+
+.table-responsive { border-radius: 0.5rem; overflow: hidden; }
+.message-stack { position: sticky; top: 1rem; z-index: 100; }
+code { font-size: 0.85rem; }
+
+code {
+	background-color: rgba(15, 23, 42, 0.08);
+	color: var(--myfsio-text);
+	padding: 0.15rem 0.4rem;
+	border-radius: 0.25rem;
+}
+[data-theme='dark'] code {
+	background-color: rgba(148, 163, 184, 0.15);
+	color: #93c5fd;
+}
+
+.card,
+.card-header,
+.modal-content,
+.dropdown-menu,
+.list-group-item {
+	background-color: var(--myfsio-card-bg);
+	color: var(--myfsio-text);
+	border-color: var(--myfsio-card-border);
+}
+
+.bg-panel {
+	background-color: var(--myfsio-preview-bg);
+	color: var(--myfsio-text);
+	border-color: var(--myfsio-card-border) !important;
+}
+
+.border-dashed {
+	border-style: dashed !important;
+}
+
+.card {
+	box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+}
+
+[data-theme='dark'] .card {
+	box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3), 0 1px 2px 0 rgba(0, 0, 0, 0.2);
+}
+
+.card-header {
+	font-weight: 500;
+}
+
+/* Drag and Drop Zone */
+.drop-zone {
+    position: relative;
+    transition: all 0.2s ease;
+}
+
+.drop-zone.drag-over {
+    background-color: var(--myfsio-hover-bg);
+    border: 2px dashed var(--myfsio-input-border);
+}
+
+.drop-zone.drag-over::after {
+    content: 'Drop files here to upload';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--myfsio-muted);
+    pointer-events: none;
+    z-index: 10;
+}
+
+.drop-zone.drag-over table {
+    opacity: 0.3;
+}
+
+.modal-header,
+.modal-footer {
+	border-color: var(--myfsio-card-border);
+}
+
+.myfsio-nav { 
+	background: var(--myfsio-nav-gradient);
+	box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+.myfsio-nav .navbar-brand { 
+	color: #fff;
+	font-weight: 600;
+	letter-spacing: -0.02em;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+.myfsio-logo {
+	border-radius: 0.35rem;
+	box-shadow: 0 0 6px rgba(15, 23, 42, 0.35);
+	background-color: rgba(255, 255, 255, 0.1);
+}
+.myfsio-title {
+	display: inline-block;
+}
+.myfsio-nav .nav-link { 
+	color: var(--myfsio-nav-link);
+	transition: color 0.2s ease;
+}
+.myfsio-nav .nav-link:hover { 
+	color: var(--myfsio-nav-link-hover);
+}
+.myfsio-nav .nav-link.nav-link-muted { opacity: 0.75; }
+.myfsio-nav .nav-link.nav-link-muted .badge { 
+	color: #0f172a;
+	background-color: #fef08a;
+}
+[data-theme='dark'] .myfsio-nav .nav-link.nav-link-muted .badge { 
+	color: #0f172a; 
+	background-color: #fde047;
+}
+.myfsio-nav .navbar-toggler {
+	border-color: rgba(255, 255, 255, 0.6);
+}
+.myfsio-nav .navbar-toggler-icon {
+	filter: invert(1);
+}
+
+.docs-hero {
+	background: var(--myfsio-nav-gradient);
+	color: #fff !important;
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	box-shadow: 0 15px 35px rgba(15, 23, 42, 0.3);
+}
+
+.docs-hero * {
+	color: inherit;
+}
+
+.docs-callout {
+	background-color: rgba(15, 23, 42, 0.35);
+	border: 1px solid rgba(255, 255, 255, 0.35);
+	border-radius: 0.75rem;
+	padding: 1rem 1.25rem;
+}
+
+.docs-callout code {
+	color: #fff;
+	background-color: rgba(0, 0, 0, 0.2);
+}
+
+[data-theme='dark'] .docs-callout {
+	background-color: rgba(2, 6, 23, 0.55);
+	border-color: rgba(255, 255, 255, 0.25);
+}
+
+.docs-feature-card + .docs-feature-card {
+	margin-top: 1.25rem;
+}
+
+.docs-checklist {
+	padding-left: 1.25rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+}
+
+.docs-checklist li {
+	margin: 0;
+}
+
+.docs-section {
+	border: 1px solid var(--myfsio-card-border);
+	border-radius: 1rem;
+}
+
+.docs-section-kicker {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 40px;
+	height: 40px;
+	border-radius: 999px;
+	background: rgba(59, 130, 246, 0.12);
+	color: #1d4ed8;
+	font-weight: 600;
+}
+
+[data-theme='dark'] .docs-section-kicker {
+	background: rgba(59, 130, 246, 0.25);
+	color: #93c5fd;
+}
+
+.docs-steps {
+	counter-reset: docs-step;
+	margin: 1rem 0 1.25rem;
+	padding-left: 1.25rem;
+}
+
+.docs-steps li {
+	margin-bottom: 0.4rem;
+}
+
+.docs-highlight {
+	background: rgba(59, 130, 246, 0.08);
+	border-radius: 0.75rem;
+	padding: 1rem 1.25rem;
+	border: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+[data-theme='dark'] .docs-highlight {
+	background: rgba(59, 130, 246, 0.18);
+	border-color: rgba(59, 130, 246, 0.35);
+}
+
+.docs-pill-list {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+	gap: 1.5rem;
+}
+
+.docs-pill-list ul {
+	padding-left: 1.1rem;
+	margin-bottom: 0;
+}
+
+.docs-table thead {
+	text-transform: uppercase;
+	font-size: 0.75rem;
+	letter-spacing: 0.08em;
+}
+
+.docs-sidebar {
+	position: sticky;
+	top: 1.5rem;
+	border-radius: 1rem;
+	border: 1px solid var(--myfsio-card-border);
+}
+
+.docs-sidebar-callouts {
+	display: flex;
+	flex-direction: column;
+	gap: 0.85rem;
+	padding: 1rem;
+	border-radius: 0.75rem;
+	background-color: rgba(15, 23, 42, 0.04);
+}
+
+[data-theme='dark'] .docs-sidebar-callouts {
+	background-color: rgba(248, 250, 252, 0.05);
+}
+
+.docs-sidebar-callouts code {
+	font-size: 0.85rem;
+}
+
+.docs-toc a {
+	color: var(--myfsio-text);
+	text-decoration: none;
+	display: inline-flex;
+	gap: 0.35rem;
+	align-items: center;
+	padding: 0.2rem 0;
+}
+
+.docs-toc a:hover {
+	color: #2563eb;
+}
+
+.badge { 
+	font-weight: 500;
+	padding: 0.35em 0.65em;
+}
+
+.theme-toggle {
+	min-width: auto;
+	width: 38px;
+	height: 32px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	transition: all 0.2s ease;
+}
+
+.theme-toggle:hover {
+	transform: translateY(-1px);
+}
+
+.theme-toggle .theme-icon {
+	transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.config-copy {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	opacity: 0.8;
+	transition: opacity 0.2s;
+	background-color: rgba(0, 0, 0, 0.5);
+	border: none;
+	color: white;
+}
+
+.config-copy:hover {
+	opacity: 1;
+	background-color: rgba(0, 0, 0, 0.7);
+	color: white;
+}
+
+.bucket-table td:last-child,
+.bucket-table th:last-child { white-space: nowrap; }
+
+.object-key {
+	word-break: break-word;
+	max-width: 32rem;
+}
+
+.preview-card { top: 1rem; }
+
+.preview-stage {
+	min-height: 260px;
+	background-color: var(--myfsio-preview-bg);
+	overflow: hidden;
+	border-color: var(--myfsio-card-border) !important;
+}
+
+.upload-progress-stack {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+.upload-progress-item {
+	border: 1px solid var(--myfsio-card-border);
+	border-radius: 0.5rem;
+	background-color: var(--myfsio-card-bg);
+	padding: 0.75rem 0.9rem;
+	transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.upload-progress-item[data-state='success'] {
+	border-color: rgba(34, 197, 94, 0.6);
+}
+
+.upload-progress-item[data-state='error'] {
+	border-color: rgba(239, 68, 68, 0.7);
+}
+
+.progress-thin {
+	height: 0.35rem;
+	background-color: rgba(15, 23, 42, 0.1);
+}
+
+[data-theme='dark'] .progress-thin {
+	background-color: rgba(248, 250, 252, 0.15);
+}
+
+#deleteObjectKey {
+	word-break: break-all;
+	max-width: 100%;
+}
+
+.preview-stage img,
+.preview-stage video,
+.preview-stage iframe {
+	border: 0;
+	max-height: 360px;
+}
+
+.upload-dropzone {
+	border: 2px dashed var(--myfsio-card-border);
+	border-radius: 0.75rem;
+	padding: 1.5rem;
+	cursor: pointer;
+	transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.upload-dropzone.is-dragover {
+	background-color: rgba(59, 130, 246, 0.08);
+	border-color: #3b82f6;
+}
+
+.metadata-stack .metadata-entry + .metadata-entry {
+	margin-top: 0.75rem;
+}
+
+.metadata-stack .metadata-key {
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--myfsio-muted);
+}
+
+.metadata-stack .metadata-value {
+	font-weight: 600;
+}
+
+.policy-preview {
+	background-color: var(--myfsio-policy-bg);
+	color: var(--myfsio-policy-fg);
+	border-radius: 0.5rem;
+	padding: 1rem;
+	font-size: 0.85rem;
+	max-height: 320px;
+	overflow: auto;
+	border: 1px solid var(--myfsio-card-border);
+}
+
+.objects-table-container {
+	max-height: 600px;
+	overflow-y: auto;
+}
+
+.btn-group form { display: inline; }
+
+.font-monospace { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; }
+
+.table {
+	color: var(--myfsio-text);
+	background-color: var(--myfsio-card-bg);
+}
+
+.table th,
+.table td {
+	border-color: var(--myfsio-card-border);
+}
+
+.table-light th {
+	background-color: rgba(15, 23, 42, 0.04);
+}
+
+[data-theme='dark'] .table-light th {
+	background-color: rgba(248, 250, 252, 0.05);
+	color: var(--myfsio-text);
+}
+
+.table-hover tbody tr:hover {
+	background-color: var(--myfsio-hover-bg);
+	cursor: pointer;
+	transition: background-color 0.15s ease;
+}
+
+.table thead {
+	background-color: rgba(15, 23, 42, 0.04);
+	color: var(--myfsio-text);
+}
+
+[data-theme='dark'] .table thead {
+	background-color: rgba(248, 250, 252, 0.05);
+	color: var(--myfsio-text);
+}
+
+.form-control,
+.form-select {
+	background-color: var(--myfsio-input-bg);
+	color: var(--myfsio-text);
+	border-color: var(--myfsio-input-border);
+	transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.form-control::placeholder {
+	color: var(--myfsio-muted);
+	opacity: 0.6;
+}
+
+[data-theme='dark'] .form-control::placeholder {
+	opacity: 0.5;
+}
+
+.form-control:focus,
+.form-select:focus {
+	background-color: var(--myfsio-input-bg);
+	color: var(--myfsio-text);
+	border-color: #3b82f6;
+	box-shadow: 0 0 0 0.2rem rgba(59, 130, 246, 0.25);
+}
+
+.alert {
+	color: var(--myfsio-text);
+	border-color: var(--myfsio-card-border);
+	border-width: 1px;
+	border-left-width: 4px;
+}
+
+.alert-success {
+	background-color: rgba(34, 197, 94, 0.1);
+	border-left-color: #22c55e;
+}
+
+[data-theme='dark'] .alert-success {
+	background-color: rgba(34, 197, 94, 0.15);
+	color: #86efac;
+}
+
+.alert-danger {
+	background-color: rgba(239, 68, 68, 0.1);
+	border-left-color: #ef4444;
+}
+
+[data-theme='dark'] .alert-danger {
+	background-color: rgba(239, 68, 68, 0.15);
+	color: #fca5a5;
+}
+
+.alert-warning {
+	background-color: rgba(251, 191, 36, 0.1);
+	border-left-color: #fbbf24;
+}
+
+[data-theme='dark'] .alert-warning {
+	background-color: rgba(251, 191, 36, 0.15);
+	color: #fde047;
+}
+
+.alert-info {
+	background-color: rgba(59, 130, 246, 0.1);
+	border-left-color: #3b82f6;
+}
+
+[data-theme='dark'] .alert-info {
+	background-color: rgba(59, 130, 246, 0.15);
+	color: #93c5fd;
+}
+
+.btn {
+	color: inherit;
+	transition: all 0.2s ease;
+}
+
+.btn:hover {
+	transform: translateY(-1px);
+}
+
+.btn:active {
+	transform: translateY(0);
+}
+
+.btn-icon {
+	width: 36px;
+	height: 36px;
+	padding: 0.4rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.btn-group-sm .btn-icon {
+	width: 34px;
+	height: 34px;
+}
+
+[data-theme='dark'] .btn-outline-secondary {
+	color: #e2e8f0;
+	border-color: #475569;
+}
+
+[data-theme='dark'] .btn-outline-secondary:hover {
+	background-color: rgba(148, 163, 184, 0.2);
+	border-color: #64748b;
+	color: #f8fafc;
+}
+
+[data-theme='dark'] .btn-outline-danger {
+	color: #fca5a5;
+	border-color: #f87171;
+}
+
+[data-theme='dark'] .btn-outline-danger:hover {
+	background-color: rgba(248, 113, 113, 0.2);
+	border-color: #ef4444;
+	color: #fecaca;
+}
+
+[data-theme='dark'] .btn-outline-primary {
+	color: #93c5fd;
+	border-color: #60a5fa;
+}
+
+[data-theme='dark'] .btn-outline-primary:hover {
+	background-color: rgba(59, 130, 246, 0.2);
+	border-color: #3b82f6;
+	color: #bfdbfe;
+}
+
+[data-theme='dark'] .btn-primary {
+	background-color: #2563eb;
+	border-color: #1d4ed8;
+	color: #ffffff;
+}
+
+[data-theme='dark'] .btn-primary:hover {
+	background-color: #1d4ed8;
+	border-color: #1e40af;
+}
+
+.btn-primary {
+	color: #ffffff;
+}
+
+[data-theme='dark'] .btn-danger {
+	background-color: #dc2626;
+	border-color: #b91c1c;
+}
+
+[data-theme='dark'] .btn-danger:hover {
+	background-color: #b91c1c;
+	border-color: #991b1b;
+}
+
+.badge.text-bg-info {
+	background-color: #bae6fd;
+	color: #0f172a;
+}
+
+[data-theme='dark'] .badge.text-bg-info {
+	background-color: #0ea5e9;
+	color: #e2e8f0;
+}
+
+[data-theme='dark'] .badge.text-bg-warning {
+	background-color: #fde047;
+	color: #0f172a;
+}
+
+[data-theme='dark'] .badge.text-bg-secondary {
+	background-color: #475569;
+	color: #e2e8f0;
+}
+
+[data-theme='dark'] .badge.text-bg-success {
+	background-color: #22c55e;
+	color: #ffffff;
+}
+
+[data-theme='dark'] .badge.text-bg-primary {
+	background-color: #3b82f6;
+	color: #ffffff;
+}
+
+.dropdown-menu {
+	border-color: var(--myfsio-card-border);
+}
+
+[data-theme='dark'] .form-label,
+[data-theme='dark'] label,
+[data-theme='dark'] .modal-title,
+[data-theme='dark'] .fw-semibold {
+	color: var(--myfsio-text);
+}
+
+.modal-backdrop.show {
+	opacity: 0.6;
+}
+
+[data-theme='dark'] .btn-close {
+	filter: invert(1) grayscale(100%) brightness(200%);
+}
+
+.config-copy {
+	color: #ffffff;
+	border-color: rgba(255, 255, 255, 0.7);
+}
+
+.config-copy:hover {
+	color: #0f172a;
+	background-color: #ffffff;
+	border-color: #ffffff;
+}
+
+[data-theme='dark'] .border {
+	border-color: var(--myfsio-card-border) !important;
+}
+
+.btn-link {
+	color: #3b82f6;
+	text-decoration: none;
+}
+
+.btn-link:hover {
+	color: #2563eb;
+	text-decoration: underline;
+	transform: none;
+}
+
+[data-theme='dark'] .btn-link {
+	color: #60a5fa;
+}
+
+[data-theme='dark'] .btn-link:hover {
+	color: #93c5fd;
+}
+
+[data-theme='dark'] .input-group-text {
+	background-color: var(--myfsio-input-bg);
+	color: var(--myfsio-text);
+	border-color: var(--myfsio-input-border);
+}
+
+.page-header {
+	margin-bottom: 2rem;
+}
+
+.page-header h1 {
+	font-weight: 600;
+	letter-spacing: -0.02em;
+}
+
+.config-copy {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	opacity: 0.8;
+	transition: opacity 0.2s;
+	background-color: rgba(0, 0, 0, 0.5);
+	border: none;
+	color: white;
+}
+
+.config-copy:hover {
+	opacity: 1;
+	background-color: rgba(0, 0, 0, 0.7);
+	color: white;
+}
+
+@keyframes pulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.5; }
+}
+
+.loading {
+	animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+[data-theme='dark'] .text-primary {
+	color: #60a5fa !important;
+}
+
+[data-theme='dark'] .text-success {
+	color: #86efac !important;
+}
+
+[data-theme='dark'] .text-danger {
+	color: #fca5a5 !important;
+}
+
+[data-theme='dark'] .text-warning {
+	color: #fde047 !important;
+}
+
+[data-theme='dark'] .lead {
+	color: var(--myfsio-muted);
+}
+
+.btn-sm {
+	transition: all 0.15s ease;
+}
+
+[data-theme='dark'] .btn-outline-light {
+	color: #f8fafc;
+	border-color: rgba(248, 250, 252, 0.3);
+}
+
+[data-theme='dark'] .btn-outline-light:hover {
+	background-color: rgba(248, 250, 252, 0.1);
+	border-color: rgba(248, 250, 252, 0.5);
+}
+
+pre {
+	background-color: rgba(15, 23, 42, 0.05);
+	border: 1px solid var(--myfsio-card-border);
+	border-radius: 0.5rem;
+	padding: 1rem;
+	overflow-x: auto;
+	font-size: 0.875rem;
+	line-height: 1.6;
+}
+
+[data-theme='dark'] pre {
+	background-color: rgba(248, 250, 252, 0.05);
+}
+
+pre code {
+	background: none;
+	padding: 0;
+	color: inherit;
+}
+
+.docs-section + .docs-section {
+	margin-top: 1.25rem;
+}
+
+/* Breadcrumb styling */
+.breadcrumb {
+	background-color: transparent;
+	padding: 0.5rem 0;
+	font-size: 0.9rem;
+}
+
+.breadcrumb-item + .breadcrumb-item::before {
+	content: "›";
+	color: var(--myfsio-muted);
+}
+
+.breadcrumb-item a {
+	color: var(--myfsio-text);
+	text-decoration: none;
+	transition: color 0.2s ease;
+}
+
+.breadcrumb-item a:hover {
+	color: #3b82f6;
+	text-decoration: underline;
+}
+
+[data-theme='dark'] .breadcrumb-item a:hover {
+	color: #60a5fa;
+}
+
+.breadcrumb-item.active {
+	color: var(--myfsio-muted);
+}
+
+/* Icon alignment */
+.bi {
+	vertical-align: -0.125em;
+}
+
+/* Sticky improvements */
+.sticky-top {
+	top: 1.5rem;
+}
+
+/* Better card spacing */
+.card-body dl:last-child {
+	margin-bottom: 0;
+}
+
+/* Empty state improvements */
+.text-center svg {
+	display: inline-block;
+}
+
+/* Input group improvements */
+[data-theme='dark'] .input-group .btn-outline-primary {
+	background-color: transparent;
+}
+
+/* File size nowrap */
+.text-nowrap {
+	white-space: nowrap;
+}
+
+/* Alert improvements */
+.alert svg {
+	flex-shrink: 0;
+}
+
+/* Better hover for table rows with data */
+[data-object-row]:hover {
+	background-color: var(--myfsio-hover-bg) !important;
+}
+
+/* Improve spacing in button groups */
+.btn-group-sm .btn {
+	padding: 0.25rem 0.6rem;
+	font-size: 0.875rem;
+}
+
+/* Better modal styling */
+.modal-header {
+	background-color: var(--myfsio-card-bg);
+}
+
+/* Badge improvements */
+.badge {
+	font-size: 0.8125rem;
+}

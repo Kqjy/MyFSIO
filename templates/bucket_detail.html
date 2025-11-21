@@ -1,0 +1,1752 @@
+{% extends "base.html" %}
+{% block content %}
+{% set active_tab = request.args.get('tab', 'objects') %}
+<div class="d-flex flex-column gap-4 h-100">
+  <!-- Header & Breadcrumbs -->
+  <div class="d-flex justify-content-between align-items-start">
+    <div>
+      <nav aria-label="breadcrumb">
+        <ol class="breadcrumb mb-1">
+          <li class="breadcrumb-item"><a href="{{ url_for('ui.buckets_overview') }}" class="text-decoration-none">Buckets</a></li>
+          <li class="breadcrumb-item active" aria-current="page">{{ bucket_name }}</li>
+        </ol>
+      </nav>
+      <h1 class="h3 fw-bold mb-0 d-flex align-items-center gap-2">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-bucket text-primary" viewBox="0 0 16 16">
+          <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+        </svg>
+        {{ bucket_name }}
+      </h1>
+    </div>
+    <div class="d-flex gap-2">
+      <button class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBucketModal">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash me-1" viewBox="0 0 16 16">
+          <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
+          <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+        </svg>
+        Delete Bucket
+      </button>
+    </div>
+  </div>
+
+  <!-- Navigation Tabs -->
+  <ul class="nav nav-tabs border-bottom-0" id="bucketTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'objects' else '' }}" id="objects-tab" data-bs-toggle="tab" data-bs-target="#objects-pane" type="button" role="tab" aria-controls="objects-pane" aria-selected="{{ 'true' if active_tab == 'objects' else 'false' }}">
+        Objects
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'properties' else '' }}" id="properties-tab" data-bs-toggle="tab" data-bs-target="#properties-pane" type="button" role="tab" aria-controls="properties-pane" aria-selected="{{ 'true' if active_tab == 'properties' else 'false' }}">
+        Properties
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'permissions' else '' }}" id="permissions-tab" data-bs-toggle="tab" data-bs-target="#permissions-pane" type="button" role="tab" aria-controls="permissions-pane" aria-selected="{{ 'true' if active_tab == 'permissions' else 'false' }}">
+        Permissions
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'replication' else '' }}" id="replication-tab" data-bs-toggle="tab" data-bs-target="#replication-pane" type="button" role="tab" aria-controls="replication-pane" aria-selected="{{ 'true' if active_tab == 'replication' else 'false' }}">
+        Replication
+      </button>
+    </li>
+  </ul>
+
+  <!-- Tab Content -->
+  <div class="tab-content" id="bucketTabsContent">
+    
+    <!-- Objects Tab -->
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'objects' else '' }}" id="objects-pane" role="tabpanel" aria-labelledby="objects-tab" tabindex="0">
+<div class="row g-4">
+  <div class="col-lg-7">
+    <div class="card shadow-sm">
+      <div class="card-header bg-body">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+          <span class="fw-semibold me-auto">Objects</span>
+          <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
+              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+              <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+            </svg>
+            Upload
+          </button>
+          <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" />
+          <button class="btn btn-outline-danger btn-sm d-none" type="button" data-bulk-delete-trigger disabled>
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
+              <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
+              <path d="m4.646 8.646-.708.708L7 12.414l5.354-5.354-.708-.708L7 10.293z" />
+            </svg>
+            <span data-bulk-delete-label>Delete selected</span>
+          </button>
+          <button class="btn btn-outline-secondary btn-sm d-none" type="button" data-bulk-download-trigger disabled>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
+              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+              <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+            </svg>
+            Download
+          </button>
+        </div>
+      </div>
+      <div
+        class="table-responsive objects-table-container drop-zone"
+        id="objects-drop-zone"
+        data-bucket="{{ bucket_name }}"
+        data-versioning="{{ 'true' if versioning_enabled else 'false' }}"
+        data-bulk-delete-endpoint="{{ url_for('ui.bulk_delete_objects', bucket_name=bucket_name) }}"
+        data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
+      >
+        <table class="table table-hover align-middle mb-0" id="objects-table">
+          <thead class="table-light">
+            <tr>
+              <th scope="col" class="text-center" style="width: 3rem;">
+                <input class="form-check-input" type="checkbox" data-select-all aria-label="Select all objects" />
+              </th>
+              <th scope="col">Key</th>
+              <th scope="col" class="text-end">Size</th>
+              <th scope="col" class="text-end">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for obj in objects %}
+            <tr
+              data-object-row
+              data-key="{{ obj.key }}"
+              data-size="{{ obj.size }}"
+              data-last-modified="{{ obj.last_modified.isoformat() }}"
+              data-etag="{{ obj.etag }}"
+              data-preview-url="{{ url_for('ui.object_preview', bucket_name=bucket_name, object_key=obj.key) }}"
+              data-download-url="{{ url_for('ui.object_preview', bucket_name=bucket_name, object_key=obj.key) }}?download=1"
+              data-presign-endpoint="{{ url_for('ui.object_presign', bucket_name=bucket_name, object_key=obj.key) }}"
+              data-delete-endpoint="{{ url_for('ui.delete_object', bucket_name=bucket_name, object_key=obj.key) }}"
+              data-metadata='{{ (obj.metadata or {}) | tojson | safe }}'
+              data-versions-endpoint="{{ url_for('ui.object_versions', bucket_name=bucket_name, object_key=obj.key) }}"
+              data-restore-template="{{ url_for('ui.restore_object_version', bucket_name=bucket_name, object_key=obj.key, version_id='VERSION_ID_PLACEHOLDER') }}"
+            >
+              <td class="text-center align-middle">
+                <input class="form-check-input" type="checkbox" data-object-select aria-label="Select {{ obj.key }}" />
+              </td>
+              <td class="object-key text-break" title="{{ obj.key }}">
+                <div class="fw-medium">{{ obj.key }}</div>
+                <div class="text-muted small">Modified {{ obj.last_modified.strftime('%b %d, %Y %H:%M') }}</div>
+              </td>
+              <td class="text-end text-nowrap">
+                <span class="text-muted small">{{ obj.size | filesizeformat }}</span>
+              </td>
+              <td class="text-end">
+                <div class="btn-group btn-group-sm" role="group">
+                  <a
+                    class="btn btn-outline-primary btn-icon"
+                    href="{{ url_for('ui.object_preview', bucket_name=bucket_name, object_key=obj.key) }}?download=1"
+                    target="_blank"
+                    title="Download"
+                    aria-label="Download"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-download" viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z" />
+                      <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z" />
+                    </svg>
+                  </a>
+                  <button
+                    type="button"
+                    class="btn btn-outline-danger btn-icon"
+                    data-delete-object
+                    title="Delete"
+                    aria-label="Delete"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z" />
+                      <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z" />
+                    </svg>
+                  </button>
+                </div>
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="4" class="text-center text-muted py-4">
+                <p class="mb-1 fw-semibold">No objects yet</p>
+                <p class="mb-0">Upload files using the console or any compatible client.</p>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-5">
+    <div class="card shadow-sm sticky-top preview-card">
+      <div class="card-header bg-body">
+        <span class="fw-semibold">Object details</span>
+      </div>
+      <div class="card-body">
+        <div id="preview-empty" class="text-center py-5">
+          <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" class="bi bi-file-earmark text-muted opacity-50 mb-3" viewBox="0 0 16 16">
+            <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+          </svg>
+          <p class="text-muted mb-0 small">Select an object to view details</p>
+        </div>
+        <div id="preview-panel" class="d-none">
+          <div class="mb-3">
+            <h2 class="h6 mb-1 text-break" id="preview-key"></h2>
+            <div class="text-muted small" id="preview-size"></div>
+          </div>
+          <div class="d-grid gap-2 mb-3">
+            <a class="btn btn-primary btn-sm" id="downloadButton" target="_blank">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
+                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+              </svg>
+              Download
+            </a>
+            <button class="btn btn-outline-secondary btn-sm" id="presignButton">Generate presigned URL</button>
+          </div>
+          <hr class="my-3">
+          <dl class="row small mb-3">
+            <dt class="col-5 text-muted">Last modified</dt>
+            <dd class="col-7 mb-2" id="preview-modified"></dd>
+            <dt class="col-5 text-muted">ETag</dt>
+            <dd class="col-7 mb-0"><code id="preview-etag" class="small"></code></dd>
+          </dl>
+          <div id="preview-metadata" class="mb-3 d-none">
+            <div class="fw-semibold text-uppercase small">Metadata</div>
+            <hr class="my-2">
+            <div id="preview-metadata-list" class="metadata-stack small"></div>
+          </div>
+          <div id="version-panel" class="mb-3 d-none">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="text-muted small">Versions</div>
+              <button class="btn btn-outline-secondary btn-sm" type="button" id="refreshVersionsButton">Refresh</button>
+            </div>
+            <div id="version-list" class="list-group list-group-flush small"></div>
+          </div>
+          <div class="preview-stage border rounded position-relative">
+            <div id="preview-placeholder" class="text-muted text-center py-5">No preview available</div>
+            <img id="preview-image" class="img-fluid d-none" alt="Object preview" />
+            <video id="preview-video" class="w-100 d-none" controls></video>
+            <iframe id="preview-iframe" class="w-100 d-none" loading="lazy"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+    <!-- Permissions Tab -->
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'permissions' else '' }}" id="permissions-pane" role="tabpanel" aria-labelledby="permissions-tab" tabindex="0">
+      <div class="row g-4">
+        <div class="col-12">
+          <div class="card shadow-sm" id="bucket-policy-card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+      <span class="fw-semibold">Bucket policy</span>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+      {% if bucket_policy %}
+      <span class="badge text-bg-info">Policy attached</span>
+      {% else %}
+      <span class="badge text-bg-secondary">IAM only</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="card-body">
+    {% if not bucket_policy %}
+    <div class="alert alert-secondary mb-3" role="alert">
+      <p class="mb-0 small">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle me-1" viewBox="0 0 16 16">
+          <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+          <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+        </svg>
+        No bucket policy is attached. Access is controlled by IAM policies only.
+      </p>
+    </div>
+    {% endif %}
+    {% if can_edit_policy %}
+    {% set preset_choice = 'custom' %}
+    {% if not bucket_policy %}
+      {% set preset_choice = 'private' %}
+    {% elif bucket_policy_text and bucket_policy_text.strip() == default_policy.strip() %}
+      {% set preset_choice = 'public' %}
+    {% endif %}
+    <form method="post" action="{{ url_for('ui.update_bucket_policy', bucket_name=bucket_name) }}" id="bucketPolicyForm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      <input type="hidden" name="mode" value="upsert" id="policyMode" />
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+        <label class="form-label mb-0">Preset</label>
+        <select class="form-select form-select-sm w-auto" id="policyPreset" data-default="{{ preset_choice }}">
+          <option value="private" {% if preset_choice == 'private' %}selected{% endif %}>Private (no policy attached)</option>
+          <option value="public" {% if preset_choice == 'public' %}selected{% endif %}>Public read-only</option>
+          <option value="custom" {% if preset_choice == 'custom' %}selected{% endif %}>Custom JSON</option>
+        </select>
+      </div>
+      <label class="form-label">Policy document (JSON)</label>
+      <textarea class="form-control font-monospace" rows="8" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | tojson }}' spellcheck="false">{{ bucket_policy_text or default_policy }}</textarea>
+      <div class="form-text">Use presets for common scenarios or switch to custom to paste AWS-style statements.</div>
+      <div class="d-flex gap-3 mt-3 align-items-center flex-wrap">
+        <button class="btn btn-primary" type="submit">Save policy</button>
+      </div>
+    </form>
+    {% else %}
+    <p class="text-muted mb-0">You do not have permission to edit this policy.</p>
+    {% endif %}
+  </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Properties Tab -->
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'properties' else '' }}" id="properties-pane" role="tabpanel" aria-labelledby="properties-tab" tabindex="0">
+      <div class="row g-4">
+        <div class="col-12">
+          <div class="card shadow-sm" id="bucket-versioning-card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span class="fw-semibold">Versioning</span>
+    <span class="badge {{ 'text-bg-success' if versioning_enabled else 'text-bg-secondary' }}">
+      {{ 'Enabled' if versioning_enabled else 'Suspended' }}
+    </span>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">When enabled, previous versions of objects are preserved so you can roll back accidental changes or deletions.</p>
+    {% if can_manage_versioning %}
+    <form method="post" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+      {% if versioning_enabled %}
+      <input type="hidden" name="state" value="suspend" />
+      <button class="btn btn-outline-danger" type="submit" data-confirm-suspend>Suspend versioning</button>
+      {% else %}
+      <input type="hidden" name="state" value="enable" />
+      <button class="btn btn-outline-success" type="submit">Enable versioning</button>
+      {% endif %}
+    </form>
+    {% else %}
+    <p class="text-muted mb-0">You do not have permission to modify versioning for this bucket.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% if versioning_enabled %}
+<div
+  class="card shadow-sm mt-4"
+  id="archived-objects-card"
+  data-archived-endpoint="{{ url_for('ui.archived_objects', bucket_name=bucket_name) }}"
+>
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span class="fw-semibold">Archived objects</span>
+    <div class="d-flex align-items-center gap-2">
+      <span class="badge text-bg-secondary" data-archived-count>0 items</span>
+      <button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>Refresh</button>
+    </div>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">When objects are deleted while versioning is enabled, their previous versions remain here until you restore or purge them.</p>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th scope="col">Key</th>
+            <th scope="col">Latest version</th>
+            <th scope="col" class="text-end">Versions</th>
+            <th scope="col" class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody data-archived-body>
+          <tr>
+            <td colspan="4" class="text-center text-muted py-3">No archived-only objects.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- Replication Tab -->
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'replication' else '' }}" id="replication-pane" role="tabpanel" aria-labelledby="replication-tab" tabindex="0">
+      <div class="row g-4">
+        <div class="col-lg-8">
+          <div class="card shadow-sm">
+            <div class="card-header">
+              <span class="fw-semibold">Replication Configuration</span>
+            </div>
+            <div class="card-body">
+              {% if replication_rule %}
+              <div class="alert alert-success d-flex align-items-center" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill flex-shrink-0 me-2" viewBox="0 0 16 16">
+                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                </svg>
+                <div>
+                  Replication is currently <strong>enabled</strong>.
+                </div>
+              </div>
+              
+              <div class="mb-4">
+                <h5>Current Rule</h5>
+                <dl class="row">
+                  <dt class="col-sm-3">Target Connection</dt>
+                  <dd class="col-sm-9">
+                    {% set target_conn = connections | selectattr("id", "equalto", replication_rule.target_connection_id) | first %}
+                    {{ target_conn.name if target_conn else replication_rule.target_connection_id }}
+                  </dd>
+                  
+                  <dt class="col-sm-3">Target Bucket</dt>
+                  <dd class="col-sm-9">{{ replication_rule.target_bucket }}</dd>
+                  
+                  <dt class="col-sm-3">Status</dt>
+                  <dd class="col-sm-9">
+                    {% if replication_rule.enabled %}
+                    <span class="badge bg-success">Enabled</span>
+                    {% else %}
+                    <span class="badge bg-secondary">Disabled</span>
+                    {% endif %}
+                  </dd>
+                </dl>
+              </div>
+              
+              <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" onsubmit="return confirm('Are you sure you want to disable replication?');">
+                <input type="hidden" name="action" value="delete">
+                <button type="submit" class="btn btn-danger">Disable Replication</button>
+              </form>
+              
+              {% else %}
+              <p class="text-muted">Replication allows you to automatically copy new objects from this bucket to a bucket in another S3-compatible service.</p>
+              
+              {% if connections %}
+              <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}">
+                <input type="hidden" name="action" value="create">
+                
+                <div class="mb-3">
+                  <label for="target_connection_id" class="form-label">Target Connection</label>
+                  <select class="form-select" id="target_connection_id" name="target_connection_id" required>
+                    <option value="" selected disabled>Select a connection...</option>
+                    {% for conn in connections %}
+                    <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
+                    {% endfor %}
+                  </select>
+                  <div class="form-text">Select the remote service where objects should be replicated.</div>
+                </div>
+                
+                <div class="mb-3">
+                  <label for="target_bucket" class="form-label">Target Bucket Name</label>
+                  <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket">
+                  <div class="form-text">The bucket on the remote service must already exist.</div>
+                </div>
+                
+                <button type="submit" class="btn btn-primary">Enable Replication</button>
+              </form>
+              {% else %}
+              <div class="alert alert-warning" role="alert">
+                You need to configure a remote connection before you can enable replication.
+                <br>
+                <a href="{{ url_for('ui.connections_dashboard') }}" class="alert-link">Manage Connections</a>
+              </div>
+              {% endif %}
+              
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        
+        <div class="col-lg-4">
+          <div class="card shadow-sm">
+            <div class="card-header">
+              <span class="fw-semibold">About Replication</span>
+            </div>
+            <div class="card-body text-muted small">
+              <p>Site Replication asynchronously copies objects to a remote destination.</p>
+              <ul class="mb-0">
+                <li>Only new uploads are replicated. Existing objects are not copied retroactively.</li>
+                <li>Deletes are <strong>not</strong> replicated to prevent accidental data loss.</li>
+                <li>Replication happens in the background.</li>
+                <li>Ensure the target bucket exists and the connection credentials have write permissions.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Upload Modal -->
+<div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">Upload objects</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form
+        method="post"
+        action="{{ url_for('ui.upload_object', bucket_name=bucket_name) }}"
+        enctype="multipart/form-data"
+        data-upload-form
+        data-multipart-init-url="{{ url_for('ui.initiate_multipart_upload', bucket_name=bucket_name) }}"
+        data-multipart-part-template="{{ url_for('ui.upload_multipart_part', bucket_name=bucket_name, upload_id='UPLOAD_ID_PLACEHOLDER') }}"
+        data-multipart-complete-template="{{ url_for('ui.complete_multipart_upload', bucket_name=bucket_name, upload_id='UPLOAD_ID_PLACEHOLDER') }}"
+        data-multipart-abort-template="{{ url_for('ui.abort_multipart_upload', bucket_name=bucket_name, upload_id='UPLOAD_ID_PLACEHOLDER') }}"
+      >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <div class="modal-body">
+          <p class="text-muted small mb-3">Upload files to <code>{{ bucket_name }}</code>. Leave object key blank to use the filename.</p>
+          <div class="row g-3">
+            <div class="col-12">
+              <label class="form-label fw-medium">Select file</label>
+              <input class="form-control" type="file" name="object" id="uploadFileInput" required />
+              <div class="form-text">Select a file from your device. Files ≥ 8&nbsp;MB automatically switch to multipart uploads.</div>
+            </div>
+            <div class="col-12">
+              <div class="upload-dropzone text-center" data-dropzone>
+                <p class="fw-semibold mb-1">Drag &amp; drop files here</p>
+                <p class="text-muted small mb-2">or click to browse</p>
+                <div class="text-muted small" data-dropzone-label>No file selected</div>
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="border rounded-3">
+                <button
+                  class="btn btn-link text-decoration-none w-100 text-start collapse-toggle"
+                  type="button"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#uploadAdvancedOptions"
+                  aria-expanded="false"
+                  aria-controls="uploadAdvancedOptions"
+                >
+                  <span class="fw-semibold">Advanced options</span>
+                  <span class="text-muted">(optional)</span>
+                </button>
+                <div class="collapse" id="uploadAdvancedOptions">
+                  <div class="p-3 border-top">
+                    <label class="form-label fw-medium">Object key</label>
+                    <input class="form-control font-monospace" type="text" name="object_key" placeholder="folder/document.pdf" />
+                    <div class="form-text mb-3">Leave blank to reuse the original filename.</div>
+                    <label class="form-label fw-medium">Metadata <span class="text-muted fw-normal">(JSON)</span></label>
+                    <textarea class="form-control font-monospace" name="metadata" rows="3" placeholder='{"project":"demo"}'></textarea>
+                    <div class="form-text">Store custom key/value pairs alongside the object.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="upload-progress-stack" data-upload-progress></div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer border-0">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
+              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+              <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+            </svg>
+            Upload
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Delete bucket modal -->
+<div class="modal fade" id="deleteBucketModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">Delete bucket</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="{{ url_for('ui.delete_bucket', bucket_name=bucket_name) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <div class="modal-body">
+          <div class="alert alert-warning border-0" role="alert">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-exclamation-triangle me-2" viewBox="0 0 16 16">
+              <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+              <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+            </svg>
+            <strong>Warning:</strong> This action cannot be undone.
+          </div>
+          <p class="mb-0">
+            Delete bucket <code class="fs-6">{{ bucket_name }}</code>? The bucket must be empty.
+          </p>
+        </div>
+        <div class="modal-footer border-0">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-danger" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-trash me-1" viewBox="0 0 16 16">
+              <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+            </svg>
+            Delete bucket
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Message modal -->
+<div class="modal fade" id="messageModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5" id="messageModalTitle">Notice</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="messageModalBody"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-primary d-none" id="messageModalAction"></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bulk delete modal -->
+<div class="modal fade" id="bulkDeleteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Delete selected objects</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p id="bulkDeleteCount" class="fw-semibold mb-1"></p>
+        <p class="text-muted small">This permanently deletes the selected objects. Deleted items cannot be recovered.</p>
+        <ul class="list-group list-group-flush mb-2" id="bulkDeleteList"></ul>
+        <div class="text-muted small" id="bulkDeleteStatus"></div>
+        {% if versioning_enabled %}
+        <div class="form-check mt-3">
+          <input class="form-check-input" type="checkbox" id="bulkDeletePurge" />
+          <label class="form-check-label" for="bulkDeletePurge">Also delete archived versions</label>
+          <div class="form-text">Removes any archived versions stored in the archive. Use with caution.</div>
+        </div>
+        {% endif %}
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="bulkDeleteConfirm" disabled>Delete objects</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete object modal -->
+<div class="modal fade" id="deleteObjectModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Delete object</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" id="deleteObjectForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <div class="modal-body">
+          <p>
+            Delete
+            <strong id="deleteObjectKey" class="d-block text-break font-monospace"></strong>
+            ?
+          </p>
+          {% if versioning_enabled %}
+          <div class="alert alert-warning small" role="alert">
+            Versioning is enabled. Deleting normally keeps previous versions in the archive.
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="1" id="deletePurgeVersions" name="purge_versions" />
+            <label class="form-check-label" for="deletePurgeVersions">Also delete all archived versions for this object</label>
+          </div>
+          <p class="form-text mb-0">Use with caution—this removes the live object and every stored version.</p>
+          {% endif %}
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-danger" type="submit">Delete</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Presign modal -->
+<div class="modal fade" id="presignModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h1 class="modal-title fs-5">Presigned URL</h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label">HTTP method</label>
+            <select class="form-select" id="presignMethod">
+              <option value="GET">GET (download)</option>
+              <option value="PUT">PUT (upload)</option>
+              <option value="DELETE">DELETE</option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Expires (seconds)</label>
+            <input class="form-control" type="number" id="presignTtl" value="900" min="1" max="604800" />
+          </div>
+        </div>
+        <label class="form-label mt-3">Signed URL</label>
+        <div class="input-group">
+          <input id="presignLink" class="form-control" type="text" readonly />
+          <button class="btn btn-outline-secondary" type="button" id="copyPresignLink">Copy</button>
+        </div>
+        <p class="form-text mb-0">A link is generated when the modal opens. Adjust the settings and click Generate to refresh.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary me-auto" id="generatePresignButton">Generate link</button>
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  const formatBytes = (bytes) => {
+    if (!Number.isFinite(bytes)) return `${bytes} bytes`;
+    const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let size = bytes;
+    while (size >= 1024 && i < units.length - 1) {
+      size /= 1024;
+      i++;
+    }
+    return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  };
+
+  const escapeHtml = (value) => {
+    if (value === null || value === undefined) return '';
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  };
+
+  const rows = document.querySelectorAll('[data-object-row]');
+  const selectAllCheckbox = document.querySelector('[data-select-all]');
+  const bulkDeleteButton = document.querySelector('[data-bulk-delete-trigger]');
+  const bulkDeleteLabel = bulkDeleteButton?.querySelector('[data-bulk-delete-label]');
+  const bulkDeleteModalEl = document.getElementById('bulkDeleteModal');
+  const bulkDeleteModal = bulkDeleteModalEl ? new bootstrap.Modal(bulkDeleteModalEl) : null;
+  const bulkDeleteList = document.getElementById('bulkDeleteList');
+  const bulkDeleteCount = document.getElementById('bulkDeleteCount');
+  const bulkDeleteStatus = document.getElementById('bulkDeleteStatus');
+  const bulkDeleteConfirm = document.getElementById('bulkDeleteConfirm');
+  const bulkDeletePurge = document.getElementById('bulkDeletePurge');
+  const previewPanel = document.getElementById('preview-panel');
+  const previewEmpty = document.getElementById('preview-empty');
+  const previewKey = document.getElementById('preview-key');
+  const previewSize = document.getElementById('preview-size');
+  const previewModified = document.getElementById('preview-modified');
+  const previewEtag = document.getElementById('preview-etag');
+  const previewMetadata = document.getElementById('preview-metadata');
+  const previewMetadataList = document.getElementById('preview-metadata-list');
+  const previewPlaceholder = document.getElementById('preview-placeholder');
+  const previewImage = document.getElementById('preview-image');
+  const previewVideo = document.getElementById('preview-video');
+  const previewIframe = document.getElementById('preview-iframe');
+  const downloadButton = document.getElementById('downloadButton');
+  const presignButton = document.getElementById('presignButton');
+  const presignModalEl = document.getElementById('presignModal');
+  const presignModal = presignModalEl ? new bootstrap.Modal(presignModalEl) : null;
+  const presignMethod = document.getElementById('presignMethod');
+  const presignTtl = document.getElementById('presignTtl');
+  const presignLink = document.getElementById('presignLink');
+  const copyPresignLink = document.getElementById('copyPresignLink');
+  const copyPresignDefaultLabel = copyPresignLink?.textContent?.trim() || 'Copy';
+  const generatePresignButton = document.getElementById('generatePresignButton');
+  const policyForm = document.getElementById('bucketPolicyForm');
+  const policyTextarea = document.getElementById('policyDocument');
+  const policyPreset = document.getElementById('policyPreset');
+  const policyMode = document.getElementById('policyMode');
+  const uploadForm = document.querySelector('[data-upload-form]');
+  const uploadModalEl = document.getElementById('uploadModal');
+  const uploadModal = uploadModalEl ? bootstrap.Modal.getOrCreateInstance(uploadModalEl) : null;
+  const uploadFileInput = uploadForm?.querySelector('input[name="object"]');
+  const uploadDropZone = uploadForm?.querySelector('[data-dropzone]');
+  const uploadDropZoneLabel = uploadDropZone?.querySelector('[data-dropzone-label]');
+  const messageModalEl = document.getElementById('messageModal');
+  const messageModal = messageModalEl ? new bootstrap.Modal(messageModalEl) : null;
+  const messageModalTitle = document.getElementById('messageModalTitle');
+  const messageModalBody = document.getElementById('messageModalBody');
+  const messageModalAction = document.getElementById('messageModalAction');
+  let messageModalActionHandler = null;
+  let isGeneratingPresign = false;
+  const objectsContainer = document.querySelector('.objects-table-container[data-bucket]');
+  const bulkDeleteEndpoint = objectsContainer?.dataset.bulkDeleteEndpoint || '';
+  const versionPanel = document.getElementById('version-panel');
+  const versionList = document.getElementById('version-list');
+  const refreshVersionsButton = document.getElementById('refreshVersionsButton');
+  const archivedCard = document.getElementById('archived-objects-card');
+  const archivedBody = archivedCard?.querySelector('[data-archived-body]');
+  const archivedCountBadge = archivedCard?.querySelector('[data-archived-count]');
+  const archivedRefreshButton = archivedCard?.querySelector('[data-archived-refresh]');
+  const archivedEndpoint = archivedCard?.dataset.archivedEndpoint;
+  const versioningEnabled = objectsContainer?.dataset.versioning === 'true';
+  const versionsCache = new Map();
+  let activeRow = null;
+  const selectedRows = new Map();
+  let bulkDeleting = false;
+  if (presignButton) presignButton.disabled = true;
+  if (generatePresignButton) generatePresignButton.disabled = true;
+  if (downloadButton) downloadButton.classList.add('disabled');
+
+  const showMessage = ({ title = 'Notice', body = '', bodyHtml = null, variant = 'info', actionText = null, onAction = null }) => {
+    if (!messageModal) {
+      window.alert(body || title);
+      return;
+    }
+    messageModalTitle.textContent = title;
+    if (bodyHtml) {
+      messageModalBody.innerHTML = bodyHtml;
+    } else {
+      messageModalBody.textContent = body;
+    }
+    messageModalActionHandler = null;
+    const variantClass = {
+      success: 'btn-success',
+      danger: 'btn-danger',
+      warning: 'btn-warning',
+      info: 'btn-primary',
+    };
+    Object.values(variantClass).forEach((cls) => messageModalAction.classList.remove(cls));
+    if (actionText && typeof onAction === 'function') {
+      messageModalAction.textContent = actionText;
+      messageModalAction.classList.remove('d-none');
+      messageModalAction.classList.add(variantClass[variant] || 'btn-primary');
+      messageModalActionHandler = onAction;
+    } else {
+      messageModalAction.classList.add('d-none');
+    }
+    messageModal.show();
+  };
+
+  messageModalAction?.addEventListener('click', () => {
+    if (typeof messageModalActionHandler === 'function') {
+      messageModalActionHandler();
+    }
+    messageModal?.hide();
+  });
+
+  messageModalEl?.addEventListener('hidden.bs.modal', () => {
+    messageModalActionHandler = null;
+    messageModalAction.classList.add('d-none');
+  });
+
+  const normalizePolicyTemplate = (rawTemplate) => {
+    if (!rawTemplate) {
+      return '';
+    }
+    try {
+      let parsed = JSON.parse(rawTemplate);
+      if (typeof parsed === 'string') {
+        parsed = JSON.parse(parsed);
+      }
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return rawTemplate;
+    }
+  };
+
+  let publicPolicyTemplate = normalizePolicyTemplate(policyTextarea?.dataset.publicTemplate || '');
+  let customPolicyDraft = policyTextarea?.value || '';
+
+  const setPolicyTextareaState = (readonly) => {
+    if (!policyTextarea) return;
+    if (readonly) {
+      policyTextarea.setAttribute('readonly', 'readonly');
+      policyTextarea.classList.add('bg-body-secondary');
+    } else {
+      policyTextarea.removeAttribute('readonly');
+      policyTextarea.classList.remove('bg-body-secondary');
+    }
+  };
+
+  const applyPolicyPreset = (preset) => {
+    if (!policyTextarea || !policyMode) return;
+    switch (preset) {
+      case 'private':
+        setPolicyTextareaState(true);
+        policyTextarea.value = '';
+        policyMode.value = 'delete';
+        break;
+      case 'public':
+        setPolicyTextareaState(false);
+        policyTextarea.value = publicPolicyTemplate || '';
+        policyMode.value = 'upsert';
+        break;
+      default:
+        setPolicyTextareaState(false);
+        policyTextarea.value = customPolicyDraft;
+        policyMode.value = 'upsert';
+        break;
+    }
+  };
+
+  policyTextarea?.addEventListener('input', () => {
+    if (policyPreset?.value === 'custom') {
+      customPolicyDraft = policyTextarea.value;
+    }
+  });
+
+  policyPreset?.addEventListener('change', () => applyPolicyPreset(policyPreset.value));
+
+  if (policyPreset) {
+    applyPolicyPreset(policyPreset.value || policyPreset.dataset.default || 'custom');
+  }
+
+  policyForm?.addEventListener('submit', () => {
+    if (!policyMode || !policyPreset || !policyTextarea) {
+      return;
+    }
+    if (policyPreset.value === 'private') {
+      policyMode.value = 'delete';
+      policyTextarea.value = '';
+    } else if (policyPreset.value === 'public') {
+      policyMode.value = 'upsert';
+      policyTextarea.value = publicPolicyTemplate || policyTextarea.value;
+    } else {
+      policyMode.value = 'upsert';
+    }
+  });
+
+  const updateBulkDeleteState = () => {
+    const selectedCount = selectedRows.size;
+    if (bulkDeleteButton) {
+      const shouldShow = Boolean(bulkDeleteEndpoint) && (selectedCount > 0 || bulkDeleting);
+      bulkDeleteButton.classList.toggle('d-none', !shouldShow);
+      bulkDeleteButton.disabled = !bulkDeleteEndpoint || selectedCount === 0 || bulkDeleting;
+      if (bulkDeleteLabel) {
+        bulkDeleteLabel.textContent = selectedCount ? `Delete selected (${selectedCount})` : 'Delete selected';
+      }
+    }
+    if (bulkDeleteConfirm) {
+      bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
+    }
+    if (selectAllCheckbox) {
+      const total = rows.length;
+      selectAllCheckbox.disabled = total === 0;
+      selectAllCheckbox.checked = selectedCount > 0 && selectedCount === total && total > 0;
+      selectAllCheckbox.indeterminate = selectedCount > 0 && selectedCount < total;
+    }
+  };
+
+  const toggleRowSelection = (row, shouldSelect) => {
+    if (!row || !row.dataset.key) return;
+    if (shouldSelect) {
+      selectedRows.set(row.dataset.key, row);
+    } else {
+      selectedRows.delete(row.dataset.key);
+    }
+    updateBulkDeleteState();
+  };
+
+  const renderBulkDeletePreview = () => {
+    if (!bulkDeleteList) return;
+    const keys = Array.from(selectedRows.keys());
+    bulkDeleteList.innerHTML = '';
+    if (bulkDeleteCount) {
+      const label = keys.length === 1 ? 'object' : 'objects';
+      bulkDeleteCount.textContent = `${keys.length} ${label} selected`;
+    }
+    if (!keys.length) {
+      const empty = document.createElement('li');
+      empty.className = 'list-group-item py-2 small text-muted';
+      empty.textContent = 'No objects selected.';
+      bulkDeleteList.appendChild(empty);
+      if (bulkDeleteStatus) {
+        bulkDeleteStatus.textContent = '';
+      }
+      return;
+    }
+    const preview = keys.slice(0, 6);
+    preview.forEach((key) => {
+      const item = document.createElement('li');
+      item.className = 'list-group-item py-1 small text-break';
+      item.textContent = key;
+      bulkDeleteList.appendChild(item);
+    });
+    if (bulkDeleteStatus) {
+      bulkDeleteStatus.textContent = keys.length > preview.length ? `+${keys.length - preview.length} more not shown` : '';
+    }
+  };
+
+  const openBulkDeleteModal = () => {
+    if (!bulkDeleteModal) {
+      return;
+    }
+    if (selectedRows.size === 0) {
+      showMessage({ title: 'Select objects', body: 'Choose at least one object to delete.', variant: 'warning' });
+      return;
+    }
+    renderBulkDeletePreview();
+    if (bulkDeletePurge) {
+      bulkDeletePurge.checked = false;
+    }
+    if (bulkDeleteConfirm) {
+      bulkDeleteConfirm.disabled = bulkDeleting;
+      bulkDeleteConfirm.textContent = bulkDeleting ? 'Deleting…' : 'Delete objects';
+    }
+    bulkDeleteModal.show();
+  };
+
+  const performBulkDelete = async () => {
+    if (!bulkDeleteEndpoint || selectedRows.size === 0 || !bulkDeleteConfirm) {
+      return;
+    }
+    bulkDeleting = true;
+    bulkDeleteConfirm.disabled = true;
+    bulkDeleteConfirm.textContent = 'Deleting…';
+    updateBulkDeleteState();
+    const payload = {
+      keys: Array.from(selectedRows.keys()),
+    };
+    if (versioningEnabled && bulkDeletePurge?.checked) {
+      payload.purge_versions = true;
+    }
+    try {
+      const response = await fetch(bulkDeleteEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify(payload),
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok || data.error) {
+        throw new Error(data.error || data.message || 'Unable to delete selected objects');
+      }
+      bulkDeleteModal?.hide();
+      const deletedCount = Array.isArray(data.deleted) ? data.deleted.length : selectedRows.size;
+      const errorCount = Array.isArray(data.errors) ? data.errors.length : 0;
+      const messageParts = [];
+      if (deletedCount) {
+        messageParts.push(`${deletedCount} deleted`);
+      }
+      if (errorCount) {
+        messageParts.push(`${errorCount} failed`);
+      }
+      const summary = messageParts.length ? messageParts.join(', ') : 'Bulk delete finished';
+      showMessage({ title: 'Bulk delete complete', body: data.message || summary, variant: errorCount ? 'warning' : 'success' });
+      window.setTimeout(() => window.location.reload(), 600);
+    } catch (error) {
+      bulkDeleteModal?.hide();
+      showMessage({ title: 'Delete failed', body: (error && error.message) || 'Unable to delete selected objects', variant: 'danger' });
+    } finally {
+      bulkDeleting = false;
+      if (bulkDeleteConfirm) {
+        bulkDeleteConfirm.disabled = false;
+        bulkDeleteConfirm.textContent = 'Delete objects';
+      }
+      updateBulkDeleteState();
+    }
+  };
+
+  const updateGeneratePresignState = () => {
+    if (!generatePresignButton) return;
+    if (isGeneratingPresign) {
+      generatePresignButton.disabled = true;
+      generatePresignButton.textContent = 'Generating…';
+      return;
+    }
+    generatePresignButton.textContent = 'Generate link';
+    generatePresignButton.disabled = !activeRow;
+  };
+
+  const requestPresignedUrl = async () => {
+    if (!activeRow) {
+      showMessage({ title: 'Select an object', body: 'Choose an object before generating a presigned URL.', variant: 'warning' });
+      return;
+    }
+    const endpoint = activeRow.dataset.presignEndpoint;
+    if (!endpoint) {
+      showMessage({ title: 'Unavailable', body: 'Presign endpoint unavailable for this object.', variant: 'danger' });
+      return;
+    }
+    if (isGeneratingPresign) {
+      return;
+    }
+    isGeneratingPresign = true;
+    updateGeneratePresignState();
+    presignLink.value = '';
+    try {
+      const payload = {
+        method: presignMethod?.value || 'GET',
+        expires_in: Number(presignTtl?.value) || 900,
+      };
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to generate presigned URL');
+      }
+      presignLink.value = data.url;
+    } catch (error) {
+      presignModal?.hide();
+      showMessage({ title: 'Presign failed', body: (error && error.message) || 'Unable to generate presigned URL', variant: 'danger' });
+    } finally {
+      isGeneratingPresign = false;
+      updateGeneratePresignState();
+    }
+  };
+
+  const renderMetadata = (metadata) => {
+    if (!previewMetadata || !previewMetadataList) return;
+    previewMetadataList.innerHTML = '';
+    if (!metadata || Object.keys(metadata).length === 0) {
+      previewMetadata.classList.add('d-none');
+      return;
+    }
+    previewMetadata.classList.remove('d-none');
+    Object.entries(metadata).forEach(([key, value]) => {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'metadata-entry';
+      const label = document.createElement('div');
+      label.className = 'metadata-key small';
+      label.textContent = key;
+      const val = document.createElement('div');
+      val.className = 'metadata-value text-break';
+      val.textContent = value;
+      wrapper.appendChild(label);
+      wrapper.appendChild(val);
+      previewMetadataList.appendChild(wrapper);
+    });
+  };
+
+  const describeVersionReason = (reason) => {
+    switch (reason) {
+      case 'delete':
+        return 'delete marker';
+      case 'restore-overwrite':
+        return 'restore overwrite';
+      default:
+        return reason || 'update';
+    }
+  };
+
+  const confirmVersionRestore = (row, version, label = null, onConfirm) => {
+    if (!version) return;
+    const timestamp = version.archived_at ? new Date(version.archived_at).toLocaleString() : version.version_id;
+    const sizeLabel = formatBytes(Number(version.size) || 0);
+    const reasonLabel = describeVersionReason(version.reason);
+    const targetLabel = label || row?.dataset.key || 'this object';
+    const metadata = version.metadata && typeof version.metadata === 'object' ? Object.entries(version.metadata) : [];
+    const metadataHtml = metadata.length
+      ? `<div class="mt-3"><div class="fw-semibold text-uppercase small">Metadata</div><hr class="my-2"><div class="metadata-stack small">${metadata
+          .map(
+            ([key, value]) =>
+              `<div class="metadata-entry"><div class="metadata-key small">${escapeHtml(key)}</div><div class="metadata-value text-break">${escapeHtml(value)}</div></div>`
+          )
+          .join('')}</div></div>`
+      : '';
+    const summaryHtml = `
+      <div class="small">
+        <div><strong>Target:</strong> ${escapeHtml(targetLabel)}</div>
+        <div><strong>Version ID:</strong> ${escapeHtml(version.version_id)}</div>
+        <div><strong>Timestamp:</strong> ${escapeHtml(timestamp)}</div>
+        <div><strong>Size:</strong> ${escapeHtml(sizeLabel)}</div>
+        <div><strong>Reason:</strong> ${escapeHtml(reasonLabel)}</div>
+      </div>
+      ${metadataHtml}
+    `;
+    const fallbackText = `Restore ${targetLabel} from ${timestamp}? Size ${sizeLabel}. Reason: ${reasonLabel}.`;
+    showMessage({
+      title: 'Restore archived version?',
+      body: fallbackText,
+      bodyHtml: summaryHtml,
+      variant: 'warning',
+      actionText: 'Restore version',
+      onAction: () => {
+        if (typeof onConfirm === 'function') {
+          onConfirm();
+        } else {
+          restoreVersion(row, version);
+        }
+      },
+    });
+  };
+
+  const updateArchivedCount = (count) => {
+    if (!archivedCountBadge) return;
+    const label = count === 1 ? 'item' : 'items';
+    archivedCountBadge.textContent = `${count} ${label}`;
+  };
+
+  function renderArchivedRows(items) {
+    if (!archivedBody) return;
+    archivedBody.innerHTML = '';
+    if (!items || items.length === 0) {
+      archivedBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No archived-only objects.</td></tr>';
+      updateArchivedCount(0);
+      return;
+    }
+    updateArchivedCount(items.length);
+    items.forEach((item) => {
+      const row = document.createElement('tr');
+
+      const keyCell = document.createElement('td');
+      const keyLabel = document.createElement('div');
+      keyLabel.className = 'fw-semibold text-break';
+      keyLabel.textContent = item.key;
+      const badgeWrap = document.createElement('div');
+      badgeWrap.className = 'mt-1';
+      const badge = document.createElement('span');
+      badge.className = 'badge text-bg-warning';
+      badge.textContent = 'Archived';
+      badgeWrap.appendChild(badge);
+      keyCell.appendChild(keyLabel);
+      keyCell.appendChild(badgeWrap);
+
+      const latestCell = document.createElement('td');
+      if (item.latest) {
+        const ts = item.latest.archived_at ? new Date(item.latest.archived_at).toLocaleString() : item.latest.version_id;
+        const sizeLabel = formatBytes(Number(item.latest.size) || 0);
+        latestCell.innerHTML = `<div class="small">${ts}</div><div class="text-muted small">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
+      } else {
+        latestCell.innerHTML = '<span class="text-muted small">Unknown</span>';
+      }
+
+      const countCell = document.createElement('td');
+      countCell.className = 'text-end text-muted';
+      countCell.textContent = item.versions;
+
+      const actionsCell = document.createElement('td');
+      actionsCell.className = 'text-end';
+      const btnGroup = document.createElement('div');
+      btnGroup.className = 'btn-group btn-group-sm';
+
+      const restoreButton = document.createElement('button');
+      restoreButton.type = 'button';
+      restoreButton.className = 'btn btn-outline-primary';
+      restoreButton.textContent = 'Restore';
+      restoreButton.disabled = !item.latest || !item.restore_url;
+      restoreButton.addEventListener('click', () => confirmVersionRestore(null, item.latest, item.key, () => restoreArchivedObject(item)));
+
+      const purgeButton = document.createElement('button');
+      purgeButton.type = 'button';
+      purgeButton.className = 'btn btn-outline-danger';
+      purgeButton.textContent = 'Delete versions';
+      purgeButton.addEventListener('click', () => confirmArchivedPurge(item));
+
+      btnGroup.appendChild(restoreButton);
+      btnGroup.appendChild(purgeButton);
+      actionsCell.appendChild(btnGroup);
+
+      row.appendChild(keyCell);
+      row.appendChild(latestCell);
+      row.appendChild(countCell);
+      row.appendChild(actionsCell);
+      archivedBody.appendChild(row);
+    });
+  }
+
+  async function restoreArchivedObject(item) {
+    if (!item?.restore_url) return;
+    try {
+      const response = await fetch(item.restore_url, { method: 'POST' });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to restore archived object');
+      }
+      showMessage({ title: 'Restore scheduled', body: data.message || 'Object restored from archive.', variant: 'success' });
+      await loadArchivedObjects();
+      window.setTimeout(() => window.location.reload(), 600);
+    } catch (error) {
+      showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore archived object', variant: 'danger' });
+    }
+  }
+
+  async function purgeArchivedObject(item) {
+    if (!item?.purge_url) return;
+    try {
+      const response = await fetch(item.purge_url, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to delete archived versions');
+      }
+      showMessage({ title: 'Archived versions removed', body: data.message || 'All archived data for this key has been deleted.', variant: 'success' });
+      await loadArchivedObjects();
+    } catch (error) {
+      showMessage({ title: 'Delete failed', body: (error && error.message) || 'Unable to delete archived versions', variant: 'danger' });
+    }
+  }
+
+  function confirmArchivedPurge(item) {
+    const label = item?.key || 'this object';
+    const count = item?.versions || 0;
+    const countLabel = count === 1 ? 'version' : 'versions';
+    showMessage({
+      title: 'Delete archived versions?',
+      body: `Permanently remove ${count} archived ${countLabel} for ${label}? This cannot be undone.`,
+      variant: 'danger',
+      actionText: 'Delete versions',
+      onAction: () => purgeArchivedObject(item),
+    });
+  }
+
+  async function loadArchivedObjects() {
+    if (!archivedEndpoint || !archivedBody) return;
+    archivedBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr>';
+    try {
+      const response = await fetch(archivedEndpoint);
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to load archived objects');
+      }
+      const items = Array.isArray(data.objects) ? data.objects : [];
+      renderArchivedRows(items);
+    } catch (error) {
+      archivedBody.innerHTML = `<tr><td colspan="4" class="text-center text-danger py-3">${(error && error.message) || 'Unable to load archived objects'}</td></tr>`;
+      updateArchivedCount(0);
+    }
+  }
+
+  if (archivedRefreshButton) {
+    archivedRefreshButton.addEventListener('click', () => loadArchivedObjects());
+  }
+  if (archivedCard && archivedEndpoint) {
+    loadArchivedObjects();
+  }
+
+  async function restoreVersion(row, version) {
+    if (!row || !version?.version_id) return;
+    const template = row.dataset.restoreTemplate;
+    if (!template) return;
+    const url = template.replace('VERSION_ID_PLACEHOLDER', version.version_id);
+    try {
+      const response = await fetch(url, { method: 'POST' });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to restore version');
+      }
+      const endpoint = row.dataset.versionsEndpoint;
+      if (endpoint) {
+        versionsCache.delete(endpoint);
+      }
+      await loadObjectVersions(row, { force: true });
+      showMessage({ title: 'Version restored', body: data.message || 'The selected version has been restored.', variant: 'success' });
+      window.setTimeout(() => window.location.reload(), 500);
+    } catch (error) {
+      showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore version', variant: 'danger' });
+    }
+  }
+
+  function renderVersionEntries(entries, row) {
+    if (!versionList) return;
+    if (!entries || entries.length === 0) {
+      versionList.innerHTML = '<p class="text-muted small mb-0">No previous versions yet.</p>';
+      return;
+    }
+    versionList.innerHTML = '';
+    entries.forEach((entry, index) => {
+      const versionNumber = index + 1;
+      const item = document.createElement('div');
+      item.className = 'd-flex align-items-center justify-content-between py-2 border-bottom';
+      const textStack = document.createElement('div');
+      textStack.className = 'me-3';
+      const heading = document.createElement('div');
+      heading.className = 'd-flex align-items-center';
+      const badge = document.createElement('span');
+      badge.className = 'badge text-bg-secondary me-2';
+      badge.textContent = `#${versionNumber}`;
+      const title = document.createElement('div');
+      title.className = 'fw-semibold small';
+      const timestamp = entry.archived_at ? new Date(entry.archived_at).toLocaleString() : entry.version_id;
+      title.textContent = timestamp;
+      heading.appendChild(badge);
+      heading.appendChild(title);
+      const meta = document.createElement('div');
+      meta.className = 'text-muted small';
+      const reason = describeVersionReason(entry.reason);
+      const sizeLabel = formatBytes(Number(entry.size) || 0);
+      meta.textContent = `${sizeLabel} · ${reason}`;
+      textStack.appendChild(heading);
+      textStack.appendChild(meta);
+      const restoreButton = document.createElement('button');
+      restoreButton.type = 'button';
+      restoreButton.className = 'btn btn-outline-primary btn-sm';
+      restoreButton.textContent = 'Restore';
+      restoreButton.addEventListener('click', () => confirmVersionRestore(row, entry));
+      item.appendChild(textStack);
+      item.appendChild(restoreButton);
+      versionList.appendChild(item);
+    });
+  }
+
+  async function loadObjectVersions(row, { force = false } = {}) {
+    if (!versionPanel || !versionList || !versioningEnabled) {
+      versionPanel?.classList.add('d-none');
+      return;
+    }
+    if (!row) {
+      versionPanel.classList.add('d-none');
+      return;
+    }
+    const endpoint = row.dataset.versionsEndpoint;
+    if (!endpoint) {
+      versionPanel.classList.add('d-none');
+      return;
+       }
+    versionPanel.classList.remove('d-none');
+    if (!force && versionsCache.has(endpoint)) {
+      renderVersionEntries(versionsCache.get(endpoint), row);
+      return;
+    }
+    versionList.innerHTML = '<div class="text-muted small">Loading versions…</div>';
+    try {
+      const response = await fetch(endpoint);
+      let data = {};
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+      if (!response.ok) {
+        throw new Error(data.error || 'Unable to load versions');
+      }
+      const entries = Array.isArray(data.versions) ? data.versions : [];
+      versionsCache.set(endpoint, entries);
+      renderVersionEntries(entries, row);
+    } catch (error) {
+      versionList.innerHTML = `<p class="text-danger small mb-0">${(error && error.message) || 'Unable to load versions'}</p>`;
+    }
+  }
+
+  renderMetadata(null);
+  const deleteModalEl = document.getElementById('deleteObjectModal');
+  const deleteModal = deleteModalEl ? new bootstrap.Modal(deleteModalEl) : null;
+  const deleteObjectForm = document.getElementById('deleteObjectForm');
+  const deleteObjectKey = document.getElementById('deleteObjectKey');
+
+  const resetPreviewMedia = () => {
+    [previewImage, previewVideo, previewIframe].forEach((el) => {
+      el.classList.add('d-none');
+      if (el.tagName === 'VIDEO') {
+        el.pause();
+        el.removeAttribute('src');
+      }
+      if (el.tagName === 'IFRAME') {
+        el.setAttribute('src', 'about:blank');
+      }
+    });
+    previewPlaceholder.classList.remove('d-none');
+  };
+
+  const metadataFromRow = (row) => {
+    if (!row || !row.dataset.metadata) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(row.dataset.metadata);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (err) {
+      console.warn('Failed to parse metadata for row', err);
+    }
+    return null;
+  };
+
+  const selectRow = (row) => {
+    rows.forEach((r) => r.classList.remove('table-active'));
+    row.classList.add('table-active');
+    previewEmpty.classList.add('d-none');
+    previewPanel.classList.remove('d-none');
+    activeRow = row;
+    renderMetadata(metadataFromRow(row));
+
+    previewKey.textContent = row.dataset.key;
+    previewSize.textContent = formatBytes(Number(row.dataset.size));
+    previewModified.textContent = row.dataset.lastModified;
+    previewEtag.textContent = row.dataset.etag;
+    downloadButton.href = row.dataset.downloadUrl;
+    downloadButton.classList.remove('disabled');
+    if (presignButton) {
+      presignButton.dataset.endpoint = row.dataset.presignEndpoint;
+      presignButton.disabled = false;
+    }
+    if (generatePresignButton) {
+      generatePresignButton.disabled = false;
+    }
+    updateGeneratePresignState();
+    if (versioningEnabled) {
+      loadObjectVersions(row);
+    }
+
+    resetPreviewMedia();
+    const previewUrl = row.dataset.previewUrl;
+    const lower = row.dataset.key.toLowerCase();
+    if (lower.match(/\.(png|jpg|jpeg|gif|webp|svg)$/)) {
+      previewImage.src = previewUrl;
+      previewImage.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    } else if (lower.match(/\.(mp4|webm|ogg)$/)) {
+      previewVideo.src = previewUrl;
+      previewVideo.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    } else if (lower.match(/\.(txt|log|json|md|csv)$/)) {
+      previewIframe.src = previewUrl;
+      previewIframe.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    }
+  };
+
+  rows.forEach((row) => {
+    row.addEventListener('click', () => selectRow(row));
+    row.querySelector('[data-delete-object]')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (!deleteModal || !deleteObjectForm) return;
+      deleteObjectForm.action = row.dataset.deleteEndpoint;
+      deleteObjectKey.textContent = row.dataset.key;
+      deleteModal.show();
+    });
+    const checkbox = row.querySelector('[data-object-select]');
+    checkbox?.addEventListener('click', (event) => event.stopPropagation());
+    checkbox?.addEventListener('change', (event) => {
+      toggleRowSelection(row, event.target.checked);
+    });
+  });
+
+  updateBulkDeleteState();
+
+  bulkDeleteButton?.addEventListener('click', () => openBulkDeleteModal());
+  bulkDeleteConfirm?.addEventListener('click', () => performBulkDelete());
+
+  document.getElementById('object-search')?.addEventListener('input', (event) => {
+    const term = event.target.value.toLowerCase();
+    rows.forEach((row) => {
+      const key = row.dataset.key.toLowerCase();
+      row.style.display = key.includes(term) ? '' : 'none';
+    });
+  });
+
+  refreshVersionsButton?.addEventListener('click', () => {
+    if (!activeRow) {
+      versionList.innerHTML = '<p class="text-muted small mb-0">Select an object to view versions.</p>';
+      return;
+    }
+    const endpoint = activeRow.dataset.versionsEndpoint;
+    if (endpoint) {
+      versionsCache.delete(endpoint);
+    }
+    loadObjectVersions(activeRow, { force: true });
+  });
+
+  presignButton?.addEventListener('click', () => {
+    if (!activeRow) {
+      showMessage({ title: 'Select an object', body: 'Choose an object before generating a presigned URL.', variant: 'warning' });
+      return;
+    }
+    presignLink.value = '';
+    presignModal?.show();
+    requestPresignedUrl();
+  });
+
+  generatePresignButton?.addEventListener('click', () => {
+    requestPresignedUrl();
+  });
+
+  copyPresignLink?.addEventListener('click', async () => {
+    if (!presignLink?.value) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(presignLink.value);
+      copyPresignLink.textContent = 'Copied!';
+      window.setTimeout(() => {
+        copyPresignLink.textContent = copyPresignDefaultLabel;
+      }, 1500);
+    } catch (error) {
+      if (window.showToast) {
+        window.showToast('Unable to copy link to clipboard.', 'Copy failed', 'warning');
+      } else {
+        alert('Unable to copy link to clipboard.');
+      }
+    }
+  });
+
+  if (uploadForm && uploadFileInput) {
+    const refreshUploadDropLabel = () => {
+      if (!uploadDropZoneLabel) return;
+      const files = uploadFileInput.files;
+      if (!files || files.length === 0) {
+        uploadDropZoneLabel.textContent = 'No file selected';
+        return;
+      }
+      uploadDropZoneLabel.textContent = files.length === 1 ? files[0].name : `${files.length} files selected`;
+    };
+
+    refreshUploadDropLabel();
+    uploadFileInput.addEventListener('change', refreshUploadDropLabel);
+    uploadDropZone?.addEventListener('click', () => uploadFileInput?.click());
+
+    const preventDefaults = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    const wireDropTarget = (target, { highlightClass = '', autoOpenModal = false } = {}) => {
+      if (!target) return;
+      ['dragenter', 'dragover'].forEach((eventName) => {
+        target.addEventListener(eventName, (event) => {
+          preventDefaults(event);
+          if (highlightClass) {
+            target.classList.add(highlightClass);
+          }
+        });
+      });
+      ['dragleave', 'drop'].forEach((eventName) => {
+        target.addEventListener(eventName, (event) => {
+          preventDefaults(event);
+          if (highlightClass) {
+            target.classList.remove(highlightClass);
+          }
+        });
+      });
+      target.addEventListener('drop', (event) => {
+        if (!event.dataTransfer?.files?.length || !uploadFileInput) {
+          return;
+        }
+        uploadFileInput.files = event.dataTransfer.files;
+        uploadFileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        if (autoOpenModal && uploadModal) {
+          uploadModal.show();
+        }
+      });
+    };
+
+    if (uploadDropZone) {
+      wireDropTarget(uploadDropZone, { highlightClass: 'is-dragover' });
+    }
+
+    if (objectsContainer) {
+      wireDropTarget(objectsContainer, { highlightClass: 'drag-over', autoOpenModal: true });
+    }
+  }
+
+  const bulkDownloadButton = document.querySelector('[data-bulk-download-trigger]');
+  const bulkDownloadEndpoint = document.getElementById('objects-drop-zone')?.dataset.bulkDownloadEndpoint;
+
+  const updateBulkDownloadState = () => {
+    if (!bulkDownloadButton) return;
+    const selectedCount = document.querySelectorAll('[data-object-select]:checked').length;
+    if (selectedCount > 0) {
+      bulkDownloadButton.classList.remove('d-none');
+      bulkDownloadButton.disabled = false;
+    } else {
+      bulkDownloadButton.classList.add('d-none');
+      bulkDownloadButton.disabled = true;
+    }
+  };
+
+  // Add listeners to update state
+  rows.forEach((row) => {
+    const checkbox = row.querySelector('[data-object-select]');
+    checkbox?.addEventListener('change', updateBulkDownloadState);
+  });
+
+  selectAllCheckbox?.addEventListener('change', (event) => {
+    const shouldSelect = Boolean(event.target?.checked);
+    rows.forEach((row) => {
+      const checkbox = row.querySelector('[data-object-select]');
+      if (!checkbox || checkbox.disabled) {
+        return;
+      }
+      checkbox.checked = shouldSelect;
+      toggleRowSelection(row, shouldSelect);
+    });
+    setTimeout(updateBulkDownloadState, 0);
+  });
+
+  bulkDownloadButton?.addEventListener('click', async () => {
+    if (!bulkDownloadEndpoint) return;
+    const selected = Array.from(document.querySelectorAll('[data-object-select]:checked')).map(
+      (cb) => cb.closest('tr').dataset.key
+    );
+    if (selected.length === 0) return;
+
+    bulkDownloadButton.disabled = true;
+    const originalHtml = bulkDownloadButton.innerHTML;
+    bulkDownloadButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Downloading...';
+
+    try {
+      const response = await fetch(bulkDownloadEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '',
+        },
+        body: JSON.stringify({ keys: selected }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Download failed');
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${document.getElementById('objects-drop-zone').dataset.bucket}-download.zip`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      a.remove();
+    } catch (error) {
+      if (window.showToast) {
+        window.showToast(error.message, 'Download Failed', 'error');
+      } else {
+        alert(error.message);
+      }
+    } finally {
+      bulkDownloadButton.disabled = false;
+      bulkDownloadButton.innerHTML = originalHtml;
+    }
+  });
+</script>
+{% endblock %}

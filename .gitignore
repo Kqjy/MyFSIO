@@ -1,0 +1,44 @@
+# Bytecode and interpreter cruft
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments and local tooling
+.venv/
+venv/
+.env
+.env.*
+.python-version
+
+# Test, coverage, and type-check caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.dmypy.json
+.pytype/
+.cache/
+
+# Build / packaging outputs
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Local runtime artifacts
+logs/
+*.log
+tmp/
+tmp-storage/
+pytestdebug.log
+
+# Bucket/object data produced at runtime (buckets + system metadata)
+/data/
+/tmp-storage/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
