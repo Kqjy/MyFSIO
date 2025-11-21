@@ -16,9 +16,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Drop privileges
-RUN useradd -m -u 1000 myfsio \ 
+# Create data directory and set permissions
+RUN mkdir -p /app/data \
+    && useradd -m -u 1000 myfsio \ 
     && chown -R myfsio:myfsio /app
+
 USER myfsio
 
 EXPOSE 5000 5100
