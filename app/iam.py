@@ -77,10 +77,20 @@ class IamService:
         self._users: Dict[str, Dict[str, Any]] = {}
         self._raw_config: Dict[str, Any] = {}
         self._failed_attempts: Dict[str, Deque[datetime]] = {}
+        self._last_load_time = 0.0
         self._load()
+
+    def _maybe_reload(self) -> None:
+        """Reload configuration if the file has changed on disk."""
+        try:
+            if self.config_path.stat().st_mtime > self._last_load_time:
+                self._load()
+        except OSError:
+            pass
 
     # ---------------------- authz helpers ----------------------
     def authenticate(self, access_key: str, secret_key: str) -> Principal:
+        self._maybe_reload()
         access_key = (access_key or "").strip()
         secret_key = (secret_key or "").strip()
         if not access_key or not secret_key:
@@ -135,12 +145,14 @@ class IamService:
         return int(max(0, self.auth_lockout_window.total_seconds() - elapsed))
 
     def principal_for_key(self, access_key: str) -> Principal:
+        self._maybe_reload()
         record = self._users.get(access_key)
         if not record:
             raise IamError("Unknown access key")
         return self._build_principal(access_key, record)
 
     def secret_for_key(self, access_key: str) -> str:
+        self._maybe_reload()
         record = self._users.get(access_key)
         if not record:
             raise IamError("Unknown access key")
@@ -245,6 +257,7 @@ class IamService:
     # ---------------------- config helpers ----------------------
     def _load(self) -> None:
         try:
+            self._last_load_time = self.config_path.stat().st_mtime
             content = self.config_path.read_text(encoding='utf-8')
             raw = json.loads(content)
         except FileNotFoundError:

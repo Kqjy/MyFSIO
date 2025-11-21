@@ -926,6 +926,12 @@ def rotate_iam_secret(access_key: str):
         return redirect(url_for("ui.iam_dashboard"))
     try:
         new_secret = _iam().rotate_secret(access_key)
+        # If rotating own key, update session immediately so subsequent API calls (like presign) work
+        if principal and principal.access_key == access_key:
+            creds = session.get("credentials", {})
+            creds["secret_key"] = new_secret
+            session["credentials"] = creds
+            session.modified = True
     except IamError as exc:
         if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
             return jsonify({"error": str(exc)}), 400
