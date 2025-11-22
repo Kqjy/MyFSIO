@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -10,9 +11,10 @@ from typing import Dict, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from boto3.exceptions import S3UploadFailedError
 
 from .connections import ConnectionStore, RemoteConnection
-from .storage import ObjectStorage
+from .storage import ObjectStorage, StorageError
 
 logger = logging.getLogger(__name__)
 
@@ -116,21 +118,73 @@ class ReplicationManager:
             # We need the file content. 
             # Since ObjectStorage is filesystem based, let's get the stream.
             # We need to be careful about closing it.
-            meta = self.storage.get_object_meta(bucket_name, object_key)
-            if not meta:
+            try:
+                path = self.storage.get_object_path(bucket_name, object_key)
+            except StorageError:
                 return
 
-            with self.storage.open_object(bucket_name, object_key) as f:
-                extra_args = {}
-                if meta.metadata:
-                    extra_args["Metadata"] = meta.metadata
-                
-                s3.upload_fileobj(
-                    f,
-                    rule.target_bucket,
-                    object_key,
-                    ExtraArgs=extra_args
-                )
+            metadata = self.storage.get_object_metadata(bucket_name, object_key)
+
+            extra_args = {}
+            if metadata:
+                extra_args["Metadata"] = metadata
+            
+            # Guess content type to prevent corruption/wrong handling
+            content_type, _ = mimetypes.guess_type(path)
+            file_size = path.stat().st_size
+
+            # Debug: Calculate MD5 of source file
+            import hashlib
+            md5_hash = hashlib.md5()
+            with path.open("rb") as f:
+                # Log first 32 bytes
+                header = f.read(32)
+                logger.info(f"Source first 32 bytes: {header.hex()}")
+                md5_hash.update(header)
+                for chunk in iter(lambda: f.read(4096), b""):
+                    md5_hash.update(chunk)
+            source_md5 = md5_hash.hexdigest()
+            logger.info(f"Replicating {bucket_name}/{object_key}: Size={file_size}, MD5={source_md5}, ContentType={content_type}")
+
+            try:
+                with path.open("rb") as f:
+                    s3.put_object(
+                        Bucket=rule.target_bucket,
+                        Key=object_key,
+                        Body=f,
+                        ContentLength=file_size,
+                        ContentType=content_type or "application/octet-stream",
+                        Metadata=metadata or {}
+                    )
+            except (ClientError, S3UploadFailedError) as e:
+                # Check if it's a NoSuchBucket error (either direct or wrapped)
+                is_no_bucket = False
+                if isinstance(e, ClientError):
+                    if e.response['Error']['Code'] == 'NoSuchBucket':
+                        is_no_bucket = True
+                elif isinstance(e, S3UploadFailedError):
+                    if "NoSuchBucket" in str(e):
+                        is_no_bucket = True
+
+                if is_no_bucket:
+                    logger.info(f"Target bucket {rule.target_bucket} not found. Attempting to create it.")
+                    try:
+                        s3.create_bucket(Bucket=rule.target_bucket)
+                        # Retry upload
+                        with path.open("rb") as f:
+                            s3.put_object(
+                                Bucket=rule.target_bucket,
+                                Key=object_key,
+                                Body=f,
+                                ContentLength=file_size,
+                                ContentType=content_type or "application/octet-stream",
+                                Metadata=metadata or {}
+                            )
+                    except Exception as create_err:
+                        logger.error(f"Failed to create target bucket {rule.target_bucket}: {create_err}")
+                        raise e # Raise original error
+                else:
+                    raise e
             
             logger.info(f"Replicated {bucket_name}/{object_key} to {conn.name} ({rule.target_bucket})")
 

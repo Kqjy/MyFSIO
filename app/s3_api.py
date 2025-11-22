@@ -1078,7 +1078,13 @@ def object_handler(bucket_name: str, object_key: str):
         _, error = _object_principal("write", bucket_name, object_key)
         if error:
             return error
-        stream = request.stream
+        
+        # Debug: Log incoming request details
+        current_app.logger.info(f"Receiving PUT {bucket_name}/{object_key}")
+        current_app.logger.info(f"Headers: {dict(request.headers)}")
+        current_app.logger.info(f"Content-Length: {request.content_length}")
+        
+        stream = DebugStream(request.stream, current_app.logger)
         metadata = _extract_request_metadata()
         try:
             meta = storage.put_object(
@@ -1252,3 +1258,19 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         return _error_response("NoSuchKey", "Object not found", 404)
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
+
+
+class DebugStream:
+    def __init__(self, stream, logger):
+        self.stream = stream
+        self.logger = logger
+        self.first_chunk = True
+
+    def read(self, size=-1):
+        chunk = self.stream.read(size)
+        if self.first_chunk and chunk:
+            # Log first 32 bytes
+            prefix = chunk[:32]
+            self.logger.info(f"Received first 32 bytes: {prefix.hex()}")
+            self.first_chunk = False
+        return chunk

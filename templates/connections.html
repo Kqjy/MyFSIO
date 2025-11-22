@@ -12,12 +12,12 @@
 
 <div class="row">
     <div class="col-md-4">
-        <div class="card">
-            <div class="card-header">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold">
                 Add New Connection
             </div>
             <div class="card-body">
-                <form method="POST" action="{{ url_for('ui.create_connection') }}">
+                <form method="POST" action="{{ url_for('ui.create_connection') }}" id="createConnectionForm">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                     <div class="mb-3">
                         <label for="name" class="form-label">Name</label>
@@ -37,44 +37,69 @@
                     </div>
                     <div class="mb-3">
                         <label for="secret_key" class="form-label">Secret Key</label>
-                        <input type="password" class="form-control" id="secret_key" name="secret_key" required>
+                        <div class="input-group">
+                            <input type="password" class="form-control" id="secret_key" name="secret_key" required>
+                            <button class="btn btn-outline-secondary" type="button" onclick="togglePassword('secret_key')">
+                                <i class="bi bi-eye"></i> Show
+                            </button>
+                        </div>
                     </div>
-                    <button type="submit" class="btn btn-primary">Add Connection</button>
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-outline-secondary" id="testConnectionBtn">Test Connection</button>
+                        <button type="submit" class="btn btn-primary">Add Connection</button>
+                    </div>
+                    <div id="testResult" class="mt-2"></div>
                 </form>
             </div>
         </div>
     </div>
     
     <div class="col-md-8">
-        <div class="card">
-            <div class="card-header">
+        <div class="card shadow-sm">
+            <div class="card-header fw-semibold">
                 Existing Connections
             </div>
             <div class="card-body">
                 {% if connections %}
                 <div class="table-responsive">
-                    <table class="table table-hover">
+                    <table class="table table-hover align-middle">
                         <thead>
                             <tr>
                                 <th>Name</th>
                                 <th>Endpoint</th>
                                 <th>Region</th>
                                 <th>Access Key</th>
-                                <th>Actions</th>
+                                <th class="text-end">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for conn in connections %}
                             <tr>
-                                <td>{{ conn.name }}</td>
-                                <td>{{ conn.endpoint_url }}</td>
-                                <td>{{ conn.region }}</td>
-                                <td><code>{{ conn.access_key }}</code></td>
-                                <td>
-                                    <form method="POST" action="{{ url_for('ui.delete_connection', connection_id=conn.id) }}" onsubmit="return confirm('Are you sure?');" style="display: inline;">
-                                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                                        <button type="submit" class="btn btn-sm btn-danger">Delete</button>
-                                    </form>
+                                <td class="fw-medium">{{ conn.name }}</td>
+                                <td class="small text-muted">{{ conn.endpoint_url }}</td>
+                                <td><span class="badge bg-light text-dark border">{{ conn.region }}</span></td>
+                                <td><code class="small">{{ conn.access_key }}</code></td>
+                                <td class="text-end">
+                                    <div class="btn-group">
+                                        <button type="button" class="btn btn-sm btn-outline-primary" 
+                                            data-bs-toggle="modal" 
+                                            data-bs-target="#editConnectionModal"
+                                            data-id="{{ conn.id }}"
+                                            data-name="{{ conn.name }}"
+                                            data-endpoint="{{ conn.endpoint_url }}"
+                                            data-region="{{ conn.region }}"
+                                            data-access="{{ conn.access_key }}"
+                                            data-secret="{{ conn.secret_key }}">
+                                            Edit
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-danger" 
+                                            data-bs-toggle="modal" 
+                                            data-bs-target="#deleteConnectionModal"
+                                            data-id="{{ conn.id }}"
+                                            data-name="{{ conn.name }}">
+                                            Delete
+                                        </button>
+                                    </div>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -82,10 +107,164 @@
                     </table>
                 </div>
                 {% else %}
-                <p class="text-muted text-center my-4">No remote connections configured.</p>
+                <div class="text-center py-5 text-muted">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" class="bi bi-hdd-network mb-3" viewBox="0 0 16 16">
+                        <path d="M4.5 5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1zM3 4.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"/>
+                        <path d="M0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H8.5v3a1.5 1.5 0 0 1 1.5 1.5v3.375a1.125 1.125 0 0 1-1.125 1.125h-1.75a1.125 1.125 0 0 1-1.125-1.125V11.5A1.5 1.5 0 0 1 7.5 10V7H2a2 2 0 0 1-2-2V4zm1 0v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1zm6 5v1.5a.5.5 0 0 0 .5.5h1.75a.5.5 0 0 0 .5-.5V10a.5.5 0 0 0-.5-.5H7.5a.5.5 0 0 0-.5.5z"/>
+                    </svg>
+                    <p>No remote connections configured.</p>
+                </div>
                 {% endif %}
             </div>
         </div>
     </div>
 </div>
+
+<!-- Edit Connection Modal -->
+<div class="modal fade" id="editConnectionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Connection</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST" id="editConnectionForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="edit_name" class="form-label">Name</label>
+                        <input type="text" class="form-control" id="edit_name" name="name" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_endpoint_url" class="form-label">Endpoint URL</label>
+                        <input type="url" class="form-control" id="edit_endpoint_url" name="endpoint_url" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_region" class="form-label">Region</label>
+                        <input type="text" class="form-control" id="edit_region" name="region" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_access_key" class="form-label">Access Key</label>
+                        <input type="text" class="form-control" id="edit_access_key" name="access_key" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_secret_key" class="form-label">Secret Key</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control" id="edit_secret_key" name="secret_key" required>
+                            <button class="btn btn-outline-secondary" type="button" onclick="togglePassword('edit_secret_key')">
+                                Show
+                            </button>
+                        </div>
+                    </div>
+                    <div id="editTestResult" class="mt-2"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" id="editTestConnectionBtn">Test Connection</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Connection Modal -->
+<div class="modal fade" id="deleteConnectionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Delete Connection</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete the connection <strong id="deleteConnectionName"></strong>?</p>
+                <p class="text-muted small">This will stop any replication rules using this connection.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form method="POST" id="deleteConnectionForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <button type="submit" class="btn btn-danger">Delete</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    function togglePassword(id) {
+        const input = document.getElementById(id);
+        if (input.type === "password") {
+            input.type = "text";
+        } else {
+            input.type = "password";
+        }
+    }
+
+    // Test Connection Logic
+    async function testConnection(formId, resultId) {
+        const form = document.getElementById(formId);
+        const resultDiv = document.getElementById(resultId);
+        const formData = new FormData(form);
+        const data = Object.fromEntries(formData.entries());
+        
+        resultDiv.innerHTML = '<div class="text-info"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Testing...</div>';
+        
+        try {
+            const response = await fetch("{{ url_for('ui.test_connection') }}", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": "{{ csrf_token() }}"
+                },
+                body: JSON.stringify(data)
+            });
+            
+            const result = await response.json();
+            if (response.ok) {
+                resultDiv.innerHTML = `<div class="text-success"><i class="bi bi-check-circle"></i> ${result.message}</div>`;
+            } else {
+                resultDiv.innerHTML = `<div class="text-danger"><i class="bi bi-exclamation-circle"></i> ${result.message}</div>`;
+            }
+        } catch (error) {
+            resultDiv.innerHTML = `<div class="text-danger"><i class="bi bi-exclamation-circle"></i> Connection failed</div>`;
+        }
+    }
+
+    document.getElementById('testConnectionBtn').addEventListener('click', () => {
+        testConnection('createConnectionForm', 'testResult');
+    });
+
+    document.getElementById('editTestConnectionBtn').addEventListener('click', () => {
+        testConnection('editConnectionForm', 'editTestResult');
+    });
+
+    // Modal Event Listeners
+    const editModal = document.getElementById('editConnectionModal');
+    editModal.addEventListener('show.bs.modal', event => {
+        const button = event.relatedTarget;
+        const id = button.getAttribute('data-id');
+        
+        document.getElementById('edit_name').value = button.getAttribute('data-name');
+        document.getElementById('edit_endpoint_url').value = button.getAttribute('data-endpoint');
+        document.getElementById('edit_region').value = button.getAttribute('data-region');
+        document.getElementById('edit_access_key').value = button.getAttribute('data-access');
+        document.getElementById('edit_secret_key').value = button.getAttribute('data-secret');
+        document.getElementById('editTestResult').innerHTML = '';
+        
+        const form = document.getElementById('editConnectionForm');
+        form.action = "{{ url_for('ui.update_connection', connection_id='CONN_ID') }}".replace('CONN_ID', id);
+    });
+
+    const deleteModal = document.getElementById('deleteConnectionModal');
+    deleteModal.addEventListener('show.bs.modal', event => {
+        const button = event.relatedTarget;
+        const id = button.getAttribute('data-id');
+        const name = button.getAttribute('data-name');
+        
+        document.getElementById('deleteConnectionName').textContent = name;
+        const form = document.getElementById('deleteConnectionForm');
+        form.action = "{{ url_for('ui.delete_connection', connection_id='CONN_ID') }}".replace('CONN_ID', id);
+    });
+</script>
 {% endblock %}

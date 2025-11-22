@@ -408,11 +408,9 @@
                 </dl>
               </div>
               
-              <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" onsubmit="return confirm('Are you sure you want to disable replication?');">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-                <input type="hidden" name="action" value="delete">
-                <button type="submit" class="btn btn-danger">Disable Replication</button>
-              </form>
+              <button type="button" class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
+                Disable Replication
+              </button>
               
               {% else %}
               <p class="text-muted">Replication allows you to automatically copy new objects from this bucket to a bucket in another S3-compatible service.</p>
@@ -436,12 +434,7 @@
                 <div class="mb-3">
                   <label for="target_bucket" class="form-label">Target Bucket Name</label>
                   <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket">
-                  <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" id="create_remote_bucket" name="create_remote_bucket">
-                    <label class="form-check-label" for="create_remote_bucket">
-                      Create this bucket on the remote server if it doesn't exist
-                    </label>
-                  </div>
+                  <div class="form-text">If the target bucket does not exist, it will be created automatically.</div>
                 </div>
                 
                 <button type="submit" class="btn btn-primary">Enable Replication</button>
@@ -711,6 +704,30 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-primary me-auto" id="generatePresignButton">Generate link</button>
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Disable Replication Modal -->
+<div class="modal fade" id="disableReplicationModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Disable Replication</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to disable replication for this bucket?</p>
+        <p class="text-muted small">Existing objects in the target bucket will remain, but new uploads will no longer be copied.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="action" value="delete">
+            <button type="submit" class="btn btn-danger">Disable Replication</button>
+        </form>
       </div>
     </div>
   </div>

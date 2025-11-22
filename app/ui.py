@@ -6,7 +6,9 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
+import boto3
 import requests
+from botocore.exceptions import ClientError
 from flask import (
     Blueprint,
     Response,
@@ -1070,6 +1072,73 @@ def create_connection():
     return redirect(url_for("ui.connections_dashboard"))
 
 
+@ui_bp.post("/connections/test")
+def test_connection():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"status": "error", "message": "Access denied"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    endpoint = data.get("endpoint_url", "").strip()
+    access_key = data.get("access_key", "").strip()
+    secret_key = data.get("secret_key", "").strip()
+    region = data.get("region", "us-east-1").strip()
+
+    if not all([endpoint, access_key, secret_key]):
+        return jsonify({"status": "error", "message": "Missing credentials"}), 400
+
+    try:
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+        )
+        # Try to list buckets to verify credentials and endpoint
+        s3.list_buckets()
+        return jsonify({"status": "ok", "message": "Connection successful"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@ui_bp.post("/connections/<connection_id>/update")
+def update_connection(connection_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+
+    conn = _connections().get(connection_id)
+    if not conn:
+        flash("Connection not found", "danger")
+        return redirect(url_for("ui.connections_dashboard"))
+
+    name = request.form.get("name", "").strip()
+    endpoint = request.form.get("endpoint_url", "").strip()
+    access_key = request.form.get("access_key", "").strip()
+    secret_key = request.form.get("secret_key", "").strip()
+    region = request.form.get("region", "us-east-1").strip()
+
+    if not all([name, endpoint, access_key, secret_key]):
+        flash("All fields are required", "danger")
+        return redirect(url_for("ui.connections_dashboard"))
+
+    conn.name = name
+    conn.endpoint_url = endpoint
+    conn.access_key = access_key
+    conn.secret_key = secret_key
+    conn.region = region
+    
+    _connections().save()
+    flash(f"Connection '{name}' updated", "success")
+    return redirect(url_for("ui.connections_dashboard"))
+
+
 @ui_bp.post("/connections/<connection_id>/delete")
 def delete_connection(connection_id: str):
     principal = _current_principal()
@@ -1105,16 +1174,6 @@ def update_bucket_replication(bucket_name: str):
         if not target_conn_id or not target_bucket:
             flash("Target connection and bucket are required", "danger")
         else:
-            # Check if user wants to create the remote bucket
-            create_remote = request.form.get("create_remote_bucket") == "on"
-            if create_remote:
-                try:
-                    _replication().create_remote_bucket(target_conn_id, target_bucket)
-                    flash(f"Created remote bucket '{target_bucket}'", "success")
-                except Exception as e:
-                    flash(f"Failed to create remote bucket: {e}", "warning")
-                    # We continue to set the rule even if creation fails (maybe it exists?)
-
             rule = ReplicationRule(
                 bucket_name=bucket_name,
                 target_connection_id=target_conn_id,
