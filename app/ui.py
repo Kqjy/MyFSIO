@@ -712,17 +712,18 @@ def object_presign(bucket_name: str, object_key: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
     
-    api_base = current_app.config.get("API_BASE_URL")
-    if not api_base:
-        api_base = "http://127.0.0.1:5000"
-    api_base = api_base.rstrip("/")
-    
-    url = f"{api_base}/presign/{bucket_name}/{object_key}"
+    # Use internal URL for the connection to ensure reliability
+    # We ignore API_BASE_URL here because that might be set to a public domain
+    # which is not reachable from within the container (NAT/DNS issues).
+    connection_url = "http://127.0.0.1:5000"
+    url = f"{connection_url}/presign/{bucket_name}/{object_key}"
     
     headers = _api_headers()
     # Forward the host so the API knows the public URL
+    # We also add X-Forwarded-For to ensure ProxyFix middleware processes the headers
     headers["X-Forwarded-Host"] = request.host
     headers["X-Forwarded-Proto"] = request.scheme
+    headers["X-Forwarded-For"] = request.remote_addr or "127.0.0.1"
     
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=5)

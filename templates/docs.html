@@ -31,14 +31,61 @@
 . .venv/Scripts/activate      # PowerShell: .\\.venv\\Scripts\\Activate.ps1
 pip install -r requirements.txt
 
-# Run both API and UI
+# Run both API and UI (Development)
 python run.py
+
+# Run in Production (Waitress server)
+python run.py --prod
 
 # Or run individually
 python run.py --mode api
 python run.py --mode ui
 </code></pre>
-        <p class="small text-muted mb-0">Configuration lives in <code>app/config.py</code>; override variables via the shell (e.g., <code>STORAGE_ROOT</code>, <code>API_BASE_URL</code>, <code>SECRET_KEY</code>, <code>MAX_UPLOAD_SIZE</code>).</p>
+        <h3 class="h6 mt-4 mb-2">Configuration</h3>
+        <p class="text-muted small">Configuration defaults live in <code>app/config.py</code>. You can override them using environment variables. This is critical for production deployments behind proxies.</p>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered small mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Variable</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>API_BASE_URL</code></td>
+                <td><code>http://127.0.0.1:5000</code></td>
+                <td>The public URL of the API. <strong>Required</strong> if running behind a proxy or if the UI and API are on different domains. Ensures presigned URLs are generated correctly.</td>
+              </tr>
+              <tr>
+                <td><code>STORAGE_ROOT</code></td>
+                <td><code>./data</code></td>
+                <td>Directory for buckets and objects.</td>
+              </tr>
+              <tr>
+                <td><code>MAX_UPLOAD_SIZE</code></td>
+                <td><code>5 GB</code></td>
+                <td>Max request body size.</td>
+              </tr>
+              <tr>
+                <td><code>SECRET_KEY</code></td>
+                <td>(Random)</td>
+                <td>Flask session key. Set this in production.</td>
+              </tr>
+              <tr>
+                <td><code>APP_HOST</code></td>
+                <td><code>0.0.0.0</code></td>
+                <td>Bind interface.</td>
+              </tr>
+              <tr>
+                <td><code>APP_PORT</code></td>
+                <td><code>5000</code></td>
+                <td>Listen port.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </article>
     <article id="auth" class="card shadow-sm docs-section">
