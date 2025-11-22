@@ -16,6 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Make entrypoint executable
+RUN chmod +x docker-entrypoint.sh
+
 # Create data directory and set permissions
 RUN mkdir -p /app/data \
     && useradd -m -u 1000 myfsio \ 
@@ -31,4 +34,4 @@ ENV APP_HOST=0.0.0.0 \
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:5000/healthz', timeout=2)"
 
-CMD ["python", "run.py", "--mode", "both"]
+CMD ["./docker-entrypoint.sh"]
