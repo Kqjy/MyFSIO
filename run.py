@@ -18,20 +18,28 @@ def _is_debug_enabled() -> bool:
     return os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
 
 
-def serve_api(port: int) -> None:
+def serve_api(port: int, prod: bool = False) -> None:
     app = create_api_app()
-    debug = _is_debug_enabled()
-    if debug:
-        warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
-    app.run(host=_server_host(), port=port, debug=debug)
+    if prod:
+        from waitress import serve
+        serve(app, host=_server_host(), port=port, ident="MyFSIO")
+    else:
+        debug = _is_debug_enabled()
+        if debug:
+            warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
+        app.run(host=_server_host(), port=port, debug=debug)
 
 
-def serve_ui(port: int) -> None:
+def serve_ui(port: int, prod: bool = False) -> None:
     app = create_ui_app()
-    debug = _is_debug_enabled()
-    if debug:
-        warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
-    app.run(host=_server_host(), port=port, debug=debug)
+    if prod:
+        from waitress import serve
+        serve(app, host=_server_host(), port=port, ident="MyFSIO")
+    else:
+        debug = _is_debug_enabled()
+        if debug:
+            warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
+        app.run(host=_server_host(), port=port, debug=debug)
 
 
 if __name__ == "__main__":
@@ -39,18 +47,19 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["api", "ui", "both"], default="both")
     parser.add_argument("--api-port", type=int, default=5000)
     parser.add_argument("--ui-port", type=int, default=5100)
+    parser.add_argument("--prod", action="store_true", help="Run in production mode using Waitress")
     args = parser.parse_args()
 
     if args.mode in {"api", "both"}:
         print(f"Starting API server on port {args.api_port}...")
-        api_proc = Process(target=serve_api, args=(args.api_port,), daemon=True)
+        api_proc = Process(target=serve_api, args=(args.api_port, args.prod), daemon=True)
         api_proc.start()
     else:
         api_proc = None
 
     if args.mode in {"ui", "both"}:
         print(f"Starting UI server on port {args.ui_port}...")
-        serve_ui(args.ui_port)
+        serve_ui(args.ui_port, args.prod)
     elif api_proc:
         try:
             api_proc.join()
