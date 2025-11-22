@@ -224,8 +224,7 @@ def logout():
 @ui_bp.get("/docs")
 def docs_page():
     principal = _current_principal()
-    # Use the current request's host as the default API base if not configured
-    api_base = current_app.config.get("API_BASE_URL") or request.host_url
+    api_base = current_app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
     api_base = api_base.rstrip("/")
     parsed = urlparse(api_base)
     api_host = parsed.netloc or parsed.path or api_base
@@ -712,15 +711,10 @@ def object_presign(bucket_name: str, object_key: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
     
-    # Use internal URL for the connection to ensure reliability
-    # We ignore API_BASE_URL here because that might be set to a public domain
-    # which is not reachable from within the container (NAT/DNS issues).
     connection_url = "http://127.0.0.1:5000"
     url = f"{connection_url}/presign/{bucket_name}/{object_key}"
     
     headers = _api_headers()
-    # Forward the host so the API knows the public URL
-    # We also add X-Forwarded-For to ensure ProxyFix middleware processes the headers
     headers["X-Forwarded-Host"] = request.host
     headers["X-Forwarded-Proto"] = request.scheme
     headers["X-Forwarded-For"] = request.remote_addr or "127.0.0.1"
@@ -732,13 +726,11 @@ def object_presign(bucket_name: str, object_key: str):
     try:
         body = response.json()
     except ValueError:
-        # Handle XML error responses from S3 backend
         text = response.text or ""
         if text.strip().startswith("<"):
             import xml.etree.ElementTree as ET
             try:
                 root = ET.fromstring(text)
-                # Try to find Message or Code
                 message = root.findtext(".//Message") or root.findtext(".//Code") or "Unknown S3 error"
                 body = {"error": message}
             except ET.ParseError:
@@ -948,7 +940,6 @@ def rotate_iam_secret(access_key: str):
         return redirect(url_for("ui.iam_dashboard"))
     try:
         new_secret = _iam().rotate_secret(access_key)
-        # If rotating own key, update session immediately so subsequent API calls (like presign) work
         if principal and principal.access_key == access_key:
             creds = session.get("credentials", {})
             creds["secret_key"] = new_secret
@@ -1040,7 +1031,6 @@ def update_iam_policies(access_key: str):
 
     policies_raw = request.form.get("policies", "").strip()
     if not policies_raw:
-        # Empty policies list is valid (clears permissions)
         policies = []
     else:
         try:
