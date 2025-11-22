@@ -500,6 +500,7 @@ def delete_bucket(bucket_name: str):
         _authorize_ui(principal, bucket_name, "delete")
         _storage().delete_bucket(bucket_name)
         _bucket_policies().delete_policy(bucket_name)
+        _replication_manager().delete_rule(bucket_name)
         flash(f"Bucket '{bucket_name}' removed", "success")
     except (StorageError, IamError) as exc:
         flash(_friendly_error_message(exc), "danger")

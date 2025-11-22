@@ -1043,6 +1043,7 @@ def bucket_handler(bucket_name: str) -> Response:
         try:
             storage.delete_bucket(bucket_name)
             _bucket_policies().delete_policy(bucket_name)
+            _replication_manager().delete_rule(bucket_name)
         except StorageError as exc:
             code = "BucketNotEmpty" if "not empty" in str(exc) else "NoSuchBucket"
             status = 409 if code == "BucketNotEmpty" else 404
