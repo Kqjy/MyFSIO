@@ -480,8 +480,8 @@ def _generate_presigned_url(
         host = parsed.netloc
         scheme = parsed.scheme
     else:
-        host = request.host
-        scheme = request.scheme or "http"
+        host = request.headers.get("X-Forwarded-Host", request.host)
+        scheme = request.headers.get("X-Forwarded-Proto", request.scheme or "http")
 
     canonical_headers = f"host:{host}\n"
     canonical_request = "\n".join(
@@ -1083,15 +1083,9 @@ def object_handler(bucket_name: str, object_key: str):
         if error:
             return error
         
-        # Debug: Log incoming request details
-        current_app.logger.info(f"Receiving PUT {bucket_name}/{object_key}")
-        current_app.logger.info(f"Headers: {dict(request.headers)}")
-        current_app.logger.info(f"Content-Length: {request.content_length}")
-        
         stream = request.stream
         content_encoding = request.headers.get("Content-Encoding", "").lower()
         if "aws-chunked" in content_encoding:
-            current_app.logger.info("Decoding aws-chunked stream")
             stream = AwsChunkedDecoder(stream)
 
         metadata = _extract_request_metadata()
