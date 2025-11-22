@@ -40,6 +40,10 @@ def _storage() -> ObjectStorage:
     return current_app.extensions["object_storage"]
 
 
+def _replication_manager() -> ReplicationManager:
+    return current_app.extensions["replication"]
+
+
 def _iam():
     return current_app.extensions["iam"]
 
@@ -514,6 +518,7 @@ def delete_object(bucket_name: str, object_key: str):
             flash(f"Permanently deleted '{object_key}' and all versions", "success")
         else:
             _storage().delete_object(bucket_name, object_key)
+            _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
             flash(f"Deleted '{object_key}'", "success")
     except (IamError, StorageError) as exc:
         flash(_friendly_error_message(exc), "danger")
@@ -574,6 +579,7 @@ def bulk_delete_objects(bucket_name: str):
                 storage.purge_object(bucket_name, key)
             else:
                 storage.delete_object(bucket_name, key)
+                _replication_manager().trigger_replication(bucket_name, key, action="delete")
             deleted.append(key)
         except StorageError as exc:
             errors.append({"key": key, "error": str(exc)})
