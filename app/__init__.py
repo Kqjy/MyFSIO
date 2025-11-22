@@ -35,7 +35,11 @@ def create_app(
     """Create and configure the Flask application."""
     config = AppConfig.from_env(test_config)
 
-    project_root = Path(__file__).resolve().parent.parent
+    if getattr(sys, "frozen", False):
+        project_root = Path(sys._MEIPASS)
+    else:
+        project_root = Path(__file__).resolve().parent.parent
+
     app = Flask(
         __name__,
         static_folder=str(project_root / "static"),

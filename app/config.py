@@ -4,12 +4,18 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # Running in a PyInstaller bundle
+    PROJECT_ROOT = Path(sys._MEIPASS)
+else:
+    # Running in a normal Python environment
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _prepare_config_file(active_path: Path, legacy_path: Optional[Path] = None) -> Path:
