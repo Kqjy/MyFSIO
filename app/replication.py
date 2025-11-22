@@ -133,18 +133,7 @@ class ReplicationManager:
             content_type, _ = mimetypes.guess_type(path)
             file_size = path.stat().st_size
 
-            # Debug: Calculate MD5 of source file
-            import hashlib
-            md5_hash = hashlib.md5()
-            with path.open("rb") as f:
-                # Log first 32 bytes
-                header = f.read(32)
-                logger.info(f"Source first 32 bytes: {header.hex()}")
-                md5_hash.update(header)
-                for chunk in iter(lambda: f.read(4096), b""):
-                    md5_hash.update(chunk)
-            source_md5 = md5_hash.hexdigest()
-            logger.info(f"Replicating {bucket_name}/{object_key}: Size={file_size}, MD5={source_md5}, ContentType={content_type}")
+            logger.info(f"Replicating {bucket_name}/{object_key}: Size={file_size}, ContentType={content_type}")
 
             try:
                 with path.open("rb") as f:

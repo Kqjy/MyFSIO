@@ -405,7 +405,11 @@ def _canonical_headers_from_request(headers: list[str]) -> str:
     lines = []
     for header in headers:
         if header == "host":
-            value = request.host
+            api_base = current_app.config.get("API_BASE_URL")
+            if api_base:
+                value = urlparse(api_base).netloc
+            else:
+                value = request.host
         else:
             value = request.headers.get(header, "")
         canonical_value = " ".join(value.strip().split()) if value else ""
@@ -1084,7 +1088,12 @@ def object_handler(bucket_name: str, object_key: str):
         current_app.logger.info(f"Headers: {dict(request.headers)}")
         current_app.logger.info(f"Content-Length: {request.content_length}")
         
-        stream = DebugStream(request.stream, current_app.logger)
+        stream = request.stream
+        content_encoding = request.headers.get("Content-Encoding", "").lower()
+        if "aws-chunked" in content_encoding:
+            current_app.logger.info("Decoding aws-chunked stream")
+            stream = AwsChunkedDecoder(stream)
+
         metadata = _extract_request_metadata()
         try:
             meta = storage.put_object(
@@ -1260,17 +1269,77 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         return _error_response("AccessDenied", str(exc), 403)
 
 
-class DebugStream:
-    def __init__(self, stream, logger):
+class AwsChunkedDecoder:
+    """Decodes aws-chunked encoded streams."""
+    def __init__(self, stream):
         self.stream = stream
-        self.logger = logger
-        self.first_chunk = True
+        self.buffer = b""
+        self.chunk_remaining = 0
+        self.finished = False
 
     def read(self, size=-1):
-        chunk = self.stream.read(size)
-        if self.first_chunk and chunk:
-            # Log first 32 bytes
-            prefix = chunk[:32]
-            self.logger.info(f"Received first 32 bytes: {prefix.hex()}")
-            self.first_chunk = False
-        return chunk
+        if self.finished:
+            return b""
+
+        result = b""
+        while size == -1 or len(result) < size:
+            if self.chunk_remaining > 0:
+                to_read = self.chunk_remaining
+                if size != -1:
+                    to_read = min(to_read, size - len(result))
+                
+                chunk = self.stream.read(to_read)
+                if not chunk:
+                    raise IOError("Unexpected EOF in chunk data")
+                
+                result += chunk
+                self.chunk_remaining -= len(chunk)
+                
+                if self.chunk_remaining == 0:
+                    # Read CRLF after chunk data
+                    crlf = self.stream.read(2)
+                    if crlf != b"\r\n":
+                        raise IOError("Malformed chunk: missing CRLF")
+            else:
+                # Read chunk size line
+                line = b""
+                while True:
+                    char = self.stream.read(1)
+                    if not char:
+                        if not line: # EOF at start of chunk size
+                            self.finished = True
+                            return result
+                        raise IOError("Unexpected EOF in chunk size")
+                    line += char
+                    if line.endswith(b"\r\n"):
+                        break
+                
+                # Parse chunk size (hex)
+                try:
+                    line_str = line.decode("ascii").strip()
+                    # Handle chunk-signature extension if present (e.g. "1000;chunk-signature=...")
+                    if ";" in line_str:
+                        line_str = line_str.split(";")[0]
+                    chunk_size = int(line_str, 16)
+                except ValueError:
+                    raise IOError(f"Invalid chunk size: {line}")
+
+                if chunk_size == 0:
+                    self.finished = True
+                    # Read trailers if any (until empty line)
+                    while True:
+                        line = b""
+                        while True:
+                            char = self.stream.read(1)
+                            if not char:
+                                break
+                            line += char
+                            if line.endswith(b"\r\n"):
+                                break
+                        if line == b"\r\n" or not line:
+                            break
+                    return result
+                
+                self.chunk_remaining = chunk_size
+        
+        return result
