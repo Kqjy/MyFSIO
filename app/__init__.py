@@ -25,21 +25,6 @@ from .storage import ObjectStorage
 from .version import get_version
 
 
-class ServerHeaderMiddleware:
-    def __init__(self, app, server_name):
-        self.app = app
-        self.server_name = server_name
-
-    def __call__(self, environ, start_response):
-        def custom_start_response(status, headers, exc_info=None):
-            # Remove existing Server header if present
-            headers = [(name, value) for name, value in headers if name.lower() != 'server']
-            headers.append(('Server', self.server_name))
-            return start_response(status, headers, exc_info)
-
-        return self.app(environ, custom_start_response)
-
-
 def create_app(
     test_config: Optional[Dict[str, Any]] = None,
     *,
@@ -65,7 +50,6 @@ def create_app(
 
     # Trust X-Forwarded-* headers from proxies
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
-    app.wsgi_app = ServerHeaderMiddleware(app.wsgi_app, "MyFSIO")
 
     _configure_cors(app)
     _configure_logging(app)
