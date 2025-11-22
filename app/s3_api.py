@@ -17,6 +17,7 @@ from werkzeug.http import http_date
 from .bucket_policies import BucketPolicyStore
 from .extensions import limiter
 from .iam import IamError, Principal
+from .replication import ReplicationManager
 from .storage import ObjectStorage, StorageError
 
 s3_api_bp = Blueprint("s3_api", __name__)
@@ -30,6 +31,9 @@ def _storage() -> ObjectStorage:
 def _iam():
     return current_app.extensions["iam"]
 
+
+def _replication_manager() -> ReplicationManager:
+    return current_app.extensions["replication"]
 
 
 def _bucket_policies() -> BucketPolicyStore:
@@ -1107,6 +1111,12 @@ def object_handler(bucket_name: str, object_key: str):
         )
         response = Response(status=200)
         response.headers["ETag"] = f'"{meta.etag}"'
+        
+        # Trigger replication if not a replication request
+        user_agent = request.headers.get("User-Agent", "")
+        if "S3ReplicationAgent" not in user_agent:
+            _replication_manager().trigger_replication(bucket_name, object_key, action="write")
+            
         return response
 
     if request.method in {"GET", "HEAD"}:
@@ -1141,6 +1151,12 @@ def object_handler(bucket_name: str, object_key: str):
         return error
     storage.delete_object(bucket_name, object_key)
     current_app.logger.info("Object deleted", extra={"bucket": bucket_name, "key": object_key})
+    
+    # Trigger replication if not a replication request
+    user_agent = request.headers.get("User-Agent", "")
+    if "S3ReplicationAgent" not in user_agent:
+        _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
+        
     return Response(status=204)
 
 

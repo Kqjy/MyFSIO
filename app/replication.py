@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from boto3.exceptions import S3UploadFailedError
 
@@ -17,6 +18,8 @@ from .connections import ConnectionStore, RemoteConnection
 from .storage import ObjectStorage, StorageError
 
 logger = logging.getLogger(__name__)
+
+REPLICATION_USER_AGENT = "S3ReplicationAgent/1.0"
 
 
 @dataclass
@@ -87,7 +90,7 @@ class ReplicationManager:
             logger.error(f"Failed to create remote bucket {bucket_name}: {e}")
             raise
 
-    def trigger_replication(self, bucket_name: str, object_key: str) -> None:
+    def trigger_replication(self, bucket_name: str, object_key: str, action: str = "write") -> None:
         rule = self.get_rule(bucket_name)
         if not rule or not rule.enabled:
             return
@@ -97,24 +100,34 @@ class ReplicationManager:
             logger.warning(f"Replication skipped for {bucket_name}/{object_key}: Connection {rule.target_connection_id} not found")
             return
 
-        self._executor.submit(self._replicate_task, bucket_name, object_key, rule, connection)
+        self._executor.submit(self._replicate_task, bucket_name, object_key, rule, connection, action)
 
-    def _replicate_task(self, bucket_name: str, object_key: str, rule: ReplicationRule, conn: RemoteConnection) -> None:
+    def _replicate_task(self, bucket_name: str, object_key: str, rule: ReplicationRule, conn: RemoteConnection, action: str) -> None:
         try:
-            # 1. Get local file path
-            # Note: We are accessing internal storage structure here. 
-            # Ideally storage.py should expose a 'get_file_path' or we read the stream.
-            # For efficiency, we'll try to read the file directly if we can, or use storage.get_object
-            
             # Using boto3 to upload
+            config = Config(user_agent_extra=REPLICATION_USER_AGENT)
             s3 = boto3.client(
                 "s3",
                 endpoint_url=conn.endpoint_url,
                 aws_access_key_id=conn.access_key,
                 aws_secret_access_key=conn.secret_key,
                 region_name=conn.region,
+                config=config,
             )
 
+            if action == "delete":
+                try:
+                    s3.delete_object(Bucket=rule.target_bucket, Key=object_key)
+                    logger.info(f"Replicated DELETE {bucket_name}/{object_key} to {conn.name} ({rule.target_bucket})")
+                except ClientError as e:
+                    logger.error(f"Replication DELETE failed for {bucket_name}/{object_key}: {e}")
+                return
+
+            # 1. Get local file path
+            # Note: We are accessing internal storage structure here. 
+            # Ideally storage.py should expose a 'get_file_path' or we read the stream.
+            # For efficiency, we'll try to read the file directly if we can, or use storage.get_object
+            
             # We need the file content. 
             # Since ObjectStorage is filesystem based, let's get the stream.
             # We need to be careful about closing it.

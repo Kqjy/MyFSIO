@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from flask import Flask, g, has_request_context, redirect, render_template, request, url_for
 from flask_cors import CORS
 from flask_wtf.csrf import CSRFError
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .bucket_policies import BucketPolicyStore
 from .config import AppConfig
@@ -46,6 +47,9 @@ def create_app(
     app.permanent_session_lifetime = timedelta(days=int(app.config.get("SESSION_LIFETIME_DAYS", 30)))
     if app.config.get("TESTING"):
         app.config.setdefault("WTF_CSRF_ENABLED", False)
+
+    # Trust X-Forwarded-* headers from proxies
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
     _configure_cors(app)
     _configure_logging(app)

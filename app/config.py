@@ -39,7 +39,7 @@ class AppConfig:
     secret_key: str
     iam_config_path: Path
     bucket_policy_path: Path
-    api_base_url: str
+    api_base_url: Optional[str]
     aws_region: str
     aws_service: str
     ui_enforce_bucket_policies: bool
@@ -100,7 +100,10 @@ class AppConfig:
             bucket_policy_path,
             legacy_path=None if bucket_policy_override else PROJECT_ROOT / "data" / "bucket_policies.json",
         )
-        api_base_url = str(_get("API_BASE_URL", "http://127.0.0.1:5000"))
+        api_base_url = _get("API_BASE_URL", None)
+        if api_base_url:
+            api_base_url = str(api_base_url)
+        
         aws_region = str(_get("AWS_REGION", "us-east-1"))
         aws_service = str(_get("AWS_SERVICE", "s3"))
         enforce_ui_policies = str(_get("UI_ENFORCE_BUCKET_POLICIES", "0")).lower() in {"1", "true", "yes", "on"}
