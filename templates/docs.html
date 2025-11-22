@@ -290,6 +290,18 @@ s3.complete_multipart_upload(
                 </div>
             </div>
         </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Bidirectional Replication (Active-Active)</h3>
+        <p class="small text-muted">To set up two-way replication (Server A ↔ Server B):</p>
+        <ol class="docs-steps mb-3">
+            <li>Follow the steps above to replicate <strong>A → B</strong>.</li>
+            <li>Repeat the process on Server B to replicate <strong>B → A</strong> (create a connection to A, enable rule).</li>
+        </ol>
+        <p class="small text-muted mb-0">
+            <strong>Loop Prevention:</strong> The system automatically detects replication traffic using a custom User-Agent (<code>S3ReplicationAgent</code>). This prevents infinite loops where an object replicated from A to B is immediately replicated back to A.
+            <br>
+            <strong>Deletes:</strong> Deleting an object on one server will propagate the deletion to the other server.
+        </p>
       </div>
     </article>
     <article id="troubleshooting" class="card shadow-sm docs-section">
@@ -330,8 +342,8 @@ s3.complete_multipart_upload(
               </tr>
               <tr>
                 <td>Requests hit the wrong host</td>
-                <td><code>API_BASE_URL</code> not updated after tunneling/forwarding</td>
-                <td>Set <code>API_BASE_URL</code> in your shell or <code>.env</code> to match the published host.</td>
+                <td>Proxy headers missing or <code>API_BASE_URL</code> incorrect</td>
+                <td>Ensure your proxy sends <code>X-Forwarded-Host</code>/<code>Proto</code> headers, or explicitly set <code>API_BASE_URL</code> to your public domain.</td>
               </tr>
             </tbody>
           </table>

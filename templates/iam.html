@@ -286,9 +286,6 @@
       </div>
       <div class="modal-body" id="rotateSecretConfirm">
         <p>Are you sure you want to rotate the secret key for <strong id="rotateUserLabel"></strong>?</p>
-        <div id="rotateSelfWarning" class="alert alert-warning d-none">
-          <strong>Warning:</strong> You are rotating your own secret key. You will need to sign in again with the new key.
-        </div>
         <div class="alert alert-warning mb-0">
             The old secret key will stop working immediately. Any applications using it must be updated.
         </div>
@@ -474,7 +471,6 @@
     const rotateSecretResult = document.getElementById('rotateSecretResult');
     const newSecretKeyInput = document.getElementById('newSecretKey');
     const copyNewSecretBtn = document.getElementById('copyNewSecret');
-    const rotateSelfWarning = document.getElementById('rotateSelfWarning');
     let currentRotateKey = null;
 
     document.querySelectorAll('[data-rotate-user]').forEach(btn => {
@@ -482,12 +478,6 @@
             currentRotateKey = btn.dataset.rotateUser;
             rotateUserLabel.textContent = currentRotateKey;
             
-            if (currentRotateKey === currentUserKey) {
-                rotateSelfWarning.classList.remove('d-none');
-            } else {
-                rotateSelfWarning.classList.add('d-none');
-            }
-
             // Reset Modal State
             rotateSecretConfirm.classList.remove('d-none');
             rotateSecretResult.classList.add('d-none');

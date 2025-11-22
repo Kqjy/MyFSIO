@@ -6,7 +6,9 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
+import boto3
 import requests
+from botocore.exceptions import ClientError
 from flask import (
     Blueprint,
     Response,
@@ -36,6 +38,10 @@ ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/u
 
 def _storage() -> ObjectStorage:
     return current_app.extensions["object_storage"]
+
+
+def _replication_manager() -> ReplicationManager:
+    return current_app.extensions["replication"]
 
 
 def _iam():
@@ -494,6 +500,7 @@ def delete_bucket(bucket_name: str):
         _authorize_ui(principal, bucket_name, "delete")
         _storage().delete_bucket(bucket_name)
         _bucket_policies().delete_policy(bucket_name)
+        _replication_manager().delete_rule(bucket_name)
         flash(f"Bucket '{bucket_name}' removed", "success")
     except (StorageError, IamError) as exc:
         flash(_friendly_error_message(exc), "danger")
@@ -512,6 +519,7 @@ def delete_object(bucket_name: str, object_key: str):
             flash(f"Permanently deleted '{object_key}' and all versions", "success")
         else:
             _storage().delete_object(bucket_name, object_key)
+            _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
             flash(f"Deleted '{object_key}'", "success")
     except (IamError, StorageError) as exc:
         flash(_friendly_error_message(exc), "danger")
@@ -572,6 +580,7 @@ def bulk_delete_objects(bucket_name: str):
                 storage.purge_object(bucket_name, key)
             else:
                 storage.delete_object(bucket_name, key)
+                _replication_manager().trigger_replication(bucket_name, key, action="delete")
             deleted.append(key)
         except StorageError as exc:
             errors.append({"key": key, "error": str(exc)})
@@ -701,10 +710,21 @@ def object_presign(bucket_name: str, object_key: str):
         _authorize_ui(principal, bucket_name, action, object_key=object_key)
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
-    api_base = current_app.config["API_BASE_URL"].rstrip("/")
+    
+    api_base = current_app.config.get("API_BASE_URL")
+    if not api_base:
+        api_base = "http://127.0.0.1:5000"
+    api_base = api_base.rstrip("/")
+    
     url = f"{api_base}/presign/{bucket_name}/{object_key}"
+    
+    headers = _api_headers()
+    # Forward the host so the API knows the public URL
+    headers["X-Forwarded-Host"] = request.host
+    headers["X-Forwarded-Proto"] = request.scheme
+    
     try:
-        response = requests.post(url, headers=_api_headers(), json=payload, timeout=5)
+        response = requests.post(url, headers=headers, json=payload, timeout=5)
     except requests.RequestException as exc:
         return jsonify({"error": f"API unavailable: {exc}"}), 502
     try:
@@ -926,6 +946,12 @@ def rotate_iam_secret(access_key: str):
         return redirect(url_for("ui.iam_dashboard"))
     try:
         new_secret = _iam().rotate_secret(access_key)
+        # If rotating own key, update session immediately so subsequent API calls (like presign) work
+        if principal and principal.access_key == access_key:
+            creds = session.get("credentials", {})
+            creds["secret_key"] = new_secret
+            session["credentials"] = creds
+            session.modified = True
     except IamError as exc:
         if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
             return jsonify({"error": str(exc)}), 400
@@ -1061,6 +1087,73 @@ def create_connection():
     )
     _connections().add(conn)
     flash(f"Connection '{name}' created", "success")
+    return redirect(url_for("ui.connections_dashboard"))
+
+
+@ui_bp.post("/connections/test")
+def test_connection():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"status": "error", "message": "Access denied"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    endpoint = data.get("endpoint_url", "").strip()
+    access_key = data.get("access_key", "").strip()
+    secret_key = data.get("secret_key", "").strip()
+    region = data.get("region", "us-east-1").strip()
+
+    if not all([endpoint, access_key, secret_key]):
+        return jsonify({"status": "error", "message": "Missing credentials"}), 400
+
+    try:
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+        )
+        # Try to list buckets to verify credentials and endpoint
+        s3.list_buckets()
+        return jsonify({"status": "ok", "message": "Connection successful"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@ui_bp.post("/connections/<connection_id>/update")
+def update_connection(connection_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+
+    conn = _connections().get(connection_id)
+    if not conn:
+        flash("Connection not found", "danger")
+        return redirect(url_for("ui.connections_dashboard"))
+
+    name = request.form.get("name", "").strip()
+    endpoint = request.form.get("endpoint_url", "").strip()
+    access_key = request.form.get("access_key", "").strip()
+    secret_key = request.form.get("secret_key", "").strip()
+    region = request.form.get("region", "us-east-1").strip()
+
+    if not all([name, endpoint, access_key, secret_key]):
+        flash("All fields are required", "danger")
+        return redirect(url_for("ui.connections_dashboard"))
+
+    conn.name = name
+    conn.endpoint_url = endpoint
+    conn.access_key = access_key
+    conn.secret_key = secret_key
+    conn.region = region
+    
+    _connections().save()
+    flash(f"Connection '{name}' updated", "success")
     return redirect(url_for("ui.connections_dashboard"))
 
 

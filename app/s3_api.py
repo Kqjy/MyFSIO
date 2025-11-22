@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
 from flask import Blueprint, Response, current_app, jsonify, request
@@ -17,6 +17,7 @@ from werkzeug.http import http_date
 from .bucket_policies import BucketPolicyStore
 from .extensions import limiter
 from .iam import IamError, Principal
+from .replication import ReplicationManager
 from .storage import ObjectStorage, StorageError
 
 s3_api_bp = Blueprint("s3_api", __name__)
@@ -30,6 +31,9 @@ def _storage() -> ObjectStorage:
 def _iam():
     return current_app.extensions["iam"]
 
+
+def _replication_manager() -> ReplicationManager:
+    return current_app.extensions["replication"]
 
 
 def _bucket_policies() -> BucketPolicyStore:
@@ -405,7 +409,11 @@ def _canonical_headers_from_request(headers: list[str]) -> str:
     lines = []
     for header in headers:
         if header == "host":
-            value = request.host
+            api_base = current_app.config.get("API_BASE_URL")
+            if api_base:
+                value = urlparse(api_base).netloc
+            else:
+                value = request.host
         else:
             value = request.headers.get(header, "")
         canonical_value = " ".join(value.strip().split()) if value else ""
@@ -468,7 +476,17 @@ def _generate_presigned_url(
         "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
     }
     canonical_query = _encode_query_params(query_params)
-    host = request.host
+
+    # Determine host and scheme from config or request
+    api_base = current_app.config.get("API_BASE_URL")
+    if api_base:
+        parsed = urlparse(api_base)
+        host = parsed.netloc
+        scheme = parsed.scheme
+    else:
+        host = request.headers.get("X-Forwarded-Host", request.host)
+        scheme = request.headers.get("X-Forwarded-Proto", request.scheme or "http")
+
     canonical_headers = f"host:{host}\n"
     canonical_request = "\n".join(
         [
@@ -492,7 +510,6 @@ def _generate_presigned_url(
     signing_key = _derive_signing_key(secret_key, date_stamp, region, service)
     signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
     query_with_sig = canonical_query + f"&X-Amz-Signature={signature}"
-    scheme = request.scheme or "http"
     return f"{scheme}://{host}{_canonical_uri(bucket_name, object_key)}?{query_with_sig}"
 
 
@@ -1026,6 +1043,7 @@ def bucket_handler(bucket_name: str) -> Response:
         try:
             storage.delete_bucket(bucket_name)
             _bucket_policies().delete_policy(bucket_name)
+            _replication_manager().delete_rule(bucket_name)
         except StorageError as exc:
             code = "BucketNotEmpty" if "not empty" in str(exc) else "NoSuchBucket"
             status = 409 if code == "BucketNotEmpty" else 404
@@ -1069,7 +1087,12 @@ def object_handler(bucket_name: str, object_key: str):
         _, error = _object_principal("write", bucket_name, object_key)
         if error:
             return error
+        
         stream = request.stream
+        content_encoding = request.headers.get("Content-Encoding", "").lower()
+        if "aws-chunked" in content_encoding:
+            stream = AwsChunkedDecoder(stream)
+
         metadata = _extract_request_metadata()
         try:
             meta = storage.put_object(
@@ -1089,6 +1112,12 @@ def object_handler(bucket_name: str, object_key: str):
         )
         response = Response(status=200)
         response.headers["ETag"] = f'"{meta.etag}"'
+        
+        # Trigger replication if not a replication request
+        user_agent = request.headers.get("User-Agent", "")
+        if "S3ReplicationAgent" not in user_agent:
+            _replication_manager().trigger_replication(bucket_name, object_key, action="write")
+            
         return response
 
     if request.method in {"GET", "HEAD"}:
@@ -1123,6 +1152,12 @@ def object_handler(bucket_name: str, object_key: str):
         return error
     storage.delete_object(bucket_name, object_key)
     current_app.logger.info("Object deleted", extra={"bucket": bucket_name, "key": object_key})
+    
+    # Trigger replication if not a replication request
+    user_agent = request.headers.get("User-Agent", "")
+    if "S3ReplicationAgent" not in user_agent:
+        _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
+        
     return Response(status=204)
 
 
@@ -1243,3 +1278,79 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         return _error_response("NoSuchKey", "Object not found", 404)
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
+
+
+class AwsChunkedDecoder:
+    """Decodes aws-chunked encoded streams."""
+    def __init__(self, stream):
+        self.stream = stream
+        self.buffer = b""
+        self.chunk_remaining = 0
+        self.finished = False
+
+    def read(self, size=-1):
+        if self.finished:
+            return b""
+
+        result = b""
+        while size == -1 or len(result) < size:
+            if self.chunk_remaining > 0:
+                to_read = self.chunk_remaining
+                if size != -1:
+                    to_read = min(to_read, size - len(result))
+                
+                chunk = self.stream.read(to_read)
+                if not chunk:
+                    raise IOError("Unexpected EOF in chunk data")
+                
+                result += chunk
+                self.chunk_remaining -= len(chunk)
+                
+                if self.chunk_remaining == 0:
+                    # Read CRLF after chunk data
+                    crlf = self.stream.read(2)
+                    if crlf != b"\r\n":
+                        raise IOError("Malformed chunk: missing CRLF")
+            else:
+                # Read chunk size line
+                line = b""
+                while True:
+                    char = self.stream.read(1)
+                    if not char:
+                        if not line: # EOF at start of chunk size
+                            self.finished = True
+                            return result
+                        raise IOError("Unexpected EOF in chunk size")
+                    line += char
+                    if line.endswith(b"\r\n"):
+                        break
+                
+                # Parse chunk size (hex)
+                try:
+                    line_str = line.decode("ascii").strip()
+                    # Handle chunk-signature extension if present (e.g. "1000;chunk-signature=...")
+                    if ";" in line_str:
+                        line_str = line_str.split(";")[0]
+                    chunk_size = int(line_str, 16)
+                except ValueError:
+                    raise IOError(f"Invalid chunk size: {line}")
+
+                if chunk_size == 0:
+                    self.finished = True
+                    # Read trailers if any (until empty line)
+                    while True:
+                        line = b""
+                        while True:
+                            char = self.stream.read(1)
+                            if not char:
+                                break
+                            line += char
+                            if line.endswith(b"\r\n"):
+                                break
+                        if line == b"\r\n" or not line:
+                            break
+                    return result
+                
+                self.chunk_remaining = chunk_size
+        
+        return result

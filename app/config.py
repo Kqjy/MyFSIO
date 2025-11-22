@@ -39,7 +39,7 @@ class AppConfig:
     secret_key: str
     iam_config_path: Path
     bucket_policy_path: Path
-    api_base_url: str
+    api_base_url: Optional[str]
     aws_region: str
     aws_service: str
     ui_enforce_bucket_policies: bool
@@ -78,11 +78,25 @@ class AppConfig:
         multipart_min_part_size = int(_get("MULTIPART_MIN_PART_SIZE", 5 * 1024 * 1024))
         default_secret = "dev-secret-key"
         secret_key = str(_get("SECRET_KEY", default_secret))
+        
+        # If using default/missing secret, try to load/persist a generated one from disk
+        # This ensures consistency across Gunicorn workers
         if not secret_key or secret_key == default_secret:
-            generated = secrets.token_urlsafe(32)
-            if secret_key == default_secret:
-                warnings.warn("Using insecure default SECRET_KEY. A random value has been generated; set SECRET_KEY for production", RuntimeWarning)
-            secret_key = generated
+            secret_file = storage_root / ".myfsio.sys" / "config" / ".secret"
+            if secret_file.exists():
+                secret_key = secret_file.read_text().strip()
+            else:
+                generated = secrets.token_urlsafe(32)
+                if secret_key == default_secret:
+                    warnings.warn("Using insecure default SECRET_KEY. A random value has been generated and persisted; set SECRET_KEY for production", RuntimeWarning)
+                try:
+                    secret_file.parent.mkdir(parents=True, exist_ok=True)
+                    secret_file.write_text(generated)
+                    secret_key = generated
+                except OSError:
+                    # Fallback if we can't write to disk (e.g. read-only fs)
+                    secret_key = generated
+
         iam_env_override = "IAM_CONFIG" in overrides or "IAM_CONFIG" in os.environ
         bucket_policy_override = "BUCKET_POLICY_PATH" in overrides or "BUCKET_POLICY_PATH" in os.environ
 
@@ -100,7 +114,10 @@ class AppConfig:
             bucket_policy_path,
             legacy_path=None if bucket_policy_override else PROJECT_ROOT / "data" / "bucket_policies.json",
         )
-        api_base_url = str(_get("API_BASE_URL", "http://127.0.0.1:5000"))
+        api_base_url = _get("API_BASE_URL", None)
+        if api_base_url:
+            api_base_url = str(api_base_url)
+        
         aws_region = str(_get("AWS_REGION", "us-east-1"))
         aws_service = str(_get("AWS_SERVICE", "s3"))
         enforce_ui_policies = str(_get("UI_ENFORCE_BUCKET_POLICIES", "0")).lower() in {"1", "true", "yes", "on"}

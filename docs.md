@@ -77,11 +77,19 @@ The repo now tracks a human-friendly release string inside `app/version.py` (see
 | `SECRET_KEY` | `dev-secret-key` | Flask session key for UI auth. |
 | `IAM_CONFIG` | `<repo>/data/.myfsio.sys/config/iam.json` | Stores users, secrets, and inline policies. |
 | `BUCKET_POLICY_PATH` | `<repo>/data/.myfsio.sys/config/bucket_policies.json` | Bucket policy store (auto hot-reload). |
-| `API_BASE_URL` | `http://127.0.0.1:5000` | Used by the UI to hit API endpoints (presign/policy). |
+| `API_BASE_URL` | `None` | Used by the UI to hit API endpoints (presign/policy). If unset, the UI will auto-detect the host or use `X-Forwarded-*` headers. |
 | `AWS_REGION` | `us-east-1` | Region embedded in SigV4 credential scope. |
 | `AWS_SERVICE` | `s3` | Service string for SigV4. |
 
 Set env vars (or pass overrides to `create_app`) to point the servers at custom paths.
+
+### Proxy Configuration
+
+If running behind a reverse proxy (e.g., Nginx, Cloudflare, or a tunnel), ensure the proxy sets the standard forwarding headers:
+- `X-Forwarded-Host`
+- `X-Forwarded-Proto`
+
+The application automatically trusts these headers to generate correct presigned URLs (e.g., `https://s3.example.com/...` instead of `http://127.0.0.1:5000/...`). Alternatively, you can explicitly set `API_BASE_URL` to your public endpoint.
 
 ## 4. Authentication & IAM
 
@@ -261,6 +269,21 @@ Now, configure the primary instance to replicate to the target.
 # Verify on target using AWS CLI
 aws --endpoint-url http://target-server:5002 s3 ls s3://backup-bucket
 ```
+
+### Bidirectional Replication (Active-Active)
+
+To set up two-way replication (Server A ↔ Server B):
+
+1.  Follow the steps above to replicate **A → B**.
+2.  Repeat the process on Server B to replicate **B → A**:
+    - Create a connection on Server B pointing to Server A.
+    - Enable replication on the target bucket on Server B.
+
+**Loop Prevention**: The system automatically detects replication traffic using a custom User-Agent (`S3ReplicationAgent`). This prevents infinite loops where an object replicated from A to B is immediately replicated back to A.
+
+**Deletes**: Deleting an object on one server will propagate the deletion to the other server.
+
+**Note**: Deleting a bucket will automatically remove its associated replication configuration.
 
 ## 7. Running Tests
 

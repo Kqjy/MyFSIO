@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 import uuid
 from logging.handlers import RotatingFileHandler
@@ -12,6 +13,7 @@ from typing import Any, Dict, Optional
 from flask import Flask, g, has_request_context, redirect, render_template, request, url_for
 from flask_cors import CORS
 from flask_wtf.csrf import CSRFError
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .bucket_policies import BucketPolicyStore
 from .config import AppConfig
@@ -46,6 +48,9 @@ def create_app(
     app.permanent_session_lifetime = timedelta(days=int(app.config.get("SESSION_LIFETIME_DAYS", 30)))
     if app.config.get("TESTING"):
         app.config.setdefault("WTF_CSRF_ENABLED", False)
+
+    # Trust X-Forwarded-* headers from proxies
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
     _configure_cors(app)
     _configure_logging(app)
@@ -167,23 +172,33 @@ class _RequestContextFilter(logging.Filter):
 
 
 def _configure_logging(app: Flask) -> None:
-    log_file = Path(app.config["LOG_FILE"])
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
-        log_file,
-        maxBytes=int(app.config.get("LOG_MAX_BYTES", 5 * 1024 * 1024)),
-        backupCount=int(app.config.get("LOG_BACKUP_COUNT", 3)),
-        encoding="utf-8",
-    )
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(request_id)s | %(method)s %(path)s | %(message)s"
     )
-    handler.setFormatter(formatter)
-    handler.addFilter(_RequestContextFilter())
+    
+    # Stream Handler (stdout) - Primary for Docker
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(_RequestContextFilter())
 
     logger = app.logger
     logger.handlers.clear()
-    logger.addHandler(handler)
+    logger.addHandler(stream_handler)
+
+    # File Handler (optional, if configured)
+    if app.config.get("LOG_TO_FILE"):
+        log_file = Path(app.config["LOG_FILE"])
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=int(app.config.get("LOG_MAX_BYTES", 5 * 1024 * 1024)),
+            backupCount=int(app.config.get("LOG_BACKUP_COUNT", 3)),
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(_RequestContextFilter())
+        logger.addHandler(file_handler)
+
     logger.setLevel(getattr(logging, app.config.get("LOG_LEVEL", "INFO"), logging.INFO))
 
     @app.before_request
@@ -211,5 +226,4 @@ def _configure_logging(app: Flask) -> None:
             },
         )
         response.headers["X-Request-Duration-ms"] = f"{duration_ms:.2f}"
-        response.headers["Server"] = "MyFISO"
         return response
