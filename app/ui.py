@@ -224,7 +224,8 @@ def logout():
 @ui_bp.get("/docs")
 def docs_page():
     principal = _current_principal()
-    api_base = current_app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
+    # Use the current request's host as the default API base if not configured
+    api_base = current_app.config.get("API_BASE_URL") or request.host_url
     api_base = api_base.rstrip("/")
     parsed = urlparse(api_base)
     api_host = parsed.netloc or parsed.path or api_base
