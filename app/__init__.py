@@ -81,6 +81,11 @@ def create_app(
     app.extensions["connections"] = connections
     app.extensions["replication"] = replication
 
+    @app.after_request
+    def set_server_header(response):
+        response.headers["Server"] = "MyFSIO"
+        return response
+
     @app.errorhandler(500)
     def internal_error(error):
         return render_template('500.html'), 500
