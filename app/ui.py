@@ -1213,7 +1213,7 @@ def connections_dashboard():
 def metrics_dashboard():
     principal = _current_principal()
     
-    cpu_percent = psutil.cpu_percent(interval=None)
+    cpu_percent = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
     
     storage_root = current_app.config["STORAGE_ROOT"]
