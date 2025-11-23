@@ -11,7 +11,7 @@ from typing import Any, Dict
 from urllib.parse import quote, urlencode, urlparse
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
-from flask import Blueprint, Response, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request, g
 from werkzeug.http import http_date
 
 from .bucket_policies import BucketPolicyStore
@@ -127,14 +127,33 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     if not amz_date:
         raise IamError("Missing Date header")
 
+    try:
+        request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise IamError("Invalid X-Amz-Date format")
+
+    now = datetime.now(timezone.utc)
+    time_diff = abs((now - request_time).total_seconds())
+    if time_diff > 900:  # 15 minutes
+        raise IamError("Request timestamp too old or too far in the future")
+
+    required_headers = {'host', 'x-amz-date'}
+    signed_headers_set = set(signed_headers_str.split(';'))
+    if not required_headers.issubset(signed_headers_set):
+        # Some clients might sign 'date' instead of 'x-amz-date'
+        if 'date' in signed_headers_set:
+            required_headers.remove('x-amz-date')
+            required_headers.add('date')
+        
+        if not required_headers.issubset(signed_headers_set):
+             raise IamError("Required headers not signed")
+
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
     string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
-
-    # Calculate Signature
     signing_key = _get_signature_key(secret_key, date_stamp, region, service)
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    if calculated_signature != signature:
+    if not hmac.compare_digest(calculated_signature, signature):
         raise IamError("SignatureDoesNotMatch")
 
     return _iam().get_principal(access_key)
@@ -155,7 +174,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     except ValueError:
         raise IamError("Invalid Credential format")
 
-    # Check expiration
     try:
         req_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
@@ -190,7 +208,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     canonical_headers_parts = []
     for header in signed_headers_list:
         val = req.headers.get(header, "").strip()
-        # Collapse multiple spaces
         val = " ".join(val.split())
         canonical_headers_parts.append(f"{header}:{val}\n")
     canonical_headers = "".join(canonical_headers_parts)
@@ -240,7 +257,6 @@ def _verify_sigv4(req: Any) -> Principal | None:
 
 
 def _require_principal():
-    # Try SigV4 first
     if ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
        (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
         try:
@@ -1132,6 +1148,9 @@ def object_handler(bucket_name: str, object_key: str):
         return response
 
     if request.method in {"GET", "HEAD"}:
+        if request.method == "GET" and "uploadId" in request.args:
+            return _list_parts(bucket_name, object_key)
+
         _, error = _object_principal("read", bucket_name, object_key)
         if error:
             return error
@@ -1157,7 +1176,6 @@ def object_handler(bucket_name: str, object_key: str):
         current_app.logger.info(action, extra={"bucket": bucket_name, "key": object_key, "bytes": logged_bytes})
         return response
 
-    # DELETE
     if "uploadId" in request.args:
         return _abort_multipart_upload(bucket_name, object_key)
 
@@ -1175,6 +1193,51 @@ def object_handler(bucket_name: str, object_key: str):
     return Response(status=204)
 
 
+def _list_parts(bucket_name: str, object_key: str) -> Response:
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "read", object_key=object_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    upload_id = request.args.get("uploadId")
+    if not upload_id:
+        return _error_response("InvalidArgument", "uploadId is required", 400)
+
+    try:
+        parts = _storage().list_multipart_parts(bucket_name, upload_id)
+    except StorageError as exc:
+        return _error_response("NoSuchUpload", str(exc), 404)
+
+    root = Element("ListPartsResult")
+    SubElement(root, "Bucket").text = bucket_name
+    SubElement(root, "Key").text = object_key
+    SubElement(root, "UploadId").text = upload_id
+    
+    initiator = SubElement(root, "Initiator")
+    SubElement(initiator, "ID").text = principal.access_key
+    SubElement(initiator, "DisplayName").text = principal.display_name
+    
+    owner = SubElement(root, "Owner")
+    SubElement(owner, "ID").text = principal.access_key
+    SubElement(owner, "DisplayName").text = principal.display_name
+    
+    SubElement(root, "StorageClass").text = "STANDARD"
+    SubElement(root, "PartNumberMarker").text = "0"
+    SubElement(root, "NextPartNumberMarker").text = str(parts[-1]["PartNumber"]) if parts else "0"
+    SubElement(root, "MaxParts").text = "1000"
+    SubElement(root, "IsTruncated").text = "false"
+
+    for part in parts:
+        p = SubElement(root, "Part")
+        SubElement(p, "PartNumber").text = str(part["PartNumber"])
+        SubElement(p, "LastModified").text = part["LastModified"].isoformat()
+        SubElement(p, "ETag").text = f'"{part["ETag"]}"'
+        SubElement(p, "Size").text = str(part["Size"])
+
+    return _xml_response(root)
 
 
 @s3_api_bp.route("/bucket-policy/<bucket_name>", methods=["GET", "PUT", "DELETE"])
@@ -1504,3 +1567,25 @@ def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
             return _error_response("NoSuchBucket", str(exc), 404)
             
     return Response(status=204)
+
+
+@s3_api_bp.before_request
+def resolve_principal():
+    g.principal = None
+    # Try SigV4
+    try:
+        if ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
+           (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
+            g.principal = _verify_sigv4(request)
+            return
+    except Exception:
+        pass
+    
+    # Try simple auth headers (internal/testing)
+    access_key = request.headers.get("X-Access-Key")
+    secret_key = request.headers.get("X-Secret-Key")
+    if access_key and secret_key:
+        try:
+            g.principal = _iam().authenticate(access_key, secret_key)
+        except Exception:
+            pass

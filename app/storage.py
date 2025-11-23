@@ -120,10 +120,22 @@ class ObjectStorage:
         self._system_bucket_root(bucket_path.name).mkdir(parents=True, exist_ok=True)
 
     def bucket_stats(self, bucket_name: str) -> dict[str, int]:
-        """Return object count and total size for the bucket without hashing files."""
+        """Return object count and total size for the bucket (cached)."""
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise StorageError("Bucket does not exist")
+
+        # Try to read from cache
+        cache_path = self._system_bucket_root(bucket_name) / "stats.json"
+        if cache_path.exists():
+            try:
+                # Check if cache is fresh (e.g., < 60 seconds old)
+                if time.time() - cache_path.stat().st_mtime < 60:
+                    return json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        # Calculate fresh stats
         object_count = 0
         total_bytes = 0
         for path in bucket_path.rglob("*"):
@@ -134,7 +146,17 @@ class ObjectStorage:
                 stat = path.stat()
                 object_count += 1
                 total_bytes += stat.st_size
-        return {"objects": object_count, "bytes": total_bytes}
+        
+        stats = {"objects": object_count, "bytes": total_bytes}
+        
+        # Write to cache
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(stats), encoding="utf-8")
+        except OSError:
+            pass
+            
+        return stats
 
     def delete_bucket(self, bucket_name: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
@@ -239,7 +261,6 @@ class ObjectStorage:
         rel = path.relative_to(bucket_path)
         self._safe_unlink(path)
         self._delete_metadata(bucket_id, rel)
-        # Clean up now empty parents inside the bucket.
         for parent in path.parents:
             if parent == bucket_path:
                 break
@@ -592,6 +613,33 @@ class ObjectStorage:
         if legacy_root.exists():
             shutil.rmtree(legacy_root, ignore_errors=True)
 
+    def list_multipart_parts(self, bucket_name: str, upload_id: str) -> List[Dict[str, Any]]:
+        """List uploaded parts for a multipart upload."""
+        bucket_path = self._bucket_path(bucket_name)
+        manifest, upload_root = self._load_multipart_manifest(bucket_path.name, upload_id)
+        
+        parts = []
+        parts_map = manifest.get("parts", {})
+        for part_num_str, record in parts_map.items():
+            part_num = int(part_num_str)
+            part_filename = record.get("filename")
+            if not part_filename:
+                continue
+            part_path = upload_root / part_filename
+            if not part_path.exists():
+                continue
+                
+            stat = part_path.stat()
+            parts.append({
+                "PartNumber": part_num,
+                "Size": stat.st_size,
+                "ETag": record.get("etag"),
+                "LastModified": datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+            })
+        
+        parts.sort(key=lambda x: x["PartNumber"])
+        return parts
+
     # ---------------------- internal helpers ----------------------
     def _bucket_path(self, bucket_name: str) -> Path:
         safe_name = self._sanitize_bucket_name(bucket_name)
@@ -886,7 +934,11 @@ class ObjectStorage:
         normalized = unicodedata.normalize("NFC", object_key)
         if normalized != object_key:
             raise StorageError("Object key must use normalized Unicode")
+        
         candidate = Path(normalized)
+        if ".." in candidate.parts:
+            raise StorageError("Object key contains parent directory references")
+        
         if candidate.is_absolute():
             raise StorageError("Absolute object keys are not allowed")
         if getattr(candidate, "drive", ""):

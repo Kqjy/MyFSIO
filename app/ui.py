@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import uuid
+import psutil
+import shutil
 from typing import Any
 from urllib.parse import urlparse
 
@@ -469,8 +471,6 @@ def complete_multipart_upload(bucket_name: str, upload_id: str):
         normalized.append({"part_number": number, "etag": etag})
     try:
         result = _storage().complete_multipart_upload(bucket_name, upload_id, normalized)
-        
-        # Trigger replication
         _replication().trigger_replication(bucket_name, result["key"])
         
         return jsonify(result)
@@ -1207,6 +1207,54 @@ def connections_dashboard():
         
     connections = _connections().list()
     return render_template("connections.html", connections=connections, principal=principal)
+
+
+@ui_bp.get("/metrics")
+def metrics_dashboard():
+    principal = _current_principal()
+    
+    cpu_percent = psutil.cpu_percent(interval=None)
+    memory = psutil.virtual_memory()
+    
+    storage_root = current_app.config["STORAGE_ROOT"]
+    disk = psutil.disk_usage(storage_root)
+    
+    storage = _storage()
+    buckets = storage.list_buckets()
+    total_buckets = len(buckets)
+    
+    total_objects = 0
+    total_bytes_used = 0
+    
+    # Note: Uses cached stats from storage layer to improve performance
+    for bucket in buckets:
+        stats = storage.bucket_stats(bucket.name)
+        total_objects += stats["objects"]
+        total_bytes_used += stats["bytes"]
+        
+    return render_template(
+        "metrics.html",
+        principal=principal,
+        cpu_percent=cpu_percent,
+        memory={
+            "total": _format_bytes(memory.total),
+            "available": _format_bytes(memory.available),
+            "used": _format_bytes(memory.used),
+            "percent": memory.percent,
+        },
+        disk={
+            "total": _format_bytes(disk.total),
+            "free": _format_bytes(disk.free),
+            "used": _format_bytes(disk.used),
+            "percent": disk.percent,
+        },
+        app={
+            "buckets": total_buckets,
+            "objects": total_objects,
+            "storage_used": _format_bytes(total_bytes_used),
+            "storage_raw": total_bytes_used,
+        }
+    )
 
 
 @ui_bp.app_errorhandler(404)
