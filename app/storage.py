@@ -634,7 +634,15 @@ class ObjectStorage:
         if part_number < 1:
             raise StorageError("part_number must be >= 1")
         bucket_path = self._bucket_path(bucket_name)
-        manifest, upload_root = self._load_multipart_manifest(bucket_path.name, upload_id)
+        
+        # Get the upload root directory
+        upload_root = self._multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            upload_root = self._legacy_multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            raise StorageError("Multipart upload not found")
+        
+        # Write the part data first (can happen concurrently)
         checksum = hashlib.md5()
         part_filename = f"part-{part_number:05d}.part"
         part_path = upload_root / part_filename
@@ -645,9 +653,23 @@ class ObjectStorage:
             "size": part_path.stat().st_size,
             "filename": part_filename,
         }
-        parts = manifest.setdefault("parts", {})
-        parts[str(part_number)] = record
-        self._write_multipart_manifest(upload_root, manifest)
+        
+        # Update manifest with file locking to prevent race conditions
+        manifest_path = upload_root / self.MULTIPART_MANIFEST
+        lock_path = upload_root / ".manifest.lock"
+        
+        with lock_path.open("w") as lock_file:
+            with _file_lock(lock_file):
+                # Re-read manifest under lock to get latest state
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise StorageError("Multipart manifest unreadable") from exc
+                
+                parts = manifest.setdefault("parts", {})
+                parts[str(part_number)] = record
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        
         return record["etag"]
 
     def complete_multipart_upload(
