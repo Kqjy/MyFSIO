@@ -105,6 +105,18 @@ def create_app(
             value /= 1024.0
         return f"{value:.1f} PB"
 
+    @app.template_filter("timestamp_to_datetime")
+    def timestamp_to_datetime(value: float) -> str:
+        """Format Unix timestamp as human-readable datetime."""
+        from datetime import datetime
+        if not value:
+            return "Never"
+        try:
+            dt = datetime.fromtimestamp(value)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, OSError):
+            return "Unknown"
+
     if include_api:
         from .s3_api import s3_api_bp
 

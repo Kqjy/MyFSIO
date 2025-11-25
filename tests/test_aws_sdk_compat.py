@@ -24,14 +24,6 @@ def test_boto3_basic_operations(live_server):
         ),
     )
 
-    # No need to inject custom headers anymore, as we support SigV4
-    # def _inject_headers(params, **_kwargs):
-    #     headers = params.setdefault("headers", {})
-    #     headers["X-Access-Key"] = "test"
-    #     headers["X-Secret-Key"] = "secret"
-
-    # s3.meta.events.register("before-call.s3", _inject_headers)
-
     s3.create_bucket(Bucket=bucket_name)
 
     try:

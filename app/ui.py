@@ -249,7 +249,8 @@ def buckets_overview():
         if bucket.name not in allowed_names:
             continue
         policy = policy_store.get_policy(bucket.name)
-        stats = _storage().bucket_stats(bucket.name)
+        cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
+        stats = _storage().bucket_stats(bucket.name, cache_ttl=cache_ttl)
         access_label, access_badge = _bucket_access_descriptor(policy)
         visible_buckets.append({
             "meta": bucket,
@@ -335,7 +336,7 @@ def bucket_detail(bucket_name: str):
         except IamError:
             can_manage_versioning = False
 
-    # Replication info
+    # Replication info - don't compute sync status here (it's slow), let JS fetch it async
     replication_rule = _replication().get_rule(bucket_name)
     connections = _connections().list()
 
@@ -1178,8 +1179,12 @@ def update_bucket_replication(bucket_name: str):
         _replication().delete_rule(bucket_name)
         flash("Replication disabled", "info")
     else:
+        from .replication import REPLICATION_MODE_NEW_ONLY, REPLICATION_MODE_ALL
+        import time
+        
         target_conn_id = request.form.get("target_connection_id")
         target_bucket = request.form.get("target_bucket", "").strip()
+        replication_mode = request.form.get("replication_mode", REPLICATION_MODE_NEW_ONLY)
         
         if not target_conn_id or not target_bucket:
             flash("Target connection and bucket are required", "danger")
@@ -1188,12 +1193,48 @@ def update_bucket_replication(bucket_name: str):
                 bucket_name=bucket_name,
                 target_connection_id=target_conn_id,
                 target_bucket=target_bucket,
-                enabled=True
+                enabled=True,
+                mode=replication_mode,
+                created_at=time.time(),
             )
             _replication().set_rule(rule)
-            flash("Replication configured", "success")
+            
+            # If mode is "all", trigger replication of existing objects
+            if replication_mode == REPLICATION_MODE_ALL:
+                _replication().replicate_existing_objects(bucket_name)
+                flash("Replication configured. Existing objects are being replicated in the background.", "success")
+            else:
+                flash("Replication configured. Only new uploads will be replicated.", "success")
             
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
+
+
+@ui_bp.get("/buckets/<bucket_name>/replication/status")
+def get_replication_status(bucket_name: str):
+    """Async endpoint to fetch replication sync status without blocking page load."""
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+    
+    rule = _replication().get_rule(bucket_name)
+    if not rule:
+        return jsonify({"error": "No replication rule"}), 404
+    
+    # This is the slow operation - compute sync status by comparing buckets
+    stats = _replication().get_sync_status(bucket_name)
+    if not stats:
+        return jsonify({"error": "Failed to compute status"}), 500
+    
+    return jsonify({
+        "objects_synced": stats.objects_synced,
+        "objects_pending": stats.objects_pending,
+        "objects_orphaned": stats.objects_orphaned,
+        "bytes_synced": stats.bytes_synced,
+        "last_sync_at": stats.last_sync_at,
+        "last_sync_key": stats.last_sync_key,
+    })
 
 
 @ui_bp.get("/connections")
@@ -1227,8 +1268,9 @@ def metrics_dashboard():
     total_bytes_used = 0
     
     # Note: Uses cached stats from storage layer to improve performance
+    cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
     for bucket in buckets:
-        stats = storage.bucket_stats(bucket.name)
+        stats = storage.bucket_stats(bucket.name, cache_ttl=cache_ttl)
         total_objects += stats["objects"]
         total_bytes_used += stats["bytes"]
         

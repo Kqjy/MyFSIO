@@ -65,6 +65,7 @@ class AppConfig:
     secret_ttl_seconds: int
     stream_chunk_size: int
     multipart_min_part_size: int
+    bucket_stats_cache_ttl: int
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -85,8 +86,6 @@ class AppConfig:
         default_secret = "dev-secret-key"
         secret_key = str(_get("SECRET_KEY", default_secret))
         
-        # If using default/missing secret, try to load/persist a generated one from disk
-        # This ensures consistency across Gunicorn workers
         if not secret_key or secret_key == default_secret:
             secret_file = storage_root / ".myfsio.sys" / "config" / ".secret"
             if secret_file.exists():
@@ -100,7 +99,6 @@ class AppConfig:
                     secret_file.write_text(generated)
                     secret_key = generated
                 except OSError:
-                    # Fallback if we can't write to disk (e.g. read-only fs)
                     secret_key = generated
 
         iam_env_override = "IAM_CONFIG" in overrides or "IAM_CONFIG" in os.environ
@@ -156,6 +154,7 @@ class AppConfig:
             "X-Amz-Signature",
         ])
         session_lifetime_days = int(_get("SESSION_LIFETIME_DAYS", 30))
+        bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60))  # Default 60 seconds
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -182,7 +181,8 @@ class AppConfig:
                    bulk_delete_max_keys=bulk_delete_max_keys,
                    secret_ttl_seconds=secret_ttl_seconds,
                    stream_chunk_size=stream_chunk_size,
-                   multipart_min_part_size=multipart_min_part_size)
+                   multipart_min_part_size=multipart_min_part_size,
+                   bucket_stats_cache_ttl=bucket_stats_cache_ttl)
 
     def to_flask_config(self) -> Dict[str, Any]:
         return {
@@ -202,6 +202,7 @@ class AppConfig:
             "SECRET_TTL_SECONDS": self.secret_ttl_seconds,
             "STREAM_CHUNK_SIZE": self.stream_chunk_size,
             "MULTIPART_MIN_PART_SIZE": self.multipart_min_part_size,
+            "BUCKET_STATS_CACHE_TTL": self.bucket_stats_cache_ttl,
             "LOG_LEVEL": self.log_level,
             "LOG_FILE": str(self.log_path),
             "LOG_MAX_BYTES": self.log_max_bytes,
