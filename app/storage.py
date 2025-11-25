@@ -116,7 +116,6 @@ class ObjectStorage:
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
 
-    # ---------------------- Bucket helpers ----------------------
     def list_buckets(self) -> List[BucketMeta]:
         buckets: List[BucketMeta] = []
         for bucket in sorted(self.root.iterdir()):
@@ -160,17 +159,14 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise StorageError("Bucket does not exist")
 
-        # Try to read from cache
         cache_path = self._system_bucket_root(bucket_name) / "stats.json"
         if cache_path.exists():
             try:
-                # Check if cache is fresh
                 if time.time() - cache_path.stat().st_mtime < cache_ttl:
                     return json.loads(cache_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 pass
 
-        # Calculate fresh stats
         object_count = 0
         total_bytes = 0
         for path in bucket_path.rglob("*"):
@@ -184,7 +180,6 @@ class ObjectStorage:
         
         stats = {"objects": object_count, "bytes": total_bytes}
         
-        # Write to cache
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(json.dumps(stats), encoding="utf-8")
@@ -215,7 +210,6 @@ class ObjectStorage:
         self._remove_tree(self._system_bucket_root(bucket_path.name))
         self._remove_tree(self._multipart_bucket_root(bucket_path.name))
 
-    # ---------------------- Object helpers ----------------------
     def list_objects(self, bucket_name: str) -> List[ObjectMeta]:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
@@ -272,7 +266,6 @@ class ObjectStorage:
         else:
             self._delete_metadata(bucket_id, safe_key)
         
-        # Invalidate bucket stats cache
         self._invalidate_bucket_stats_cache(bucket_id)
         
         return ObjectMeta(
@@ -309,7 +302,6 @@ class ObjectStorage:
         self._safe_unlink(path)
         self._delete_metadata(bucket_id, rel)
         
-        # Invalidate bucket stats cache
         self._invalidate_bucket_stats_cache(bucket_id)
         
         for parent in path.parents:
@@ -345,7 +337,6 @@ class ObjectStorage:
             if parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
 
-    # ---------------------- Versioning helpers ----------------------
     def is_versioning_enabled(self, bucket_name: str) -> bool:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
@@ -358,7 +349,6 @@ class ObjectStorage:
         config["versioning_enabled"] = bool(enabled)
         self._write_bucket_config(bucket_path.name, config)
 
-    # ---------------------- Bucket configuration helpers ----------------------
     def get_bucket_tags(self, bucket_name: str) -> List[Dict[str, str]]:
         bucket_path = self._require_bucket_path(bucket_name)
         config = self._read_bucket_config(bucket_path.name)
@@ -411,7 +401,18 @@ class ObjectStorage:
         bucket_path = self._require_bucket_path(bucket_name)
         self._set_bucket_config_entry(bucket_path.name, "encryption", config_payload or None)
 
-    # ---------------------- Object tagging helpers ----------------------
+    def get_bucket_lifecycle(self, bucket_name: str) -> Optional[List[Dict[str, Any]]]:
+        """Get lifecycle configuration for bucket."""
+        bucket_path = self._require_bucket_path(bucket_name)
+        config = self._read_bucket_config(bucket_path.name)
+        lifecycle = config.get("lifecycle")
+        return lifecycle if isinstance(lifecycle, list) else None
+
+    def set_bucket_lifecycle(self, bucket_name: str, rules: Optional[List[Dict[str, Any]]]) -> None:
+        """Set lifecycle configuration for bucket."""
+        bucket_path = self._require_bucket_path(bucket_name)
+        self._set_bucket_config_entry(bucket_path.name, "lifecycle", rules)
+
     def get_object_tags(self, bucket_name: str, object_key: str) -> List[Dict[str, str]]:
         """Get tags for an object."""
         bucket_path = self._bucket_path(bucket_name)
@@ -422,7 +423,6 @@ class ObjectStorage:
         if not object_path.exists():
             raise StorageError("Object does not exist")
         
-        # Tags are stored in the metadata file alongside user metadata
         for meta_file in (self._metadata_file(bucket_path.name, safe_key), self._legacy_metadata_file(bucket_path.name, safe_key)):
             if not meta_file.exists():
                 continue
@@ -448,7 +448,6 @@ class ObjectStorage:
         
         meta_file = self._metadata_file(bucket_path.name, safe_key)
         
-        # Read existing metadata
         existing_payload: Dict[str, Any] = {}
         if meta_file.exists():
             try:
@@ -456,19 +455,16 @@ class ObjectStorage:
             except (OSError, json.JSONDecodeError):
                 pass
         
-        # Update tags
         if tags:
             existing_payload["tags"] = tags
         else:
             existing_payload.pop("tags", None)
         
-        # Write back if there's anything to store, otherwise delete
         if existing_payload.get("metadata") or existing_payload.get("tags"):
             meta_file.parent.mkdir(parents=True, exist_ok=True)
             meta_file.write_text(json.dumps(existing_payload), encoding="utf-8")
         elif meta_file.exists():
             meta_file.unlink()
-            # Clean up empty parent directories
             parent = meta_file.parent
             meta_root = self._bucket_meta_root(bucket_path.name)
             while parent != meta_root and parent.exists() and not any(parent.iterdir()):
@@ -603,7 +599,6 @@ class ObjectStorage:
             record.pop("_latest_sort", None)
         return sorted(aggregated.values(), key=lambda item: item["key"])
 
-    # ---------------------- Multipart helpers ----------------------
     def initiate_multipart_upload(
         self,
         bucket_name: str,
@@ -695,7 +690,6 @@ class ObjectStorage:
         destination = bucket_path / safe_key
         destination.parent.mkdir(parents=True, exist_ok=True)
         
-        # Use a lock file to prevent concurrent writes to the same destination
         lock_file_path = self._system_bucket_root(bucket_id) / "locks" / f"{safe_key.as_posix().replace('/', '_')}.lock"
         lock_file_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -726,7 +720,6 @@ class ObjectStorage:
         except BlockingIOError:
             raise StorageError("Another upload to this key is in progress")
         finally:
-            # Clean up lock file
             try:
                 lock_file_path.unlink(missing_ok=True)
             except OSError:
@@ -734,7 +727,6 @@ class ObjectStorage:
 
         shutil.rmtree(upload_root, ignore_errors=True)
         
-        # Invalidate bucket stats cache
         self._invalidate_bucket_stats_cache(bucket_id)
         
         stat = destination.stat()
@@ -783,7 +775,6 @@ class ObjectStorage:
         parts.sort(key=lambda x: x["PartNumber"])
         return parts
 
-    # ---------------------- internal helpers ----------------------
     def _bucket_path(self, bucket_name: str) -> Path:
         safe_name = self._sanitize_bucket_name(bucket_name)
         return self.root / safe_name

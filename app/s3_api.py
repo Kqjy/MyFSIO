@@ -800,6 +800,8 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "encryption": _bucket_encryption_handler,
         "location": _bucket_location_handler,
         "acl": _bucket_acl_handler,
+        "versions": _bucket_list_versions_handler,
+        "lifecycle": _bucket_lifecycle_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -1133,6 +1135,268 @@ def _bucket_acl_handler(bucket_name: str) -> Response:
     SubElement(grant, "Permission").text = "FULL_CONTROL"
     
     return _xml_response(root)
+
+
+def _bucket_list_versions_handler(bucket_name: str) -> Response:
+    """Handle ListObjectVersions (GET /<bucket>?versions)."""
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+    
+    principal, error = _require_principal()
+    try:
+        _authorize_action(principal, bucket_name, "list")
+    except IamError as exc:
+        if error:
+            return error
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    storage = _storage()
+    
+    try:
+        objects = storage.list_objects(bucket_name)
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+    
+    prefix = request.args.get("prefix", "")
+    delimiter = request.args.get("delimiter", "")
+    max_keys = min(int(request.args.get("max-keys", 1000)), 1000)
+    key_marker = request.args.get("key-marker", "")
+    
+    if prefix:
+        objects = [obj for obj in objects if obj.key.startswith(prefix)]
+    
+    if key_marker:
+        objects = [obj for obj in objects if obj.key > key_marker]
+    
+    # Build XML response
+    root = Element("ListVersionsResult", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+    SubElement(root, "Name").text = bucket_name
+    SubElement(root, "Prefix").text = prefix
+    SubElement(root, "KeyMarker").text = key_marker
+    SubElement(root, "MaxKeys").text = str(max_keys)
+    if delimiter:
+        SubElement(root, "Delimiter").text = delimiter
+    
+    version_count = 0
+    is_truncated = False
+    next_key_marker = ""
+    
+    for obj in objects:
+        if version_count >= max_keys:
+            is_truncated = True
+            break
+        
+        # Current version
+        version = SubElement(root, "Version")
+        SubElement(version, "Key").text = obj.key
+        SubElement(version, "VersionId").text = "null"  # Current version ID
+        SubElement(version, "IsLatest").text = "true"
+        SubElement(version, "LastModified").text = obj.last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        SubElement(version, "ETag").text = f'"{obj.etag}"'
+        SubElement(version, "Size").text = str(obj.size)
+        SubElement(version, "StorageClass").text = "STANDARD"
+        
+        owner = SubElement(version, "Owner")
+        SubElement(owner, "ID").text = "local-owner"
+        SubElement(owner, "DisplayName").text = "Local Owner"
+        
+        version_count += 1
+        next_key_marker = obj.key
+        
+        # Get historical versions
+        try:
+            versions = storage.list_object_versions(bucket_name, obj.key)
+            for v in versions:
+                if version_count >= max_keys:
+                    is_truncated = True
+                    break
+                    
+                ver_elem = SubElement(root, "Version")
+                SubElement(ver_elem, "Key").text = obj.key
+                SubElement(ver_elem, "VersionId").text = v.get("version_id", "unknown")
+                SubElement(ver_elem, "IsLatest").text = "false"
+                SubElement(ver_elem, "LastModified").text = v.get("archived_at", "")
+                SubElement(ver_elem, "ETag").text = f'"{v.get("etag", "")}"'
+                SubElement(ver_elem, "Size").text = str(v.get("size", 0))
+                SubElement(ver_elem, "StorageClass").text = "STANDARD"
+                
+                owner = SubElement(ver_elem, "Owner")
+                SubElement(owner, "ID").text = "local-owner"
+                SubElement(owner, "DisplayName").text = "Local Owner"
+                
+                version_count += 1
+        except StorageError:
+            pass
+    
+    SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
+    if is_truncated and next_key_marker:
+        SubElement(root, "NextKeyMarker").text = next_key_marker
+    
+    return _xml_response(root)
+
+
+def _bucket_lifecycle_handler(bucket_name: str) -> Response:
+    """Handle bucket lifecycle configuration (GET/PUT/DELETE /<bucket>?lifecycle)."""
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+    
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    storage = _storage()
+    
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    
+    if request.method == "GET":
+        config = storage.get_bucket_lifecycle(bucket_name)
+        if not config:
+            return _error_response("NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist", 404)
+        return _xml_response(_render_lifecycle_config(config))
+    
+    if request.method == "DELETE":
+        storage.set_bucket_lifecycle(bucket_name, None)
+        current_app.logger.info("Bucket lifecycle deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+    
+    # PUT
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+    try:
+        config = _parse_lifecycle_config(payload)
+        storage.set_bucket_lifecycle(bucket_name, config)
+    except ValueError as exc:
+        return _error_response("MalformedXML", str(exc), 400)
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+    
+    current_app.logger.info("Bucket lifecycle updated", extra={"bucket": bucket_name})
+    return Response(status=200)
+
+
+def _render_lifecycle_config(config: list) -> Element:
+    """Render lifecycle configuration to XML."""
+    root = Element("LifecycleConfiguration", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+    for rule in config:
+        rule_el = SubElement(root, "Rule")
+        SubElement(rule_el, "ID").text = rule.get("ID", "")
+        
+        # Filter
+        filter_el = SubElement(rule_el, "Filter")
+        if rule.get("Prefix"):
+            SubElement(filter_el, "Prefix").text = rule.get("Prefix", "")
+        
+        SubElement(rule_el, "Status").text = rule.get("Status", "Enabled")
+        
+        # Expiration
+        if "Expiration" in rule:
+            exp = rule["Expiration"]
+            exp_el = SubElement(rule_el, "Expiration")
+            if "Days" in exp:
+                SubElement(exp_el, "Days").text = str(exp["Days"])
+            if "Date" in exp:
+                SubElement(exp_el, "Date").text = exp["Date"]
+            if exp.get("ExpiredObjectDeleteMarker"):
+                SubElement(exp_el, "ExpiredObjectDeleteMarker").text = "true"
+        
+        # NoncurrentVersionExpiration
+        if "NoncurrentVersionExpiration" in rule:
+            nve = rule["NoncurrentVersionExpiration"]
+            nve_el = SubElement(rule_el, "NoncurrentVersionExpiration")
+            if "NoncurrentDays" in nve:
+                SubElement(nve_el, "NoncurrentDays").text = str(nve["NoncurrentDays"])
+        
+        # AbortIncompleteMultipartUpload
+        if "AbortIncompleteMultipartUpload" in rule:
+            aimu = rule["AbortIncompleteMultipartUpload"]
+            aimu_el = SubElement(rule_el, "AbortIncompleteMultipartUpload")
+            if "DaysAfterInitiation" in aimu:
+                SubElement(aimu_el, "DaysAfterInitiation").text = str(aimu["DaysAfterInitiation"])
+    
+    return root
+
+
+def _parse_lifecycle_config(payload: bytes) -> list:
+    """Parse lifecycle configuration from XML."""
+    try:
+        root = fromstring(payload)
+    except ParseError as exc:
+        raise ValueError(f"Unable to parse XML document: {exc}") from exc
+    
+    if _strip_ns(root.tag) != "LifecycleConfiguration":
+        raise ValueError("Root element must be LifecycleConfiguration")
+    
+    rules = []
+    for rule_el in root.findall("{*}Rule") or root.findall("Rule"):
+        rule: dict = {}
+        
+        # ID
+        id_el = rule_el.find("{*}ID") or rule_el.find("ID")
+        if id_el is not None and id_el.text:
+            rule["ID"] = id_el.text.strip()
+        
+        # Filter/Prefix
+        filter_el = rule_el.find("{*}Filter") or rule_el.find("Filter")
+        if filter_el is not None:
+            prefix_el = filter_el.find("{*}Prefix") or filter_el.find("Prefix")
+            if prefix_el is not None and prefix_el.text:
+                rule["Prefix"] = prefix_el.text
+        
+        # Legacy Prefix (outside Filter)
+        if "Prefix" not in rule:
+            prefix_el = rule_el.find("{*}Prefix") or rule_el.find("Prefix")
+            if prefix_el is not None:
+                rule["Prefix"] = prefix_el.text or ""
+        
+        # Status
+        status_el = rule_el.find("{*}Status") or rule_el.find("Status")
+        rule["Status"] = (status_el.text or "Enabled").strip() if status_el is not None else "Enabled"
+        
+        # Expiration
+        exp_el = rule_el.find("{*}Expiration") or rule_el.find("Expiration")
+        if exp_el is not None:
+            expiration: dict = {}
+            days_el = exp_el.find("{*}Days") or exp_el.find("Days")
+            if days_el is not None and days_el.text:
+                expiration["Days"] = int(days_el.text.strip())
+            date_el = exp_el.find("{*}Date") or exp_el.find("Date")
+            if date_el is not None and date_el.text:
+                expiration["Date"] = date_el.text.strip()
+            eodm_el = exp_el.find("{*}ExpiredObjectDeleteMarker") or exp_el.find("ExpiredObjectDeleteMarker")
+            if eodm_el is not None and (eodm_el.text or "").strip().lower() in {"true", "1"}:
+                expiration["ExpiredObjectDeleteMarker"] = True
+            if expiration:
+                rule["Expiration"] = expiration
+        
+        # NoncurrentVersionExpiration
+        nve_el = rule_el.find("{*}NoncurrentVersionExpiration") or rule_el.find("NoncurrentVersionExpiration")
+        if nve_el is not None:
+            nve: dict = {}
+            days_el = nve_el.find("{*}NoncurrentDays") or nve_el.find("NoncurrentDays")
+            if days_el is not None and days_el.text:
+                nve["NoncurrentDays"] = int(days_el.text.strip())
+            if nve:
+                rule["NoncurrentVersionExpiration"] = nve
+        
+        # AbortIncompleteMultipartUpload
+        aimu_el = rule_el.find("{*}AbortIncompleteMultipartUpload") or rule_el.find("AbortIncompleteMultipartUpload")
+        if aimu_el is not None:
+            aimu: dict = {}
+            days_el = aimu_el.find("{*}DaysAfterInitiation") or aimu_el.find("DaysAfterInitiation")
+            if days_el is not None and days_el.text:
+                aimu["DaysAfterInitiation"] = int(days_el.text.strip())
+            if aimu:
+                rule["AbortIncompleteMultipartUpload"] = aimu
+        
+        rules.append(rule)
+    
+    return rules
 
 
 def _bulk_delete_handler(bucket_name: str) -> Response:

@@ -258,9 +258,19 @@ class ReplicationManager:
         self._executor.submit(self._replicate_task, bucket_name, object_key, rule, connection, action)
 
     def _replicate_task(self, bucket_name: str, object_key: str, rule: ReplicationRule, conn: RemoteConnection, action: str) -> None:
+        if ".." in object_key or object_key.startswith("/") or object_key.startswith("\\"):
+            logger.error(f"Invalid object key in replication (path traversal attempt): {object_key}")
+            return
+        
+        try:
+            from .storage import ObjectStorage
+            ObjectStorage._sanitize_object_key(object_key)
+        except StorageError as e:
+            logger.error(f"Object key validation failed in replication: {e}")
+            return
+        
         file_size = 0
         try:
-            # Using boto3 to upload
             config = Config(user_agent_extra=REPLICATION_USER_AGENT)
             s3 = boto3.client(
                 "s3",

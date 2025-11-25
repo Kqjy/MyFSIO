@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import warnings
 from multiprocessing import Process
 
@@ -16,6 +17,11 @@ def _server_host() -> str:
 
 def _is_debug_enabled() -> bool:
     return os.getenv("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
+
+
+def _is_frozen() -> bool:
+    """Check if running as a compiled binary (PyInstaller/Nuitka)."""
+    return getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
 
 def serve_api(port: int, prod: bool = False) -> None:
@@ -48,18 +54,28 @@ if __name__ == "__main__":
     parser.add_argument("--api-port", type=int, default=5000)
     parser.add_argument("--ui-port", type=int, default=5100)
     parser.add_argument("--prod", action="store_true", help="Run in production mode using Waitress")
+    parser.add_argument("--dev", action="store_true", help="Force development mode (Flask dev server)")
     args = parser.parse_args()
+
+    # Default to production mode when running as compiled binary
+    # unless --dev is explicitly passed
+    prod_mode = args.prod or (_is_frozen() and not args.dev)
+    
+    if prod_mode:
+        print("Running in production mode (Waitress)")
+    else:
+        print("Running in development mode (Flask dev server)")
 
     if args.mode in {"api", "both"}:
         print(f"Starting API server on port {args.api_port}...")
-        api_proc = Process(target=serve_api, args=(args.api_port, args.prod), daemon=True)
+        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode), daemon=True)
         api_proc.start()
     else:
         api_proc = None
 
     if args.mode in {"ui", "both"}:
         print(f"Starting UI server on port {args.ui_port}...")
-        serve_ui(args.ui_port, args.prod)
+        serve_ui(args.ui_port, prod_mode)
     elif api_proc:
         try:
             api_proc.join()

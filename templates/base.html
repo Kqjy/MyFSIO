@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="csrf-token" content="{{ csrf_token() }}" />
+    {% if principal %}<meta name="csrf-token" content="{{ csrf_token() }}" />{% endif %}
     <title>MyFSIO Console</title>
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/MyFISO.png') }}" />
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/MyFISO.ico') }}" />
