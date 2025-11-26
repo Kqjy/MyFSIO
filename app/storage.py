@@ -10,10 +10,40 @@ import stat
 import time
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional
+from typing import Any, BinaryIO, Dict, Generator, List, Optional
+
+# Platform-specific file locking
+if os.name == "nt":
+    import msvcrt
+    
+    @contextmanager
+    def _file_lock(file_handle) -> Generator[None, None, None]:
+        """Acquire an exclusive lock on a file (Windows)."""
+        try:
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            yield
+        finally:
+            try:
+                file_handle.seek(0)
+                msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+else:
+    import fcntl  # type: ignore
+    
+    @contextmanager
+    def _file_lock(file_handle) -> Generator[None, None, None]:
+        """Acquire an exclusive lock on a file (Unix)."""
+        try:
+            fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+
 
 WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -86,7 +116,6 @@ class ObjectStorage:
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
 
-    # ---------------------- Bucket helpers ----------------------
     def list_buckets(self) -> List[BucketMeta]:
         buckets: List[BucketMeta] = []
         for bucket in sorted(self.root.iterdir()):
@@ -119,11 +148,25 @@ class ObjectStorage:
         bucket_path.mkdir(parents=True, exist_ok=False)
         self._system_bucket_root(bucket_path.name).mkdir(parents=True, exist_ok=True)
 
-    def bucket_stats(self, bucket_name: str) -> dict[str, int]:
-        """Return object count and total size for the bucket without hashing files."""
+    def bucket_stats(self, bucket_name: str, cache_ttl: int = 60) -> dict[str, int]:
+        """Return object count and total size for the bucket (cached).
+        
+        Args:
+            bucket_name: Name of the bucket
+            cache_ttl: Cache time-to-live in seconds (default 60)
+        """
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise StorageError("Bucket does not exist")
+
+        cache_path = self._system_bucket_root(bucket_name) / "stats.json"
+        if cache_path.exists():
+            try:
+                if time.time() - cache_path.stat().st_mtime < cache_ttl:
+                    return json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+
         object_count = 0
         total_bytes = 0
         for path in bucket_path.rglob("*"):
@@ -134,7 +177,24 @@ class ObjectStorage:
                 stat = path.stat()
                 object_count += 1
                 total_bytes += stat.st_size
-        return {"objects": object_count, "bytes": total_bytes}
+        
+        stats = {"objects": object_count, "bytes": total_bytes}
+        
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(stats), encoding="utf-8")
+        except OSError:
+            pass
+            
+        return stats
+
+    def _invalidate_bucket_stats_cache(self, bucket_id: str) -> None:
+        """Invalidate the cached bucket statistics."""
+        cache_path = self._system_bucket_root(bucket_id) / "stats.json"
+        try:
+            cache_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def delete_bucket(self, bucket_name: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
@@ -150,7 +210,6 @@ class ObjectStorage:
         self._remove_tree(self._system_bucket_root(bucket_path.name))
         self._remove_tree(self._multipart_bucket_root(bucket_path.name))
 
-    # ---------------------- Object helpers ----------------------
     def list_objects(self, bucket_name: str) -> List[ObjectMeta]:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
@@ -206,6 +265,9 @@ class ObjectStorage:
             self._write_metadata(bucket_id, safe_key, metadata)
         else:
             self._delete_metadata(bucket_id, safe_key)
+        
+        self._invalidate_bucket_stats_cache(bucket_id)
+        
         return ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
@@ -239,7 +301,9 @@ class ObjectStorage:
         rel = path.relative_to(bucket_path)
         self._safe_unlink(path)
         self._delete_metadata(bucket_id, rel)
-        # Clean up now empty parents inside the bucket.
+        
+        self._invalidate_bucket_stats_cache(bucket_id)
+        
         for parent in path.parents:
             if parent == bucket_path:
                 break
@@ -263,13 +327,16 @@ class ObjectStorage:
         legacy_version_dir = self._legacy_version_dir(bucket_id, rel)
         if legacy_version_dir.exists():
             shutil.rmtree(legacy_version_dir, ignore_errors=True)
+        
+        # Invalidate bucket stats cache
+        self._invalidate_bucket_stats_cache(bucket_id)
+        
         for parent in target.parents:
             if parent == bucket_path:
                 break
             if parent.exists() and not any(parent.iterdir()):
                 parent.rmdir()
 
-    # ---------------------- Versioning helpers ----------------------
     def is_versioning_enabled(self, bucket_name: str) -> bool:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
@@ -282,7 +349,6 @@ class ObjectStorage:
         config["versioning_enabled"] = bool(enabled)
         self._write_bucket_config(bucket_path.name, config)
 
-    # ---------------------- Bucket configuration helpers ----------------------
     def get_bucket_tags(self, bucket_name: str) -> List[Dict[str, str]]:
         bucket_path = self._require_bucket_path(bucket_name)
         config = self._read_bucket_config(bucket_path.name)
@@ -334,6 +400,80 @@ class ObjectStorage:
     def set_bucket_encryption(self, bucket_name: str, config_payload: Optional[Dict[str, Any]]) -> None:
         bucket_path = self._require_bucket_path(bucket_name)
         self._set_bucket_config_entry(bucket_path.name, "encryption", config_payload or None)
+
+    def get_bucket_lifecycle(self, bucket_name: str) -> Optional[List[Dict[str, Any]]]:
+        """Get lifecycle configuration for bucket."""
+        bucket_path = self._require_bucket_path(bucket_name)
+        config = self._read_bucket_config(bucket_path.name)
+        lifecycle = config.get("lifecycle")
+        return lifecycle if isinstance(lifecycle, list) else None
+
+    def set_bucket_lifecycle(self, bucket_name: str, rules: Optional[List[Dict[str, Any]]]) -> None:
+        """Set lifecycle configuration for bucket."""
+        bucket_path = self._require_bucket_path(bucket_name)
+        self._set_bucket_config_entry(bucket_path.name, "lifecycle", rules)
+
+    def get_object_tags(self, bucket_name: str, object_key: str) -> List[Dict[str, str]]:
+        """Get tags for an object."""
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise StorageError("Bucket does not exist")
+        safe_key = self._sanitize_object_key(object_key)
+        object_path = bucket_path / safe_key
+        if not object_path.exists():
+            raise StorageError("Object does not exist")
+        
+        for meta_file in (self._metadata_file(bucket_path.name, safe_key), self._legacy_metadata_file(bucket_path.name, safe_key)):
+            if not meta_file.exists():
+                continue
+            try:
+                payload = json.loads(meta_file.read_text(encoding="utf-8"))
+                tags = payload.get("tags")
+                if isinstance(tags, list):
+                    return tags
+                return []
+            except (OSError, json.JSONDecodeError):
+                return []
+        return []
+
+    def set_object_tags(self, bucket_name: str, object_key: str, tags: Optional[List[Dict[str, str]]]) -> None:
+        """Set tags for an object."""
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise StorageError("Bucket does not exist")
+        safe_key = self._sanitize_object_key(object_key)
+        object_path = bucket_path / safe_key
+        if not object_path.exists():
+            raise StorageError("Object does not exist")
+        
+        meta_file = self._metadata_file(bucket_path.name, safe_key)
+        
+        existing_payload: Dict[str, Any] = {}
+        if meta_file.exists():
+            try:
+                existing_payload = json.loads(meta_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        
+        if tags:
+            existing_payload["tags"] = tags
+        else:
+            existing_payload.pop("tags", None)
+        
+        if existing_payload.get("metadata") or existing_payload.get("tags"):
+            meta_file.parent.mkdir(parents=True, exist_ok=True)
+            meta_file.write_text(json.dumps(existing_payload), encoding="utf-8")
+        elif meta_file.exists():
+            meta_file.unlink()
+            parent = meta_file.parent
+            meta_root = self._bucket_meta_root(bucket_path.name)
+            while parent != meta_root and parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+
+    def delete_object_tags(self, bucket_name: str, object_key: str) -> None:
+        """Delete all tags from an object."""
+        self.set_object_tags(bucket_name, object_key, None)
 
     def list_object_versions(self, bucket_name: str, object_key: str) -> List[Dict[str, Any]]:
         bucket_path = self._bucket_path(bucket_name)
@@ -459,7 +599,6 @@ class ObjectStorage:
             record.pop("_latest_sort", None)
         return sorted(aggregated.values(), key=lambda item: item["key"])
 
-    # ---------------------- Multipart helpers ----------------------
     def initiate_multipart_upload(
         self,
         bucket_name: str,
@@ -495,7 +634,15 @@ class ObjectStorage:
         if part_number < 1:
             raise StorageError("part_number must be >= 1")
         bucket_path = self._bucket_path(bucket_name)
-        manifest, upload_root = self._load_multipart_manifest(bucket_path.name, upload_id)
+        
+        # Get the upload root directory
+        upload_root = self._multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            upload_root = self._legacy_multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            raise StorageError("Multipart upload not found")
+        
+        # Write the part data first (can happen concurrently)
         checksum = hashlib.md5()
         part_filename = f"part-{part_number:05d}.part"
         part_path = upload_root / part_filename
@@ -506,9 +653,23 @@ class ObjectStorage:
             "size": part_path.stat().st_size,
             "filename": part_filename,
         }
-        parts = manifest.setdefault("parts", {})
-        parts[str(part_number)] = record
-        self._write_multipart_manifest(upload_root, manifest)
+        
+        # Update manifest with file locking to prevent race conditions
+        manifest_path = upload_root / self.MULTIPART_MANIFEST
+        lock_path = upload_root / ".manifest.lock"
+        
+        with lock_path.open("w") as lock_file:
+            with _file_lock(lock_file):
+                # Re-read manifest under lock to get latest state
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise StorageError("Multipart manifest unreadable") from exc
+                
+                parts = manifest.setdefault("parts", {})
+                parts[str(part_number)] = record
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        
         return record["etag"]
 
     def complete_multipart_upload(
@@ -550,29 +711,46 @@ class ObjectStorage:
         safe_key = self._sanitize_object_key(manifest["object_key"])
         destination = bucket_path / safe_key
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if self._is_versioning_enabled(bucket_path) and destination.exists():
-            self._archive_current_version(bucket_id, safe_key, reason="overwrite")
-        checksum = hashlib.md5()
-        with destination.open("wb") as target:
-            for _, record in validated:
-                part_path = upload_root / record["filename"]
-                if not part_path.exists():
-                    raise StorageError(f"Missing part file {record['filename']}")
-                with part_path.open("rb") as chunk:
-                    while True:
-                        data = chunk.read(1024 * 1024)
-                        if not data:
-                            break
-                        checksum.update(data)
-                        target.write(data)
+        
+        lock_file_path = self._system_bucket_root(bucket_id) / "locks" / f"{safe_key.as_posix().replace('/', '_')}.lock"
+        lock_file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            with lock_file_path.open("w") as lock_file:
+                with _file_lock(lock_file):
+                    if self._is_versioning_enabled(bucket_path) and destination.exists():
+                        self._archive_current_version(bucket_id, safe_key, reason="overwrite")
+                    checksum = hashlib.md5()
+                    with destination.open("wb") as target:
+                        for _, record in validated:
+                            part_path = upload_root / record["filename"]
+                            if not part_path.exists():
+                                raise StorageError(f"Missing part file {record['filename']}")
+                            with part_path.open("rb") as chunk:
+                                while True:
+                                    data = chunk.read(1024 * 1024)
+                                    if not data:
+                                        break
+                                    checksum.update(data)
+                                    target.write(data)
 
-        metadata = manifest.get("metadata")
-        if metadata:
-            self._write_metadata(bucket_id, safe_key, metadata)
-        else:
-            self._delete_metadata(bucket_id, safe_key)
+                    metadata = manifest.get("metadata")
+                    if metadata:
+                        self._write_metadata(bucket_id, safe_key, metadata)
+                    else:
+                        self._delete_metadata(bucket_id, safe_key)
+        except BlockingIOError:
+            raise StorageError("Another upload to this key is in progress")
+        finally:
+            try:
+                lock_file_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
         shutil.rmtree(upload_root, ignore_errors=True)
+        
+        self._invalidate_bucket_stats_cache(bucket_id)
+        
         stat = destination.stat()
         return ObjectMeta(
             key=safe_key.as_posix(),
@@ -592,7 +770,33 @@ class ObjectStorage:
         if legacy_root.exists():
             shutil.rmtree(legacy_root, ignore_errors=True)
 
-    # ---------------------- internal helpers ----------------------
+    def list_multipart_parts(self, bucket_name: str, upload_id: str) -> List[Dict[str, Any]]:
+        """List uploaded parts for a multipart upload."""
+        bucket_path = self._bucket_path(bucket_name)
+        manifest, upload_root = self._load_multipart_manifest(bucket_path.name, upload_id)
+        
+        parts = []
+        parts_map = manifest.get("parts", {})
+        for part_num_str, record in parts_map.items():
+            part_num = int(part_num_str)
+            part_filename = record.get("filename")
+            if not part_filename:
+                continue
+            part_path = upload_root / part_filename
+            if not part_path.exists():
+                continue
+                
+            stat = part_path.stat()
+            parts.append({
+                "PartNumber": part_num,
+                "Size": stat.st_size,
+                "ETag": record.get("etag"),
+                "LastModified": datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+            })
+        
+        parts.sort(key=lambda x: x["PartNumber"])
+        return parts
+
     def _bucket_path(self, bucket_name: str) -> Path:
         safe_name = self._sanitize_bucket_name(bucket_name)
         return self.root / safe_name
@@ -886,7 +1090,11 @@ class ObjectStorage:
         normalized = unicodedata.normalize("NFC", object_key)
         if normalized != object_key:
             raise StorageError("Object key must use normalized Unicode")
+        
         candidate = Path(normalized)
+        if ".." in candidate.parts:
+            raise StorageError("Object key contains parent directory references")
+        
         if candidate.is_absolute():
             raise StorageError("Absolute object keys are not allowed")
         if getattr(candidate, "drive", ""):

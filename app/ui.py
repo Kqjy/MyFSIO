@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import uuid
+import psutil
+import shutil
 from typing import Any
 from urllib.parse import urlparse
 
@@ -247,7 +249,8 @@ def buckets_overview():
         if bucket.name not in allowed_names:
             continue
         policy = policy_store.get_policy(bucket.name)
-        stats = _storage().bucket_stats(bucket.name)
+        cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
+        stats = _storage().bucket_stats(bucket.name, cache_ttl=cache_ttl)
         access_label, access_badge = _bucket_access_descriptor(policy)
         visible_buckets.append({
             "meta": bucket,
@@ -333,7 +336,7 @@ def bucket_detail(bucket_name: str):
         except IamError:
             can_manage_versioning = False
 
-    # Replication info
+    # Replication info - don't compute sync status here (it's slow), let JS fetch it async
     replication_rule = _replication().get_rule(bucket_name)
     connections = _connections().list()
 
@@ -469,8 +472,6 @@ def complete_multipart_upload(bucket_name: str, upload_id: str):
         normalized.append({"part_number": number, "etag": etag})
     try:
         result = _storage().complete_multipart_upload(bucket_name, upload_id, normalized)
-        
-        # Trigger replication
         _replication().trigger_replication(bucket_name, result["key"])
         
         return jsonify(result)
@@ -711,17 +712,13 @@ def object_presign(bucket_name: str, object_key: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
     
-    api_base = current_app.config.get("API_BASE_URL")
-    if not api_base:
-        api_base = "http://127.0.0.1:5000"
-    api_base = api_base.rstrip("/")
-    
-    url = f"{api_base}/presign/{bucket_name}/{object_key}"
+    connection_url = "http://127.0.0.1:5000"
+    url = f"{connection_url}/presign/{bucket_name}/{object_key}"
     
     headers = _api_headers()
-    # Forward the host so the API knows the public URL
     headers["X-Forwarded-Host"] = request.host
     headers["X-Forwarded-Proto"] = request.scheme
+    headers["X-Forwarded-For"] = request.remote_addr or "127.0.0.1"
     
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=5)
@@ -730,13 +727,11 @@ def object_presign(bucket_name: str, object_key: str):
     try:
         body = response.json()
     except ValueError:
-        # Handle XML error responses from S3 backend
         text = response.text or ""
         if text.strip().startswith("<"):
             import xml.etree.ElementTree as ET
             try:
                 root = ET.fromstring(text)
-                # Try to find Message or Code
                 message = root.findtext(".//Message") or root.findtext(".//Code") or "Unknown S3 error"
                 body = {"error": message}
             except ET.ParseError:
@@ -946,7 +941,6 @@ def rotate_iam_secret(access_key: str):
         return redirect(url_for("ui.iam_dashboard"))
     try:
         new_secret = _iam().rotate_secret(access_key)
-        # If rotating own key, update session immediately so subsequent API calls (like presign) work
         if principal and principal.access_key == access_key:
             creds = session.get("credentials", {})
             creds["secret_key"] = new_secret
@@ -1038,7 +1032,6 @@ def update_iam_policies(access_key: str):
 
     policies_raw = request.form.get("policies", "").strip()
     if not policies_raw:
-        # Empty policies list is valid (clears permissions)
         policies = []
     else:
         try:
@@ -1186,8 +1179,12 @@ def update_bucket_replication(bucket_name: str):
         _replication().delete_rule(bucket_name)
         flash("Replication disabled", "info")
     else:
+        from .replication import REPLICATION_MODE_NEW_ONLY, REPLICATION_MODE_ALL
+        import time
+        
         target_conn_id = request.form.get("target_connection_id")
         target_bucket = request.form.get("target_bucket", "").strip()
+        replication_mode = request.form.get("replication_mode", REPLICATION_MODE_NEW_ONLY)
         
         if not target_conn_id or not target_bucket:
             flash("Target connection and bucket are required", "danger")
@@ -1196,12 +1193,48 @@ def update_bucket_replication(bucket_name: str):
                 bucket_name=bucket_name,
                 target_connection_id=target_conn_id,
                 target_bucket=target_bucket,
-                enabled=True
+                enabled=True,
+                mode=replication_mode,
+                created_at=time.time(),
             )
             _replication().set_rule(rule)
-            flash("Replication configured", "success")
+            
+            # If mode is "all", trigger replication of existing objects
+            if replication_mode == REPLICATION_MODE_ALL:
+                _replication().replicate_existing_objects(bucket_name)
+                flash("Replication configured. Existing objects are being replicated in the background.", "success")
+            else:
+                flash("Replication configured. Only new uploads will be replicated.", "success")
             
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
+
+
+@ui_bp.get("/buckets/<bucket_name>/replication/status")
+def get_replication_status(bucket_name: str):
+    """Async endpoint to fetch replication sync status without blocking page load."""
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+    
+    rule = _replication().get_rule(bucket_name)
+    if not rule:
+        return jsonify({"error": "No replication rule"}), 404
+    
+    # This is the slow operation - compute sync status by comparing buckets
+    stats = _replication().get_sync_status(bucket_name)
+    if not stats:
+        return jsonify({"error": "Failed to compute status"}), 500
+    
+    return jsonify({
+        "objects_synced": stats.objects_synced,
+        "objects_pending": stats.objects_pending,
+        "objects_orphaned": stats.objects_orphaned,
+        "bytes_synced": stats.bytes_synced,
+        "last_sync_at": stats.last_sync_at,
+        "last_sync_key": stats.last_sync_key,
+    })
 
 
 @ui_bp.get("/connections")
@@ -1215,6 +1248,55 @@ def connections_dashboard():
         
     connections = _connections().list()
     return render_template("connections.html", connections=connections, principal=principal)
+
+
+@ui_bp.get("/metrics")
+def metrics_dashboard():
+    principal = _current_principal()
+    
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    
+    storage_root = current_app.config["STORAGE_ROOT"]
+    disk = psutil.disk_usage(storage_root)
+    
+    storage = _storage()
+    buckets = storage.list_buckets()
+    total_buckets = len(buckets)
+    
+    total_objects = 0
+    total_bytes_used = 0
+    
+    # Note: Uses cached stats from storage layer to improve performance
+    cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
+    for bucket in buckets:
+        stats = storage.bucket_stats(bucket.name, cache_ttl=cache_ttl)
+        total_objects += stats["objects"]
+        total_bytes_used += stats["bytes"]
+        
+    return render_template(
+        "metrics.html",
+        principal=principal,
+        cpu_percent=cpu_percent,
+        memory={
+            "total": _format_bytes(memory.total),
+            "available": _format_bytes(memory.available),
+            "used": _format_bytes(memory.used),
+            "percent": memory.percent,
+        },
+        disk={
+            "total": _format_bytes(disk.total),
+            "free": _format_bytes(disk.free),
+            "used": _format_bytes(disk.used),
+            "percent": disk.percent,
+        },
+        app={
+            "buckets": total_buckets,
+            "objects": total_objects,
+            "storage_used": _format_bytes(total_bytes_used),
+            "storage_raw": total_bytes_used,
+        }
+    )
 
 
 @ui_bp.app_errorhandler(404)

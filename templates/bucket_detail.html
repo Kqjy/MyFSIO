@@ -2,29 +2,42 @@
 {% block content %}
 {% set active_tab = request.args.get('tab', 'objects') %}
 <div class="d-flex flex-column gap-4 h-100">
-  <!-- Header & Breadcrumbs -->
-  <div class="d-flex justify-content-between align-items-start">
+  <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
     <div>
       <nav aria-label="breadcrumb">
-        <ol class="breadcrumb mb-1">
+        <ol class="breadcrumb mb-2">
           <li class="breadcrumb-item"><a href="{{ url_for('ui.buckets_overview') }}" class="text-decoration-none">Buckets</a></li>
           <li class="breadcrumb-item active" aria-current="page">{{ bucket_name }}</li>
         </ol>
       </nav>
-      <h1 class="h3 fw-bold mb-0 d-flex align-items-center gap-2">
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-bucket text-primary" viewBox="0 0 16 16">
-          <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
-        </svg>
-        {{ bucket_name }}
-      </h1>
+      <div class="d-flex align-items-center gap-3">
+        <div class="bucket-icon" style="width: 48px; height: 48px; border-radius: 12px;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M4.5 5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1zM3 4.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"/>
+            <path d="M0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H8.5v3a1.5 1.5 0 0 1 1.5 1.5H11a.5.5 0 0 1 0 1h-1v1h1a.5.5 0 0 1 0 1h-1v1a.5.5 0 0 1-1 0v-1H6v1a.5.5 0 0 1-1 0v-1H4a.5.5 0 0 1 0-1h1v-1H4a.5.5 0 0 1 0-1h1.5A1.5 1.5 0 0 1 7 10.5V7H2a2 2 0 0 1-2-2V4zm1 0v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1zm5 7.5v1h3v-1a.5.5 0 0 0-.5-.5h-2a.5.5 0 0 0-.5.5z"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="h3 fw-bold mb-1">{{ bucket_name }}</h1>
+          <div class="d-flex align-items-center gap-2">
+            <span class="badge {{ 'text-bg-success' if versioning_enabled else 'text-bg-secondary' }} rounded-pill">
+              <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2zm.995-14.901a1 1 0 1 0-1.99 0A5.002 5.002 0 0 0 3 6c0 1.098-.5 6-2 7h14c-1.5-1-2-5.902-2-7 0-2.42-1.72-4.44-4.005-4.901z"/>
+              </svg>
+              {{ 'Versioning On' if versioning_enabled else 'Versioning Off' }}
+            </span>
+            <span class="text-muted small">{{ objects|length }} object{{ 's' if objects|length != 1 else '' }}</span>
+          </div>
+        </div>
+      </div>
     </div>
     <div class="d-flex gap-2">
       <button class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteBucketModal">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash me-1" viewBox="0 0 16 16">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
           <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
           <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
         </svg>
-        Delete Bucket
+        Delete
       </button>
     </div>
   </div>
@@ -164,9 +177,24 @@
             </tr>
             {% else %}
             <tr>
-              <td colspan="4" class="text-center text-muted py-4">
-                <p class="mb-1 fw-semibold">No objects yet</p>
-                <p class="mb-0">Upload files using the console or any compatible client.</p>
+              <td colspan="4" class="py-5">
+                <div class="empty-state">
+                  <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+                      <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                      <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+                    </svg>
+                  </div>
+                  <h6 class="mb-2">No objects yet</h6>
+                  <p class="text-muted small mb-3">Drag and drop files here or click Upload to get started.</p>
+                  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                      <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+                    </svg>
+                    Upload Files
+                  </button>
+                </div>
               </td>
             </tr>
             {% endfor %}
@@ -176,53 +204,96 @@
     </div>
   </div>
   <div class="col-lg-5">
-    <div class="card shadow-sm sticky-top preview-card">
-      <div class="card-header bg-body">
-        <span class="fw-semibold">Object details</span>
+    <div class="card shadow-sm sticky-top preview-card" style="border-radius: 1rem;">
+      <div class="card-header bg-body d-flex align-items-center gap-2" style="border-radius: 1rem 1rem 0 0;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+          <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+        </svg>
+        <span class="fw-semibold">Object Details</span>
       </div>
       <div class="card-body">
-        <div id="preview-empty" class="text-center py-5">
-          <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" class="bi bi-file-earmark text-muted opacity-50 mb-3" viewBox="0 0 16 16">
-            <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-          </svg>
-          <p class="text-muted mb-0 small">Select an object to view details</p>
+        <div id="preview-empty" class="empty-state py-4">
+          <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+              <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+            </svg>
+          </div>
+          <p class="text-muted mb-0">Select an object to view details</p>
         </div>
         <div id="preview-panel" class="d-none">
-          <div class="mb-3">
-            <h2 class="h6 mb-1 text-break" id="preview-key"></h2>
-            <div class="text-muted small" id="preview-size"></div>
+          <div class="d-flex align-items-start gap-3 mb-3 p-3 rounded" style="background: var(--myfsio-preview-bg);">
+            <div class="file-icon flex-shrink-0" style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--myfsio-hover-bg);">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+              </svg>
+            </div>
+            <div class="min-w-0 flex-grow-1">
+              <h2 class="h6 mb-1 text-break fw-semibold" id="preview-key"></h2>
+              <div class="text-muted small" id="preview-size"></div>
+            </div>
           </div>
-          <div class="d-grid gap-2 mb-3">
-            <a class="btn btn-primary btn-sm" id="downloadButton" target="_blank">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
+          <div class="d-flex gap-2 mb-3">
+            <a class="btn btn-primary btn-sm flex-grow-1" id="downloadButton" target="_blank">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                 <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
                 <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
               </svg>
               Download
             </a>
-            <button class="btn btn-outline-secondary btn-sm" id="presignButton">Generate presigned URL</button>
+            <button class="btn btn-outline-secondary btn-sm" id="presignButton">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+                <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+              </svg>
+              Share Link
+            </button>
           </div>
-          <hr class="my-3">
-          <dl class="row small mb-3">
-            <dt class="col-5 text-muted">Last modified</dt>
-            <dd class="col-7 mb-2" id="preview-modified"></dd>
-            <dt class="col-5 text-muted">ETag</dt>
-            <dd class="col-7 mb-0"><code id="preview-etag" class="small"></code></dd>
-          </dl>
+          <div class="p-3 rounded mb-3" style="background: var(--myfsio-preview-bg);">
+            <dl class="row small mb-0">
+              <dt class="col-5 text-muted fw-normal">Last modified</dt>
+              <dd class="col-7 mb-2 fw-medium" id="preview-modified"></dd>
+              <dt class="col-5 text-muted fw-normal">ETag</dt>
+              <dd class="col-7 mb-0"><code id="preview-etag" class="small" style="font-size: 0.75rem;"></code></dd>
+            </dl>
+          </div>
           <div id="preview-metadata" class="mb-3 d-none">
-            <div class="fw-semibold text-uppercase small">Metadata</div>
-            <hr class="my-2">
-            <div id="preview-metadata-list" class="metadata-stack small"></div>
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                <path d="M3 2v4.586l7 7L14.586 9l-7-7H3zM2 2a1 1 0 0 1 1-1h4.586a1 1 0 0 1 .707.293l7 7a1 1 0 0 1 0 1.414l-4.586 4.586a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 2 6.586V2z"/>
+                <path d="M5.5 5a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm0 1a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/>
+              </svg>
+              <span class="fw-semibold small text-uppercase">Metadata</span>
+            </div>
+            <div id="preview-metadata-list" class="metadata-stack small p-3 rounded" style="background: var(--myfsio-preview-bg);"></div>
           </div>
           <div id="version-panel" class="mb-3 d-none">
             <div class="d-flex justify-content-between align-items-center mb-2">
-              <div class="text-muted small">Versions</div>
-              <button class="btn btn-outline-secondary btn-sm" type="button" id="refreshVersionsButton">Refresh</button>
+              <div class="d-flex align-items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                  <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
+                  <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
+                  <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
+                </svg>
+                <span class="fw-semibold small text-uppercase">Versions</span>
+              </div>
+              <button class="btn btn-outline-secondary btn-sm" type="button" id="refreshVersionsButton" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                  <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                </svg>
+                Refresh
+              </button>
             </div>
-            <div id="version-list" class="list-group list-group-flush small"></div>
+            <div id="version-list" class="list-group list-group-flush small rounded overflow-hidden" style="border: 1px solid var(--myfsio-card-border);"></div>
           </div>
-          <div class="preview-stage border rounded position-relative">
-            <div id="preview-placeholder" class="text-muted text-center py-5">No preview available</div>
+          <div class="preview-stage border rounded position-relative overflow-hidden" style="border-radius: 0.75rem !important;">
+            <div id="preview-placeholder" class="text-muted text-center py-5">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
+                <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+                <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
+              </svg>
+              <div class="small">No preview available</div>
+            </div>
             <img id="preview-image" class="img-fluid d-none" alt="Object preview" />
             <video id="preview-video" class="w-100 d-none" controls></video>
             <iframe id="preview-iframe" class="w-100 d-none" loading="lazy"></iframe>
@@ -237,61 +308,156 @@
     <!-- Permissions Tab -->
     <div class="tab-pane fade {{ 'show active' if active_tab == 'permissions' else '' }}" id="permissions-pane" role="tabpanel" aria-labelledby="permissions-tab" tabindex="0">
       <div class="row g-4">
-        <div class="col-12">
+        <!-- Main Content -->
+        <div class="col-lg-8">
           <div class="card shadow-sm" id="bucket-policy-card">
-  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <div>
-      <span class="fw-semibold">Bucket policy</span>
-    </div>
-    <div class="d-flex align-items-center gap-2">
-      {% if bucket_policy %}
-      <span class="badge text-bg-info">Policy attached</span>
-      {% else %}
-      <span class="badge text-bg-secondary">IAM only</span>
-      {% endif %}
-    </div>
-  </div>
-  <div class="card-body">
-    {% if not bucket_policy %}
-    <div class="alert alert-secondary mb-3" role="alert">
-      <p class="mb-0 small">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle me-1" viewBox="0 0 16 16">
-          <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
-          <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
-        </svg>
-        No bucket policy is attached. Access is controlled by IAM policies only.
-      </p>
-    </div>
-    {% endif %}
-    {% if can_edit_policy %}
-    {% set preset_choice = 'custom' %}
-    {% if not bucket_policy %}
-      {% set preset_choice = 'private' %}
-    {% elif bucket_policy_text and bucket_policy_text.strip() == default_policy.strip() %}
-      {% set preset_choice = 'public' %}
-    {% endif %}
-    <form method="post" action="{{ url_for('ui.update_bucket_policy', bucket_name=bucket_name) }}" id="bucketPolicyForm">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-      <input type="hidden" name="mode" value="upsert" id="policyMode" />
-      <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-        <label class="form-label mb-0">Preset</label>
-        <select class="form-select form-select-sm w-auto" id="policyPreset" data-default="{{ preset_choice }}">
-          <option value="private" {% if preset_choice == 'private' %}selected{% endif %}>Private (no policy attached)</option>
-          <option value="public" {% if preset_choice == 'public' %}selected{% endif %}>Public read-only</option>
-          <option value="custom" {% if preset_choice == 'custom' %}selected{% endif %}>Custom JSON</option>
-        </select>
-      </div>
-      <label class="form-label">Policy document (JSON)</label>
-      <textarea class="form-control font-monospace" rows="8" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | tojson }}' spellcheck="false">{{ bucket_policy_text or default_policy }}</textarea>
-      <div class="form-text">Use presets for common scenarios or switch to custom to paste AWS-style statements.</div>
-      <div class="d-flex gap-3 mt-3 align-items-center flex-wrap">
-        <button class="btn btn-primary" type="submit">Save policy</button>
-      </div>
-    </form>
-    {% else %}
-    <p class="text-muted mb-0">You do not have permission to edit this policy.</p>
-    {% endif %}
-  </div>
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+              </svg>
+              <span class="fw-semibold">Bucket Policy</span>
+            </div>
+            <div class="card-body">
+              <!-- Status Banner -->
+              {% if bucket_policy %}
+              <div class="alert alert-info d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                </svg>
+                <div>
+                  <strong>Policy attached</strong>
+                  <p class="mb-0 small">A bucket policy is attached to this bucket. Access is granted via both IAM and bucket policy rules.</p>
+                </div>
+              </div>
+              {% else %}
+              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                <div>
+                  <strong>IAM only</strong>
+                  <p class="mb-0 small">No bucket policy is attached. Access is controlled by IAM policies only.</p>
+                </div>
+              </div>
+              {% endif %}
+
+              {% if can_edit_policy %}
+              {% set preset_choice = 'custom' %}
+              {% if not bucket_policy %}
+                {% set preset_choice = 'private' %}
+              {% elif bucket_policy_text and bucket_policy_text.strip() == default_policy.strip() %}
+                {% set preset_choice = 'public' %}
+              {% endif %}
+              <form method="post" action="{{ url_for('ui.update_bucket_policy', bucket_name=bucket_name) }}" id="bucketPolicyForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="mode" value="upsert" id="policyMode" />
+                
+                <!-- Policy Preset Selector -->
+                <div class="mb-4">
+                  <label class="form-label fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M8 4a.5.5 0 0 1 .5.5V6a.5.5 0 0 1-1 0V4.5A.5.5 0 0 1 8 4zM3.732 5.732a.5.5 0 0 1 .707 0l.915.914a.5.5 0 1 1-.708.708l-.914-.915a.5.5 0 0 1 0-.707zM2 10a.5.5 0 0 1 .5-.5h1.586a.5.5 0 0 1 0 1H2.5A.5.5 0 0 1 2 10zm9.5 0a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 0 1H12a.5.5 0 0 1-.5-.5zm.754-4.246a.5.5 0 0 0-.708 0l-.914.914a.5.5 0 0 0 .707.708l.915-.914a.5.5 0 0 0 0-.708z"/>
+                      <path fill-rule="evenodd" d="M8 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-1 3a1 1 0 1 1 2 0 1 1 0 0 1-2 0z"/>
+                    </svg>
+                    Quick Presets
+                  </label>
+                  <div class="d-flex flex-wrap gap-2">
+                    <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == 'private' %}active{% endif %}" data-preset="private">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                      </svg>
+                      Private
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == 'public' %}active{% endif %}" data-preset="public">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
+                      </svg>
+                      Public Read
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == 'custom' %}active{% endif %}" data-preset="custom">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M10.478 1.647a.5.5 0 1 0-.956-.294l-4 13a.5.5 0 0 0 .956.294l4-13zM4.854 4.146a.5.5 0 0 1 0 .708L1.707 8l3.147 3.146a.5.5 0 0 1-.708.708l-3.5-3.5a.5.5 0 0 1 0-.708l3.5-3.5a.5.5 0 0 1 .708 0zm6.292 0a.5.5 0 0 0 0 .708L14.293 8l-3.147 3.146a.5.5 0 0 0 .708.708l3.5-3.5a.5.5 0 0 0 0-.708l-3.5-3.5a.5.5 0 0 0-.708 0z"/>
+                      </svg>
+                      Custom JSON
+                    </button>
+                  </div>
+                  <input type="hidden" id="policyPreset" name="preset" value="{{ preset_choice }}" data-default="{{ preset_choice }}">
+                </div>
+
+                <!-- Policy Document Editor -->
+                <div class="mb-3">
+                  <label class="form-label fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+                      <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm1.639-3.708 1.33.886 1.854-1.855a.25.25 0 0 1 .289-.047l1.888.974V8.5a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V8s1.54-1.274 1.639-1.208z"/>
+                    </svg>
+                    Policy Document (JSON)
+                  </label>
+                  <textarea class="form-control font-monospace" rows="12" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | tojson }}' spellcheck="false">{{ bucket_policy_text or default_policy }}</textarea>
+                  <div class="form-text">Use presets for common scenarios or switch to Custom JSON to paste AWS-style statements.</div>
+                </div>
+
+                <div class="d-flex gap-2 flex-wrap">
+                  <button class="btn btn-primary" type="submit">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M2 1a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H9.5a1 1 0 0 0-1 1v7.293l2.646-2.647a.5.5 0 0 1 .708.708l-3.5 3.5a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L7.5 9.293V2a2 2 0 0 1 2-2H14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h2.5a.5.5 0 0 1 0 1H2z"/>
+                    </svg>
+                    Save Policy
+                  </button>
+                  {% if bucket_policy %}
+                  <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deletePolicyModal">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                      <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                    </svg>
+                    Delete Policy
+                  </button>
+                  {% endif %}
+                </div>
+              </form>
+              {% else %}
+              <div class="text-center py-4">
+                <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" class="text-muted mb-3" viewBox="0 0 16 16">
+                  <path d="M9.293 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4.707A1 1 0 0 0 13.707 4L10 .293A1 1 0 0 0 9.293 0zM9.5 3.5v-2l3 3h-2a1 1 0 0 1-1-1zM4.5 9a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1h-7zM4 10.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zm.5 2.5a.5.5 0 0 1 0-1h4a.5.5 0 0 1 0 1h-4z"/>
+                </svg>
+                <p class="text-muted mb-0">You do not have permission to edit this policy.</p>
+              </div>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                About Bucket Policies
+              </h6>
+              <p class="small text-muted mb-3">
+                Bucket policies are JSON-based access policy documents that specify who can access your bucket and under what conditions.
+              </p>
+              
+              <h6 class="small fw-semibold mb-2">Policy Types</h6>
+              <ul class="small text-muted mb-3 ps-3">
+                <li><strong>Private</strong> — No policy attached; only IAM users with explicit permissions can access.</li>
+                <li><strong>Public Read</strong> — Anyone can read objects, but only authenticated users can write.</li>
+                <li><strong>Custom</strong> — Fine-grained control using AWS IAM policy syntax.</li>
+              </ul>
+
+              <h6 class="small fw-semibold mb-2">Policy Elements</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li><strong>Effect</strong> — Allow or Deny</li>
+                <li><strong>Principal</strong> — Who the policy applies to</li>
+                <li><strong>Action</strong> — Which S3 operations</li>
+                <li><strong>Resource</strong> — Bucket/object ARN</li>
+              </ul>
+            </div>
           </div>
         </div>
       </div>
@@ -300,67 +466,180 @@
     <!-- Properties Tab -->
     <div class="tab-pane fade {{ 'show active' if active_tab == 'properties' else '' }}" id="properties-pane" role="tabpanel" aria-labelledby="properties-tab" tabindex="0">
       <div class="row g-4">
-        <div class="col-12">
+        <!-- Main Content -->
+        <div class="col-lg-8">
+          <!-- Versioning Card -->
           <div class="card shadow-sm" id="bucket-versioning-card">
-  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span class="fw-semibold">Versioning</span>
-    <span class="badge {{ 'text-bg-success' if versioning_enabled else 'text-bg-secondary' }}">
-      {{ 'Enabled' if versioning_enabled else 'Suspended' }}
-    </span>
-  </div>
-  <div class="card-body">
-    <p class="text-muted small mb-3">When enabled, previous versions of objects are preserved so you can roll back accidental changes or deletions.</p>
-    {% if can_manage_versioning %}
-    <form method="post" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-      {% if versioning_enabled %}
-      <input type="hidden" name="state" value="suspend" />
-      <button class="btn btn-outline-danger" type="submit" data-confirm-suspend>Suspend versioning</button>
-      {% else %}
-      <input type="hidden" name="state" value="enable" />
-      <button class="btn btn-outline-success" type="submit">Enable versioning</button>
-      {% endif %}
-    </form>
-    {% else %}
-    <p class="text-muted mb-0">You do not have permission to modify versioning for this bucket.</p>
-    {% endif %}
-  </div>
-</div>
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
+                <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
+              </svg>
+              <span class="fw-semibold">Versioning</span>
+            </div>
+            <div class="card-body">
+              <!-- Status Banner -->
+              {% if versioning_enabled %}
+              <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                </svg>
+                <div>
+                  <strong>Versioning is enabled</strong>
+                  <p class="mb-0 small">All previous versions of objects are preserved. You can roll back accidental changes or deletions at any time.</p>
+                </div>
+              </div>
+              {% else %}
+              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                </svg>
+                <div>
+                  <strong>Versioning is suspended</strong>
+                  <p class="mb-0 small">New object uploads overwrite existing objects. Enable versioning to preserve previous versions.</p>
+                </div>
+              </div>
+              {% endif %}
 
-{% if versioning_enabled %}
-<div
-  class="card shadow-sm mt-4"
-  id="archived-objects-card"
-  data-archived-endpoint="{{ url_for('ui.archived_objects', bucket_name=bucket_name) }}"
->
-  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span class="fw-semibold">Archived objects</span>
-    <div class="d-flex align-items-center gap-2">
-      <span class="badge text-bg-secondary" data-archived-count>0 items</span>
-      <button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>Refresh</button>
-    </div>
-  </div>
-  <div class="card-body">
-    <p class="text-muted small mb-3">When objects are deleted while versioning is enabled, their previous versions remain here until you restore or purge them.</p>
-    <div class="table-responsive">
-      <table class="table table-sm align-middle mb-0">
-        <thead class="table-light">
-          <tr>
-            <th scope="col">Key</th>
-            <th scope="col">Latest version</th>
-            <th scope="col" class="text-end">Versions</th>
-            <th scope="col" class="text-end">Actions</th>
-          </tr>
-        </thead>
-        <tbody data-archived-body>
-          <tr>
-            <td colspan="4" class="text-center text-muted py-3">No archived-only objects.</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
+              {% if can_manage_versioning %}
+              <form method="post" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                {% if versioning_enabled %}
+                <input type="hidden" name="state" value="suspend" />
+                <button class="btn btn-outline-danger" type="submit" data-confirm-suspend>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+                  </svg>
+                  Suspend Versioning
+                </button>
+                {% else %}
+                <input type="hidden" name="state" value="enable" />
+                <button class="btn btn-success" type="submit">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M10.854 8.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 0 1 .708-.708L7.5 10.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
+                    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8z"/>
+                  </svg>
+                  Enable Versioning
+                </button>
+                {% endif %}
+              </form>
+              {% else %}
+              <div class="text-center py-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
+                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                </svg>
+                <p class="text-muted mb-0 small">You do not have permission to modify versioning for this bucket.</p>
+              </div>
+              {% endif %}
+            </div>
+          </div>
+
+          <!-- Archived Objects Card -->
+          {% if versioning_enabled %}
+          <div
+            class="card shadow-sm mt-4"
+            id="archived-objects-card"
+            data-archived-endpoint="{{ url_for('ui.archived_objects', bucket_name=bucket_name) }}"
+          >
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div class="d-flex align-items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning me-2" viewBox="0 0 16 16">
+                  <path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>
+                </svg>
+                <span class="fw-semibold">Archived Objects</span>
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <span class="badge text-bg-secondary" data-archived-count>0 items</span>
+                <button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                    <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
+                  </svg>
+                  Refresh
+                </button>
+              </div>
+            </div>
+            <div class="card-body">
+              <p class="text-muted small mb-3">Objects that have been deleted while versioning is enabled. Their previous versions remain available until you restore or purge them.</p>
+              <div class="table-responsive">
+                <table class="table table-sm table-hover align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th scope="col">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 text-muted" viewBox="0 0 16 16">
+                          <path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>
+                        </svg>
+                        Key
+                      </th>
+                      <th scope="col">Latest Version</th>
+                      <th scope="col" class="text-center">Versions</th>
+                      <th scope="col" class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody data-archived-body>
+                    <tr>
+                      <td colspan="4" class="text-center text-muted py-4">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="mb-2 d-block mx-auto" viewBox="0 0 16 16">
+                          <path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>
+                        </svg>
+                        No archived objects
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          {% endif %}
+        </div>
+
+        <!-- Sidebar -->
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                About Versioning
+              </h6>
+              <p class="small text-muted mb-3">
+                Versioning keeps multiple variants of an object in the same bucket. You can use versioning to preserve, retrieve, and restore every version of every object.
+              </p>
+              
+              <h6 class="small fw-semibold mb-2">Benefits</h6>
+              <ul class="small text-muted mb-3 ps-3">
+                <li><strong>Recovery</strong> — Restore accidentally deleted or overwritten objects</li>
+                <li><strong>Audit Trail</strong> — Track changes to objects over time</li>
+                <li><strong>Compliance</strong> — Meet retention requirements</li>
+              </ul>
+
+              <h6 class="small fw-semibold mb-2">How It Works</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li>Each upload creates a new version</li>
+                <li>Deleting adds a "delete marker"</li>
+                <li>Previous versions remain accessible</li>
+                <li>Storage costs apply to all versions</li>
+              </ul>
+            </div>
+          </div>
+
+          {% if versioning_enabled %}
+          <div class="card bg-body-tertiary border-0 mt-3">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-warning me-2" viewBox="0 0 16 16">
+                  <path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>
+                </svg>
+                About Archives
+              </h6>
+              <p class="small text-muted mb-0">
+                When you delete an object with versioning enabled, S3 inserts a delete marker instead of removing the object. The archived versions remain in the bucket and can be restored at any time.
+              </p>
+            </div>
+          </div>
           {% endif %}
         </div>
       </div>
@@ -371,49 +650,194 @@
       <div class="row g-4">
         <div class="col-lg-8">
           <div class="card shadow-sm">
-            <div class="card-header">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+              </svg>
               <span class="fw-semibold">Replication Configuration</span>
             </div>
             <div class="card-body">
               {% if replication_rule %}
-              <div class="alert alert-success d-flex align-items-center" role="alert">
+              <!-- Replication Enabled State -->
+              <div class="alert alert-success d-flex align-items-center mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill flex-shrink-0 me-2" viewBox="0 0 16 16">
                   <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
                 </svg>
                 <div>
-                  Replication is currently <strong>enabled</strong>.
+                  <strong>Replication Active</strong> — 
+                  {% if replication_rule.mode == 'all' %}
+                  All objects (existing + new) are being replicated.
+                  {% else %}
+                  New uploads to this bucket are automatically replicated.
+                  {% endif %}
                 </div>
               </div>
               
-              <div class="mb-4">
-                <h5>Current Rule</h5>
-                <dl class="row">
-                  <dt class="col-sm-3">Target Connection</dt>
-                  <dd class="col-sm-9">
-                    {% set target_conn = connections | selectattr("id", "equalto", replication_rule.target_connection_id) | first %}
-                    {{ target_conn.name if target_conn else replication_rule.target_connection_id }}
-                  </dd>
-                  
-                  <dt class="col-sm-3">Target Bucket</dt>
-                  <dd class="col-sm-9">{{ replication_rule.target_bucket }}</dd>
-                  
-                  <dt class="col-sm-3">Status</dt>
-                  <dd class="col-sm-9">
-                    {% if replication_rule.enabled %}
-                    <span class="badge bg-success">Enabled</span>
-                    {% else %}
-                    <span class="badge bg-secondary">Disabled</span>
-                    {% endif %}
-                  </dd>
-                </dl>
+              <!-- Replication Stats Cards (loaded asynchronously) -->
+              <div class="row g-3 mb-4" id="replication-stats-cards" data-status-endpoint="{{ url_for('ui.get_replication_status', bucket_name=bucket_name) }}">
+                <div class="col-6 col-lg">
+                  <div class="card bg-body-tertiary border-0 h-100">
+                    <div class="card-body text-center py-3">
+                      <div class="d-flex justify-content-center align-items-center mb-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-success" viewBox="0 0 16 16">
+                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                        </svg>
+                      </div>
+                      <div class="text-muted small text-uppercase">Synced</div>
+                      <div class="fw-semibold fs-5 text-success" data-stat="synced">
+                        <span class="spinner-border spinner-border-sm" role="status"></span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-6 col-lg">
+                  <div class="card bg-body-tertiary border-0 h-100">
+                    <div class="card-body text-center py-3">
+                      <div class="d-flex justify-content-center align-items-center mb-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+                          <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                        </svg>
+                      </div>
+                      <div class="text-muted small text-uppercase">Pending</div>
+                      <div class="fw-semibold fs-5" data-stat="pending">
+                        <span class="spinner-border spinner-border-sm" role="status"></span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-6 col-lg">
+                  <div class="card bg-body-tertiary border-0 h-100">
+                    <div class="card-body text-center py-3">
+                      <div class="d-flex justify-content-center align-items-center mb-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
+                          <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                          <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                        </svg>
+                      </div>
+                      <div class="text-muted small text-uppercase">Orphaned</div>
+                      <div class="fw-semibold fs-5" data-stat="orphaned">
+                        <span class="spinner-border spinner-border-sm" role="status"></span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-6 col-lg">
+                  <div class="card bg-body-tertiary border-0 h-100">
+                    <div class="card-body text-center py-3">
+                      <div class="d-flex justify-content-center align-items-center mb-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-info" viewBox="0 0 16 16">
+                          <path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>
+                        </svg>
+                      </div>
+                      <div class="text-muted small text-uppercase">Data Synced</div>
+                      <div class="fw-semibold small" data-stat="bytes">
+                        <span class="spinner-border spinner-border-sm" role="status"></span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-12 col-lg">
+                  <div class="card bg-body-tertiary border-0 h-100">
+                    <div class="card-body text-center py-3">
+                      <div class="d-flex justify-content-center align-items-center mb-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                          <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
+                          <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
+                        </svg>
+                      </div>
+                      <div class="text-muted small text-uppercase">Mode</div>
+                      <div class="fw-semibold small">
+                        {% if replication_rule.mode == 'all' %}All Objects{% else %}New Only{% endif %}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
               
-              <button type="button" class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
-                Disable Replication
-              </button>
+              <div class="alert alert-light border small mb-4" id="replication-last-sync" style="display: none;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+                </svg>
+                <strong>Last sync:</strong> 
+                <span data-stat="last-sync-time"></span>
+                <span data-stat="last-sync-key"></span>
+              </div>
+              
+              <!-- Current Rule Details -->
+              <h6 class="text-muted text-uppercase small mb-3">Replication Target</h6>
+              <div class="card border mb-4">
+                <div class="card-body">
+                  <div class="row align-items-center">
+                    <div class="col-auto">
+                      <div class="rounded-circle bg-primary bg-opacity-10 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                          <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+                          <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+                        </svg>
+                      </div>
+                    </div>
+                    <div class="col">
+                      {% set target_conn = connections | selectattr("id", "equalto", replication_rule.target_connection_id) | first %}
+                      <div class="fw-semibold">{{ target_conn.name if target_conn else 'Unknown Connection' }}</div>
+                      <div class="text-muted small">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M5 4a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zM5 8a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm0 2a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1H5z"/>
+                          <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/>
+                        </svg>
+                        {{ replication_rule.target_bucket }}
+                      </div>
+                      {% if target_conn %}
+                      <div class="text-muted small">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
+                        </svg>
+                        {{ target_conn.endpoint_url }}
+                      </div>
+                      {% endif %}
+                    </div>
+                    <div class="col-auto">
+                      <span class="badge bg-success-subtle text-success px-3 py-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                        </svg>
+                        Enabled
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="d-flex gap-2">
+                <a href="{{ url_for('ui.bucket_detail', bucket_name=bucket_name, tab='replication') }}" class="btn btn-outline-secondary">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                  </svg>
+                  Refresh
+                </a>
+                <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                  </svg>
+                  Disable Replication
+                </button>
+              </div>
               
               {% else %}
-              <p class="text-muted">Replication allows you to automatically copy new objects from this bucket to a bucket in another S3-compatible service.</p>
+              <!-- Replication Setup State -->
+              <div class="text-center py-4">
+                <div class="rounded-circle bg-body-tertiary d-inline-flex align-items-center justify-content-center mb-3" style="width: 64px; height: 64px;">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                  </svg>
+                </div>
+                <h5 class="mb-2">Set Up Replication</h5>
+                <p class="text-muted mb-4">Automatically copy new objects from this bucket to a bucket in another S3-compatible service.</p>
+              </div>
               
               {% if connections %}
               <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}">
@@ -421,7 +845,7 @@
                 <input type="hidden" name="action" value="create">
                 
                 <div class="mb-3">
-                  <label for="target_connection_id" class="form-label">Target Connection</label>
+                  <label for="target_connection_id" class="form-label fw-medium">Target Connection</label>
                   <select class="form-select" id="target_connection_id" name="target_connection_id" required>
                     <option value="" selected disabled>Select a connection...</option>
                     {% for conn in connections %}
@@ -432,18 +856,56 @@
                 </div>
                 
                 <div class="mb-3">
-                  <label for="target_bucket" class="form-label">Target Bucket Name</label>
+                  <label for="target_bucket" class="form-label fw-medium">Target Bucket Name</label>
                   <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket">
                   <div class="form-text">If the target bucket does not exist, it will be created automatically.</div>
                 </div>
                 
-                <button type="submit" class="btn btn-primary">Enable Replication</button>
+                <div class="mb-4">
+                  <label class="form-label fw-medium">Replication Mode</label>
+                  <div class="card border">
+                    <div class="card-body p-0">
+                      <div class="form-check p-3 border-bottom m-0">
+                        <input class="form-check-input" type="radio" name="replication_mode" id="mode_new_only" value="new_only" checked>
+                        <label class="form-check-label w-100" for="mode_new_only">
+                          <span class="fw-medium">New uploads only</span>
+                          <div class="text-muted small">Only replicate objects uploaded after enabling replication. Existing objects will not be copied.</div>
+                        </label>
+                      </div>
+                      <div class="form-check p-3 m-0">
+                        <input class="form-check-input" type="radio" name="replication_mode" id="mode_all" value="all">
+                        <label class="form-check-label w-100" for="mode_all">
+                          <span class="fw-medium">All objects (existing + new)</span>
+                          <div class="text-muted small">Replicate all existing objects immediately, plus all future uploads. <span class="text-warning">This may take time for large buckets.</span></div>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <button type="submit" class="btn btn-primary">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                  </svg>
+                  Enable Replication
+                </button>
               </form>
               {% else %}
-              <div class="alert alert-warning" role="alert">
-                You need to configure a remote connection before you can enable replication.
-                <br>
-                <a href="{{ url_for('ui.connections_dashboard') }}" class="alert-link">Manage Connections</a>
+              <div class="alert alert-warning d-flex align-items-start" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                </svg>
+                <div>
+                  <strong>No connections configured.</strong>
+                  <p class="mb-1">You need to add a remote connection before you can enable replication.</p>
+                  <a href="{{ url_for('ui.connections_dashboard') }}" class="alert-link">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                    </svg>
+                    Add Connection
+                  </a>
+                </div>
               </div>
               {% endif %}
               
@@ -454,20 +916,81 @@
         
         <div class="col-lg-4">
           <div class="card shadow-sm">
-            <div class="card-header">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted me-2" viewBox="0 0 16 16">
+                <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+              </svg>
               <span class="fw-semibold">About Replication</span>
             </div>
-            <div class="card-body text-muted small">
-              <p>Site Replication asynchronously copies objects to a remote destination.</p>
-              <ul class="mb-0">
-                <li>Only new uploads are replicated. Existing objects are not copied retroactively.</li>
-                <li>Deletes are <strong>not</strong> replicated to prevent accidental data loss.</li>
-                <li>Replication happens in the background.</li>
-                <li>Ensure the target bucket exists and the connection credentials have write permissions.</li>
+            <div class="card-body">
+              <ul class="list-unstyled mb-0 small">
+                <li class="d-flex align-items-start mb-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+                    <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                  </svg>
+                  <span class="text-muted">Choose to replicate <strong>new uploads only</strong> or <strong>all objects</strong> (including existing).</span>
+                </li>
+                <li class="d-flex align-items-start mb-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                  </svg>
+                  <span class="text-muted"><strong>All changes sync</strong> — uploads, updates, and deletes are replicated.</span>
+                </li>
+                <li class="d-flex align-items-start mb-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-info flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+                    <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z"/>
+                  </svg>
+                  <span class="text-muted">Replication happens <strong>asynchronously</strong> in the background.</span>
+                </li>
+                <li class="d-flex align-items-start">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+                    <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                  </svg>
+                  <span class="text-muted">Ensure credentials have <strong>write permissions</strong> on target bucket.</span>
+                </li>
               </ul>
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Policy Modal -->
+<div class="modal fade" id="deletePolicyModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold text-danger">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+          </svg>
+          Delete bucket policy
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning d-flex align-items-start" role="alert">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+          </svg>
+          <div>
+            <strong>Warning:</strong> Removing the bucket policy will revert access control to IAM-only. Users relying on policy-based permissions may lose access.
+          </div>
+        </div>
+        <p class="text-muted small mb-0">Are you sure you want to delete the bucket policy for <strong>{{ bucket_name }}</strong>?</p>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <form method="post" action="{{ url_for('ui.update_bucket_policy', bucket_name=bucket_name) }}" class="d-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="mode" value="delete" />
+          <button type="submit" class="btn btn-danger">Delete Policy</button>
+        </form>
       </div>
     </div>
   </div>
@@ -478,7 +1001,13 @@
   <div class="modal-dialog modal-lg modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">Upload objects</h1>
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+            <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+          </svg>
+          Upload objects
+        </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form
@@ -557,27 +1086,34 @@
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header border-0 pb-0">
-        <h1 class="modal-title fs-5 fw-semibold">Delete bucket</h1>
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+          </svg>
+          Delete bucket
+        </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" action="{{ url_for('ui.delete_bucket', bucket_name=bucket_name) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <div class="modal-body">
-          <div class="alert alert-warning border-0" role="alert">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-exclamation-triangle me-2" viewBox="0 0 16 16">
+          <div class="alert alert-danger d-flex align-items-center mb-3" role="alert">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
               <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
               <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
             </svg>
-            <strong>Warning:</strong> This action cannot be undone.
+            <div><strong>Warning:</strong> This action cannot be undone.</div>
           </div>
           <p class="mb-0">
-            Delete bucket <code class="fs-6">{{ bucket_name }}</code>? The bucket must be empty.
+            Are you sure you want to delete <code class="fs-6">{{ bucket_name }}</code>?
+            <span class="text-muted">The bucket must be empty.</span>
           </p>
         </div>
-        <div class="modal-footer border-0">
+        <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
           <button class="btn btn-danger" type="submit">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-trash me-1" viewBox="0 0 16 16">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
               <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
               <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
             </svg>
@@ -593,8 +1129,13 @@
 <div class="modal fade" id="messageModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
-      <div class="modal-header">
-        <h1 class="modal-title fs-5" id="messageModalTitle">Notice</h1>
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold" id="messageModalTitle">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16" id="messageModalIcon">
+            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+          </svg>
+          Notice
+        </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body" id="messageModalBody"></div>
@@ -610,26 +1151,46 @@
 <div class="modal fade" id="bulkDeleteModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
-      <div class="modal-header">
-        <h1 class="modal-title fs-5">Delete selected objects</h1>
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+          </svg>
+          Delete selected objects
+        </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <p id="bulkDeleteCount" class="fw-semibold mb-1"></p>
-        <p class="text-muted small">This permanently deletes the selected objects. Deleted items cannot be recovered.</p>
-        <ul class="list-group list-group-flush mb-2" id="bulkDeleteList"></ul>
+        <div class="alert alert-danger d-flex align-items-start mb-3" role="alert">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+          </svg>
+          <div>
+            <p id="bulkDeleteCount" class="fw-semibold mb-1"></p>
+            <p class="mb-0 small">Deleted items cannot be recovered.</p>
+          </div>
+        </div>
+        <ul class="list-group mb-3" id="bulkDeleteList" style="max-height: 200px; overflow-y: auto;"></ul>
         <div class="text-muted small" id="bulkDeleteStatus"></div>
         {% if versioning_enabled %}
-        <div class="form-check mt-3">
+        <div class="form-check mt-3 p-3 bg-body-tertiary rounded-3">
           <input class="form-check-input" type="checkbox" id="bulkDeletePurge" />
           <label class="form-check-label" for="bulkDeletePurge">Also delete archived versions</label>
-          <div class="form-text">Removes any archived versions stored in the archive. Use with caution.</div>
+          <div class="form-text">Removes any archived versions stored in the archive.</div>
         </div>
         {% endif %}
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="button" class="btn btn-danger" id="bulkDeleteConfirm" disabled>Delete objects</button>
+        <button type="button" class="btn btn-danger" id="bulkDeleteConfirm" disabled>
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+          </svg>
+          Delete objects
+        </button>
       </div>
     </div>
   </div>
@@ -639,32 +1200,48 @@
 <div class="modal fade" id="deleteObjectModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
-      <div class="modal-header">
-        <h1 class="modal-title fs-5">Delete object</h1>
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+          </svg>
+          Delete object
+        </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" id="deleteObjectForm">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <div class="modal-body">
-          <p>
-            Delete
-            <strong id="deleteObjectKey" class="d-block text-break font-monospace"></strong>
-            ?
+          <p class="mb-3">
+            Are you sure you want to delete this object?
           </p>
+          <div class="p-3 bg-body-tertiary rounded-3 mb-3">
+            <code id="deleteObjectKey" class="d-block text-break"></code>
+          </div>
           {% if versioning_enabled %}
-          <div class="alert alert-warning small" role="alert">
-            Versioning is enabled. Deleting normally keeps previous versions in the archive.
+          <div class="alert alert-warning d-flex align-items-start small mb-3" role="alert">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-0" viewBox="0 0 16 16">
+              <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+            </svg>
+            <div>Versioning is enabled. Deleting normally keeps previous versions in the archive.</div>
           </div>
-          <div class="form-check">
+          <div class="form-check p-3 bg-body-tertiary rounded-3">
             <input class="form-check-input" type="checkbox" value="1" id="deletePurgeVersions" name="purge_versions" />
-            <label class="form-check-label" for="deletePurgeVersions">Also delete all archived versions for this object</label>
+            <label class="form-check-label" for="deletePurgeVersions">Also delete all archived versions</label>
+            <div class="form-text mb-0">Removes the live object and every stored version.</div>
           </div>
-          <p class="form-text mb-0">Use with caution—this removes the live object and every stored version.</p>
           {% endif %}
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-danger" type="submit">Delete</button>
+          <button class="btn btn-danger" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+              <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+            </svg>
+            Delete
+          </button>
         </div>
       </form>
     </div>
@@ -675,14 +1252,21 @@
 <div class="modal fade" id="presignModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
-      <div class="modal-header">
-        <h1 class="modal-title fs-5">Presigned URL</h1>
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+            <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+          </svg>
+          Presigned URL
+        </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
+        <p class="text-muted small mb-3">Generate a temporary signed URL to share access to this object.</p>
         <div class="row g-3">
           <div class="col-md-6">
-            <label class="form-label">HTTP method</label>
+            <label class="form-label fw-medium">HTTP method</label>
             <select class="form-select" id="presignMethod">
               <option value="GET">GET (download)</option>
               <option value="PUT">PUT (upload)</option>
@@ -690,19 +1274,30 @@
             </select>
           </div>
           <div class="col-md-6">
-            <label class="form-label">Expires (seconds)</label>
+            <label class="form-label fw-medium">Expires (seconds)</label>
             <input class="form-control" type="number" id="presignTtl" value="900" min="1" max="604800" />
+            <div class="form-text">Max: 604800 (7 days)</div>
           </div>
         </div>
-        <label class="form-label mt-3">Signed URL</label>
+        <label class="form-label fw-medium mt-3">Signed URL</label>
         <div class="input-group">
-          <input id="presignLink" class="form-control" type="text" readonly />
-          <button class="btn btn-outline-secondary" type="button" id="copyPresignLink">Copy</button>
+          <input id="presignLink" class="form-control font-monospace bg-body-tertiary" type="text" readonly />
+          <button class="btn btn-outline-primary" type="button" id="copyPresignLink">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+              <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+              <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+            </svg>
+          </button>
         </div>
-        <p class="form-text mb-0">A link is generated when the modal opens. Adjust the settings and click Generate to refresh.</p>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-primary me-auto" id="generatePresignButton">Generate link</button>
+        <button type="button" class="btn btn-primary" id="generatePresignButton">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+            <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+          </svg>
+          Generate
+        </button>
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
       </div>
     </div>
@@ -713,20 +1308,41 @@
 <div class="modal fade" id="disableReplicationModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Disable Replication</h5>
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+            <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
+            <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
+          </svg>
+          Disable Replication
+        </h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
-        <p>Are you sure you want to disable replication for this bucket?</p>
-        <p class="text-muted small">Existing objects in the target bucket will remain, but new uploads will no longer be copied.</p>
+        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+          </svg>
+          <div>
+            <strong>Are you sure?</strong><br>
+            <span class="small">New uploads will no longer be copied to the target bucket.</span>
+          </div>
+        </div>
+        <p class="text-muted small mb-0">Existing objects in the target bucket will remain unchanged.</p>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
             <input type="hidden" name="action" value="delete">
-            <button type="submit" class="btn btn-danger">Disable Replication</button>
+            <button type="submit" class="btn btn-warning">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+              </svg>
+              Disable Replication
+            </button>
         </form>
       </div>
     </div>
@@ -925,7 +1541,20 @@
     }
   });
 
-  policyPreset?.addEventListener('change', () => applyPolicyPreset(policyPreset.value));
+  // Handle button-based preset selector
+  const presetButtons = document.querySelectorAll('.preset-btn[data-preset]');
+  presetButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const preset = btn.dataset.preset;
+      // Update hidden input
+      if (policyPreset) policyPreset.value = preset;
+      // Update button active states
+      presetButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      // Apply preset
+      applyPolicyPreset(preset);
+    });
+  });
 
   if (policyPreset) {
     applyPolicyPreset(policyPreset.value || policyPreset.dataset.default || 'custom');
@@ -1772,5 +2401,65 @@
       bulkDownloadButton.innerHTML = originalHtml;
     }
   });
+
+  // Async load replication stats
+  const replicationStatsContainer = document.getElementById('replication-stats-cards');
+  if (replicationStatsContainer) {
+    const statusEndpoint = replicationStatsContainer.dataset.statusEndpoint;
+    const syncedEl = replicationStatsContainer.querySelector('[data-stat="synced"]');
+    const pendingEl = replicationStatsContainer.querySelector('[data-stat="pending"]');
+    const orphanedEl = replicationStatsContainer.querySelector('[data-stat="orphaned"]');
+    const bytesEl = replicationStatsContainer.querySelector('[data-stat="bytes"]');
+    const lastSyncEl = document.getElementById('replication-last-sync');
+    const lastSyncTimeEl = document.querySelector('[data-stat="last-sync-time"]');
+    const lastSyncKeyEl = document.querySelector('[data-stat="last-sync-key"]');
+
+    const loadReplicationStats = async () => {
+      try {
+        const resp = await fetch(statusEndpoint);
+        if (!resp.ok) throw new Error('Failed to fetch stats');
+        const data = await resp.json();
+        
+        // Update stats
+        if (syncedEl) syncedEl.textContent = data.objects_synced;
+        if (pendingEl) {
+          pendingEl.textContent = data.objects_pending;
+          if (data.objects_pending > 0) pendingEl.classList.add('text-warning');
+        }
+        if (orphanedEl) orphanedEl.textContent = data.objects_orphaned;
+        if (bytesEl) bytesEl.textContent = formatBytes(data.bytes_synced);
+        
+        // Update last sync
+        if (data.last_sync_at && lastSyncEl) {
+          lastSyncEl.style.display = '';
+          const date = new Date(data.last_sync_at * 1000);
+          if (lastSyncTimeEl) lastSyncTimeEl.textContent = date.toLocaleString();
+          if (lastSyncKeyEl && data.last_sync_key) {
+            lastSyncKeyEl.innerHTML = ' — <code class="small">' + escapeHtml(data.last_sync_key) + '</code>';
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load replication stats:', err);
+        if (syncedEl) syncedEl.textContent = '—';
+        if (pendingEl) pendingEl.textContent = '—';
+        if (orphanedEl) orphanedEl.textContent = '—';
+        if (bytesEl) bytesEl.textContent = '—';
+      }
+    };
+
+    // Load stats immediately
+    loadReplicationStats();
+
+    // Also refresh when the refresh button is clicked
+    const refreshBtn = document.querySelector('[data-refresh-replication]');
+    refreshBtn?.addEventListener('click', () => {
+      // Show loading state
+      if (syncedEl) syncedEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      if (pendingEl) pendingEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      if (orphanedEl) orphanedEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      if (bytesEl) bytesEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      loadReplicationStats();
+    });
+  }
 </script>
 {% endblock %}

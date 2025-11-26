@@ -99,11 +99,11 @@ def test_delete_object_retries_when_locked(tmp_path, monkeypatch):
     original_unlink = Path.unlink
     attempts = {"count": 0}
 
-    def flaky_unlink(self):
+    def flaky_unlink(self, missing_ok=False):
         if self == target_path and attempts["count"] < 1:
             attempts["count"] += 1
             raise PermissionError("locked")
-        return original_unlink(self)
+        return original_unlink(self, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", flaky_unlink)
 

@@ -11,7 +11,7 @@ from typing import Any, Dict
 from urllib.parse import quote, urlencode, urlparse
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
-from flask import Blueprint, Response, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request, g
 from werkzeug.http import http_date
 
 from .bucket_policies import BucketPolicyStore
@@ -127,14 +127,33 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     if not amz_date:
         raise IamError("Missing Date header")
 
+    try:
+        request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise IamError("Invalid X-Amz-Date format")
+
+    now = datetime.now(timezone.utc)
+    time_diff = abs((now - request_time).total_seconds())
+    if time_diff > 900:  # 15 minutes
+        raise IamError("Request timestamp too old or too far in the future")
+
+    required_headers = {'host', 'x-amz-date'}
+    signed_headers_set = set(signed_headers_str.split(';'))
+    if not required_headers.issubset(signed_headers_set):
+        # Some clients might sign 'date' instead of 'x-amz-date'
+        if 'date' in signed_headers_set:
+            required_headers.remove('x-amz-date')
+            required_headers.add('date')
+        
+        if not required_headers.issubset(signed_headers_set):
+             raise IamError("Required headers not signed")
+
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
     string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
-
-    # Calculate Signature
     signing_key = _get_signature_key(secret_key, date_stamp, region, service)
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    if calculated_signature != signature:
+    if not hmac.compare_digest(calculated_signature, signature):
         raise IamError("SignatureDoesNotMatch")
 
     return _iam().get_principal(access_key)
@@ -155,7 +174,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     except ValueError:
         raise IamError("Invalid Credential format")
 
-    # Check expiration
     try:
         req_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
@@ -190,7 +208,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     canonical_headers_parts = []
     for header in signed_headers_list:
         val = req.headers.get(header, "").strip()
-        # Collapse multiple spaces
         val = " ".join(val.split())
         canonical_headers_parts.append(f"{header}:{val}\n")
     canonical_headers = "".join(canonical_headers_parts)
@@ -240,7 +257,6 @@ def _verify_sigv4(req: Any) -> Principal | None:
 
 
 def _require_principal():
-    # Try SigV4 first
     if ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
        (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
         try:
@@ -568,6 +584,73 @@ def _render_tagging_document(tags: list[dict[str, str]]) -> Element:
         SubElement(tag_el, "Value").text = tag.get("Value", "")
     return root
 
+DANGEROUS_CONTENT_TYPES = frozenset([
+    "text/html",
+    "application/xhtml+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-javascript",
+    "text/ecmascript",
+    "application/ecmascript",
+    "image/svg+xml", 
+])
+
+SAFE_EXTENSION_MAP = {
+    ".txt": ["text/plain"],
+    ".json": ["application/json"],
+    ".xml": ["application/xml", "text/xml"],
+    ".csv": ["text/csv"],
+    ".pdf": ["application/pdf"],
+    ".png": ["image/png"],
+    ".jpg": ["image/jpeg"],
+    ".jpeg": ["image/jpeg"],
+    ".gif": ["image/gif"],
+    ".webp": ["image/webp"],
+    ".mp4": ["video/mp4"],
+    ".mp3": ["audio/mpeg"],
+    ".zip": ["application/zip"],
+    ".gz": ["application/gzip"],
+    ".tar": ["application/x-tar"],
+}
+
+
+def _validate_content_type(object_key: str, content_type: str | None) -> str | None:
+    """Validate Content-Type header for security.
+    
+    Returns an error message if validation fails, None otherwise.
+    
+    Rules:
+    1. Block dangerous MIME types that can execute scripts (unless explicitly allowed)
+    2. Warn if Content-Type doesn't match file extension (but don't block)
+    """
+    if not content_type:
+        return None
+    
+    base_type = content_type.split(";")[0].strip().lower()
+    
+    if base_type in DANGEROUS_CONTENT_TYPES:
+        ext = "." + object_key.rsplit(".", 1)[-1].lower() if "." in object_key else ""
+        
+        allowed_dangerous = {
+            ".svg": "image/svg+xml",
+            ".html": "text/html",
+            ".htm": "text/html",
+            ".xhtml": "application/xhtml+xml",
+            ".js": "application/javascript",
+            ".mjs": "application/javascript",
+        }
+        
+        if ext in allowed_dangerous and base_type == allowed_dangerous[ext]:
+            return None 
+        
+        return (
+            f"Content-Type '{content_type}' is potentially dangerous and not allowed "
+            f"for object key '{object_key}'. Use a safe Content-Type or rename the file "
+            f"with an appropriate extension."
+        )
+    
+    return None
+
 
 def _parse_cors_document(payload: bytes) -> list[dict[str, Any]]:
     try:
@@ -715,6 +798,10 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "tagging": _bucket_tagging_handler,
         "cors": _bucket_cors_handler,
         "encryption": _bucket_encryption_handler,
+        "location": _bucket_location_handler,
+        "acl": _bucket_acl_handler,
+        "versions": _bucket_list_versions_handler,
+        "lifecycle": _bucket_lifecycle_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -730,8 +817,8 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
 
 
 def _bucket_versioning_handler(bucket_name: str) -> Response:
-    if request.method != "GET":
-        return _method_not_allowed(["GET"])
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
     principal, error = _require_principal()
     if error:
         return error
@@ -740,6 +827,31 @@ def _bucket_versioning_handler(bucket_name: str) -> Response:
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()
+    
+    if request.method == "PUT":
+        payload = request.get_data(cache=False) or b""
+        if not payload.strip():
+            return _error_response("MalformedXML", "Request body is required", 400)
+        try:
+            root = fromstring(payload)
+        except ParseError:
+            return _error_response("MalformedXML", "Unable to parse XML document", 400)
+        if _strip_ns(root.tag) != "VersioningConfiguration":
+            return _error_response("MalformedXML", "Root element must be VersioningConfiguration", 400)
+        status_el = root.find("{*}Status")
+        if status_el is None:
+            status_el = root.find("Status")
+        status = (status_el.text or "").strip() if status_el is not None else ""
+        if status not in {"Enabled", "Suspended", ""}:
+            return _error_response("MalformedXML", "Status must be Enabled or Suspended", 400)
+        try:
+            storage.set_bucket_versioning(bucket_name, status == "Enabled")
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        current_app.logger.info("Bucket versioning updated", extra={"bucket": bucket_name, "status": status})
+        return Response(status=200)
+    
+    # GET
     try:
         enabled = storage.is_versioning_enabled(bucket_name)
     except StorageError as exc:
@@ -750,8 +862,8 @@ def _bucket_versioning_handler(bucket_name: str) -> Response:
 
 
 def _bucket_tagging_handler(bucket_name: str) -> Response:
-    if request.method not in {"GET", "PUT"}:
-        return _method_not_allowed(["GET", "PUT"])
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
     principal, error = _require_principal()
     if error:
         return error
@@ -768,6 +880,14 @@ def _bucket_tagging_handler(bucket_name: str) -> Response:
         if not tags:
             return _error_response("NoSuchTagSet", "No tags are configured for this bucket", 404)
         return _xml_response(_render_tagging_document(tags))
+    if request.method == "DELETE":
+        try:
+            storage.set_bucket_tags(bucket_name, None)
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        current_app.logger.info("Bucket tags deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+    # PUT
     payload = request.get_data(cache=False) or b""
     try:
         tags = _parse_tagging_document(payload)
@@ -780,6 +900,64 @@ def _bucket_tagging_handler(bucket_name: str) -> Response:
     except StorageError as exc:
         return _error_response("NoSuchBucket", str(exc), 404)
     current_app.logger.info("Bucket tags updated", extra={"bucket": bucket_name, "tags": len(tags)})
+    return Response(status=204)
+
+
+def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
+    """Handle object tagging operations (GET/PUT/DELETE /<bucket>/<key>?tagging)."""
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+    
+    principal, error = _require_principal()
+    if error:
+        return error
+    
+    # For tagging, we use read permission for GET, write for PUT/DELETE
+    action = "read" if request.method == "GET" else "write"
+    try:
+        _authorize_action(principal, bucket_name, action, object_key=object_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    storage = _storage()
+    
+    if request.method == "GET":
+        try:
+            tags = storage.get_object_tags(bucket_name, object_key)
+        except StorageError as exc:
+            message = str(exc)
+            if "Bucket" in message:
+                return _error_response("NoSuchBucket", message, 404)
+            return _error_response("NoSuchKey", message, 404)
+        return _xml_response(_render_tagging_document(tags))
+    
+    if request.method == "DELETE":
+        try:
+            storage.delete_object_tags(bucket_name, object_key)
+        except StorageError as exc:
+            message = str(exc)
+            if "Bucket" in message:
+                return _error_response("NoSuchBucket", message, 404)
+            return _error_response("NoSuchKey", message, 404)
+        current_app.logger.info("Object tags deleted", extra={"bucket": bucket_name, "key": object_key})
+        return Response(status=204)
+    
+    # PUT
+    payload = request.get_data(cache=False) or b""
+    try:
+        tags = _parse_tagging_document(payload)
+    except ValueError as exc:
+        return _error_response("MalformedXML", str(exc), 400)
+    if len(tags) > 10:
+        return _error_response("InvalidTag", "A maximum of 10 tags is supported for objects", 400)
+    try:
+        storage.set_object_tags(bucket_name, object_key, tags)
+    except StorageError as exc:
+        message = str(exc)
+        if "Bucket" in message:
+            return _error_response("NoSuchBucket", message, 404)
+        return _error_response("NoSuchKey", message, 404)
+    current_app.logger.info("Object tags updated", extra={"bucket": bucket_name, "key": object_key, "tags": len(tags)})
     return Response(status=204)
 
 
@@ -807,8 +985,8 @@ def _sanitize_cors_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _bucket_cors_handler(bucket_name: str) -> Response:
-    if request.method not in {"GET", "PUT"}:
-        return _method_not_allowed(["GET", "PUT"])
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
     principal, error = _require_principal()
     if error:
         return error
@@ -825,6 +1003,14 @@ def _bucket_cors_handler(bucket_name: str) -> Response:
         if not rules:
             return _error_response("NoSuchCORSConfiguration", "No CORS configuration found", 404)
         return _xml_response(_render_cors_document(rules))
+    if request.method == "DELETE":
+        try:
+            storage.set_bucket_cors(bucket_name, None)
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        current_app.logger.info("Bucket CORS deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+    # PUT
     payload = request.get_data(cache=False) or b""
     if not payload.strip():
         try:
@@ -889,6 +1075,328 @@ def _bucket_encryption_handler(bucket_name: str) -> Response:
         return _error_response("NoSuchBucket", str(exc), 404)
     current_app.logger.info("Bucket encryption updated", extra={"bucket": bucket_name})
     return Response(status=204)
+
+
+def _bucket_location_handler(bucket_name: str) -> Response:
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "list")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    
+    # Return the configured AWS_REGION
+    region = current_app.config.get("AWS_REGION", "us-east-1")
+    root = Element("LocationConstraint")
+    # AWS returns empty for us-east-1, but we'll be explicit
+    root.text = region if region != "us-east-1" else None
+    return _xml_response(root)
+
+
+def _bucket_acl_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    
+    if request.method == "PUT":
+        # We don't fully implement ACLs, but we accept the request for compatibility
+        # Check for canned ACL header
+        canned_acl = request.headers.get("x-amz-acl", "private")
+        current_app.logger.info("Bucket ACL set (canned)", extra={"bucket": bucket_name, "acl": canned_acl})
+        return Response(status=200)
+    
+    # GET - Return a basic ACL document showing full control for owner
+    root = Element("AccessControlPolicy")
+    owner = SubElement(root, "Owner")
+    SubElement(owner, "ID").text = principal.access_key if principal else "anonymous"
+    SubElement(owner, "DisplayName").text = principal.display_name if principal else "Anonymous"
+    
+    acl = SubElement(root, "AccessControlList")
+    grant = SubElement(acl, "Grant")
+    grantee = SubElement(grant, "Grantee")
+    grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "CanonicalUser")
+    SubElement(grantee, "ID").text = principal.access_key if principal else "anonymous"
+    SubElement(grantee, "DisplayName").text = principal.display_name if principal else "Anonymous"
+    SubElement(grant, "Permission").text = "FULL_CONTROL"
+    
+    return _xml_response(root)
+
+
+def _bucket_list_versions_handler(bucket_name: str) -> Response:
+    """Handle ListObjectVersions (GET /<bucket>?versions)."""
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+    
+    principal, error = _require_principal()
+    try:
+        _authorize_action(principal, bucket_name, "list")
+    except IamError as exc:
+        if error:
+            return error
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    storage = _storage()
+    
+    try:
+        objects = storage.list_objects(bucket_name)
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+    
+    prefix = request.args.get("prefix", "")
+    delimiter = request.args.get("delimiter", "")
+    max_keys = min(int(request.args.get("max-keys", 1000)), 1000)
+    key_marker = request.args.get("key-marker", "")
+    
+    if prefix:
+        objects = [obj for obj in objects if obj.key.startswith(prefix)]
+    
+    if key_marker:
+        objects = [obj for obj in objects if obj.key > key_marker]
+    
+    # Build XML response
+    root = Element("ListVersionsResult", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+    SubElement(root, "Name").text = bucket_name
+    SubElement(root, "Prefix").text = prefix
+    SubElement(root, "KeyMarker").text = key_marker
+    SubElement(root, "MaxKeys").text = str(max_keys)
+    if delimiter:
+        SubElement(root, "Delimiter").text = delimiter
+    
+    version_count = 0
+    is_truncated = False
+    next_key_marker = ""
+    
+    for obj in objects:
+        if version_count >= max_keys:
+            is_truncated = True
+            break
+        
+        # Current version
+        version = SubElement(root, "Version")
+        SubElement(version, "Key").text = obj.key
+        SubElement(version, "VersionId").text = "null"  # Current version ID
+        SubElement(version, "IsLatest").text = "true"
+        SubElement(version, "LastModified").text = obj.last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        SubElement(version, "ETag").text = f'"{obj.etag}"'
+        SubElement(version, "Size").text = str(obj.size)
+        SubElement(version, "StorageClass").text = "STANDARD"
+        
+        owner = SubElement(version, "Owner")
+        SubElement(owner, "ID").text = "local-owner"
+        SubElement(owner, "DisplayName").text = "Local Owner"
+        
+        version_count += 1
+        next_key_marker = obj.key
+        
+        # Get historical versions
+        try:
+            versions = storage.list_object_versions(bucket_name, obj.key)
+            for v in versions:
+                if version_count >= max_keys:
+                    is_truncated = True
+                    break
+                    
+                ver_elem = SubElement(root, "Version")
+                SubElement(ver_elem, "Key").text = obj.key
+                SubElement(ver_elem, "VersionId").text = v.get("version_id", "unknown")
+                SubElement(ver_elem, "IsLatest").text = "false"
+                SubElement(ver_elem, "LastModified").text = v.get("archived_at", "")
+                SubElement(ver_elem, "ETag").text = f'"{v.get("etag", "")}"'
+                SubElement(ver_elem, "Size").text = str(v.get("size", 0))
+                SubElement(ver_elem, "StorageClass").text = "STANDARD"
+                
+                owner = SubElement(ver_elem, "Owner")
+                SubElement(owner, "ID").text = "local-owner"
+                SubElement(owner, "DisplayName").text = "Local Owner"
+                
+                version_count += 1
+        except StorageError:
+            pass
+    
+    SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
+    if is_truncated and next_key_marker:
+        SubElement(root, "NextKeyMarker").text = next_key_marker
+    
+    return _xml_response(root)
+
+
+def _bucket_lifecycle_handler(bucket_name: str) -> Response:
+    """Handle bucket lifecycle configuration (GET/PUT/DELETE /<bucket>?lifecycle)."""
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+    
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    storage = _storage()
+    
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    
+    if request.method == "GET":
+        config = storage.get_bucket_lifecycle(bucket_name)
+        if not config:
+            return _error_response("NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist", 404)
+        return _xml_response(_render_lifecycle_config(config))
+    
+    if request.method == "DELETE":
+        storage.set_bucket_lifecycle(bucket_name, None)
+        current_app.logger.info("Bucket lifecycle deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+    
+    # PUT
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+    try:
+        config = _parse_lifecycle_config(payload)
+        storage.set_bucket_lifecycle(bucket_name, config)
+    except ValueError as exc:
+        return _error_response("MalformedXML", str(exc), 400)
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+    
+    current_app.logger.info("Bucket lifecycle updated", extra={"bucket": bucket_name})
+    return Response(status=200)
+
+
+def _render_lifecycle_config(config: list) -> Element:
+    """Render lifecycle configuration to XML."""
+    root = Element("LifecycleConfiguration", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+    for rule in config:
+        rule_el = SubElement(root, "Rule")
+        SubElement(rule_el, "ID").text = rule.get("ID", "")
+        
+        # Filter
+        filter_el = SubElement(rule_el, "Filter")
+        if rule.get("Prefix"):
+            SubElement(filter_el, "Prefix").text = rule.get("Prefix", "")
+        
+        SubElement(rule_el, "Status").text = rule.get("Status", "Enabled")
+        
+        # Expiration
+        if "Expiration" in rule:
+            exp = rule["Expiration"]
+            exp_el = SubElement(rule_el, "Expiration")
+            if "Days" in exp:
+                SubElement(exp_el, "Days").text = str(exp["Days"])
+            if "Date" in exp:
+                SubElement(exp_el, "Date").text = exp["Date"]
+            if exp.get("ExpiredObjectDeleteMarker"):
+                SubElement(exp_el, "ExpiredObjectDeleteMarker").text = "true"
+        
+        # NoncurrentVersionExpiration
+        if "NoncurrentVersionExpiration" in rule:
+            nve = rule["NoncurrentVersionExpiration"]
+            nve_el = SubElement(rule_el, "NoncurrentVersionExpiration")
+            if "NoncurrentDays" in nve:
+                SubElement(nve_el, "NoncurrentDays").text = str(nve["NoncurrentDays"])
+        
+        # AbortIncompleteMultipartUpload
+        if "AbortIncompleteMultipartUpload" in rule:
+            aimu = rule["AbortIncompleteMultipartUpload"]
+            aimu_el = SubElement(rule_el, "AbortIncompleteMultipartUpload")
+            if "DaysAfterInitiation" in aimu:
+                SubElement(aimu_el, "DaysAfterInitiation").text = str(aimu["DaysAfterInitiation"])
+    
+    return root
+
+
+def _parse_lifecycle_config(payload: bytes) -> list:
+    """Parse lifecycle configuration from XML."""
+    try:
+        root = fromstring(payload)
+    except ParseError as exc:
+        raise ValueError(f"Unable to parse XML document: {exc}") from exc
+    
+    if _strip_ns(root.tag) != "LifecycleConfiguration":
+        raise ValueError("Root element must be LifecycleConfiguration")
+    
+    rules = []
+    for rule_el in root.findall("{*}Rule") or root.findall("Rule"):
+        rule: dict = {}
+        
+        # ID
+        id_el = rule_el.find("{*}ID") or rule_el.find("ID")
+        if id_el is not None and id_el.text:
+            rule["ID"] = id_el.text.strip()
+        
+        # Filter/Prefix
+        filter_el = rule_el.find("{*}Filter") or rule_el.find("Filter")
+        if filter_el is not None:
+            prefix_el = filter_el.find("{*}Prefix") or filter_el.find("Prefix")
+            if prefix_el is not None and prefix_el.text:
+                rule["Prefix"] = prefix_el.text
+        
+        # Legacy Prefix (outside Filter)
+        if "Prefix" not in rule:
+            prefix_el = rule_el.find("{*}Prefix") or rule_el.find("Prefix")
+            if prefix_el is not None:
+                rule["Prefix"] = prefix_el.text or ""
+        
+        # Status
+        status_el = rule_el.find("{*}Status") or rule_el.find("Status")
+        rule["Status"] = (status_el.text or "Enabled").strip() if status_el is not None else "Enabled"
+        
+        # Expiration
+        exp_el = rule_el.find("{*}Expiration") or rule_el.find("Expiration")
+        if exp_el is not None:
+            expiration: dict = {}
+            days_el = exp_el.find("{*}Days") or exp_el.find("Days")
+            if days_el is not None and days_el.text:
+                expiration["Days"] = int(days_el.text.strip())
+            date_el = exp_el.find("{*}Date") or exp_el.find("Date")
+            if date_el is not None and date_el.text:
+                expiration["Date"] = date_el.text.strip()
+            eodm_el = exp_el.find("{*}ExpiredObjectDeleteMarker") or exp_el.find("ExpiredObjectDeleteMarker")
+            if eodm_el is not None and (eodm_el.text or "").strip().lower() in {"true", "1"}:
+                expiration["ExpiredObjectDeleteMarker"] = True
+            if expiration:
+                rule["Expiration"] = expiration
+        
+        # NoncurrentVersionExpiration
+        nve_el = rule_el.find("{*}NoncurrentVersionExpiration") or rule_el.find("NoncurrentVersionExpiration")
+        if nve_el is not None:
+            nve: dict = {}
+            days_el = nve_el.find("{*}NoncurrentDays") or nve_el.find("NoncurrentDays")
+            if days_el is not None and days_el.text:
+                nve["NoncurrentDays"] = int(days_el.text.strip())
+            if nve:
+                rule["NoncurrentVersionExpiration"] = nve
+        
+        # AbortIncompleteMultipartUpload
+        aimu_el = rule_el.find("{*}AbortIncompleteMultipartUpload") or rule_el.find("AbortIncompleteMultipartUpload")
+        if aimu_el is not None:
+            aimu: dict = {}
+            days_el = aimu_el.find("{*}DaysAfterInitiation") or aimu_el.find("DaysAfterInitiation")
+            if days_el is not None and days_el.text:
+                aimu["DaysAfterInitiation"] = int(days_el.text.strip())
+            if aimu:
+                rule["AbortIncompleteMultipartUpload"] = aimu
+        
+        rules.append(rule)
+    
+    return rules
 
 
 def _bulk_delete_handler(bucket_name: str) -> Response:
@@ -1051,7 +1559,7 @@ def bucket_handler(bucket_name: str) -> Response:
         current_app.logger.info("Bucket deleted", extra={"bucket": bucket_name})
         return Response(status=204)
 
-    # GET - list objects
+    # GET - list objects (supports both ListObjects and ListObjectsV2)
     principal, error = _require_principal()
     try:
         _authorize_action(principal, bucket_name, "list")
@@ -1064,26 +1572,159 @@ def bucket_handler(bucket_name: str) -> Response:
     except StorageError as exc:
         return _error_response("NoSuchBucket", str(exc), 404)
 
-    root = Element("ListBucketResult")
-    SubElement(root, "Name").text = bucket_name
-    SubElement(root, "MaxKeys").text = str(current_app.config["UI_PAGE_SIZE"])
-    SubElement(root, "IsTruncated").text = "false"
-    for meta in objects:
-        obj_el = SubElement(root, "Contents")
-        SubElement(obj_el, "Key").text = meta.key
-        SubElement(obj_el, "LastModified").text = meta.last_modified.isoformat()
-        SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
-        SubElement(obj_el, "Size").text = str(meta.size)
+    # Check if this is ListObjectsV2 (list-type=2)
+    list_type = request.args.get("list-type")
+    prefix = request.args.get("prefix", "")
+    delimiter = request.args.get("delimiter", "")
+    max_keys = min(int(request.args.get("max-keys", current_app.config["UI_PAGE_SIZE"])), 1000)
+    
+    # Pagination markers
+    marker = request.args.get("marker", "")  # ListObjects v1
+    continuation_token = request.args.get("continuation-token", "")  # ListObjectsV2
+    start_after = request.args.get("start-after", "")  # ListObjectsV2
+    
+    # For ListObjectsV2, continuation-token takes precedence, then start-after
+    # For ListObjects v1, use marker
+    effective_start = ""
+    if list_type == "2":
+        if continuation_token:
+            import base64
+            try:
+                effective_start = base64.urlsafe_b64decode(continuation_token.encode()).decode("utf-8")
+            except Exception:
+                effective_start = continuation_token
+        elif start_after:
+            effective_start = start_after
+    else:
+        effective_start = marker
+    
+    if prefix:
+        objects = [obj for obj in objects if obj.key.startswith(prefix)]
+    
+    if effective_start:
+        objects = [obj for obj in objects if obj.key > effective_start]
+    
+    common_prefixes: list[str] = []
+    filtered_objects: list = []
+    if delimiter:
+        seen_prefixes: set[str] = set()
+        for obj in objects:
+            key_after_prefix = obj.key[len(prefix):] if prefix else obj.key
+            if delimiter in key_after_prefix:
+                # This is a "folder" - extract the common prefix
+                common_prefix = prefix + key_after_prefix.split(delimiter)[0] + delimiter
+                if common_prefix not in seen_prefixes:
+                    seen_prefixes.add(common_prefix)
+                    common_prefixes.append(common_prefix)
+            else:
+                filtered_objects.append(obj)
+        objects = filtered_objects
+        common_prefixes = sorted(common_prefixes)
+    
+    total_items = len(objects) + len(common_prefixes)
+    is_truncated = total_items > max_keys
+    
+    if len(objects) >= max_keys:
+        objects = objects[:max_keys]
+        common_prefixes = []
+    else:
+        remaining = max_keys - len(objects)
+        common_prefixes = common_prefixes[:remaining]
+    
+    next_marker = ""
+    next_continuation_token = ""
+    if is_truncated:
+        if objects:
+            next_marker = objects[-1].key
+        elif common_prefixes:
+            next_marker = common_prefixes[-1].rstrip(delimiter) if delimiter else common_prefixes[-1]
+        
+        if list_type == "2" and next_marker:
+            import base64
+            next_continuation_token = base64.urlsafe_b64encode(next_marker.encode()).decode("utf-8")
+
+    if list_type == "2":
+        root = Element("ListBucketResult")
+        SubElement(root, "Name").text = bucket_name
+        SubElement(root, "Prefix").text = prefix
+        SubElement(root, "MaxKeys").text = str(max_keys)
+        SubElement(root, "KeyCount").text = str(len(objects) + len(common_prefixes))
+        SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
+        if delimiter:
+            SubElement(root, "Delimiter").text = delimiter
+        
+        continuation_token = request.args.get("continuation-token", "")
+        start_after = request.args.get("start-after", "")
+        if continuation_token:
+            SubElement(root, "ContinuationToken").text = continuation_token
+        if start_after:
+            SubElement(root, "StartAfter").text = start_after
+        
+        if is_truncated and next_continuation_token:
+            SubElement(root, "NextContinuationToken").text = next_continuation_token
+        
+        for meta in objects:
+            obj_el = SubElement(root, "Contents")
+            SubElement(obj_el, "Key").text = meta.key
+            SubElement(obj_el, "LastModified").text = meta.last_modified.isoformat()
+            SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
+            SubElement(obj_el, "Size").text = str(meta.size)
+            SubElement(obj_el, "StorageClass").text = "STANDARD"
+        
+        for cp in common_prefixes:
+            cp_el = SubElement(root, "CommonPrefixes")
+            SubElement(cp_el, "Prefix").text = cp
+    else:
+        root = Element("ListBucketResult")
+        SubElement(root, "Name").text = bucket_name
+        SubElement(root, "Prefix").text = prefix
+        SubElement(root, "Marker").text = marker
+        SubElement(root, "MaxKeys").text = str(max_keys)
+        SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
+        if delimiter:
+            SubElement(root, "Delimiter").text = delimiter
+        
+        if is_truncated and delimiter and next_marker:
+            SubElement(root, "NextMarker").text = next_marker
+        
+        for meta in objects:
+            obj_el = SubElement(root, "Contents")
+            SubElement(obj_el, "Key").text = meta.key
+            SubElement(obj_el, "LastModified").text = meta.last_modified.isoformat()
+            SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
+            SubElement(obj_el, "Size").text = str(meta.size)
+        
+        for cp in common_prefixes:
+            cp_el = SubElement(root, "CommonPrefixes")
+            SubElement(cp_el, "Prefix").text = cp
 
     return _xml_response(root)
 
 
-@s3_api_bp.route("/<bucket_name>/<path:object_key>", methods=["PUT", "GET", "DELETE", "HEAD"], strict_slashes=False)
+@s3_api_bp.route("/<bucket_name>/<path:object_key>", methods=["PUT", "GET", "DELETE", "HEAD", "POST"], strict_slashes=False)
 @limiter.limit("240 per minute")
 def object_handler(bucket_name: str, object_key: str):
     storage = _storage()
 
+    if "tagging" in request.args:
+        return _object_tagging_handler(bucket_name, object_key)
+
+    # Multipart Uploads
+    if request.method == "POST":
+        if "uploads" in request.args:
+            return _initiate_multipart_upload(bucket_name, object_key)
+        if "uploadId" in request.args:
+            return _complete_multipart_upload(bucket_name, object_key)
+        return _method_not_allowed(["GET", "PUT", "DELETE", "HEAD", "POST"])
+
     if request.method == "PUT":
+        if "partNumber" in request.args and "uploadId" in request.args:
+            return _upload_part(bucket_name, object_key)
+
+        copy_source = request.headers.get("x-amz-copy-source")
+        if copy_source:
+            return _copy_object(bucket_name, object_key, copy_source)
+
         _, error = _object_principal("write", bucket_name, object_key)
         if error:
             return error
@@ -1094,6 +1735,12 @@ def object_handler(bucket_name: str, object_key: str):
             stream = AwsChunkedDecoder(stream)
 
         metadata = _extract_request_metadata()
+        
+        content_type = request.headers.get("Content-Type")
+        validation_error = _validate_content_type(object_key, content_type)
+        if validation_error:
+            return _error_response("InvalidArgument", validation_error, 400)
+        
         try:
             meta = storage.put_object(
                 bucket_name,
@@ -1121,6 +1768,9 @@ def object_handler(bucket_name: str, object_key: str):
         return response
 
     if request.method in {"GET", "HEAD"}:
+        if request.method == "GET" and "uploadId" in request.args:
+            return _list_parts(bucket_name, object_key)
+
         _, error = _object_principal("read", bucket_name, object_key)
         if error:
             return error
@@ -1146,7 +1796,9 @@ def object_handler(bucket_name: str, object_key: str):
         current_app.logger.info(action, extra={"bucket": bucket_name, "key": object_key, "bytes": logged_bytes})
         return response
 
-    # DELETE
+    if "uploadId" in request.args:
+        return _abort_multipart_upload(bucket_name, object_key)
+
     _, error = _object_principal("delete", bucket_name, object_key)
     if error:
         return error
@@ -1161,6 +1813,51 @@ def object_handler(bucket_name: str, object_key: str):
     return Response(status=204)
 
 
+def _list_parts(bucket_name: str, object_key: str) -> Response:
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "read", object_key=object_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    upload_id = request.args.get("uploadId")
+    if not upload_id:
+        return _error_response("InvalidArgument", "uploadId is required", 400)
+
+    try:
+        parts = _storage().list_multipart_parts(bucket_name, upload_id)
+    except StorageError as exc:
+        return _error_response("NoSuchUpload", str(exc), 404)
+
+    root = Element("ListPartsResult")
+    SubElement(root, "Bucket").text = bucket_name
+    SubElement(root, "Key").text = object_key
+    SubElement(root, "UploadId").text = upload_id
+    
+    initiator = SubElement(root, "Initiator")
+    SubElement(initiator, "ID").text = principal.access_key
+    SubElement(initiator, "DisplayName").text = principal.display_name
+    
+    owner = SubElement(root, "Owner")
+    SubElement(owner, "ID").text = principal.access_key
+    SubElement(owner, "DisplayName").text = principal.display_name
+    
+    SubElement(root, "StorageClass").text = "STANDARD"
+    SubElement(root, "PartNumberMarker").text = "0"
+    SubElement(root, "NextPartNumberMarker").text = str(parts[-1]["PartNumber"]) if parts else "0"
+    SubElement(root, "MaxParts").text = "1000"
+    SubElement(root, "IsTruncated").text = "false"
+
+    for part in parts:
+        p = SubElement(root, "Part")
+        SubElement(p, "PartNumber").text = str(part["PartNumber"])
+        SubElement(p, "LastModified").text = part["LastModified"].isoformat()
+        SubElement(p, "ETag").text = f'"{part["ETag"]}"'
+        SubElement(p, "Size").text = str(part["Size"])
+
+    return _xml_response(root)
 
 
 @s3_api_bp.route("/bucket-policy/<bucket_name>", methods=["GET", "PUT", "DELETE"])
@@ -1280,6 +1977,88 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         return _error_response("AccessDenied", str(exc), 403)
 
 
+def _copy_object(dest_bucket: str, dest_key: str, copy_source: str) -> Response:
+    """Handle S3 CopyObject operation."""
+    from urllib.parse import unquote
+    copy_source = unquote(copy_source)
+    if copy_source.startswith("/"):
+        copy_source = copy_source[1:]
+    
+    parts = copy_source.split("/", 1)
+    if len(parts) != 2:
+        return _error_response("InvalidArgument", "Invalid x-amz-copy-source format", 400)
+    
+    source_bucket, source_key = parts
+    if not source_bucket or not source_key:
+        return _error_response("InvalidArgument", "Invalid x-amz-copy-source format", 400)
+    
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, source_bucket, "read", object_key=source_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    try:
+        _authorize_action(principal, dest_bucket, "write", object_key=dest_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    storage = _storage()
+    
+    try:
+        source_path = storage.get_object_path(source_bucket, source_key)
+    except StorageError:
+        return _error_response("NoSuchKey", "Source object not found", 404)
+    
+    source_metadata = storage.get_object_metadata(source_bucket, source_key)
+    
+    metadata_directive = request.headers.get("x-amz-metadata-directive", "COPY").upper()
+    if metadata_directive == "REPLACE":
+        metadata = _extract_request_metadata()
+        content_type = request.headers.get("Content-Type")
+        validation_error = _validate_content_type(dest_key, content_type)
+        if validation_error:
+            return _error_response("InvalidArgument", validation_error, 400)
+    else:
+        metadata = source_metadata
+    
+    try:
+        with source_path.open("rb") as stream:
+            meta = storage.put_object(
+                dest_bucket,
+                dest_key,
+                stream,
+                metadata=metadata or None,
+            )
+    except StorageError as exc:
+        message = str(exc)
+        if "Bucket" in message:
+            return _error_response("NoSuchBucket", message, 404)
+        return _error_response("InvalidArgument", message, 400)
+    
+    current_app.logger.info(
+        "Object copied",
+        extra={
+            "source_bucket": source_bucket,
+            "source_key": source_key,
+            "dest_bucket": dest_bucket,
+            "dest_key": dest_key,
+            "size": meta.size,
+        },
+    )
+    
+    user_agent = request.headers.get("User-Agent", "")
+    if "S3ReplicationAgent" not in user_agent:
+        _replication_manager().trigger_replication(dest_bucket, dest_key, action="write")
+    
+    root = Element("CopyObjectResult")
+    SubElement(root, "LastModified").text = meta.last_modified.isoformat()
+    SubElement(root, "ETag").text = f'"{meta.etag}"'
+    return _xml_response(root)
+
+
 class AwsChunkedDecoder:
     """Decodes aws-chunked encoded streams."""
     def __init__(self, stream):
@@ -1312,12 +2091,11 @@ class AwsChunkedDecoder:
                     if crlf != b"\r\n":
                         raise IOError("Malformed chunk: missing CRLF")
             else:
-                # Read chunk size line
                 line = b""
                 while True:
                     char = self.stream.read(1)
                     if not char:
-                        if not line: # EOF at start of chunk size
+                        if not line:
                             self.finished = True
                             return result
                         raise IOError("Unexpected EOF in chunk size")
@@ -1325,7 +2103,6 @@ class AwsChunkedDecoder:
                     if line.endswith(b"\r\n"):
                         break
                 
-                # Parse chunk size (hex)
                 try:
                     line_str = line.decode("ascii").strip()
                     # Handle chunk-signature extension if present (e.g. "1000;chunk-signature=...")
@@ -1337,7 +2114,6 @@ class AwsChunkedDecoder:
 
                 if chunk_size == 0:
                     self.finished = True
-                    # Read trailers if any (until empty line)
                     while True:
                         line = b""
                         while True:
@@ -1354,3 +2130,159 @@ class AwsChunkedDecoder:
                 self.chunk_remaining = chunk_size
         
         return result
+
+
+def _initiate_multipart_upload(bucket_name: str, object_key: str) -> Response:
+    principal, error = _object_principal("write", bucket_name, object_key)
+    if error:
+        return error
+    
+    metadata = _extract_request_metadata()
+    try:
+        upload_id = _storage().initiate_multipart_upload(
+            bucket_name, 
+            object_key, 
+            metadata=metadata or None
+        )
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+
+    root = Element("InitiateMultipartUploadResult")
+    SubElement(root, "Bucket").text = bucket_name
+    SubElement(root, "Key").text = object_key
+    SubElement(root, "UploadId").text = upload_id
+    return _xml_response(root)
+
+
+def _upload_part(bucket_name: str, object_key: str) -> Response:
+    principal, error = _object_principal("write", bucket_name, object_key)
+    if error:
+        return error
+
+    upload_id = request.args.get("uploadId")
+    part_number_str = request.args.get("partNumber")
+    if not upload_id or not part_number_str:
+        return _error_response("InvalidArgument", "uploadId and partNumber are required", 400)
+    
+    try:
+        part_number = int(part_number_str)
+    except ValueError:
+        return _error_response("InvalidArgument", "partNumber must be an integer", 400)
+
+    stream = request.stream
+    content_encoding = request.headers.get("Content-Encoding", "").lower()
+    if "aws-chunked" in content_encoding:
+        stream = AwsChunkedDecoder(stream)
+
+    try:
+        etag = _storage().upload_multipart_part(bucket_name, upload_id, part_number, stream)
+    except StorageError as exc:
+        if "NoSuchBucket" in str(exc):
+            return _error_response("NoSuchBucket", str(exc), 404)
+        if "Multipart upload not found" in str(exc):
+            return _error_response("NoSuchUpload", str(exc), 404)
+        return _error_response("InvalidArgument", str(exc), 400)
+
+    response = Response(status=200)
+    response.headers["ETag"] = f'"{etag}"'
+    return response
+
+
+def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
+    principal, error = _object_principal("write", bucket_name, object_key)
+    if error:
+        return error
+
+    upload_id = request.args.get("uploadId")
+    if not upload_id:
+        return _error_response("InvalidArgument", "uploadId is required", 400)
+
+    payload = request.get_data(cache=False) or b""
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+    
+    if _strip_ns(root.tag) != "CompleteMultipartUpload":
+        return _error_response("MalformedXML", "Root element must be CompleteMultipartUpload", 400)
+
+    parts = []
+    for part_el in list(root):
+        if _strip_ns(part_el.tag) != "Part":
+            continue
+        part_number_el = part_el.find("{*}PartNumber")
+        if part_number_el is None:
+            part_number_el = part_el.find("PartNumber")
+        
+        etag_el = part_el.find("{*}ETag")
+        if etag_el is None:
+            etag_el = part_el.find("ETag")
+            
+        if part_number_el is not None and etag_el is not None:
+            parts.append({
+                "PartNumber": int(part_number_el.text or 0),
+                "ETag": (etag_el.text or "").strip('"')
+            })
+
+    try:
+        meta = _storage().complete_multipart_upload(bucket_name, upload_id, parts)
+    except StorageError as exc:
+        if "NoSuchBucket" in str(exc):
+            return _error_response("NoSuchBucket", str(exc), 404)
+        if "Multipart upload not found" in str(exc):
+            return _error_response("NoSuchUpload", str(exc), 404)
+        return _error_response("InvalidPart", str(exc), 400)
+
+    user_agent = request.headers.get("User-Agent", "")
+    if "S3ReplicationAgent" not in user_agent:
+        _replication_manager().trigger_replication(bucket_name, object_key, action="write")
+
+    root = Element("CompleteMultipartUploadResult")
+    location = f"{request.host_url}{bucket_name}/{object_key}"
+    SubElement(root, "Location").text = location
+    SubElement(root, "Bucket").text = bucket_name
+    SubElement(root, "Key").text = object_key
+    SubElement(root, "ETag").text = f'"{meta.etag}"'
+    
+    return _xml_response(root)
+
+
+def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
+    principal, error = _object_principal("delete", bucket_name, object_key)
+    if error:
+        return error
+
+    upload_id = request.args.get("uploadId")
+    if not upload_id:
+        return _error_response("InvalidArgument", "uploadId is required", 400)
+
+    try:
+        _storage().abort_multipart_upload(bucket_name, upload_id)
+    except StorageError as exc:
+        # Abort is idempotent, but if bucket missing...
+        if "Bucket does not exist" in str(exc):
+            return _error_response("NoSuchBucket", str(exc), 404)
+            
+    return Response(status=204)
+
+
+@s3_api_bp.before_request
+def resolve_principal():
+    g.principal = None
+    # Try SigV4
+    try:
+        if ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
+           (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
+            g.principal = _verify_sigv4(request)
+            return
+    except Exception:
+        pass
+    
+    # Try simple auth headers (internal/testing)
+    access_key = request.headers.get("X-Access-Key")
+    secret_key = request.headers.get("X-Secret-Key")
+    if access_key and secret_key:
+        try:
+            g.principal = _iam().authenticate(access_key, secret_key)
+        except Exception:
+            pass

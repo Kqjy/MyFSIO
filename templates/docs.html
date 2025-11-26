@@ -31,20 +31,124 @@
 . .venv/Scripts/activate      # PowerShell: .\\.venv\\Scripts\\Activate.ps1
 pip install -r requirements.txt
 
-# Run both API and UI
+# Run both API and UI (Development)
 python run.py
+
+# Run in Production (Waitress server)
+python run.py --prod
 
 # Or run individually
 python run.py --mode api
 python run.py --mode ui
 </code></pre>
-        <p class="small text-muted mb-0">Configuration lives in <code>app/config.py</code>; override variables via the shell (e.g., <code>STORAGE_ROOT</code>, <code>API_BASE_URL</code>, <code>SECRET_KEY</code>, <code>MAX_UPLOAD_SIZE</code>).</p>
+        <h3 class="h6 mt-4 mb-2">Configuration</h3>
+        <p class="text-muted small">Configuration defaults live in <code>app/config.py</code>. You can override them using environment variables. This is critical for production deployments behind proxies.</p>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered small mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Variable</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>API_BASE_URL</code></td>
+                <td><code>http://127.0.0.1:5000</code></td>
+                <td>The public URL of the API. <strong>Required</strong> if running behind a proxy or if the UI and API are on different domains. Ensures presigned URLs are generated correctly.</td>
+              </tr>
+              <tr>
+                <td><code>STORAGE_ROOT</code></td>
+                <td><code>./data</code></td>
+                <td>Directory for buckets and objects.</td>
+              </tr>
+              <tr>
+                <td><code>MAX_UPLOAD_SIZE</code></td>
+                <td><code>5 GB</code></td>
+                <td>Max request body size.</td>
+              </tr>
+              <tr>
+                <td><code>SECRET_KEY</code></td>
+                <td>(Random)</td>
+                <td>Flask session key. Set this in production.</td>
+              </tr>
+              <tr>
+                <td><code>APP_HOST</code></td>
+                <td><code>0.0.0.0</code></td>
+                <td>Bind interface.</td>
+              </tr>
+              <tr>
+                <td><code>APP_PORT</code></td>
+                <td><code>5000</code></td>
+                <td>Listen port.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </article>
+    <article id="background" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">02</span>
+          <h2 class="h4 mb-0">Running in background</h2>
+        </div>
+        <p class="text-muted">For production or server deployments, run MyFSIO as a background service so it persists after you close the terminal.</p>
+        
+        <h3 class="h6 text-uppercase text-muted mt-4">Quick Start (nohup)</h3>
+        <p class="text-muted small">Simplest way to run in background—survives terminal close:</p>
+<pre class="mb-3"><code class="language-bash"># Using Python
+nohup python run.py --prod > /dev/null 2>&1 &
+
+# Using compiled binary
+nohup ./myfsio > /dev/null 2>&1 &
+
+# Check if running
+ps aux | grep myfsio</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Screen / Tmux</h3>
+        <p class="text-muted small">Attach/detach from a persistent session:</p>
+<pre class="mb-3"><code class="language-bash"># Start in a detached screen session
+screen -dmS myfsio ./myfsio
+
+# Attach to view logs
+screen -r myfsio
+
+# Detach: press Ctrl+A, then D</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Systemd (Recommended for Production)</h3>
+        <p class="text-muted small">Create <code>/etc/systemd/system/myfsio.service</code>:</p>
+<pre class="mb-3"><code class="language-ini">[Unit]
+Description=MyFSIO S3-Compatible Storage
+After=network.target
+
+[Service]
+Type=simple
+User=myfsio
+WorkingDirectory=/opt/myfsio
+ExecStart=/opt/myfsio/myfsio
+Restart=on-failure
+RestartSec=5
+Environment=MYFSIO_DATA_DIR=/var/lib/myfsio
+Environment=API_BASE_URL=https://s3.example.com
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+        <p class="text-muted small">Then enable and start:</p>
+<pre class="mb-0"><code class="language-bash">sudo systemctl daemon-reload
+sudo systemctl enable myfsio
+sudo systemctl start myfsio
+
+# Check status
+sudo systemctl status myfsio
+sudo journalctl -u myfsio -f   # View logs</code></pre>
       </div>
     </article>
     <article id="auth" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">02</span>
+          <span class="docs-section-kicker">03</span>
           <h2 class="h4 mb-0">Authenticate &amp; manage IAM</h2>
         </div>
         <p class="text-muted">MyFSIO seeds <code>data/.myfsio.sys/config/iam.json</code> with <code>localadmin/localadmin</code>. Sign in once, rotate it, then grant least-privilege access to teammates and tools.</p>
@@ -62,7 +166,7 @@ python run.py --mode ui
     <article id="console" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">03</span>
+          <span class="docs-section-kicker">04</span>
           <h2 class="h4 mb-0">Use the console effectively</h2>
         </div>
         <p class="text-muted">Each workspace models an S3 workflow so you can administer buckets end-to-end.</p>
@@ -101,7 +205,7 @@ python run.py --mode ui
     <article id="automation" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">04</span>
+          <span class="docs-section-kicker">05</span>
           <h2 class="h4 mb-0">Automate with CLI &amp; tools</h2>
         </div>
         <p class="text-muted">Point standard S3 clients at {{ api_base }} and reuse the same IAM credentials.</p>
@@ -154,7 +258,7 @@ curl -X POST {{ api_base }}/presign/demo/notes.txt \
     <article id="api" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">05</span>
+          <span class="docs-section-kicker">06</span>
           <h2 class="h4 mb-0">Key REST endpoints</h2>
         </div>
         <div class="table-responsive">
@@ -221,7 +325,7 @@ curl -X POST {{ api_base }}/presign/demo/notes.txt \
     <article id="examples" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">06</span>
+          <span class="docs-section-kicker">07</span>
           <h2 class="h4 mb-0">API Examples</h2>
         </div>
         <p class="text-muted">Common operations using boto3.</p>
@@ -260,7 +364,7 @@ s3.complete_multipart_upload(
     <article id="replication" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">07</span>
+          <span class="docs-section-kicker">08</span>
           <h2 class="h4 mb-0">Site Replication</h2>
         </div>
         <p class="text-muted">Automatically copy new objects to another MyFSIO instance or S3-compatible service for backup or disaster recovery.</p>
@@ -307,7 +411,7 @@ s3.complete_multipart_upload(
     <article id="troubleshooting" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">08</span>
+          <span class="docs-section-kicker">09</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -357,10 +461,12 @@ s3.complete_multipart_upload(
         <h3 class="h6 text-uppercase text-muted mb-3">On this page</h3>
         <ul class="list-unstyled docs-toc mb-4">
           <li><a href="#setup">Set up &amp; run</a></li>
+          <li><a href="#background">Running in background</a></li>
           <li><a href="#auth">Authentication &amp; IAM</a></li>
           <li><a href="#console">Console tour</a></li>
           <li><a href="#automation">Automation / CLI</a></li>
           <li><a href="#api">REST endpoints</a></li>
+          <li><a href="#examples">API Examples</a></li>
           <li><a href="#replication">Site Replication</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>
         </ul>
