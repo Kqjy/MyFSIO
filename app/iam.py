@@ -409,9 +409,11 @@ class IamService:
         raise IamError("User not found")
 
     def get_secret_key(self, access_key: str) -> str | None:
+        self._maybe_reload()
         record = self._users.get(access_key)
         return record["secret_key"] if record else None
 
     def get_principal(self, access_key: str) -> Principal | None:
+        self._maybe_reload()
         record = self._users.get(access_key)
         return self._build_principal(access_key, record) if record else None
