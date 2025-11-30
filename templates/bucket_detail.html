@@ -84,7 +84,7 @@
             </svg>
             Upload
           </button>
-          <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" />
+          <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
           <button class="btn btn-outline-danger btn-sm d-none" type="button" data-bulk-delete-trigger disabled>
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
               <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
@@ -100,6 +100,19 @@
             Download
           </button>
         </div>
+        <!-- Folder breadcrumb navigation -->
+        <nav id="folder-breadcrumb" class="mt-2 d-none" aria-label="Folder navigation">
+          <ol class="breadcrumb mb-0 small">
+            <li class="breadcrumb-item">
+              <a href="#" data-folder-nav="" class="text-decoration-none">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3H14.5A1.5 1.5 0 0 1 16 4.5v1.384l-4.578-.724a3 3 0 0 0-2.856 1.13l-2.847 3.55A3 3 0 0 0 5 11.373V14H2.5A1.5 1.5 0 0 1 1 12.5v-8A1.5 1.5 0 0 1 2.5 3H6c-.314 0-.6-.172-.742-.438l-.328-.658A.5.5 0 0 0 4.47 1.657z"/>
+                </svg>
+                Root
+              </a>
+            </li>
+          </ol>
+        </nav>
       </div>
       <div
         class="table-responsive objects-table-container drop-zone"
@@ -287,16 +300,16 @@
             <div id="version-list" class="list-group list-group-flush small rounded overflow-hidden" style="border: 1px solid var(--myfsio-card-border);"></div>
           </div>
           <div class="preview-stage border rounded position-relative overflow-hidden" style="border-radius: 0.75rem !important;">
-            <div id="preview-placeholder" class="text-muted text-center py-5">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
+            <div id="preview-placeholder" class="text-muted text-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
                 <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
                 <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
               </svg>
               <div class="small">No preview available</div>
             </div>
-            <img id="preview-image" class="img-fluid d-none" alt="Object preview" />
-            <video id="preview-video" class="w-100 d-none" controls></video>
-            <iframe id="preview-iframe" class="w-100 d-none" loading="lazy"></iframe>
+            <img id="preview-image" class="img-fluid d-none w-100" alt="Object preview" style="display: block;" />
+            <video id="preview-video" class="w-100 d-none" controls style="display: block;"></video>
+            <iframe id="preview-iframe" class="w-100 d-none" loading="lazy" style="min-height: 200px;"></iframe>
           </div>
         </div>
       </div>
@@ -1022,18 +1035,18 @@
       >
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <div class="modal-body">
-          <p class="text-muted small mb-3">Upload files to <code>{{ bucket_name }}</code>. Leave object key blank to use the filename.</p>
+          <p class="text-muted small mb-3">Upload files to <code>{{ bucket_name }}</code>. You can select multiple files at once.</p>
           <div class="row g-3">
             <div class="col-12">
-              <label class="form-label fw-medium">Select file</label>
-              <input class="form-control" type="file" name="object" id="uploadFileInput" required />
-              <div class="form-text">Select a file from your device. Files ≥ 8&nbsp;MB automatically switch to multipart uploads.</div>
+              <label class="form-label fw-medium">Select files</label>
+              <input class="form-control" type="file" name="object" id="uploadFileInput" multiple required />
+              <div class="form-text">Select one or more files from your device. Files ≥ 8&nbsp;MB automatically switch to multipart uploads.</div>
             </div>
             <div class="col-12">
               <div class="upload-dropzone text-center" data-dropzone>
                 <p class="fw-semibold mb-1">Drag &amp; drop files here</p>
-                <p class="text-muted small mb-2">or click to browse</p>
-                <div class="text-muted small" data-dropzone-label>No file selected</div>
+                <p class="text-muted small mb-2">or click to browse (multiple files supported)</p>
+                <div class="text-muted small" data-dropzone-label>No files selected</div>
               </div>
             </div>
             <div class="col-12">
@@ -1051,12 +1064,17 @@
                 </button>
                 <div class="collapse" id="uploadAdvancedOptions">
                   <div class="p-3 border-top">
-                    <label class="form-label fw-medium">Object key</label>
-                    <input class="form-control font-monospace" type="text" name="object_key" placeholder="folder/document.pdf" />
-                    <div class="form-text mb-3">Leave blank to reuse the original filename.</div>
+                    <div id="singleFileOptions">
+                      <label class="form-label fw-medium">Object key</label>
+                      <input class="form-control font-monospace" type="text" name="object_key" placeholder="folder/document.pdf" />
+                      <div class="form-text mb-3">Leave blank to reuse the original filename. (Only applies when uploading a single file)</div>
+                    </div>
+                    <label class="form-label fw-medium">Key prefix <span class="text-muted fw-normal">(optional)</span></label>
+                    <input class="form-control font-monospace" type="text" name="key_prefix" id="uploadKeyPrefix" placeholder="uploads/2024/" />
+                    <div class="form-text mb-3">Add a prefix to all uploaded files (e.g., <code>folder/subfolder/</code>).</div>
                     <label class="form-label fw-medium">Metadata <span class="text-muted fw-normal">(JSON)</span></label>
                     <textarea class="form-control font-monospace" name="metadata" rows="3" placeholder='{"project":"demo"}'></textarea>
-                    <div class="form-text">Store custom key/value pairs alongside the object.</div>
+                    <div class="form-text">Store custom key/value pairs alongside each object.</div>
                   </div>
                 </div>
               </div>
@@ -1064,16 +1082,44 @@
             <div class="col-12">
               <div class="upload-progress-stack" data-upload-progress></div>
             </div>
+            <div class="col-12 d-none" id="bulkUploadProgress">
+              <div class="alert alert-info small mb-0">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <span id="bulkUploadStatus">Uploading files...</span>
+                  <span id="bulkUploadCounter">0/0</span>
+                </div>
+                <div class="progress" style="height: 8px;">
+                  <div class="progress-bar progress-bar-striped progress-bar-animated" id="bulkUploadProgressBar" role="progressbar" style="width: 0%;"></div>
+                </div>
+                <div id="bulkUploadCurrentFile" class="mt-2 text-muted small"></div>
+              </div>
+            </div>
+            <div class="col-12 d-none" id="bulkUploadResults">
+              <div class="alert alert-success small mb-2" id="bulkUploadSuccessAlert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                </svg>
+                <span id="bulkUploadSuccessCount">0</span> file(s) uploaded successfully
+              </div>
+              <div class="alert alert-danger small mb-0 d-none" id="bulkUploadErrorAlert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+                  <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+                </svg>
+                <span id="bulkUploadErrorCount">0</span> file(s) failed to upload
+                <ul class="mb-0 mt-1" id="bulkUploadErrorList"></ul>
+              </div>
+            </div>
           </div>
         </div>
         <div class="modal-footer border-0">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary" type="submit">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="uploadCancelBtn">Cancel</button>
+          <button class="btn btn-primary" type="submit" id="uploadSubmitBtn">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
               <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
               <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
             </svg>
-            Upload
+            <span id="uploadBtnText">Upload</span>
           </button>
         </div>
       </form>
@@ -1443,6 +1489,277 @@
   if (generatePresignButton) generatePresignButton.disabled = true;
   if (downloadButton) downloadButton.classList.add('disabled');
 
+  // ========== Folder Navigation ==========
+  const folderBreadcrumb = document.getElementById('folder-breadcrumb');
+  const objectsTableBody = document.querySelector('#objects-table tbody');
+  let currentPrefix = '';
+  let allObjects = []; // Store all object data for folder navigation
+
+  // Collect all object data from the table rows
+  rows.forEach(row => {
+    allObjects.push({
+      key: row.dataset.key,
+      size: row.dataset.size,
+      lastModified: row.dataset.lastModified,
+      etag: row.dataset.etag,
+      previewUrl: row.dataset.previewUrl,
+      downloadUrl: row.dataset.downloadUrl,
+      presignEndpoint: row.dataset.presignEndpoint,
+      deleteEndpoint: row.dataset.deleteEndpoint,
+      metadata: row.dataset.metadata,
+      versionsEndpoint: row.dataset.versionsEndpoint,
+      restoreTemplate: row.dataset.restoreTemplate,
+      element: row
+    });
+  });
+
+  // Check if we have any prefixed objects (folders)
+  const hasFolders = allObjects.some(obj => obj.key.includes('/'));
+
+  // Get unique folder prefixes at a given level
+  const getFoldersAtPrefix = (prefix) => {
+    const folders = new Set();
+    const files = [];
+    
+    allObjects.forEach(obj => {
+      const key = obj.key;
+      if (!key.startsWith(prefix)) return;
+      
+      const remainder = key.slice(prefix.length);
+      const slashIndex = remainder.indexOf('/');
+      
+      if (slashIndex === -1) {
+        // This is a file at this level
+        files.push(obj);
+      } else {
+        // This is a folder
+        const folderName = remainder.slice(0, slashIndex + 1);
+        folders.add(prefix + folderName);
+      }
+    });
+    
+    return { folders: Array.from(folders).sort(), files };
+  };
+
+  // Count objects in a folder
+  const countObjectsInFolder = (folderPrefix) => {
+    return allObjects.filter(obj => obj.key.startsWith(folderPrefix)).length;
+  };
+
+  // Render breadcrumb
+  const renderBreadcrumb = (prefix) => {
+    if (!folderBreadcrumb) return;
+    
+    if (!prefix && !hasFolders) {
+      folderBreadcrumb.classList.add('d-none');
+      return;
+    }
+    
+    folderBreadcrumb.classList.remove('d-none');
+    const ol = folderBreadcrumb.querySelector('ol');
+    ol.innerHTML = '';
+    
+    // Root item
+    const rootLi = document.createElement('li');
+    rootLi.className = 'breadcrumb-item';
+    if (!prefix) {
+      rootLi.classList.add('active');
+      rootLi.setAttribute('aria-current', 'page');
+      rootLi.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+          <path d="M8.354 1.146a.5.5 0 0 0-.708 0l-6 6A.5.5 0 0 0 1.5 7.5v7a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5v-4h2v4a.5.5 0 0 0 .5.5H14a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.146-.354L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293L8.354 1.146zM2.5 14V7.707l5.5-5.5 5.5 5.5V14H10v-4a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v4H2.5z"/>
+        </svg>
+        Root
+      `;
+    } else {
+      rootLi.innerHTML = `
+        <a href="#" data-folder-nav="" class="text-decoration-none">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M8.354 1.146a.5.5 0 0 0-.708 0l-6 6A.5.5 0 0 0 1.5 7.5v7a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5v-4h2v4a.5.5 0 0 0 .5.5H14a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.146-.354L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293L8.354 1.146zM2.5 14V7.707l5.5-5.5 5.5 5.5V14H10v-4a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v4H2.5z"/>
+          </svg>
+          Root
+        </a>
+      `;
+    }
+    ol.appendChild(rootLi);
+    
+    // Build path segments
+    if (prefix) {
+      const parts = prefix.split('/').filter(Boolean);
+      let accumulated = '';
+      parts.forEach((part, index) => {
+        accumulated += part + '/';
+        const li = document.createElement('li');
+        li.className = 'breadcrumb-item';
+        
+        if (index === parts.length - 1) {
+          li.classList.add('active');
+          li.setAttribute('aria-current', 'page');
+          li.textContent = part;
+        } else {
+          const a = document.createElement('a');
+          a.href = '#';
+          a.className = 'text-decoration-none';
+          a.dataset.folderNav = accumulated;
+          a.textContent = part;
+          li.appendChild(a);
+        }
+        ol.appendChild(li);
+      });
+    }
+    
+    // Add click handlers
+    ol.querySelectorAll('[data-folder-nav]').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateToFolder(link.dataset.folderNav);
+      });
+    });
+  };
+
+  // Get all objects inside a folder (for bulk selection)
+  const getObjectsInFolder = (folderPrefix) => {
+    return allObjects.filter(obj => obj.key.startsWith(folderPrefix));
+  };
+
+  // Create folder row element
+  const createFolderRow = (folderPath) => {
+    const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
+    const objectCount = countObjectsInFolder(folderPath);
+    
+    const tr = document.createElement('tr');
+    tr.className = 'folder-row';
+    tr.dataset.folderPath = folderPath;
+    tr.style.cursor = 'pointer';
+    
+    tr.innerHTML = `
+      <td class="text-center align-middle" onclick="event.stopPropagation();">
+        <input class="form-check-input" type="checkbox" data-folder-select="${escapeHtml(folderPath)}" aria-label="Select folder" />
+      </td>
+      <td class="object-key text-break">
+        <div class="fw-medium d-flex align-items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning flex-shrink-0" viewBox="0 0 16 16">
+            <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
+          </svg>
+          <span>${escapeHtml(folderName)}/</span>
+        </div>
+        <div class="text-muted small ms-4 ps-2">${objectCount} object${objectCount !== 1 ? 's' : ''}</div>
+      </td>
+      <td class="text-end text-nowrap">
+        <span class="text-muted small">—</span>
+      </td>
+      <td class="text-end">
+        <button type="button" class="btn btn-outline-primary btn-sm" title="Open folder">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
+          </svg>
+        </button>
+      </td>
+    `;
+    
+    // Handle folder checkbox
+    const checkbox = tr.querySelector('[data-folder-select]');
+    checkbox?.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const folderObjects = getObjectsInFolder(folderPath);
+      folderObjects.forEach(obj => {
+        const objCheckbox = obj.element.querySelector('[data-object-select]');
+        if (objCheckbox) {
+          objCheckbox.checked = checkbox.checked;
+        }
+        toggleRowSelection(obj.element, checkbox.checked);
+      });
+    });
+    
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
+      navigateToFolder(folderPath);
+    });
+    
+    return tr;
+  };
+
+  // Navigate to a folder
+  const navigateToFolder = (prefix) => {
+    currentPrefix = prefix;
+    renderBreadcrumb(prefix);
+    renderObjectsView();
+    // Clear selection when navigating
+    selectedRows.clear();
+    // Defer updateBulkDeleteState call to ensure it's defined
+    if (typeof updateBulkDeleteState === 'function') {
+      updateBulkDeleteState();
+    }
+    // Clear preview
+    if (previewPanel) previewPanel.classList.add('d-none');
+    if (previewEmpty) previewEmpty.classList.remove('d-none');
+    activeRow = null;
+  };
+
+  // Render objects view based on current prefix
+  const renderObjectsView = () => {
+    if (!objectsTableBody) return;
+    
+    const { folders, files } = getFoldersAtPrefix(currentPrefix);
+    
+    // Clear table
+    objectsTableBody.innerHTML = '';
+    
+    // Add folder rows first
+    folders.forEach(folderPath => {
+      objectsTableBody.appendChild(createFolderRow(folderPath));
+    });
+    
+    // Add file rows
+    files.forEach(obj => {
+      objectsTableBody.appendChild(obj.element);
+      obj.element.style.display = '';
+      // Update displayed key to show just filename when inside a folder
+      const keyCell = obj.element.querySelector('.object-key .fw-medium');
+      if (keyCell && currentPrefix) {
+        const displayName = obj.key.slice(currentPrefix.length);
+        keyCell.textContent = displayName;
+        keyCell.closest('.object-key').title = obj.key; // Full path in tooltip
+      } else if (keyCell) {
+        keyCell.textContent = obj.key; // Reset to full key at root
+      }
+    });
+    
+    // Hide files not in current view
+    allObjects.forEach(obj => {
+      if (!files.includes(obj)) {
+        obj.element.style.display = 'none';
+      }
+    });
+    
+    // Show empty state if no content
+    if (folders.length === 0 && files.length === 0) {
+      const emptyRow = document.createElement('tr');
+      emptyRow.innerHTML = `
+        <td colspan="4" class="py-5">
+          <div class="empty-state">
+            <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
+              </svg>
+            </div>
+            <h6 class="mb-2">Empty folder</h6>
+            <p class="text-muted small mb-0">This folder contains no objects.</p>
+          </div>
+        </td>
+      `;
+      objectsTableBody.appendChild(emptyRow);
+    }
+    
+    // Update select all checkbox state - deferred to ensure function is defined
+    if (typeof updateBulkDeleteState === 'function') {
+      updateBulkDeleteState();
+    }
+  };
+
+  // Folder view initialization moved after updateBulkDeleteState is defined
+  // ========== End Folder Navigation ==========
+
   const showMessage = ({ title = 'Notice', body = '', bodyHtml = null, variant = 'info', actionText = null, onAction = null }) => {
     if (!messageModal) {
       window.alert(body || title);
@@ -1589,10 +1906,15 @@
       bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
     }
     if (selectAllCheckbox) {
-      const total = rows.length;
+      // Count only visible rows in current folder view
+      const visibleRows = hasFolders
+        ? allObjects.filter(obj => obj.key.startsWith(currentPrefix) && !obj.key.slice(currentPrefix.length).includes('/')).map(obj => obj.element)
+        : Array.from(rows);
+      const total = visibleRows.filter(r => r.style.display !== 'none').length;
+      const visibleSelectedCount = visibleRows.filter(r => r.style.display !== 'none' && selectedRows.has(r.dataset.key)).length;
       selectAllCheckbox.disabled = total === 0;
-      selectAllCheckbox.checked = selectedCount > 0 && selectedCount === total && total > 0;
-      selectAllCheckbox.indeterminate = selectedCount > 0 && selectedCount < total;
+      selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
+      selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
     }
   };
 
@@ -2206,15 +2528,49 @@
 
   updateBulkDeleteState();
 
+  // Initialize folder view if there are folders (must be after updateBulkDeleteState is defined)
+  if (hasFolders) {
+    renderBreadcrumb('');
+    renderObjectsView();
+  }
+
   bulkDeleteButton?.addEventListener('click', () => openBulkDeleteModal());
   bulkDeleteConfirm?.addEventListener('click', () => performBulkDelete());
 
   document.getElementById('object-search')?.addEventListener('input', (event) => {
     const term = event.target.value.toLowerCase();
-    rows.forEach((row) => {
-      const key = row.dataset.key.toLowerCase();
-      row.style.display = key.includes(term) ? '' : 'none';
-    });
+    
+    if (hasFolders) {
+      // With folder navigation: re-render view with search filter
+      const { folders, files } = getFoldersAtPrefix(currentPrefix);
+      const tbody = objectsTableBody;
+      
+      // Clear and re-add matching content
+      tbody.innerHTML = '';
+      
+      // Filter and add matching folders
+      folders.forEach(folderPath => {
+        const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '').toLowerCase();
+        if (folderName.includes(term)) {
+          tbody.appendChild(createFolderRow(folderPath));
+        }
+      });
+      
+      // Filter and add matching files
+      files.forEach(obj => {
+        const keyName = obj.key.slice(currentPrefix.length).toLowerCase();
+        if (keyName.includes(term)) {
+          tbody.appendChild(obj.element);
+          obj.element.style.display = '';
+        }
+      });
+    } else {
+      // Original behavior without folders
+      rows.forEach((row) => {
+        const key = row.dataset.key.toLowerCase();
+        row.style.display = key.includes(term) ? '' : 'none';
+      });
+    }
   });
 
   refreshVersionsButton?.addEventListener('click', () => {
@@ -2263,19 +2619,234 @@
   });
 
   if (uploadForm && uploadFileInput) {
+    const uploadSubmitBtn = document.getElementById('uploadSubmitBtn');
+    const uploadCancelBtn = document.getElementById('uploadCancelBtn');
+    const uploadBtnText = document.getElementById('uploadBtnText');
+    const bulkUploadProgress = document.getElementById('bulkUploadProgress');
+    const bulkUploadStatus = document.getElementById('bulkUploadStatus');
+    const bulkUploadCounter = document.getElementById('bulkUploadCounter');
+    const bulkUploadProgressBar = document.getElementById('bulkUploadProgressBar');
+    const bulkUploadCurrentFile = document.getElementById('bulkUploadCurrentFile');
+    const bulkUploadResults = document.getElementById('bulkUploadResults');
+    const bulkUploadSuccessAlert = document.getElementById('bulkUploadSuccessAlert');
+    const bulkUploadErrorAlert = document.getElementById('bulkUploadErrorAlert');
+    const bulkUploadSuccessCount = document.getElementById('bulkUploadSuccessCount');
+    const bulkUploadErrorCount = document.getElementById('bulkUploadErrorCount');
+    const bulkUploadErrorList = document.getElementById('bulkUploadErrorList');
+    const uploadKeyPrefix = document.getElementById('uploadKeyPrefix');
+    const singleFileOptions = document.getElementById('singleFileOptions');
+    let isUploading = false;
+
     const refreshUploadDropLabel = () => {
       if (!uploadDropZoneLabel) return;
       const files = uploadFileInput.files;
       if (!files || files.length === 0) {
         uploadDropZoneLabel.textContent = 'No file selected';
+        if (singleFileOptions) singleFileOptions.classList.remove('d-none');
         return;
       }
       uploadDropZoneLabel.textContent = files.length === 1 ? files[0].name : `${files.length} files selected`;
+      // Hide single file object key option when multiple files selected
+      if (singleFileOptions) {
+        singleFileOptions.classList.toggle('d-none', files.length > 1);
+      }
+    };
+
+    const updateUploadBtnText = () => {
+      if (!uploadBtnText) return;
+      const files = uploadFileInput.files;
+      if (!files || files.length <= 1) {
+        uploadBtnText.textContent = 'Upload';
+      } else {
+        uploadBtnText.textContent = `Upload ${files.length} files`;
+      }
+    };
+
+    const resetUploadUI = () => {
+      if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
+      if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
+      if (bulkUploadSuccessAlert) bulkUploadSuccessAlert.classList.remove('d-none');
+      if (bulkUploadErrorAlert) bulkUploadErrorAlert.classList.add('d-none');
+      if (bulkUploadErrorList) bulkUploadErrorList.innerHTML = '';
+      if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
+      if (uploadFileInput) uploadFileInput.disabled = false;
+      isUploading = false;
+    };
+
+    const uploadSingleFile = async (file, keyPrefix = '', metadata = null) => {
+      const formData = new FormData();
+      formData.append('object', file);
+      const objectKey = keyPrefix ? `${keyPrefix}${file.name}` : file.name;
+      formData.append('object_key', objectKey);
+      if (metadata) {
+        formData.append('metadata', JSON.stringify(metadata));
+      }
+      // Get CSRF token
+      const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
+      if (csrfToken) {
+        formData.append('csrf_token', csrfToken);
+      }
+      
+      const response = await fetch(uploadForm.action, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      });
+      
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.status === 'error') {
+        throw new Error(data.message || 'Upload failed');
+      }
+      return data;
+    };
+
+    const performBulkUpload = async (files) => {
+      if (isUploading || !files || files.length === 0) return;
+      
+      isUploading = true;
+      const keyPrefix = (uploadKeyPrefix?.value || '').trim();
+      const metadataRaw = uploadForm.querySelector('textarea[name="metadata"]')?.value?.trim();
+      let metadata = null;
+      if (metadataRaw) {
+        try {
+          metadata = JSON.parse(metadataRaw);
+        } catch {
+          showMessage({ title: 'Invalid metadata', body: 'Metadata must be valid JSON.', variant: 'danger' });
+          resetUploadUI();
+          return;
+        }
+      }
+
+      // Show progress UI
+      if (bulkUploadProgress) bulkUploadProgress.classList.remove('d-none');
+      if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
+      if (uploadSubmitBtn) uploadSubmitBtn.disabled = true;
+      if (uploadFileInput) uploadFileInput.disabled = true;
+
+      const successFiles = [];
+      const errorFiles = [];
+      const total = files.length;
+
+      for (let i = 0; i < total; i++) {
+        const file = files[i];
+        const current = i + 1;
+        
+        // Update progress
+        if (bulkUploadCounter) bulkUploadCounter.textContent = `${current}/${total}`;
+        if (bulkUploadCurrentFile) bulkUploadCurrentFile.textContent = `Uploading: ${file.name}`;
+        if (bulkUploadProgressBar) {
+          const percent = Math.round((current / total) * 100);
+          bulkUploadProgressBar.style.width = `${percent}%`;
+        }
+
+        try {
+          await uploadSingleFile(file, keyPrefix, metadata);
+          successFiles.push(file.name);
+        } catch (error) {
+          errorFiles.push({ name: file.name, error: error.message || 'Unknown error' });
+        }
+      }
+
+      // Show results
+      if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
+      if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
+      
+      if (bulkUploadSuccessCount) bulkUploadSuccessCount.textContent = successFiles.length;
+      if (successFiles.length === 0 && bulkUploadSuccessAlert) {
+        bulkUploadSuccessAlert.classList.add('d-none');
+      }
+      
+      if (errorFiles.length > 0) {
+        if (bulkUploadErrorCount) bulkUploadErrorCount.textContent = errorFiles.length;
+        if (bulkUploadErrorAlert) bulkUploadErrorAlert.classList.remove('d-none');
+        if (bulkUploadErrorList) {
+          bulkUploadErrorList.innerHTML = errorFiles
+            .map(f => `<li><strong>${escapeHtml(f.name)}</strong>: ${escapeHtml(f.error)}</li>`)
+            .join('');
+        }
+      }
+
+      isUploading = false;
+      
+      // Reload page if any files were uploaded successfully
+      if (successFiles.length > 0) {
+        // Keep button disabled and show uploading state until reload
+        if (uploadBtnText) uploadBtnText.textContent = 'Refreshing...';
+        // Short delay to show results, then reload
+        window.setTimeout(() => window.location.reload(), 800);
+      } else {
+        // Only re-enable if no success (all failed)
+        if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
+        if (uploadFileInput) uploadFileInput.disabled = false;
+      }
     };
 
     refreshUploadDropLabel();
-    uploadFileInput.addEventListener('change', refreshUploadDropLabel);
+    uploadFileInput.addEventListener('change', () => {
+      refreshUploadDropLabel();
+      updateUploadBtnText();
+      resetUploadUI();
+    });
     uploadDropZone?.addEventListener('click', () => uploadFileInput?.click());
+
+    // Handle form submission for bulk upload
+    uploadForm.addEventListener('submit', async (event) => {
+      const files = uploadFileInput.files;
+      if (!files || files.length === 0) return;
+      
+      const keyPrefix = (uploadKeyPrefix?.value || '').trim();
+      
+      // For single file with custom object key and NO prefix, use default form submission
+      if (files.length === 1 && !keyPrefix) {
+        const customKey = uploadForm.querySelector('input[name="object_key"]')?.value?.trim();
+        if (customKey) {
+          // Single file with custom key - let form submit normally
+          // Disable button immediately for feedback
+          if (uploadSubmitBtn) {
+            uploadSubmitBtn.disabled = true;
+            if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
+          }
+          return;
+        }
+      }
+      
+      // Bulk upload or prefix specified - handle with JavaScript
+      event.preventDefault();
+      
+      // Disable button immediately
+      if (uploadSubmitBtn) {
+        uploadSubmitBtn.disabled = true;
+        if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
+      }
+      
+      await performBulkUpload(Array.from(files));
+    });
+
+    // Pre-fill key prefix with current folder when modal opens
+    uploadModalEl?.addEventListener('show.bs.modal', () => {
+      if (hasFolders && currentPrefix) {
+        uploadKeyPrefix.value = currentPrefix;
+        // Auto-expand advanced options if there's a prefix
+        const advancedToggle = document.querySelector('[data-bs-target="#advancedUploadOptions"]');
+        const advancedCollapse = document.getElementById('advancedUploadOptions');
+        if (advancedToggle && advancedCollapse && !advancedCollapse.classList.contains('show')) {
+          new bootstrap.Collapse(advancedCollapse, { show: true });
+        }
+      } else if (uploadKeyPrefix) {
+        // Clear prefix when at root
+        uploadKeyPrefix.value = '';
+      }
+    });
+
+    // Reset UI when modal is closed
+    uploadModalEl?.addEventListener('hidden.bs.modal', () => {
+      resetUploadUI();
+      uploadFileInput.value = '';
+      refreshUploadDropLabel();
+      updateUploadBtnText();
+    });
 
     const preventDefaults = (event) => {
       event.preventDefault();
@@ -2344,14 +2915,34 @@
 
   selectAllCheckbox?.addEventListener('change', (event) => {
     const shouldSelect = Boolean(event.target?.checked);
-    rows.forEach((row) => {
-      const checkbox = row.querySelector('[data-object-select]');
-      if (!checkbox || checkbox.disabled) {
-        return;
-      }
-      checkbox.checked = shouldSelect;
-      toggleRowSelection(row, shouldSelect);
-    });
+    
+    if (hasFolders) {
+      // Select all objects that start with current prefix (including inside subfolders)
+      const objectsInCurrentView = allObjects.filter(obj => obj.key.startsWith(currentPrefix));
+      objectsInCurrentView.forEach(obj => {
+        const checkbox = obj.element.querySelector('[data-object-select]');
+        if (checkbox && !checkbox.disabled) {
+          checkbox.checked = shouldSelect;
+        }
+        toggleRowSelection(obj.element, shouldSelect);
+      });
+      
+      // Also toggle folder checkboxes
+      document.querySelectorAll('[data-folder-select]').forEach(cb => {
+        cb.checked = shouldSelect;
+      });
+    } else {
+      // Original behavior without folders
+      rows.forEach((row) => {
+        if (row.style.display === 'none') return;
+        const checkbox = row.querySelector('[data-object-select]');
+        if (!checkbox || checkbox.disabled) {
+          return;
+        }
+        checkbox.checked = shouldSelect;
+        toggleRowSelection(row, shouldSelect);
+      });
+    }
     setTimeout(updateBulkDownloadState, 0);
   });
 

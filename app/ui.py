@@ -712,12 +712,15 @@ def object_presign(bucket_name: str, object_key: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
     
-    connection_url = "http://127.0.0.1:5000"
-    url = f"{connection_url}/presign/{bucket_name}/{object_key}"
+    api_base = current_app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
+    api_base = api_base.rstrip("/")
+    url = f"{api_base}/presign/{bucket_name}/{object_key}"
     
+    # Use API base URL for forwarded headers so presigned URLs point to API, not UI
+    parsed_api = urlparse(api_base)
     headers = _api_headers()
-    headers["X-Forwarded-Host"] = request.host
-    headers["X-Forwarded-Proto"] = request.scheme
+    headers["X-Forwarded-Host"] = parsed_api.netloc or "127.0.0.1:5000"
+    headers["X-Forwarded-Proto"] = parsed_api.scheme or "http"
     headers["X-Forwarded-For"] = request.remote_addr or "127.0.0.1"
     
     try:

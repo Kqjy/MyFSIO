@@ -289,6 +289,27 @@ class ObjectStorage:
         safe_key = self._sanitize_object_key(object_key)
         return self._read_metadata(bucket_path.name, safe_key) or {}
 
+    def _cleanup_empty_parents(self, path: Path, stop_at: Path) -> None:
+        """Remove empty parent directories up to (but not including) stop_at.
+        
+        On Windows/OneDrive, directories may be locked briefly after file deletion.
+        This method retries with a small delay to handle that case.
+        """
+        for parent in path.parents:
+            if parent == stop_at:
+                break
+            # Retry a few times with small delays for Windows/OneDrive
+            for attempt in range(3):
+                try:
+                    if parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
+                        break  # Success, move to next parent
+                except OSError:
+                    if attempt < 2:
+                        time.sleep(0.1)  # Brief delay before retry
+                    # Final attempt failed - continue to next parent
+                    break
+
     def delete_object(self, bucket_name: str, object_key: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
         path = self._object_path(bucket_name, object_key)
@@ -303,12 +324,7 @@ class ObjectStorage:
         self._delete_metadata(bucket_id, rel)
         
         self._invalidate_bucket_stats_cache(bucket_id)
-        
-        for parent in path.parents:
-            if parent == bucket_path:
-                break
-            if parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
+        self._cleanup_empty_parents(path, bucket_path)
 
     def purge_object(self, bucket_name: str, object_key: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
@@ -330,12 +346,7 @@ class ObjectStorage:
         
         # Invalidate bucket stats cache
         self._invalidate_bucket_stats_cache(bucket_id)
-        
-        for parent in target.parents:
-            if parent == bucket_path:
-                break
-            if parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
+        self._cleanup_empty_parents(target, bucket_path)
 
     def is_versioning_enabled(self, bucket_name: str) -> bool:
         bucket_path = self._bucket_path(bucket_name)
