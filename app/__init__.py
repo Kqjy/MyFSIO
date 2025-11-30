@@ -18,8 +18,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from .bucket_policies import BucketPolicyStore
 from .config import AppConfig
 from .connections import ConnectionStore
+from .encryption import EncryptionManager
 from .extensions import limiter, csrf
 from .iam import IamService
+from .kms import KMSManager
 from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage
@@ -77,6 +79,21 @@ def create_app(
     
     connections = ConnectionStore(connections_path)
     replication = ReplicationManager(storage, connections, replication_rules_path)
+    
+    # Initialize encryption and KMS
+    encryption_config = {
+        "encryption_enabled": app.config.get("ENCRYPTION_ENABLED", False),
+        "encryption_master_key_path": app.config.get("ENCRYPTION_MASTER_KEY_PATH"),
+        "default_encryption_algorithm": app.config.get("DEFAULT_ENCRYPTION_ALGORITHM", "AES256"),
+    }
+    encryption_manager = EncryptionManager(encryption_config)
+    
+    kms_manager = None
+    if app.config.get("KMS_ENABLED", False):
+        kms_keys_path = Path(app.config.get("KMS_KEYS_PATH", ""))
+        kms_master_key_path = Path(app.config.get("ENCRYPTION_MASTER_KEY_PATH", ""))
+        kms_manager = KMSManager(kms_keys_path, kms_master_key_path)
+        encryption_manager.set_kms_provider(kms_manager)
 
     app.extensions["object_storage"] = storage
     app.extensions["iam"] = iam
@@ -85,6 +102,8 @@ def create_app(
     app.extensions["limiter"] = limiter
     app.extensions["connections"] = connections
     app.extensions["replication"] = replication
+    app.extensions["encryption"] = encryption_manager
+    app.extensions["kms"] = kms_manager
 
     @app.errorhandler(500)
     def internal_error(error):
@@ -119,9 +138,12 @@ def create_app(
 
     if include_api:
         from .s3_api import s3_api_bp
+        from .kms_api import kms_api_bp
 
         app.register_blueprint(s3_api_bp)
+        app.register_blueprint(kms_api_bp)
         csrf.exempt(s3_api_bp)
+        csrf.exempt(kms_api_bp)
 
     if include_ui:
         from .ui import ui_bp

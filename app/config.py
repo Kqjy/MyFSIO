@@ -66,6 +66,11 @@ class AppConfig:
     stream_chunk_size: int
     multipart_min_part_size: int
     bucket_stats_cache_ttl: int
+    encryption_enabled: bool
+    encryption_master_key_path: Path
+    kms_enabled: bool
+    kms_keys_path: Path
+    default_encryption_algorithm: str
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -155,6 +160,14 @@ class AppConfig:
         ])
         session_lifetime_days = int(_get("SESSION_LIFETIME_DAYS", 30))
         bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60))  # Default 60 seconds
+        
+        # Encryption settings
+        encryption_enabled = str(_get("ENCRYPTION_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        encryption_keys_dir = storage_root / ".myfsio.sys" / "keys"
+        encryption_master_key_path = Path(_get("ENCRYPTION_MASTER_KEY_PATH", encryption_keys_dir / "master.key")).resolve()
+        kms_enabled = str(_get("KMS_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        kms_keys_path = Path(_get("KMS_KEYS_PATH", encryption_keys_dir / "kms_keys.json")).resolve()
+        default_encryption_algorithm = str(_get("DEFAULT_ENCRYPTION_ALGORITHM", "AES256"))
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -182,7 +195,12 @@ class AppConfig:
                    secret_ttl_seconds=secret_ttl_seconds,
                    stream_chunk_size=stream_chunk_size,
                    multipart_min_part_size=multipart_min_part_size,
-                   bucket_stats_cache_ttl=bucket_stats_cache_ttl)
+                   bucket_stats_cache_ttl=bucket_stats_cache_ttl,
+                   encryption_enabled=encryption_enabled,
+                   encryption_master_key_path=encryption_master_key_path,
+                   kms_enabled=kms_enabled,
+                   kms_keys_path=kms_keys_path,
+                   default_encryption_algorithm=default_encryption_algorithm)
 
     def to_flask_config(self) -> Dict[str, Any]:
         return {
@@ -213,4 +231,9 @@ class AppConfig:
             "CORS_METHODS": self.cors_methods,
             "CORS_ALLOW_HEADERS": self.cors_allow_headers,
             "SESSION_LIFETIME_DAYS": self.session_lifetime_days,
+            "ENCRYPTION_ENABLED": self.encryption_enabled,
+            "ENCRYPTION_MASTER_KEY_PATH": str(self.encryption_master_key_path),
+            "KMS_ENABLED": self.kms_enabled,
+            "KMS_KEYS_PATH": str(self.kms_keys_path),
+            "DEFAULT_ENCRYPTION_ALGORITHM": self.default_encryption_algorithm,
         }

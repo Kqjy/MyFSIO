@@ -30,6 +30,7 @@ from .bucket_policies import BucketPolicyStore
 from .connections import ConnectionStore, RemoteConnection
 from .extensions import limiter
 from .iam import IamError
+from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage, StorageError
@@ -49,6 +50,9 @@ def _replication_manager() -> ReplicationManager:
 def _iam():
     return current_app.extensions["iam"]
 
+
+def _kms() -> KMSManager | None:
+    return current_app.extensions.get("kms")
 
 
 def _bucket_policies() -> BucketPolicyStore:
@@ -360,6 +364,14 @@ def bucket_detail(bucket_name: str):
     # Load connections for admin, or for non-admin if there's an existing rule (to show target name)
     connections = _connections().list() if (is_replication_admin or replication_rule) else []
 
+    # Encryption settings
+    encryption_config = storage.get_bucket_encryption(bucket_name)
+    kms_manager = _kms()
+    kms_keys = kms_manager.list_keys() if kms_manager else []
+    kms_enabled = current_app.config.get("KMS_ENABLED", False)
+    encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
+    can_manage_encryption = can_manage_versioning  # Same as other bucket properties
+
     return render_template(
         "bucket_detail.html",
         bucket_name=bucket_name,
@@ -370,11 +382,16 @@ def bucket_detail(bucket_name: str):
         can_edit_policy=can_edit_policy,
         can_manage_versioning=can_manage_versioning,
         can_manage_replication=can_manage_replication,
+        can_manage_encryption=can_manage_encryption,
         is_replication_admin=is_replication_admin,
         default_policy=default_policy,
         versioning_enabled=versioning_enabled,
         replication_rule=replication_rule,
         connections=connections,
+        encryption_config=encryption_config,
+        kms_keys=kms_keys,
+        kms_enabled=kms_enabled,
+        encryption_enabled=encryption_enabled,
     )
 
 
@@ -875,6 +892,62 @@ def update_bucket_versioning(bucket_name: str):
         flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     flash("Versioning enabled" if enable else "Versioning suspended", "success")
+    return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+
+@ui_bp.post("/buckets/<bucket_name>/encryption")
+def update_bucket_encryption(bucket_name: str):
+    """Update bucket default encryption configuration."""
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "write")
+    except IamError as exc:
+        flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    action = request.form.get("action", "enable")
+    
+    if action == "disable":
+        # Disable encryption
+        try:
+            _storage().set_bucket_encryption(bucket_name, None)
+            flash("Default encryption disabled", "info")
+        except StorageError as exc:
+            flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    # Enable or update encryption
+    algorithm = request.form.get("algorithm", "AES256")
+    kms_key_id = request.form.get("kms_key_id", "").strip() or None
+    
+    # Validate algorithm
+    if algorithm not in ("AES256", "aws:kms"):
+        flash("Invalid encryption algorithm", "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    # Build encryption config following AWS format
+    encryption_config: dict[str, Any] = {
+        "Rules": [
+            {
+                "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": algorithm,
+                }
+            }
+        ]
+    }
+    
+    if algorithm == "aws:kms" and kms_key_id:
+        encryption_config["Rules"][0]["ApplyServerSideEncryptionByDefault"]["KMSMasterKeyID"] = kms_key_id
+    
+    try:
+        _storage().set_bucket_encryption(bucket_name, encryption_config)
+        if algorithm == "aws:kms":
+            flash("Default KMS encryption enabled", "success")
+        else:
+            flash("Default AES-256 encryption enabled", "success")
+    except StorageError as exc:
+        flash(_friendly_error_message(exc), "danger")
+    
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
 
 

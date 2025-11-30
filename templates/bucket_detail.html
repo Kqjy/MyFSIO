@@ -607,6 +607,129 @@
             </div>
           </div>
           {% endif %}
+
+          <!-- Encryption Card -->
+          {% if encryption_enabled %}
+          <div class="card shadow-sm mt-4" id="bucket-encryption-card">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                <path d="M9.5 6.5a1.5 1.5 0 0 1-1 1.415l.385 1.99a.5.5 0 0 1-.491.595h-.788a.5.5 0 0 1-.49-.595l.384-1.99a1.5 1.5 0 1 1 2-1.415z"/>
+              </svg>
+              <span class="fw-semibold">Default Encryption</span>
+            </div>
+            <div class="card-body">
+              {% set enc_rules = encryption_config.get('Rules', []) %}
+              {% set enc_default = enc_rules[0].get('ApplyServerSideEncryptionByDefault', {}) if enc_rules else {} %}
+              {% set enc_algorithm = enc_default.get('SSEAlgorithm', '') %}
+              {% set enc_kms_key = enc_default.get('KMSMasterKeyID', '') %}
+              
+              {% if enc_algorithm %}
+              <!-- Encryption Enabled State -->
+              <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                </svg>
+                <div>
+                  <strong>Default encryption enabled</strong>
+                  <p class="mb-0 small">
+                    {% if enc_algorithm == 'aws:kms' %}
+                    Objects are encrypted with AWS KMS (SSE-KMS).
+                    {% if enc_kms_key %}Key: <code class="small">{{ enc_kms_key[:20] }}...</code>{% endif %}
+                    {% else %}
+                    Objects are encrypted with AES-256 (SSE-S3).
+                    {% endif %}
+                  </p>
+                </div>
+              </div>
+              {% else %}
+              <!-- Encryption Disabled State -->
+              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                </svg>
+                <div>
+                  <strong>Default encryption disabled</strong>
+                  <p class="mb-0 small">Objects are stored without default encryption. You can enable server-side encryption below.</p>
+                </div>
+              </div>
+              {% endif %}
+
+              {% if can_manage_encryption %}
+              <form method="post" action="{{ url_for('ui.update_bucket_encryption', bucket_name=bucket_name) }}" id="encryptionForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="action" value="enable" id="encryptionAction" />
+                
+                <!-- Algorithm Selection -->
+                <div class="mb-3">
+                  <label class="form-label fw-medium">Encryption Algorithm</label>
+                  <div class="card border">
+                    <div class="card-body p-0">
+                      <div class="form-check p-3 border-bottom m-0">
+                        <input class="form-check-input" type="radio" name="algorithm" id="algo_aes256" value="AES256" {{ 'checked' if enc_algorithm != 'aws:kms' else '' }}>
+                        <label class="form-check-label w-100" for="algo_aes256">
+                          <span class="fw-medium">AES-256 (SSE-S3)</span>
+                          <div class="text-muted small">Server-side encryption with S3-managed keys. Recommended for most use cases.</div>
+                        </label>
+                      </div>
+                      {% if kms_enabled %}
+                      <div class="form-check p-3 m-0">
+                        <input class="form-check-input" type="radio" name="algorithm" id="algo_kms" value="aws:kms" {{ 'checked' if enc_algorithm == 'aws:kms' else '' }}>
+                        <label class="form-check-label w-100" for="algo_kms">
+                          <span class="fw-medium">AWS KMS (SSE-KMS)</span>
+                          <div class="text-muted small">Server-side encryption with KMS-managed keys. Provides audit trail and key rotation.</div>
+                        </label>
+                      </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+
+                <!-- KMS Key Selection (visible only when KMS is selected) -->
+                {% if kms_enabled %}
+                <div class="mb-4" id="kmsKeySection" style="{{ 'display: none;' if enc_algorithm != 'aws:kms' else '' }}">
+                  <label for="kms_key_id" class="form-label fw-medium">KMS Key</label>
+                  <select class="form-select" id="kms_key_id" name="kms_key_id">
+                    <option value="">Use default KMS key</option>
+                    {% for key in kms_keys %}
+                    <option value="{{ key.key_id }}" {{ 'selected' if key.key_id == enc_kms_key else '' }}>
+                      {{ key.description or key.key_id }} ({{ key.key_id[:8] }}...)
+                    </option>
+                    {% endfor %}
+                  </select>
+                  <div class="form-text">Select a KMS key to encrypt objects. Leave empty to use the default key.</div>
+                </div>
+                {% endif %}
+
+                <div class="d-flex gap-2 flex-wrap">
+                  <button class="btn btn-primary" type="submit">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                    </svg>
+                    Save Encryption Settings
+                  </button>
+                  {% if enc_algorithm %}
+                  <button type="button" class="btn btn-outline-danger" id="disableEncryptionBtn">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M11 1a2 2 0 0 0-2 2v4a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h5V3a3 3 0 0 1 6 0v4a.5.5 0 0 1-1 0V3a2 2 0 0 0-2-2z"/>
+                    </svg>
+                    Disable Encryption
+                  </button>
+                  {% endif %}
+                </div>
+              </form>
+              {% else %}
+              <div class="text-center py-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
+                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                </svg>
+                <p class="text-muted mb-0 small">You do not have permission to modify encryption settings for this bucket.</p>
+              </div>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
         </div>
 
         <!-- Sidebar -->
@@ -653,6 +776,35 @@
               <p class="small text-muted mb-0">
                 When you delete an object with versioning enabled, S3 inserts a delete marker instead of removing the object. The archived versions remain in the bucket and can be restored at any time.
               </p>
+            </div>
+          </div>
+          {% endif %}
+
+          {% if encryption_enabled %}
+          <div class="card bg-body-tertiary border-0 mt-3">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                </svg>
+                About Encryption
+              </h6>
+              <p class="small text-muted mb-3">
+                Server-side encryption protects data at rest. Objects are encrypted when stored and decrypted when retrieved.
+              </p>
+              
+              <h6 class="small fw-semibold mb-2">Encryption Types</h6>
+              <ul class="small text-muted mb-3 ps-3">
+                <li><strong>SSE-S3 (AES-256)</strong> — S3-managed keys, automatic encryption</li>
+                <li><strong>SSE-KMS</strong> — KMS-managed keys with audit trail and key rotation</li>
+              </ul>
+
+              <h6 class="small fw-semibold mb-2">How It Works</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li>New objects are encrypted using the default setting</li>
+                <li>Existing objects are not automatically re-encrypted</li>
+                <li>Decryption is transparent during download</li>
+              </ul>
             </div>
           </div>
           {% endif %}
@@ -3147,5 +3299,33 @@
       loadReplicationStats();
     });
   }
+
+  // Encryption settings
+  const algoAes256Radio = document.getElementById('algo_aes256');
+  const algoKmsRadio = document.getElementById('algo_kms');
+  const kmsKeySection = document.getElementById('kmsKeySection');
+  const encryptionForm = document.getElementById('encryptionForm');
+  const encryptionAction = document.getElementById('encryptionAction');
+  const disableEncryptionBtn = document.getElementById('disableEncryptionBtn');
+
+  // Toggle KMS key section visibility based on selected algorithm
+  const updateKmsKeyVisibility = () => {
+    if (!kmsKeySection) return;
+    const showKms = algoKmsRadio?.checked;
+    kmsKeySection.style.display = showKms ? '' : 'none';
+  };
+
+  algoAes256Radio?.addEventListener('change', updateKmsKeyVisibility);
+  algoKmsRadio?.addEventListener('change', updateKmsKeyVisibility);
+
+  // Handle disable encryption button
+  disableEncryptionBtn?.addEventListener('click', () => {
+    if (encryptionAction && encryptionForm) {
+      if (confirm('Are you sure you want to disable default encryption? New objects will not be encrypted automatically.')) {
+        encryptionAction.value = 'disable';
+        encryptionForm.submit();
+      }
+    }
+  });
 </script>
 {% endblock %}
