@@ -185,6 +185,7 @@ def inject_nav_state() -> dict[str, Any]:
     return {
         "principal": principal,
         "can_manage_iam": can_manage,
+        "can_view_metrics": can_manage,  # Only admins can view metrics
         "csrf_token": generate_csrf,
     }
 
@@ -336,9 +337,28 @@ def bucket_detail(bucket_name: str):
         except IamError:
             can_manage_versioning = False
 
+    # Check replication permission
+    can_manage_replication = False
+    if principal:
+        try:
+            _iam().authorize(principal, bucket_name, "replication")
+            can_manage_replication = True
+        except IamError:
+            can_manage_replication = False
+
+    # Check if user is admin (can configure replication settings, not just toggle)
+    is_replication_admin = False
+    if principal:
+        try:
+            _iam().authorize(principal, None, "iam:list_users")
+            is_replication_admin = True
+        except IamError:
+            is_replication_admin = False
+
     # Replication info - don't compute sync status here (it's slow), let JS fetch it async
     replication_rule = _replication().get_rule(bucket_name)
-    connections = _connections().list()
+    # Load connections for admin, or for non-admin if there's an existing rule (to show target name)
+    connections = _connections().list() if (is_replication_admin or replication_rule) else []
 
     return render_template(
         "bucket_detail.html",
@@ -349,6 +369,8 @@ def bucket_detail(bucket_name: str):
         bucket_policy=bucket_policy,
         can_edit_policy=can_edit_policy,
         can_manage_versioning=can_manage_versioning,
+        can_manage_replication=can_manage_replication,
+        is_replication_admin=is_replication_admin,
         default_policy=default_policy,
         versioning_enabled=versioning_enabled,
         replication_rule=replication_rule,
@@ -1171,17 +1193,52 @@ def delete_connection(connection_id: str):
 def update_bucket_replication(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "write")
+        _authorize_ui(principal, bucket_name, "replication")
     except IamError as exc:
         flash(str(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
+    
+    # Check if user is admin (required for create/delete operations)
+    is_admin = False
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+        is_admin = True
+    except IamError:
+        is_admin = False
         
     action = request.form.get("action")
     
     if action == "delete":
+        # Admin only - remove configuration entirely
+        if not is_admin:
+            flash("Only administrators can remove replication configuration", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
         _replication().delete_rule(bucket_name)
-        flash("Replication disabled", "info")
-    else:
+        flash("Replication configuration removed", "info")
+    elif action == "pause":
+        # Users can pause - just set enabled=False
+        rule = _replication().get_rule(bucket_name)
+        if rule:
+            rule.enabled = False
+            _replication().set_rule(rule)
+            flash("Replication paused", "info")
+        else:
+            flash("No replication configuration to pause", "warning")
+    elif action == "resume":
+        # Users can resume - just set enabled=True
+        rule = _replication().get_rule(bucket_name)
+        if rule:
+            rule.enabled = True
+            _replication().set_rule(rule)
+            flash("Replication resumed", "success")
+        else:
+            flash("No replication configuration to resume", "warning")
+    elif action == "create":
+        # Admin only - create new configuration
+        if not is_admin:
+            flash("Only administrators can configure replication settings", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
+            
         from .replication import REPLICATION_MODE_NEW_ONLY, REPLICATION_MODE_ALL
         import time
         
@@ -1208,6 +1265,8 @@ def update_bucket_replication(bucket_name: str):
                 flash("Replication configured. Existing objects are being replicated in the background.", "success")
             else:
                 flash("Replication configured. Only new uploads will be replicated.", "success")
+    else:
+        flash("Invalid action", "danger")
             
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
 
@@ -1217,7 +1276,7 @@ def get_replication_status(bucket_name: str):
     """Async endpoint to fetch replication sync status without blocking page load."""
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "read")
+        _authorize_ui(principal, bucket_name, "replication")
     except IamError:
         return jsonify({"error": "Access denied"}), 403
     
@@ -1256,6 +1315,13 @@ def connections_dashboard():
 @ui_bp.get("/metrics")
 def metrics_dashboard():
     principal = _current_principal()
+    
+    # Metrics are restricted to admin users
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        flash("Access denied: Metrics require admin permissions", "danger")
+        return redirect(url_for("ui.buckets_overview"))
     
     cpu_percent = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()

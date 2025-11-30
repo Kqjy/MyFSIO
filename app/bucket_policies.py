@@ -11,17 +11,51 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 RESOURCE_PREFIX = "arn:aws:s3:::"
 
 ACTION_ALIASES = {
-    "s3:getobject": "read",
-    "s3:getobjectversion": "read",
+    # List actions
     "s3:listbucket": "list",
     "s3:listallmybuckets": "list",
+    "s3:listbucketversions": "list",
+    "s3:listmultipartuploads": "list",
+    "s3:listparts": "list",
+    # Read actions
+    "s3:getobject": "read",
+    "s3:getobjectversion": "read",
+    "s3:getobjecttagging": "read",
+    "s3:getobjectversiontagging": "read",
+    "s3:getobjectacl": "read",
+    "s3:getbucketversioning": "read",
+    "s3:headobject": "read",
+    "s3:headbucket": "read",
+    # Write actions
     "s3:putobject": "write",
     "s3:createbucket": "write",
+    "s3:putobjecttagging": "write",
+    "s3:putbucketversioning": "write",
+    "s3:createmultipartupload": "write",
+    "s3:uploadpart": "write",
+    "s3:completemultipartupload": "write",
+    "s3:abortmultipartupload": "write",
+    "s3:copyobject": "write",
+    # Delete actions
     "s3:deleteobject": "delete",
     "s3:deleteobjectversion": "delete",
     "s3:deletebucket": "delete",
+    "s3:deleteobjecttagging": "delete",
+    # Share actions (ACL)
     "s3:putobjectacl": "share",
+    "s3:putbucketacl": "share",
+    "s3:getbucketacl": "share",
+    # Policy actions
     "s3:putbucketpolicy": "policy",
+    "s3:getbucketpolicy": "policy",
+    "s3:deletebucketpolicy": "policy",
+    # Replication actions
+    "s3:getreplicationconfiguration": "replication",
+    "s3:putreplicationconfiguration": "replication",
+    "s3:deletereplicationconfiguration": "replication",
+    "s3:replicateobject": "replication",
+    "s3:replicatetags": "replication",
+    "s3:replicatedelete": "replication",
 }
 
 

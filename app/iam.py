@@ -15,7 +15,7 @@ class IamError(RuntimeError):
     """Raised when authentication or authorization fails."""
 
 
-S3_ACTIONS = {"list", "read", "write", "delete", "share", "policy"}
+S3_ACTIONS = {"list", "read", "write", "delete", "share", "policy", "replication"}
 IAM_ACTIONS = {
     "iam:list_users",
     "iam:create_user",
@@ -26,22 +26,59 @@ IAM_ACTIONS = {
 ALLOWED_ACTIONS = (S3_ACTIONS | IAM_ACTIONS) | {"iam:*"}
 
 ACTION_ALIASES = {
+    # List actions
     "list": "list",
     "s3:listbucket": "list",
     "s3:listallmybuckets": "list",
+    "s3:listbucketversions": "list",
+    "s3:listmultipartuploads": "list",
+    "s3:listparts": "list",
+    # Read actions
     "read": "read",
     "s3:getobject": "read",
     "s3:getobjectversion": "read",
+    "s3:getobjecttagging": "read",
+    "s3:getobjectversiontagging": "read",
+    "s3:getobjectacl": "read",
+    "s3:getbucketversioning": "read",
+    "s3:headobject": "read",
+    "s3:headbucket": "read",
+    # Write actions
     "write": "write",
     "s3:putobject": "write",
     "s3:createbucket": "write",
+    "s3:putobjecttagging": "write",
+    "s3:putbucketversioning": "write",
+    "s3:createmultipartupload": "write",
+    "s3:uploadpart": "write",
+    "s3:completemultipartupload": "write",
+    "s3:abortmultipartupload": "write",
+    "s3:copyobject": "write",
+    # Delete actions
     "delete": "delete",
     "s3:deleteobject": "delete",
+    "s3:deleteobjectversion": "delete",
     "s3:deletebucket": "delete",
+    "s3:deleteobjecttagging": "delete",
+    # Share actions (ACL)
     "share": "share",
     "s3:putobjectacl": "share",
+    "s3:putbucketacl": "share",
+    "s3:getbucketacl": "share",
+    # Policy actions
     "policy": "policy",
     "s3:putbucketpolicy": "policy",
+    "s3:getbucketpolicy": "policy",
+    "s3:deletebucketpolicy": "policy",
+    # Replication actions
+    "replication": "replication",
+    "s3:getreplicationconfiguration": "replication",
+    "s3:putreplicationconfiguration": "replication",
+    "s3:deletereplicationconfiguration": "replication",
+    "s3:replicateobject": "replication",
+    "s3:replicatetags": "replication",
+    "s3:replicatedelete": "replication",
+    # IAM actions
     "iam:listusers": "iam:list_users",
     "iam:createuser": "iam:create_user",
     "iam:deleteuser": "iam:delete_user",

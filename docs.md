@@ -102,6 +102,46 @@ The application automatically trusts these headers to generate correct presigned
 
 The API expects every request to include `X-Access-Key` and `X-Secret-Key` headers. The UI persists them in the Flask session after login.
 
+### Available IAM Actions
+
+| Action | Description | AWS Aliases |
+| --- | --- | --- |
+| `list` | List buckets and objects | `s3:ListBucket`, `s3:ListAllMyBuckets`, `s3:ListBucketVersions`, `s3:ListMultipartUploads`, `s3:ListParts` |
+| `read` | Download objects | `s3:GetObject`, `s3:GetObjectVersion`, `s3:GetObjectTagging`, `s3:HeadObject`, `s3:HeadBucket` |
+| `write` | Upload objects, create buckets | `s3:PutObject`, `s3:CreateBucket`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload`, `s3:CopyObject` |
+| `delete` | Remove objects and buckets | `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteBucket` |
+| `share` | Manage ACLs | `s3:PutObjectAcl`, `s3:PutBucketAcl`, `s3:GetBucketAcl` |
+| `policy` | Manage bucket policies | `s3:PutBucketPolicy`, `s3:GetBucketPolicy`, `s3:DeleteBucketPolicy` |
+| `replication` | Configure and manage replication | `s3:GetReplicationConfiguration`, `s3:PutReplicationConfiguration`, `s3:ReplicateObject`, `s3:ReplicateTags`, `s3:ReplicateDelete` |
+| `iam:list_users` | View IAM users | `iam:ListUsers` |
+| `iam:create_user` | Create IAM users | `iam:CreateUser` |
+| `iam:delete_user` | Delete IAM users | `iam:DeleteUser` |
+| `iam:rotate_key` | Rotate user secrets | `iam:RotateAccessKey` |
+| `iam:update_policy` | Modify user policies | `iam:PutUserPolicy` |
+| `iam:*` | All IAM actions (admin wildcard) | — |
+
+### Example Policies
+
+**Full Control (admin):**
+```json
+[{"bucket": "*", "actions": ["list", "read", "write", "delete", "share", "policy", "replication", "iam:*"]}]
+```
+
+**Read-Only:**
+```json
+[{"bucket": "*", "actions": ["list", "read"]}]
+```
+
+**Single Bucket Access (no listing other buckets):**
+```json
+[{"bucket": "user-bucket", "actions": ["read", "write", "delete"]}]
+```
+
+**Bucket Access with Replication:**
+```json
+[{"bucket": "my-bucket", "actions": ["list", "read", "write", "delete", "replication"]}]
+```
+
 ## 5. Bucket Policies & Presets
 
 - **Storage**: Policies are persisted in `data/.myfsio.sys/config/bucket_policies.json` under `{"policies": {"bucket": {...}}}`.
@@ -176,6 +216,19 @@ s3.complete_multipart_upload(
 ## 6. Site Replication
 
 MyFSIO supports **Site Replication**, allowing you to automatically copy new objects from one MyFSIO instance (Source) to another (Target). This is useful for disaster recovery, data locality, or backups.
+
+### Permission Model
+
+Replication uses a two-tier permission system:
+
+| Role | Capabilities |
+|------|--------------|
+| **Admin** (users with `iam:*` permissions) | Create/delete replication rules, configure connections and target buckets |
+| **Users** (with `replication` permission) | Enable/disable (pause/resume) existing replication rules |
+
+> **Note:** The Replication tab is hidden for users without the `replication` permission on the bucket.
+
+This separation allows administrators to pre-configure where data should replicate, while allowing authorized users to toggle replication on/off without accessing connection credentials.
 
 ### Architecture
 
@@ -253,12 +306,14 @@ Now, configure the primary instance to replicate to the target.
     - **Secret Key**: The secret you generated on the Target.
     - Click **Add Connection**.
 
-3.  **Enable Replication**:
+3.  **Enable Replication** (Admin):
     - Navigate to **Buckets** and select the source bucket.
     - Switch to the **Replication** tab.
     - Select the `Secondary Site` connection.
     - Enter the target bucket name (`backup-bucket`).
     - Click **Enable Replication**.
+
+    Once configured, users with `replication` permission on this bucket can pause/resume replication without needing access to connection details.
 
 ### Verification
 
@@ -269,6 +324,18 @@ Now, configure the primary instance to replicate to the target.
 # Verify on target using AWS CLI
 aws --endpoint-url http://target-server:5002 s3 ls s3://backup-bucket
 ```
+
+### Pausing and Resuming Replication
+
+Users with the `replication` permission (but not admin rights) can pause and resume existing replication rules:
+
+1. Navigate to the bucket's **Replication** tab.
+2. If replication is **Active**, click **Pause Replication** to temporarily stop syncing.
+3. If replication is **Paused**, click **Resume Replication** to continue syncing.
+
+When paused, new objects uploaded to the source will not replicate until replication is resumed. Objects uploaded while paused will be replicated once resumed.
+
+> **Note:** Only admins can create new replication rules, change the target connection/bucket, or delete rules entirely.
 
 ### Bidirectional Replication (Active-Active)
 

@@ -51,21 +51,17 @@
             <li class="nav-item">
               <a class="nav-link" href="{{ url_for('ui.buckets_overview') }}">Buckets</a>
             </li>
+            {% if can_manage_iam %}
             <li class="nav-item">
-              <a class="nav-link {% if not can_manage_iam %}nav-link-muted{% endif %}" href="{{ url_for('ui.iam_dashboard') }}">
-                IAM
-                {% if not can_manage_iam %}<span class="badge ms-2 text-bg-warning">Restricted</span>{% endif %}
-              </a>
+              <a class="nav-link" href="{{ url_for('ui.iam_dashboard') }}">IAM</a>
             </li>
             <li class="nav-item">
-              <a class="nav-link {% if not can_manage_iam %}nav-link-muted{% endif %}" href="{{ url_for('ui.connections_dashboard') }}">
-                Connections
-                {% if not can_manage_iam %}<span class="badge ms-2 text-bg-warning">Restricted</span>{% endif %}
-              </a>
+              <a class="nav-link" href="{{ url_for('ui.connections_dashboard') }}">Connections</a>
             </li>
             <li class="nav-item">
               <a class="nav-link" href="{{ url_for('ui.metrics_dashboard') }}">Metrics</a>
             </li>
+            {% endif %}
             {% endif %}
             {% if principal %}
             <li class="nav-item">
