@@ -83,6 +83,16 @@ python run.py --mode ui
                 <td><code>5000</code></td>
                 <td>Listen port.</td>
               </tr>
+              <tr>
+                <td><code>ENCRYPTION_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable server-side encryption support.</td>
+              </tr>
+              <tr>
+                <td><code>KMS_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable KMS key management for encryption.</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -408,10 +418,104 @@ s3.complete_multipart_upload(
         </p>
       </div>
     </article>
-    <article id="troubleshooting" class="card shadow-sm docs-section">
+    <article id="encryption" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">09</span>
+          <h2 class="h4 mb-0">Encryption</h2>
+        </div>
+        <p class="text-muted">Protect data at rest with server-side encryption using AES-256-GCM. Objects are encrypted before being written to disk and decrypted transparently on read.</p>
+        
+        <h3 class="h6 text-uppercase text-muted mt-4">Encryption Types</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>AES-256 (SSE-S3)</strong></td>
+                <td>Server-managed encryption using a local master key</td>
+              </tr>
+              <tr>
+                <td><strong>KMS (SSE-KMS)</strong></td>
+                <td>Encryption using customer-managed keys via the built-in KMS</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Encryption</h3>
+        <ol class="docs-steps mb-3">
+          <li>
+            <strong>Set environment variables:</strong>
+<pre class="mb-2"><code class="language-bash"># PowerShell
+$env:ENCRYPTION_ENABLED = "true"
+$env:KMS_ENABLED = "true"  # Optional
+python run.py
+
+# Bash
+export ENCRYPTION_ENABLED=true
+export KMS_ENABLED=true
+python run.py</code></pre>
+          </li>
+          <li>
+            <strong>Configure bucket encryption:</strong> Navigate to your bucket → <strong>Properties</strong> tab → <strong>Default Encryption</strong> card → Click <strong>Enable Encryption</strong>.
+          </li>
+          <li>
+            <strong>Choose algorithm:</strong> Select <strong>AES-256</strong> for server-managed keys or <strong>aws:kms</strong> to use a KMS-managed key.
+          </li>
+        </ol>
+
+        <div class="alert alert-warning border-warning bg-warning-subtle mb-3">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle mt-1" viewBox="0 0 16 16">
+              <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+              <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+            </svg>
+            <div>
+              <strong>Important:</strong> Only <em>new uploads</em> after enabling encryption will be encrypted. Existing objects remain unencrypted.
+            </div>
+          </div>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">KMS Key Management</h3>
+        <p class="small text-muted">When <code>KMS_ENABLED=true</code>, manage encryption keys via the API:</p>
+<pre class="mb-3"><code class="language-bash"># Create a new KMS key
+curl -X POST {{ api_base }}/kms/keys \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"alias": "my-key", "description": "Production key"}'
+
+# List all keys
+curl {{ api_base }}/kms/keys \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Rotate a key (creates new key material)
+curl -X POST {{ api_base }}/kms/keys/{key-id}/rotate \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Disable/Enable a key
+curl -X POST {{ api_base }}/kms/keys/{key-id}/disable \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Schedule key deletion (30-day waiting period)
+curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">How It Works</h3>
+        <p class="small text-muted mb-0">
+          <strong>Envelope Encryption:</strong> Each object is encrypted with a unique Data Encryption Key (DEK). The DEK is then encrypted (wrapped) by the master key or KMS key and stored alongside the ciphertext. On read, the DEK is unwrapped and used to decrypt the object transparently.
+        </p>
+      </div>
+    </article>
+    <article id="troubleshooting" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">10</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -468,6 +572,7 @@ s3.complete_multipart_upload(
           <li><a href="#api">REST endpoints</a></li>
           <li><a href="#examples">API Examples</a></li>
           <li><a href="#replication">Site Replication</a></li>
+          <li><a href="#encryption">Encryption</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>
         </ul>
         <div class="docs-sidebar-callouts">

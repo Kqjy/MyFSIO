@@ -80,6 +80,10 @@ The repo now tracks a human-friendly release string inside `app/version.py` (see
 | `API_BASE_URL` | `None` | Used by the UI to hit API endpoints (presign/policy). If unset, the UI will auto-detect the host or use `X-Forwarded-*` headers. |
 | `AWS_REGION` | `us-east-1` | Region embedded in SigV4 credential scope. |
 | `AWS_SERVICE` | `s3` | Service string for SigV4. |
+| `ENCRYPTION_ENABLED` | `false` | Enable server-side encryption support. |
+| `KMS_ENABLED` | `false` | Enable KMS key management for encryption. |
+| `KMS_KEYS_PATH` | `data/kms_keys.json` | Path to store KMS key metadata. |
+| `ENCRYPTION_MASTER_KEY_PATH` | `data/master.key` | Path to the master encryption key file. |
 
 Set env vars (or pass overrides to `create_app`) to point the servers at custom paths.
 
@@ -213,9 +217,130 @@ s3.complete_multipart_upload(
 )
 ```
 
-## 6. Site Replication
+## 7. Encryption
 
-MyFSIO supports **Site Replication**, allowing you to automatically copy new objects from one MyFSIO instance (Source) to another (Target). This is useful for disaster recovery, data locality, or backups.
+MyFSIO supports **server-side encryption at rest** to protect your data. When enabled, objects are encrypted using AES-256-GCM before being written to disk.
+
+### Encryption Types
+
+| Type | Description |
+|------|-------------|
+| **AES-256 (SSE-S3)** | Server-managed encryption using a local master key |
+| **KMS (SSE-KMS)** | Encryption using customer-managed keys via the built-in KMS |
+
+### Enabling Encryption
+
+#### 1. Set Environment Variables
+
+```powershell
+# PowerShell
+$env:ENCRYPTION_ENABLED = "true"
+$env:KMS_ENABLED = "true"  # Optional, for KMS key management
+python run.py
+```
+
+```bash
+# Bash
+export ENCRYPTION_ENABLED=true
+export KMS_ENABLED=true
+python run.py
+```
+
+#### 2. Configure Bucket Default Encryption (UI)
+
+1. Navigate to your bucket in the UI
+2. Click the **Properties** tab
+3. Find the **Default Encryption** card
+4. Click **Enable Encryption**
+5. Choose algorithm:
+   - **AES-256**: Uses the server's master key
+   - **aws:kms**: Uses a KMS-managed key (select from dropdown)
+6. Save changes
+
+Once enabled, all **new objects** uploaded to the bucket will be automatically encrypted.
+
+### KMS Key Management
+
+When `KMS_ENABLED=true`, you can manage encryption keys via the KMS API:
+
+```bash
+# Create a new KMS key
+curl -X POST http://localhost:5000/kms/keys \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"alias": "my-key", "description": "Production encryption key"}'
+
+# List all keys
+curl http://localhost:5000/kms/keys \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Get key details
+curl http://localhost:5000/kms/keys/{key-id} \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Rotate a key (creates new key material)
+curl -X POST http://localhost:5000/kms/keys/{key-id}/rotate \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Disable/Enable a key
+curl -X POST http://localhost:5000/kms/keys/{key-id}/disable \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+curl -X POST http://localhost:5000/kms/keys/{key-id}/enable \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Schedule key deletion (30-day waiting period)
+curl -X DELETE http://localhost:5000/kms/keys/{key-id}?waiting_period_days=30 \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### How It Works
+
+1. **Envelope Encryption**: Each object is encrypted with a unique Data Encryption Key (DEK)
+2. **Key Wrapping**: The DEK is encrypted (wrapped) by the master key or KMS key
+3. **Storage**: The encrypted DEK is stored alongside the encrypted object
+4. **Decryption**: On read, the DEK is unwrapped and used to decrypt the object
+
+### Client-Side Encryption
+
+For additional security, you can use client-side encryption. The `ClientEncryptionHelper` class provides utilities:
+
+```python
+from app.encryption import ClientEncryptionHelper
+
+# Generate a client-side key
+key = ClientEncryptionHelper.generate_key()
+key_b64 = ClientEncryptionHelper.key_to_base64(key)
+
+# Encrypt before upload
+plaintext = b"sensitive data"
+encrypted, metadata = ClientEncryptionHelper.encrypt_for_upload(plaintext, key)
+
+# Upload with metadata headers
+# x-amz-meta-x-amz-key: <wrapped-key>
+# x-amz-meta-x-amz-iv: <iv>
+# x-amz-meta-x-amz-matdesc: <material-description>
+
+# Decrypt after download
+decrypted = ClientEncryptionHelper.decrypt_from_download(encrypted, metadata, key)
+```
+
+### Important Notes
+
+- **Existing objects are NOT encrypted** - Only new uploads after enabling encryption are encrypted
+- **Master key security** - The master key file (`master.key`) should be backed up securely and protected
+- **Key rotation** - Rotating a KMS key creates new key material; existing objects remain encrypted with the old material
+- **Disabled keys** - Objects encrypted with a disabled key cannot be decrypted until the key is re-enabled
+- **Deleted keys** - Once a key is deleted (after the waiting period), objects encrypted with it are permanently inaccessible
+
+### Verifying Encryption
+
+To verify an object is encrypted:
+1. Check the raw file in `data/<bucket>/` - it should be unreadable binary
+2. Look for `.meta` files containing encryption metadata
+3. Download via the API/UI - the object should be automatically decrypted
+
+## 8. Site Replication
 
 ### Permission Model
 
@@ -352,7 +477,7 @@ To set up two-way replication (Server A ↔ Server B):
 
 **Note**: Deleting a bucket will automatically remove its associated replication configuration.
 
-## 7. Running Tests
+## 9. Running Tests
 
 ```bash
 pytest -q
@@ -362,7 +487,7 @@ The suite now includes a boto3 integration test that spins up a live HTTP server
 
 The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, and regression tests for anonymous reads when a Public policy is attached.
 
-## 8. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 | --- | --- | --- |
@@ -371,7 +496,7 @@ The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, an
 | Presign modal errors with 403 | IAM user lacks `read/write/delete` for target bucket or bucket policy denies | Update IAM inline policies or remove conflicting deny statements. |
 | Large upload rejected immediately | File exceeds `MAX_UPLOAD_SIZE` | Increase env var or shrink object. |
 
-## 9. API Matrix
+## 11. API Matrix
 
 ```
 GET    /                               # List buckets
@@ -387,7 +512,7 @@ PUT    /bucket-policy/<bucket>          # Upsert policy
 DELETE /bucket-policy/<bucket>          # Delete policy
 ```
 
-## 10. Next Steps
+## 12. Next Steps
 
 - Tailor IAM + policy JSON files for team-ready presets.
 - Wrap `run_api.py` with gunicorn or another WSGI server for long-running workloads.
