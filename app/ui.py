@@ -6,7 +6,7 @@ import uuid
 import psutil
 import shutil
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import boto3
 import requests
@@ -796,7 +796,8 @@ def object_presign(bucket_name: str, object_key: str):
     
     api_base = current_app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
     api_base = api_base.rstrip("/")
-    url = f"{api_base}/presign/{bucket_name}/{object_key}"
+    encoded_key = quote(object_key, safe="")
+    url = f"{api_base}/presign/{bucket_name}/{encoded_key}"
     
     # Use API base URL for forwarded headers so presigned URLs point to API, not UI
     parsed_api = urlparse(api_base)
