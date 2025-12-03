@@ -50,6 +50,7 @@ class AppConfig:
     aws_service: str
     ui_enforce_bucket_policies: bool
     log_level: str
+    log_to_file: bool
     log_path: Path
     log_max_bytes: int
     log_backup_count: int
@@ -131,6 +132,7 @@ class AppConfig:
         aws_service = str(_get("AWS_SERVICE", "s3"))
         enforce_ui_policies = str(_get("UI_ENFORCE_BUCKET_POLICIES", "0")).lower() in {"1", "true", "yes", "on"}
         log_level = str(_get("LOG_LEVEL", "INFO")).upper()
+        log_to_file = str(_get("LOG_TO_FILE", "1")).lower() in {"1", "true", "yes", "on"}
         log_dir = Path(_get("LOG_DIR", PROJECT_ROOT / "logs")).resolve()
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / str(_get("LOG_FILE", "app.log"))
@@ -180,6 +182,7 @@ class AppConfig:
                    aws_service=aws_service,
                    ui_enforce_bucket_policies=enforce_ui_policies,
                    log_level=log_level,
+                   log_to_file=log_to_file,
                    log_path=log_path,
                    log_max_bytes=log_max_bytes,
                    log_backup_count=log_backup_count,
@@ -222,6 +225,7 @@ class AppConfig:
             "MULTIPART_MIN_PART_SIZE": self.multipart_min_part_size,
             "BUCKET_STATS_CACHE_TTL": self.bucket_stats_cache_ttl,
             "LOG_LEVEL": self.log_level,
+            "LOG_TO_FILE": self.log_to_file,
             "LOG_FILE": str(self.log_path),
             "LOG_MAX_BYTES": self.log_max_bytes,
             "LOG_BACKUP_COUNT": self.log_backup_count,
