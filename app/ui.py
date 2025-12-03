@@ -686,9 +686,18 @@ def bulk_download_objects(bucket_name: str):
                 # But strictly we should check. Let's check.
                 _authorize_ui(principal, bucket_name, "read", object_key=key)
                 
-                path = storage.get_object_path(bucket_name, key)
-                # Use the key as the filename in the zip
-                zf.write(path, arcname=key)
+                # Check if object is encrypted
+                metadata = storage.get_object_metadata(bucket_name, key)
+                is_encrypted = "x-amz-server-side-encryption" in metadata
+                
+                if is_encrypted and hasattr(storage, 'get_object_data'):
+                    # Decrypt and add to zip
+                    data, _ = storage.get_object_data(bucket_name, key)
+                    zf.writestr(key, data)
+                else:
+                    # Add unencrypted file directly
+                    path = storage.get_object_path(bucket_name, key)
+                    zf.write(path, arcname=key)
             except (StorageError, IamError):
                 # Skip files we can't read or don't exist
                 continue
@@ -730,13 +739,34 @@ def purge_object_versions(bucket_name: str, object_key: str):
 @ui_bp.get("/buckets/<bucket_name>/objects/<path:object_key>/preview")
 def object_preview(bucket_name: str, object_key: str) -> Response:
     principal = _current_principal()
+    storage = _storage()
     try:
         _authorize_ui(principal, bucket_name, "read", object_key=object_key)
-        path = _storage().get_object_path(bucket_name, object_key)
+        path = storage.get_object_path(bucket_name, object_key)
+        metadata = storage.get_object_metadata(bucket_name, object_key)
     except (StorageError, IamError) as exc:
         status = 403 if isinstance(exc, IamError) else 404
         return Response(str(exc), status=status)
+    
     download = request.args.get("download") == "1"
+    
+    # Check if object is encrypted and needs decryption
+    is_encrypted = "x-amz-server-side-encryption" in metadata
+    if is_encrypted and hasattr(storage, 'get_object_data'):
+        try:
+            data, _ = storage.get_object_data(bucket_name, object_key)
+            import io
+            import mimetypes
+            mimetype = mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+            return send_file(
+                io.BytesIO(data),
+                mimetype=mimetype,
+                as_attachment=download,
+                download_name=path.name
+            )
+        except StorageError as exc:
+            return Response(f"Decryption failed: {exc}", status=500)
+    
     return send_file(path, as_attachment=download, download_name=path.name)
 
 

@@ -688,7 +688,9 @@
             rotateDoneBtn.classList.remove('d-none');
             
         } catch (err) {
-            alert(err.message);
+            if (window.showToast) {
+              window.showToast(err.message, 'Error', 'danger');
+            }
             rotateSecretModal.hide();
         } finally {
             confirmRotateBtn.disabled = false;

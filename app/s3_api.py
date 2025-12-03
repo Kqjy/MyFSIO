@@ -784,8 +784,9 @@ def _apply_object_headers(
     metadata: Dict[str, str] | None,
     etag: str,
 ) -> None:
-    response.headers["Content-Length"] = str(file_stat.st_size)
-    response.headers["Last-Modified"] = http_date(file_stat.st_mtime)
+    if file_stat is not None:
+        response.headers["Content-Length"] = str(file_stat.st_size)
+        response.headers["Last-Modified"] = http_date(file_stat.st_mtime)
     response.headers["ETag"] = f'"{etag}"'
     response.headers["Accept-Ranges"] = "bytes"
     for key, value in (metadata or {}).items():
@@ -1779,19 +1780,48 @@ def object_handler(bucket_name: str, object_key: str):
         except StorageError as exc:
             return _error_response("NoSuchKey", str(exc), 404)
         metadata = storage.get_object_metadata(bucket_name, object_key)
-        stat = path.stat()
-        mimetype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        etag = storage._compute_etag(path)
-
+        mimetype = mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+        
+        # Check if object is encrypted and needs decryption
+        is_encrypted = "x-amz-server-side-encryption" in metadata
+        
         if request.method == "GET":
-            response = Response(_stream_file(path), mimetype=mimetype, direct_passthrough=True)
-            logged_bytes = stat.st_size
+            if is_encrypted and hasattr(storage, 'get_object_data'):
+                # Use encrypted storage to decrypt
+                try:
+                    data, clean_metadata = storage.get_object_data(bucket_name, object_key)
+                    response = Response(data, mimetype=mimetype)
+                    logged_bytes = len(data)
+                    # Use decrypted size for Content-Length
+                    response.headers["Content-Length"] = len(data)
+                    etag = hashlib.md5(data).hexdigest()
+                except StorageError as exc:
+                    return _error_response("InternalError", str(exc), 500)
+            else:
+                # Stream unencrypted file directly
+                stat = path.stat()
+                response = Response(_stream_file(path), mimetype=mimetype, direct_passthrough=True)
+                logged_bytes = stat.st_size
+                etag = storage._compute_etag(path)
         else:
-            response = Response(status=200)
+            # HEAD request
+            if is_encrypted and hasattr(storage, 'get_object_data'):
+                # For encrypted objects, we need to report decrypted size
+                try:
+                    data, _ = storage.get_object_data(bucket_name, object_key)
+                    response = Response(status=200)
+                    response.headers["Content-Length"] = len(data)
+                    etag = hashlib.md5(data).hexdigest()
+                except StorageError as exc:
+                    return _error_response("InternalError", str(exc), 500)
+            else:
+                stat = path.stat()
+                response = Response(status=200)
+                etag = storage._compute_etag(path)
             response.headers["Content-Type"] = mimetype
             logged_bytes = 0
 
-        _apply_object_headers(response, file_stat=stat, metadata=metadata, etag=etag)
+        _apply_object_headers(response, file_stat=path.stat() if not is_encrypted else None, metadata=metadata, etag=etag)
         action = "Object read" if request.method == "GET" else "Object head"
         current_app.logger.info(action, extra={"bucket": bucket_name, "key": object_key, "bytes": logged_bytes})
         return response

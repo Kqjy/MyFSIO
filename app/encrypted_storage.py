@@ -54,8 +54,10 @@ class EncryptedObjectStorage:
             encryption_config = self.storage.get_bucket_encryption(bucket_name)
             if encryption_config and encryption_config.get("Rules"):
                 rule = encryption_config["Rules"][0]
-                algorithm = rule.get("SSEAlgorithm", "AES256")
-                kms_key_id = rule.get("KMSMasterKeyID")
+                # AWS format: Rules[].ApplyServerSideEncryptionByDefault.SSEAlgorithm
+                sse_default = rule.get("ApplyServerSideEncryptionByDefault", {})
+                algorithm = sse_default.get("SSEAlgorithm", "AES256")
+                kms_key_id = sse_default.get("KMSMasterKeyID")
                 return True, algorithm, kms_key_id
         except StorageError:
             pass

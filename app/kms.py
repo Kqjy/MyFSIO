@@ -91,7 +91,8 @@ class KMSEncryptionProvider(EncryptionProvider):
     def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
                 key_id: str, context: Dict[str, str] | None = None) -> bytes:
         """Decrypt data using envelope encryption with KMS."""
-        data_key = self.kms.decrypt_data_key(key_id, encrypted_data_key, context)
+        # Note: Data key is encrypted without context (AAD), so we decrypt without context
+        data_key = self.kms.decrypt_data_key(key_id, encrypted_data_key, context=None)
         
         aesgcm = AESGCM(data_key)
         try:

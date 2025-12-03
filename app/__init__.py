@@ -95,6 +95,11 @@ def create_app(
         kms_manager = KMSManager(kms_keys_path, kms_master_key_path)
         encryption_manager.set_kms_provider(kms_manager)
 
+    # Wrap storage with encryption layer if encryption is enabled
+    if app.config.get("ENCRYPTION_ENABLED", False):
+        from .encrypted_storage import EncryptedObjectStorage
+        storage = EncryptedObjectStorage(storage, encryption_manager)
+
     app.extensions["object_storage"] = storage
     app.extensions["iam"] = iam
     app.extensions["bucket_policies"] = bucket_policies
