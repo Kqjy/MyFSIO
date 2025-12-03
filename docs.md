@@ -389,7 +389,7 @@ curl -X PUT "http://localhost:5000/bucket/<bucket>?quota" \
 
 ### Quota Behavior
 
-- **Version Counting**: When versioning is enabled, archived versions count toward the quota (similar to MinIO behavior)
+- **Version Counting**: When versioning is enabled, archived versions count toward the quota
 - **Enforcement Points**: Quotas are checked during `PUT` object and `CompleteMultipartUpload` operations
 - **Error Response**: When quota is exceeded, the API returns `HTTP 400` with error code `QuotaExceeded`
 - **Visibility**: All users can view quota usage in the bucket detail page, but only admins can modify quotas
