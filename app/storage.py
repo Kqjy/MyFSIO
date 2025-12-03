@@ -75,6 +75,15 @@ class StorageError(RuntimeError):
     """Raised when the storage layer encounters an unrecoverable problem."""
 
 
+class QuotaExceededError(StorageError):
+    """Raised when an operation would exceed bucket quota limits."""
+    
+    def __init__(self, message: str, quota: Dict[str, Any], usage: Dict[str, int]):
+        super().__init__(message)
+        self.quota = quota
+        self.usage = usage
+
+
 @dataclass
 class ObjectMeta:
     key: str
@@ -169,16 +178,38 @@ class ObjectStorage:
 
         object_count = 0
         total_bytes = 0
+        version_count = 0
+        version_bytes = 0
+        
+        # Count current objects in the bucket folder
         for path in bucket_path.rglob("*"):
             if path.is_file():
                 rel = path.relative_to(bucket_path)
-                if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
+                if not rel.parts:
                     continue
-                stat = path.stat()
-                object_count += 1
-                total_bytes += stat.st_size
+                top_folder = rel.parts[0]
+                if top_folder not in self.INTERNAL_FOLDERS:
+                    stat = path.stat()
+                    object_count += 1
+                    total_bytes += stat.st_size
         
-        stats = {"objects": object_count, "bytes": total_bytes}
+        # Count archived versions in the system folder
+        versions_root = self._bucket_versions_root(bucket_name)
+        if versions_root.exists():
+            for path in versions_root.rglob("*.bin"):
+                if path.is_file():
+                    stat = path.stat()
+                    version_count += 1
+                    version_bytes += stat.st_size
+        
+        stats = {
+            "objects": object_count,
+            "bytes": total_bytes,
+            "version_count": version_count,
+            "version_bytes": version_bytes,
+            "total_objects": object_count + version_count,  # All objects including versions
+            "total_bytes": total_bytes + version_bytes,  # All storage including versions
+        }
         
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +274,7 @@ class ObjectStorage:
         stream: BinaryIO,
         *,
         metadata: Optional[Dict[str, str]] = None,
+        enforce_quota: bool = True,
     ) -> ObjectMeta:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
@@ -253,12 +285,52 @@ class ObjectStorage:
         destination = bucket_path / safe_key
         destination.parent.mkdir(parents=True, exist_ok=True)
 
-        if self._is_versioning_enabled(bucket_path) and destination.exists():
+        # Check if this is an overwrite (won't add to object count)
+        is_overwrite = destination.exists()
+        existing_size = destination.stat().st_size if is_overwrite else 0
+
+        if self._is_versioning_enabled(bucket_path) and is_overwrite:
             self._archive_current_version(bucket_id, safe_key, reason="overwrite")
 
-        checksum = hashlib.md5()
-        with destination.open("wb") as target:
-            shutil.copyfileobj(_HashingReader(stream, checksum), target)
+        # Write to temp file first to get actual size
+        tmp_dir = self._system_root_path() / self.SYSTEM_TMP_DIR
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"{uuid.uuid4().hex}.tmp"
+        
+        try:
+            checksum = hashlib.md5()
+            with tmp_path.open("wb") as target:
+                shutil.copyfileobj(_HashingReader(stream, checksum), target)
+            
+            new_size = tmp_path.stat().st_size
+            
+            # Check quota before finalizing
+            if enforce_quota:
+                # Calculate net change (new size minus size being replaced)
+                size_delta = new_size - existing_size
+                object_delta = 0 if is_overwrite else 1
+                
+                quota_check = self.check_quota(
+                    bucket_name,
+                    additional_bytes=max(0, size_delta),
+                    additional_objects=object_delta,
+                )
+                if not quota_check["allowed"]:
+                    raise QuotaExceededError(
+                        quota_check["message"] or "Quota exceeded",
+                        quota_check["quota"],
+                        quota_check["usage"],
+                    )
+            
+            # Move to final destination
+            shutil.move(str(tmp_path), str(destination))
+            
+        finally:
+            # Clean up temp file if it still exists
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
         stat = destination.stat()
         if metadata:
@@ -289,6 +361,27 @@ class ObjectStorage:
         safe_key = self._sanitize_object_key(object_key)
         return self._read_metadata(bucket_path.name, safe_key) or {}
 
+    def _cleanup_empty_parents(self, path: Path, stop_at: Path) -> None:
+        """Remove empty parent directories up to (but not including) stop_at.
+        
+        On Windows/OneDrive, directories may be locked briefly after file deletion.
+        This method retries with a small delay to handle that case.
+        """
+        for parent in path.parents:
+            if parent == stop_at:
+                break
+            # Retry a few times with small delays for Windows/OneDrive
+            for attempt in range(3):
+                try:
+                    if parent.exists() and not any(parent.iterdir()):
+                        parent.rmdir()
+                        break  # Success, move to next parent
+                except OSError:
+                    if attempt < 2:
+                        time.sleep(0.1)  # Brief delay before retry
+                    # Final attempt failed - continue to next parent
+                    break
+
     def delete_object(self, bucket_name: str, object_key: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
         path = self._object_path(bucket_name, object_key)
@@ -303,12 +396,7 @@ class ObjectStorage:
         self._delete_metadata(bucket_id, rel)
         
         self._invalidate_bucket_stats_cache(bucket_id)
-        
-        for parent in path.parents:
-            if parent == bucket_path:
-                break
-            if parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
+        self._cleanup_empty_parents(path, bucket_path)
 
     def purge_object(self, bucket_name: str, object_key: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
@@ -330,12 +418,7 @@ class ObjectStorage:
         
         # Invalidate bucket stats cache
         self._invalidate_bucket_stats_cache(bucket_id)
-        
-        for parent in target.parents:
-            if parent == bucket_path:
-                break
-            if parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
+        self._cleanup_empty_parents(target, bucket_path)
 
     def is_versioning_enabled(self, bucket_name: str) -> bool:
         bucket_path = self._bucket_path(bucket_name)
@@ -412,6 +495,124 @@ class ObjectStorage:
         """Set lifecycle configuration for bucket."""
         bucket_path = self._require_bucket_path(bucket_name)
         self._set_bucket_config_entry(bucket_path.name, "lifecycle", rules)
+
+    def get_bucket_quota(self, bucket_name: str) -> Dict[str, Any]:
+        """Get quota configuration for bucket.
+        
+        Returns:
+            Dict with 'max_bytes' and 'max_objects' (None if unlimited).
+        """
+        bucket_path = self._require_bucket_path(bucket_name)
+        config = self._read_bucket_config(bucket_path.name)
+        quota = config.get("quota")
+        if isinstance(quota, dict):
+            return {
+                "max_bytes": quota.get("max_bytes"),
+                "max_objects": quota.get("max_objects"),
+            }
+        return {"max_bytes": None, "max_objects": None}
+
+    def set_bucket_quota(
+        self,
+        bucket_name: str,
+        *,
+        max_bytes: Optional[int] = None,
+        max_objects: Optional[int] = None,
+    ) -> None:
+        """Set quota limits for a bucket.
+        
+        Args:
+            bucket_name: Name of the bucket
+            max_bytes: Maximum total size in bytes (None to remove limit)
+            max_objects: Maximum number of objects (None to remove limit)
+        """
+        bucket_path = self._require_bucket_path(bucket_name)
+        
+        if max_bytes is None and max_objects is None:
+            # Remove quota entirely
+            self._set_bucket_config_entry(bucket_path.name, "quota", None)
+            return
+        
+        quota: Dict[str, Any] = {}
+        if max_bytes is not None:
+            if max_bytes < 0:
+                raise StorageError("max_bytes must be non-negative")
+            quota["max_bytes"] = max_bytes
+        if max_objects is not None:
+            if max_objects < 0:
+                raise StorageError("max_objects must be non-negative")
+            quota["max_objects"] = max_objects
+        
+        self._set_bucket_config_entry(bucket_path.name, "quota", quota)
+
+    def check_quota(
+        self,
+        bucket_name: str,
+        additional_bytes: int = 0,
+        additional_objects: int = 0,
+    ) -> Dict[str, Any]:
+        """Check if an operation would exceed bucket quota.
+        
+        Args:
+            bucket_name: Name of the bucket
+            additional_bytes: Bytes that would be added
+            additional_objects: Objects that would be added
+            
+        Returns:
+            Dict with 'allowed' (bool), 'quota' (current limits),
+            'usage' (current usage), and 'message' (if not allowed).
+        """
+        quota = self.get_bucket_quota(bucket_name)
+        if not quota:
+            return {
+                "allowed": True,
+                "quota": None,
+                "usage": None,
+                "message": None,
+            }
+        
+        # Get current stats (uses cache when available)
+        stats = self.bucket_stats(bucket_name)
+        # Use totals which include versions for quota enforcement
+        current_bytes = stats.get("total_bytes", stats.get("bytes", 0))
+        current_objects = stats.get("total_objects", stats.get("objects", 0))
+        
+        result = {
+            "allowed": True,
+            "quota": quota,
+            "usage": {
+                "bytes": current_bytes,
+                "objects": current_objects,
+                "version_count": stats.get("version_count", 0),
+                "version_bytes": stats.get("version_bytes", 0),
+            },
+            "message": None,
+        }
+        
+        max_bytes_limit = quota.get("max_bytes")
+        max_objects = quota.get("max_objects")
+        
+        if max_bytes_limit is not None:
+            projected_bytes = current_bytes + additional_bytes
+            if projected_bytes > max_bytes_limit:
+                result["allowed"] = False
+                result["message"] = (
+                    f"Quota exceeded: adding {additional_bytes} bytes would result in "
+                    f"{projected_bytes} bytes, exceeding limit of {max_bytes_limit} bytes"
+                )
+                return result
+        
+        if max_objects is not None:
+            projected_objects = current_objects + additional_objects
+            if projected_objects > max_objects:
+                result["allowed"] = False
+                result["message"] = (
+                    f"Quota exceeded: adding {additional_objects} objects would result in "
+                    f"{projected_objects} objects, exceeding limit of {max_objects} objects"
+                )
+                return result
+        
+        return result
 
     def get_object_tags(self, bucket_name: str, object_key: str) -> List[Dict[str, str]]:
         """Get tags for an object."""
@@ -529,6 +730,7 @@ class ObjectStorage:
         else:
             self._delete_metadata(bucket_id, safe_key)
         stat = destination.stat()
+        self._invalidate_bucket_stats_cache(bucket_id)
         return ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
@@ -677,6 +879,7 @@ class ObjectStorage:
         bucket_name: str,
         upload_id: str,
         ordered_parts: List[Dict[str, Any]],
+        enforce_quota: bool = True,
     ) -> ObjectMeta:
         if not ordered_parts:
             raise StorageError("parts list required")
@@ -687,6 +890,7 @@ class ObjectStorage:
         if not parts_map:
             raise StorageError("No uploaded parts found")
         validated: List[tuple[int, Dict[str, Any]]] = []
+        total_size = 0
         for part in ordered_parts:
             raw_number = part.get("part_number")
             if raw_number is None:
@@ -706,10 +910,33 @@ class ObjectStorage:
             if supplied_etag and record.get("etag") and supplied_etag.strip('"') != record["etag"]:
                 raise StorageError(f"ETag mismatch for part {number}")
             validated.append((number, record))
+            total_size += record.get("size", 0)
         validated.sort(key=lambda entry: entry[0])
 
         safe_key = self._sanitize_object_key(manifest["object_key"])
         destination = bucket_path / safe_key
+        
+        # Check if this is an overwrite
+        is_overwrite = destination.exists()
+        existing_size = destination.stat().st_size if is_overwrite else 0
+        
+        # Check quota before writing
+        if enforce_quota:
+            size_delta = total_size - existing_size
+            object_delta = 0 if is_overwrite else 1
+            
+            quota_check = self.check_quota(
+                bucket_name,
+                additional_bytes=max(0, size_delta),
+                additional_objects=object_delta,
+            )
+            if not quota_check["allowed"]:
+                raise QuotaExceededError(
+                    quota_check["message"] or "Quota exceeded",
+                    quota_check["quota"],
+                    quota_check["usage"],
+                )
+        
         destination.parent.mkdir(parents=True, exist_ok=True)
         
         lock_file_path = self._system_bucket_root(bucket_id) / "locks" / f"{safe_key.as_posix().replace('/', '_')}.lock"

@@ -86,7 +86,7 @@ Presigned URLs follow the AWS CLI playbook:
 | `AWS_REGION` | `us-east-1` | Region used in Signature V4 scope |
 | `AWS_SERVICE` | `s3` | Service used in Signature V4 scope |
 
-> Buckets now live directly under `data/` while system metadata (versions, IAM, bucket policies, multipart uploads, etc.) lives in `data/.myfsio.sys`. Existing installs can keep their environment variables, but the defaults now match MinIO's `data/.system` pattern for easier bind-mounting.
+> Buckets now live directly under `data/` while system metadata (versions, IAM, bucket policies, multipart uploads, etc.) lives in `data/.myfsio.sys`.
 
 ## API Cheatsheet (IAM headers required)
 

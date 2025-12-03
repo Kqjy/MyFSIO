@@ -396,10 +396,23 @@ code {
 .preview-card { top: 1rem; }
 
 .preview-stage {
-	min-height: 260px;
 	background-color: var(--myfsio-preview-bg);
 	overflow: hidden;
 	border-color: var(--myfsio-card-border) !important;
+}
+
+.preview-stage:has(#preview-placeholder:not(.d-none)) {
+	min-height: 0;
+}
+
+.preview-stage:has(#preview-image:not(.d-none)),
+.preview-stage:has(#preview-video:not(.d-none)),
+.preview-stage:has(#preview-iframe:not(.d-none)) {
+	min-height: 200px;
+}
+
+#preview-placeholder {
+	padding: 2rem 1rem;
 }
 
 .upload-progress-stack {
@@ -926,6 +939,19 @@ pre code {
 
 [data-object-row]:hover {
 	background-color: var(--myfsio-hover-bg) !important;
+}
+
+.folder-row {
+	background-color: var(--myfsio-section-bg);
+	transition: background-color 0.15s ease;
+}
+
+.folder-row:hover {
+	background-color: var(--myfsio-hover-bg) !important;
+}
+
+.folder-row td:first-child {
+	padding-left: 0.5rem;
 }
 
 .btn-group-sm .btn {

@@ -80,6 +80,10 @@ The repo now tracks a human-friendly release string inside `app/version.py` (see
 | `API_BASE_URL` | `None` | Used by the UI to hit API endpoints (presign/policy). If unset, the UI will auto-detect the host or use `X-Forwarded-*` headers. |
 | `AWS_REGION` | `us-east-1` | Region embedded in SigV4 credential scope. |
 | `AWS_SERVICE` | `s3` | Service string for SigV4. |
+| `ENCRYPTION_ENABLED` | `false` | Enable server-side encryption support. |
+| `KMS_ENABLED` | `false` | Enable KMS key management for encryption. |
+| `KMS_KEYS_PATH` | `data/kms_keys.json` | Path to store KMS key metadata. |
+| `ENCRYPTION_MASTER_KEY_PATH` | `data/master.key` | Path to the master encryption key file. |
 
 Set env vars (or pass overrides to `create_app`) to point the servers at custom paths.
 
@@ -101,6 +105,46 @@ The application automatically trusts these headers to generate correct presigned
 3. Wildcard action `iam:*` is supported for admin user definitions.
 
 The API expects every request to include `X-Access-Key` and `X-Secret-Key` headers. The UI persists them in the Flask session after login.
+
+### Available IAM Actions
+
+| Action | Description | AWS Aliases |
+| --- | --- | --- |
+| `list` | List buckets and objects | `s3:ListBucket`, `s3:ListAllMyBuckets`, `s3:ListBucketVersions`, `s3:ListMultipartUploads`, `s3:ListParts` |
+| `read` | Download objects | `s3:GetObject`, `s3:GetObjectVersion`, `s3:GetObjectTagging`, `s3:HeadObject`, `s3:HeadBucket` |
+| `write` | Upload objects, create buckets | `s3:PutObject`, `s3:CreateBucket`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload`, `s3:CopyObject` |
+| `delete` | Remove objects and buckets | `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteBucket` |
+| `share` | Manage ACLs | `s3:PutObjectAcl`, `s3:PutBucketAcl`, `s3:GetBucketAcl` |
+| `policy` | Manage bucket policies | `s3:PutBucketPolicy`, `s3:GetBucketPolicy`, `s3:DeleteBucketPolicy` |
+| `replication` | Configure and manage replication | `s3:GetReplicationConfiguration`, `s3:PutReplicationConfiguration`, `s3:ReplicateObject`, `s3:ReplicateTags`, `s3:ReplicateDelete` |
+| `iam:list_users` | View IAM users | `iam:ListUsers` |
+| `iam:create_user` | Create IAM users | `iam:CreateUser` |
+| `iam:delete_user` | Delete IAM users | `iam:DeleteUser` |
+| `iam:rotate_key` | Rotate user secrets | `iam:RotateAccessKey` |
+| `iam:update_policy` | Modify user policies | `iam:PutUserPolicy` |
+| `iam:*` | All IAM actions (admin wildcard) | — |
+
+### Example Policies
+
+**Full Control (admin):**
+```json
+[{"bucket": "*", "actions": ["list", "read", "write", "delete", "share", "policy", "replication", "iam:*"]}]
+```
+
+**Read-Only:**
+```json
+[{"bucket": "*", "actions": ["list", "read"]}]
+```
+
+**Single Bucket Access (no listing other buckets):**
+```json
+[{"bucket": "user-bucket", "actions": ["read", "write", "delete"]}]
+```
+
+**Bucket Access with Replication:**
+```json
+[{"bucket": "my-bucket", "actions": ["list", "read", "write", "delete", "replication"]}]
+```
 
 ## 5. Bucket Policies & Presets
 
@@ -173,9 +217,207 @@ s3.complete_multipart_upload(
 )
 ```
 
-## 6. Site Replication
+## 7. Encryption
 
-MyFSIO supports **Site Replication**, allowing you to automatically copy new objects from one MyFSIO instance (Source) to another (Target). This is useful for disaster recovery, data locality, or backups.
+MyFSIO supports **server-side encryption at rest** to protect your data. When enabled, objects are encrypted using AES-256-GCM before being written to disk.
+
+### Encryption Types
+
+| Type | Description |
+|------|-------------|
+| **AES-256 (SSE-S3)** | Server-managed encryption using a local master key |
+| **KMS (SSE-KMS)** | Encryption using customer-managed keys via the built-in KMS |
+
+### Enabling Encryption
+
+#### 1. Set Environment Variables
+
+```powershell
+# PowerShell
+$env:ENCRYPTION_ENABLED = "true"
+$env:KMS_ENABLED = "true"  # Optional, for KMS key management
+python run.py
+```
+
+```bash
+# Bash
+export ENCRYPTION_ENABLED=true
+export KMS_ENABLED=true
+python run.py
+```
+
+#### 2. Configure Bucket Default Encryption (UI)
+
+1. Navigate to your bucket in the UI
+2. Click the **Properties** tab
+3. Find the **Default Encryption** card
+4. Click **Enable Encryption**
+5. Choose algorithm:
+   - **AES-256**: Uses the server's master key
+   - **aws:kms**: Uses a KMS-managed key (select from dropdown)
+6. Save changes
+
+Once enabled, all **new objects** uploaded to the bucket will be automatically encrypted.
+
+### KMS Key Management
+
+When `KMS_ENABLED=true`, you can manage encryption keys via the KMS API:
+
+```bash
+# Create a new KMS key
+curl -X POST http://localhost:5000/kms/keys \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"alias": "my-key", "description": "Production encryption key"}'
+
+# List all keys
+curl http://localhost:5000/kms/keys \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Get key details
+curl http://localhost:5000/kms/keys/{key-id} \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Rotate a key (creates new key material)
+curl -X POST http://localhost:5000/kms/keys/{key-id}/rotate \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Disable/Enable a key
+curl -X POST http://localhost:5000/kms/keys/{key-id}/disable \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+curl -X POST http://localhost:5000/kms/keys/{key-id}/enable \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Schedule key deletion (30-day waiting period)
+curl -X DELETE http://localhost:5000/kms/keys/{key-id}?waiting_period_days=30 \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### How It Works
+
+1. **Envelope Encryption**: Each object is encrypted with a unique Data Encryption Key (DEK)
+2. **Key Wrapping**: The DEK is encrypted (wrapped) by the master key or KMS key
+3. **Storage**: The encrypted DEK is stored alongside the encrypted object
+4. **Decryption**: On read, the DEK is unwrapped and used to decrypt the object
+
+### Client-Side Encryption
+
+For additional security, you can use client-side encryption. The `ClientEncryptionHelper` class provides utilities:
+
+```python
+from app.encryption import ClientEncryptionHelper
+
+# Generate a client-side key
+key = ClientEncryptionHelper.generate_key()
+key_b64 = ClientEncryptionHelper.key_to_base64(key)
+
+# Encrypt before upload
+plaintext = b"sensitive data"
+encrypted, metadata = ClientEncryptionHelper.encrypt_for_upload(plaintext, key)
+
+# Upload with metadata headers
+# x-amz-meta-x-amz-key: <wrapped-key>
+# x-amz-meta-x-amz-iv: <iv>
+# x-amz-meta-x-amz-matdesc: <material-description>
+
+# Decrypt after download
+decrypted = ClientEncryptionHelper.decrypt_from_download(encrypted, metadata, key)
+```
+
+### Important Notes
+
+- **Existing objects are NOT encrypted** - Only new uploads after enabling encryption are encrypted
+- **Master key security** - The master key file (`master.key`) should be backed up securely and protected
+- **Key rotation** - Rotating a KMS key creates new key material; existing objects remain encrypted with the old material
+- **Disabled keys** - Objects encrypted with a disabled key cannot be decrypted until the key is re-enabled
+- **Deleted keys** - Once a key is deleted (after the waiting period), objects encrypted with it are permanently inaccessible
+
+### Verifying Encryption
+
+To verify an object is encrypted:
+1. Check the raw file in `data/<bucket>/` - it should be unreadable binary
+2. Look for `.meta` files containing encryption metadata
+3. Download via the API/UI - the object should be automatically decrypted
+
+## 8. Bucket Quotas
+
+MyFSIO supports **storage quotas** to limit how much data a bucket can hold. Quotas are enforced on uploads and multipart completions.
+
+### Quota Types
+
+| Limit | Description |
+|-------|-------------|
+| **Max Size (MB)** | Maximum total storage in megabytes (includes current objects + archived versions) |
+| **Max Objects** | Maximum number of objects (includes current objects + archived versions) |
+
+### Managing Quotas (Admin Only)
+
+Quota management is restricted to administrators (users with `iam:*` or `iam:list_users` permissions).
+
+#### Via UI
+
+1. Navigate to your bucket in the UI
+2. Click the **Properties** tab
+3. Find the **Storage Quota** card
+4. Enter limits:
+   - **Max Size (MB)**: Leave empty for unlimited
+   - **Max Objects**: Leave empty for unlimited
+5. Click **Update Quota**
+
+To remove a quota, click **Remove Quota**.
+
+#### Via API
+
+```bash
+# Set quota (max 100MB, max 1000 objects)
+curl -X PUT "http://localhost:5000/bucket/<bucket>?quota" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"max_bytes": 104857600, "max_objects": 1000}'
+
+# Get current quota
+curl "http://localhost:5000/bucket/<bucket>?quota" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Remove quota
+curl -X PUT "http://localhost:5000/bucket/<bucket>?quota" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"max_bytes": null, "max_objects": null}'
+```
+
+### Quota Behavior
+
+- **Version Counting**: When versioning is enabled, archived versions count toward the quota
+- **Enforcement Points**: Quotas are checked during `PUT` object and `CompleteMultipartUpload` operations
+- **Error Response**: When quota is exceeded, the API returns `HTTP 400` with error code `QuotaExceeded`
+- **Visibility**: All users can view quota usage in the bucket detail page, but only admins can modify quotas
+
+### Example Error
+
+```xml
+<Error>
+  <Code>QuotaExceeded</Code>
+  <Message>Bucket quota exceeded: storage limit reached</Message>
+  <BucketName>my-bucket</BucketName>
+</Error>
+```
+
+## 9. Site Replication
+
+### Permission Model
+
+Replication uses a two-tier permission system:
+
+| Role | Capabilities |
+|------|--------------|
+| **Admin** (users with `iam:*` permissions) | Create/delete replication rules, configure connections and target buckets |
+| **Users** (with `replication` permission) | Enable/disable (pause/resume) existing replication rules |
+
+> **Note:** The Replication tab is hidden for users without the `replication` permission on the bucket.
+
+This separation allows administrators to pre-configure where data should replicate, while allowing authorized users to toggle replication on/off without accessing connection credentials.
 
 ### Architecture
 
@@ -253,12 +495,14 @@ Now, configure the primary instance to replicate to the target.
     - **Secret Key**: The secret you generated on the Target.
     - Click **Add Connection**.
 
-3.  **Enable Replication**:
+3.  **Enable Replication** (Admin):
     - Navigate to **Buckets** and select the source bucket.
     - Switch to the **Replication** tab.
     - Select the `Secondary Site` connection.
     - Enter the target bucket name (`backup-bucket`).
     - Click **Enable Replication**.
+
+    Once configured, users with `replication` permission on this bucket can pause/resume replication without needing access to connection details.
 
 ### Verification
 
@@ -269,6 +513,18 @@ Now, configure the primary instance to replicate to the target.
 # Verify on target using AWS CLI
 aws --endpoint-url http://target-server:5002 s3 ls s3://backup-bucket
 ```
+
+### Pausing and Resuming Replication
+
+Users with the `replication` permission (but not admin rights) can pause and resume existing replication rules:
+
+1. Navigate to the bucket's **Replication** tab.
+2. If replication is **Active**, click **Pause Replication** to temporarily stop syncing.
+3. If replication is **Paused**, click **Resume Replication** to continue syncing.
+
+When paused, new objects uploaded to the source will not replicate until replication is resumed. Objects uploaded while paused will be replicated once resumed.
+
+> **Note:** Only admins can create new replication rules, change the target connection/bucket, or delete rules entirely.
 
 ### Bidirectional Replication (Active-Active)
 
@@ -285,7 +541,7 @@ To set up two-way replication (Server A ↔ Server B):
 
 **Note**: Deleting a bucket will automatically remove its associated replication configuration.
 
-## 7. Running Tests
+## 11. Running Tests
 
 ```bash
 pytest -q
@@ -295,7 +551,7 @@ The suite now includes a boto3 integration test that spins up a live HTTP server
 
 The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, and regression tests for anonymous reads when a Public policy is attached.
 
-## 8. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 | --- | --- | --- |
@@ -304,7 +560,7 @@ The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, an
 | Presign modal errors with 403 | IAM user lacks `read/write/delete` for target bucket or bucket policy denies | Update IAM inline policies or remove conflicting deny statements. |
 | Large upload rejected immediately | File exceeds `MAX_UPLOAD_SIZE` | Increase env var or shrink object. |
 
-## 9. API Matrix
+## 13. API Matrix
 
 ```
 GET    /                               # List buckets
@@ -318,9 +574,11 @@ POST   /presign/<bucket>/<key>          # Generate SigV4 URL
 GET    /bucket-policy/<bucket>          # Fetch policy
 PUT    /bucket-policy/<bucket>          # Upsert policy
 DELETE /bucket-policy/<bucket>          # Delete policy
+GET    /<bucket>?quota                  # Get bucket quota
+PUT    /<bucket>?quota                  # Set bucket quota (admin only)
 ```
 
-## 10. Next Steps
+## 14. Next Steps
 
 - Tailor IAM + policy JSON files for team-ready presets.
 - Wrap `run_api.py` with gunicorn or another WSGI server for long-running workloads.

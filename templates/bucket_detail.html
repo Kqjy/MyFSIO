@@ -59,11 +59,13 @@
         Permissions
       </button>
     </li>
+    {% if can_manage_replication %}
     <li class="nav-item" role="presentation">
       <button class="nav-link {{ 'active' if active_tab == 'replication' else '' }}" id="replication-tab" data-bs-toggle="tab" data-bs-target="#replication-pane" type="button" role="tab" aria-controls="replication-pane" aria-selected="{{ 'true' if active_tab == 'replication' else 'false' }}">
         Replication
       </button>
     </li>
+    {% endif %}
   </ul>
 
   <!-- Tab Content -->
@@ -84,7 +86,7 @@
             </svg>
             Upload
           </button>
-          <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" />
+          <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
           <button class="btn btn-outline-danger btn-sm d-none" type="button" data-bulk-delete-trigger disabled>
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
               <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
@@ -100,6 +102,19 @@
             Download
           </button>
         </div>
+        <!-- Folder breadcrumb navigation -->
+        <nav id="folder-breadcrumb" class="mt-2 d-none" aria-label="Folder navigation">
+          <ol class="breadcrumb mb-0 small">
+            <li class="breadcrumb-item">
+              <a href="#" data-folder-nav="" class="text-decoration-none">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M.54 3.87.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3H14.5A1.5 1.5 0 0 1 16 4.5v1.384l-4.578-.724a3 3 0 0 0-2.856 1.13l-2.847 3.55A3 3 0 0 0 5 11.373V14H2.5A1.5 1.5 0 0 1 1 12.5v-8A1.5 1.5 0 0 1 2.5 3H6c-.314 0-.6-.172-.742-.438l-.328-.658A.5.5 0 0 0 4.47 1.657z"/>
+                </svg>
+                Root
+              </a>
+            </li>
+          </ol>
+        </nav>
       </div>
       <div
         class="table-responsive objects-table-container drop-zone"
@@ -287,16 +302,16 @@
             <div id="version-list" class="list-group list-group-flush small rounded overflow-hidden" style="border: 1px solid var(--myfsio-card-border);"></div>
           </div>
           <div class="preview-stage border rounded position-relative overflow-hidden" style="border-radius: 0.75rem !important;">
-            <div id="preview-placeholder" class="text-muted text-center py-5">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
+            <div id="preview-placeholder" class="text-muted text-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="mb-2 opacity-50" viewBox="0 0 16 16">
                 <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
                 <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
               </svg>
               <div class="small">No preview available</div>
             </div>
-            <img id="preview-image" class="img-fluid d-none" alt="Object preview" />
-            <video id="preview-video" class="w-100 d-none" controls></video>
-            <iframe id="preview-iframe" class="w-100 d-none" loading="lazy"></iframe>
+            <img id="preview-image" class="img-fluid d-none w-100" alt="Object preview" style="display: block;" />
+            <video id="preview-video" class="w-100 d-none" controls style="display: block;"></video>
+            <iframe id="preview-iframe" class="w-100 d-none" loading="lazy" style="min-height: 200px;"></iframe>
           </div>
         </div>
       </div>
@@ -592,6 +607,281 @@
             </div>
           </div>
           {% endif %}
+
+          <!-- Encryption Card -->
+          {% if encryption_enabled %}
+          <div class="card shadow-sm mt-4" id="bucket-encryption-card">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                <path d="M9.5 6.5a1.5 1.5 0 0 1-1 1.415l.385 1.99a.5.5 0 0 1-.491.595h-.788a.5.5 0 0 1-.49-.595l.384-1.99a1.5 1.5 0 1 1 2-1.415z"/>
+              </svg>
+              <span class="fw-semibold">Default Encryption</span>
+            </div>
+            <div class="card-body">
+              {% set enc_rules = encryption_config.get('Rules', []) %}
+              {% set enc_default = enc_rules[0].get('ApplyServerSideEncryptionByDefault', {}) if enc_rules else {} %}
+              {% set enc_algorithm = enc_default.get('SSEAlgorithm', '') %}
+              {% set enc_kms_key = enc_default.get('KMSMasterKeyID', '') %}
+              
+              {% if enc_algorithm %}
+              <!-- Encryption Enabled State -->
+              <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                </svg>
+                <div>
+                  <strong>Default encryption enabled</strong>
+                  <p class="mb-0 small">
+                    {% if enc_algorithm == 'aws:kms' %}
+                    Objects are encrypted with AWS KMS (SSE-KMS).
+                    {% if enc_kms_key %}Key: <code class="small">{{ enc_kms_key[:20] }}...</code>{% endif %}
+                    {% else %}
+                    Objects are encrypted with AES-256 (SSE-S3).
+                    {% endif %}
+                  </p>
+                </div>
+              </div>
+              {% else %}
+              <!-- Encryption Disabled State -->
+              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                </svg>
+                <div>
+                  <strong>Default encryption disabled</strong>
+                  <p class="mb-0 small">Objects are stored without default encryption. You can enable server-side encryption below.</p>
+                </div>
+              </div>
+              {% endif %}
+
+              {% if can_manage_encryption %}
+              <form method="post" action="{{ url_for('ui.update_bucket_encryption', bucket_name=bucket_name) }}" id="encryptionForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="action" value="enable" id="encryptionAction" />
+                
+                <!-- Algorithm Selection -->
+                <div class="mb-3">
+                  <label class="form-label fw-medium">Encryption Algorithm</label>
+                  <div class="card border">
+                    <div class="card-body p-0">
+                      <div class="form-check p-3 border-bottom m-0">
+                        <input class="form-check-input" type="radio" name="algorithm" id="algo_aes256" value="AES256" {{ 'checked' if enc_algorithm != 'aws:kms' else '' }}>
+                        <label class="form-check-label w-100" for="algo_aes256">
+                          <span class="fw-medium">AES-256 (SSE-S3)</span>
+                          <div class="text-muted small">Server-side encryption with S3-managed keys. Recommended for most use cases.</div>
+                        </label>
+                      </div>
+                      {% if kms_enabled %}
+                      <div class="form-check p-3 m-0">
+                        <input class="form-check-input" type="radio" name="algorithm" id="algo_kms" value="aws:kms" {{ 'checked' if enc_algorithm == 'aws:kms' else '' }}>
+                        <label class="form-check-label w-100" for="algo_kms">
+                          <span class="fw-medium">AWS KMS (SSE-KMS)</span>
+                          <div class="text-muted small">Server-side encryption with KMS-managed keys. Provides audit trail and key rotation.</div>
+                        </label>
+                      </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+
+                <!-- KMS Key Selection (visible only when KMS is selected) -->
+                {% if kms_enabled %}
+                <div class="mb-4" id="kmsKeySection" style="{{ 'display: none;' if enc_algorithm != 'aws:kms' else '' }}">
+                  <label for="kms_key_id" class="form-label fw-medium">KMS Key</label>
+                  <select class="form-select" id="kms_key_id" name="kms_key_id">
+                    <option value="">Use default KMS key</option>
+                    {% for key in kms_keys %}
+                    <option value="{{ key.key_id }}" {{ 'selected' if key.key_id == enc_kms_key else '' }}>
+                      {{ key.description or key.key_id }} ({{ key.key_id[:8] }}...)
+                    </option>
+                    {% endfor %}
+                  </select>
+                  <div class="form-text">Select a KMS key to encrypt objects. Leave empty to use the default key.</div>
+                </div>
+                {% endif %}
+
+                <div class="d-flex gap-2 flex-wrap">
+                  <button class="btn btn-primary" type="submit">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                    </svg>
+                    Save Encryption Settings
+                  </button>
+                  {% if enc_algorithm %}
+                  <button type="button" class="btn btn-outline-danger" id="disableEncryptionBtn">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M11 1a2 2 0 0 0-2 2v4a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h5V3a3 3 0 0 1 6 0v4a.5.5 0 0 1-1 0V3a2 2 0 0 0-2-2z"/>
+                    </svg>
+                    Disable Encryption
+                  </button>
+                  {% endif %}
+                </div>
+              </form>
+              {% else %}
+              <div class="text-center py-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
+                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                </svg>
+                <p class="text-muted mb-0 small">You do not have permission to modify encryption settings for this bucket.</p>
+              </div>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+
+          <!-- Storage Quota Card -->
+          <div class="card shadow-sm mt-4" id="bucket-quota-card">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h3A1.5 1.5 0 0 1 7 2.5v3A1.5 1.5 0 0 1 5.5 7h-3A1.5 1.5 0 0 1 1 5.5v-3zM2.5 2a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zm6.5.5A1.5 1.5 0 0 1 10.5 1h3A1.5 1.5 0 0 1 15 2.5v3A1.5 1.5 0 0 1 13.5 7h-3A1.5 1.5 0 0 1 9 5.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zM1 10.5A1.5 1.5 0 0 1 2.5 9h3A1.5 1.5 0 0 1 7 10.5v3A1.5 1.5 0 0 1 5.5 15h-3A1.5 1.5 0 0 1 1 13.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zm6.5.5A1.5 1.5 0 0 1 10.5 9h3a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-3A1.5 1.5 0 0 1 9 13.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3z"/>
+              </svg>
+              <span class="fw-semibold">Storage Quota</span>
+            </div>
+            <div class="card-body">
+              {% set max_bytes = bucket_quota.get('max_bytes') %}
+              {% set max_objects = bucket_quota.get('max_objects') %}
+              {% set has_quota = max_bytes is not none or max_objects is not none %}
+              {% set current_objects = bucket_stats.get('objects', 0) %}
+              {% set version_count = bucket_stats.get('version_count', 0) %}
+              {% set total_objects = bucket_stats.get('total_objects', current_objects) %}
+              {% set current_bytes = bucket_stats.get('bytes', 0) %}
+              {% set version_bytes = bucket_stats.get('version_bytes', 0) %}
+              {% set total_bytes = bucket_stats.get('total_bytes', current_bytes) %}
+              
+              <!-- Current Usage Display -->
+              <div class="mb-4">
+                <h6 class="small fw-semibold mb-3">Current Usage</h6>
+                <div class="row g-3">
+                  <div class="col-6">
+                    <div class="border rounded p-3 text-center">
+                      <div class="fs-4 fw-bold text-primary">{{ total_objects }}</div>
+                      <div class="small text-muted">Total Objects</div>
+                      {% if max_objects is not none %}
+                      <div class="progress mt-2" style="height: 4px;">
+                        {% set obj_pct = (total_objects / max_objects * 100) | int if max_objects > 0 else 0 %}
+                        <div class="progress-bar {% if obj_pct >= 90 %}bg-danger{% elif obj_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {{ [obj_pct, 100] | min }}%"></div>
+                      </div>
+                      <div class="small text-muted mt-1">{{ obj_pct }}% of {{ max_objects }} limit</div>
+                      {% else %}
+                      <div class="small text-muted mt-2">No limit</div>
+                      {% endif %}
+                      {% if version_count > 0 %}
+                      <div class="small text-muted mt-1">
+                        <span class="text-body-secondary">({{ current_objects }} current + {{ version_count }} versions)</span>
+                      </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="col-6">
+                    <div class="border rounded p-3 text-center">
+                      <div class="fs-4 fw-bold text-primary">{{ total_bytes | filesizeformat }}</div>
+                      <div class="small text-muted">Total Storage</div>
+                      {% if max_bytes is not none %}
+                      <div class="progress mt-2" style="height: 4px;">
+                        {% set bytes_pct = (total_bytes / max_bytes * 100) | int if max_bytes > 0 else 0 %}
+                        <div class="progress-bar {% if bytes_pct >= 90 %}bg-danger{% elif bytes_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {{ [bytes_pct, 100] | min }}%"></div>
+                      </div>
+                      <div class="small text-muted mt-1">{{ bytes_pct }}% of {{ max_bytes | filesizeformat }} limit</div>
+                      {% else %}
+                      <div class="small text-muted mt-2">No limit</div>
+                      {% endif %}
+                      {% if version_bytes > 0 %}
+                      <div class="small text-muted mt-1">
+                        <span class="text-body-secondary">({{ current_bytes | filesizeformat }} current + {{ version_bytes | filesizeformat }} versions)</span>
+                      </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {% if has_quota %}
+              <!-- Quota Enabled State -->
+              <div class="alert alert-info d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                </svg>
+                <div>
+                  <strong>Storage quota enabled</strong>
+                  <p class="mb-0 small">
+                    {% if max_bytes is not none and max_objects is not none %}
+                    Limited to {{ max_bytes | filesizeformat }} and {{ max_objects }} objects.
+                    {% elif max_bytes is not none %}
+                    Limited to {{ max_bytes | filesizeformat }} storage.
+                    {% else %}
+                    Limited to {{ max_objects }} objects.
+                    {% endif %}
+                  </p>
+                </div>
+              </div>
+              {% else %}
+              <!-- Quota Disabled State -->
+              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                </svg>
+                <div>
+                  <strong>No storage quota</strong>
+                  <p class="mb-0 small">This bucket has no storage or object count limits. Set limits below to control usage.</p>
+                </div>
+              </div>
+              {% endif %}
+
+              {% if can_manage_quota %}
+              <form method="post" action="{{ url_for('ui.update_bucket_quota', bucket_name=bucket_name) }}" id="quotaForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                
+                <!-- Max Storage -->
+                <div class="mb-3">
+                  <label for="max_mb" class="form-label fw-medium">Maximum Storage Size</label>
+                  <div class="input-group">
+                    <input type="number" class="form-control" id="max_mb" name="max_mb" 
+                           value="{{ (max_bytes / 1048576) | int if max_bytes is not none else '' }}" 
+                           min="1" step="1" placeholder="Unlimited">
+                    <span class="input-group-text">MB</span>
+                  </div>
+                  <div class="form-text">Minimum 1 MB. Leave empty for unlimited.</div>
+                </div>
+
+                <!-- Max Objects -->
+                <div class="mb-4">
+                  <label for="max_objects" class="form-label fw-medium">Maximum Object Count</label>
+                  <input type="number" class="form-control" id="max_objects" name="max_objects" 
+                         value="{{ max_objects if max_objects is not none else '' }}" 
+                         min="0" step="1" placeholder="Unlimited">
+                  <div class="form-text">Maximum number of objects allowed. Leave empty for unlimited.</div>
+                </div>
+
+                <div class="d-flex gap-2 flex-wrap">
+                  <button class="btn btn-primary" type="submit">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425a.247.247 0 0 1 .02-.022Z"/>
+                    </svg>
+                    Save Quota Settings
+                  </button>
+                  {% if has_quota %}
+                  <button type="submit" class="btn btn-outline-danger" id="removeQuotaBtn" name="action" value="remove">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                    </svg>
+                    Remove Quota
+                  </button>
+                  {% endif %}
+                </div>
+              </form>
+              {% else %}
+              <div class="text-center py-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
+                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                </svg>
+                <p class="text-muted mb-0 small">You do not have permission to modify quota settings for this bucket.</p>
+              </div>
+              {% endif %}
+            </div>
+          </div>
         </div>
 
         <!-- Sidebar -->
@@ -641,10 +931,40 @@
             </div>
           </div>
           {% endif %}
+
+          {% if encryption_enabled %}
+          <div class="card bg-body-tertiary border-0 mt-3">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                </svg>
+                About Encryption
+              </h6>
+              <p class="small text-muted mb-3">
+                Server-side encryption protects data at rest. Objects are encrypted when stored and decrypted when retrieved.
+              </p>
+              
+              <h6 class="small fw-semibold mb-2">Encryption Types</h6>
+              <ul class="small text-muted mb-3 ps-3">
+                <li><strong>SSE-S3 (AES-256)</strong> — S3-managed keys, automatic encryption</li>
+                <li><strong>SSE-KMS</strong> — KMS-managed keys with audit trail and key rotation</li>
+              </ul>
+
+              <h6 class="small fw-semibold mb-2">How It Works</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li>New objects are encrypted using the default setting</li>
+                <li>Existing objects are not automatically re-encrypted</li>
+                <li>Decryption is transparent during download</li>
+              </ul>
+            </div>
+          </div>
+          {% endif %}
         </div>
       </div>
     </div>
 
+    {% if can_manage_replication %}
     <!-- Replication Tab -->
     <div class="tab-pane fade {{ 'show active' if active_tab == 'replication' else '' }}" id="replication-pane" role="tabpanel" aria-labelledby="replication-tab" tabindex="0">
       <div class="row g-4">
@@ -658,8 +978,8 @@
               <span class="fw-semibold">Replication Configuration</span>
             </div>
             <div class="card-body">
-              {% if replication_rule %}
-              <!-- Replication Enabled State -->
+              {% if replication_rule and replication_rule.enabled %}
+              <!-- Replication Active State -->
               <div class="alert alert-success d-flex align-items-center mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill flex-shrink-0 me-2" viewBox="0 0 16 16">
                   <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
@@ -817,17 +1137,103 @@
                   </svg>
                   Refresh
                 </a>
+                <!-- Pause button - available to users with replication permission -->
+                <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="pause">
+                  <button type="submit" class="btn btn-outline-warning">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+                    </svg>
+                    Pause Replication
+                  </button>
+                </form>
+                {% if is_replication_admin %}
+                <!-- Delete button - admin only -->
                 <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                     <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
                     <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
                   </svg>
-                  Disable Replication
+                  Remove Configuration
                 </button>
+                {% endif %}
+              </div>
+
+              {% elif replication_rule and not replication_rule.enabled %}
+              <!-- Replication Paused State -->
+              <div class="alert alert-warning d-flex align-items-center mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+                  <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+                </svg>
+                <div>
+                  <strong>Replication Paused</strong> — 
+                  Replication is configured but currently paused. New uploads will not be replicated until resumed.
+                </div>
+              </div>
+              
+              <!-- Show target info even when paused -->
+              <h6 class="text-muted text-uppercase small mb-3">Replication Target</h6>
+              <div class="card border mb-4">
+                <div class="card-body">
+                  <div class="row align-items-center">
+                    <div class="col-auto">
+                      <div class="rounded-circle bg-warning bg-opacity-10 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+                          <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+                          <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+                        </svg>
+                      </div>
+                    </div>
+                    <div class="col">
+                      {% set target_conn = connections | selectattr("id", "equalto", replication_rule.target_connection_id) | first %}
+                      <div class="fw-semibold">{{ target_conn.name if target_conn else 'Unknown Connection' }}</div>
+                      <div class="text-muted small">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M5 4a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm-.5 2.5A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zM5 8a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1H5zm0 2a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1H5z"/>
+                          <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2zm10-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1z"/>
+                        </svg>
+                        {{ replication_rule.target_bucket }}
+                      </div>
+                    </div>
+                    <div class="col-auto">
+                      <span class="badge bg-warning-subtle text-warning px-3 py-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+                        </svg>
+                        Paused
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="d-flex gap-2">
+                <!-- Resume button -->
+                <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="action" value="resume">
+                  <button type="submit" class="btn btn-primary">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/>
+                    </svg>
+                    Resume Replication
+                  </button>
+                </form>
+                {% if is_replication_admin %}
+                <!-- Delete button - admin only -->
+                <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                  </svg>
+                  Remove Configuration
+                </button>
+                {% endif %}
               </div>
               
               {% else %}
-              <!-- Replication Setup State -->
+              <!-- Replication Not Configured State -->
               <div class="text-center py-4">
                 <div class="rounded-circle bg-body-tertiary d-inline-flex align-items-center justify-content-center mb-3" style="width: 64px; height: 64px;">
                   <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
@@ -835,11 +1241,16 @@
                     <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
                   </svg>
                 </div>
+                {% if is_replication_admin %}
                 <h5 class="mb-2">Set Up Replication</h5>
                 <p class="text-muted mb-4">Automatically copy new objects from this bucket to a bucket in another S3-compatible service.</p>
+                {% else %}
+                <h5 class="mb-2">Replication Not Configured</h5>
+                <p class="text-muted mb-4">An administrator needs to configure replication settings for this bucket before you can enable it.</p>
+                {% endif %}
               </div>
               
-              {% if connections %}
+              {% if is_replication_admin and connections %}
               <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 <input type="hidden" name="action" value="create">
@@ -891,7 +1302,7 @@
                   Enable Replication
                 </button>
               </form>
-              {% else %}
+              {% elif is_replication_admin %}
               <div class="alert alert-warning d-flex align-items-start" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
                   <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
@@ -956,6 +1367,7 @@
         </div>
       </div>
     </div>
+    {% endif %}
   </div>
 </div>
 
@@ -1022,18 +1434,18 @@
       >
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <div class="modal-body">
-          <p class="text-muted small mb-3">Upload files to <code>{{ bucket_name }}</code>. Leave object key blank to use the filename.</p>
+          <p class="text-muted small mb-3">Upload files to <code>{{ bucket_name }}</code>. You can select multiple files at once.</p>
           <div class="row g-3">
             <div class="col-12">
-              <label class="form-label fw-medium">Select file</label>
-              <input class="form-control" type="file" name="object" id="uploadFileInput" required />
-              <div class="form-text">Select a file from your device. Files ≥ 8&nbsp;MB automatically switch to multipart uploads.</div>
+              <label class="form-label fw-medium">Select files</label>
+              <input class="form-control" type="file" name="object" id="uploadFileInput" multiple required />
+              <div class="form-text">Select one or more files from your device. Files ≥ 8&nbsp;MB automatically switch to multipart uploads.</div>
             </div>
             <div class="col-12">
               <div class="upload-dropzone text-center" data-dropzone>
                 <p class="fw-semibold mb-1">Drag &amp; drop files here</p>
-                <p class="text-muted small mb-2">or click to browse</p>
-                <div class="text-muted small" data-dropzone-label>No file selected</div>
+                <p class="text-muted small mb-2">or click to browse (multiple files supported)</p>
+                <div class="text-muted small" data-dropzone-label>No files selected</div>
               </div>
             </div>
             <div class="col-12">
@@ -1051,12 +1463,17 @@
                 </button>
                 <div class="collapse" id="uploadAdvancedOptions">
                   <div class="p-3 border-top">
-                    <label class="form-label fw-medium">Object key</label>
-                    <input class="form-control font-monospace" type="text" name="object_key" placeholder="folder/document.pdf" />
-                    <div class="form-text mb-3">Leave blank to reuse the original filename.</div>
+                    <div id="singleFileOptions">
+                      <label class="form-label fw-medium">Object key</label>
+                      <input class="form-control font-monospace" type="text" name="object_key" placeholder="folder/document.pdf" />
+                      <div class="form-text mb-3">Leave blank to reuse the original filename. (Only applies when uploading a single file)</div>
+                    </div>
+                    <label class="form-label fw-medium">Key prefix <span class="text-muted fw-normal">(optional)</span></label>
+                    <input class="form-control font-monospace" type="text" name="key_prefix" id="uploadKeyPrefix" placeholder="uploads/2024/" />
+                    <div class="form-text mb-3">Add a prefix to all uploaded files (e.g., <code>folder/subfolder/</code>).</div>
                     <label class="form-label fw-medium">Metadata <span class="text-muted fw-normal">(JSON)</span></label>
                     <textarea class="form-control font-monospace" name="metadata" rows="3" placeholder='{"project":"demo"}'></textarea>
-                    <div class="form-text">Store custom key/value pairs alongside the object.</div>
+                    <div class="form-text">Store custom key/value pairs alongside each object.</div>
                   </div>
                 </div>
               </div>
@@ -1064,16 +1481,44 @@
             <div class="col-12">
               <div class="upload-progress-stack" data-upload-progress></div>
             </div>
+            <div class="col-12 d-none" id="bulkUploadProgress">
+              <div class="alert alert-info small mb-0">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <span id="bulkUploadStatus">Uploading files...</span>
+                  <span id="bulkUploadCounter">0/0</span>
+                </div>
+                <div class="progress" style="height: 8px;">
+                  <div class="progress-bar progress-bar-striped progress-bar-animated" id="bulkUploadProgressBar" role="progressbar" style="width: 0%;"></div>
+                </div>
+                <div id="bulkUploadCurrentFile" class="mt-2 text-muted small"></div>
+              </div>
+            </div>
+            <div class="col-12 d-none" id="bulkUploadResults">
+              <div class="alert alert-success small mb-2" id="bulkUploadSuccessAlert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                </svg>
+                <span id="bulkUploadSuccessCount">0</span> file(s) uploaded successfully
+              </div>
+              <div class="alert alert-danger small mb-0 d-none" id="bulkUploadErrorAlert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+                  <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+                </svg>
+                <span id="bulkUploadErrorCount">0</span> file(s) failed to upload
+                <ul class="mb-0 mt-1" id="bulkUploadErrorList"></ul>
+              </div>
+            </div>
           </div>
         </div>
         <div class="modal-footer border-0">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary" type="submit">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="uploadCancelBtn">Cancel</button>
+          <button class="btn btn-primary" type="submit" id="uploadSubmitBtn">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
               <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
               <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
             </svg>
-            Upload
+            <span id="uploadBtnText">Upload</span>
           </button>
         </div>
       </form>
@@ -1443,6 +1888,277 @@
   if (generatePresignButton) generatePresignButton.disabled = true;
   if (downloadButton) downloadButton.classList.add('disabled');
 
+  // ========== Folder Navigation ==========
+  const folderBreadcrumb = document.getElementById('folder-breadcrumb');
+  const objectsTableBody = document.querySelector('#objects-table tbody');
+  let currentPrefix = '';
+  let allObjects = []; // Store all object data for folder navigation
+
+  // Collect all object data from the table rows
+  rows.forEach(row => {
+    allObjects.push({
+      key: row.dataset.key,
+      size: row.dataset.size,
+      lastModified: row.dataset.lastModified,
+      etag: row.dataset.etag,
+      previewUrl: row.dataset.previewUrl,
+      downloadUrl: row.dataset.downloadUrl,
+      presignEndpoint: row.dataset.presignEndpoint,
+      deleteEndpoint: row.dataset.deleteEndpoint,
+      metadata: row.dataset.metadata,
+      versionsEndpoint: row.dataset.versionsEndpoint,
+      restoreTemplate: row.dataset.restoreTemplate,
+      element: row
+    });
+  });
+
+  // Check if we have any prefixed objects (folders)
+  const hasFolders = allObjects.some(obj => obj.key.includes('/'));
+
+  // Get unique folder prefixes at a given level
+  const getFoldersAtPrefix = (prefix) => {
+    const folders = new Set();
+    const files = [];
+    
+    allObjects.forEach(obj => {
+      const key = obj.key;
+      if (!key.startsWith(prefix)) return;
+      
+      const remainder = key.slice(prefix.length);
+      const slashIndex = remainder.indexOf('/');
+      
+      if (slashIndex === -1) {
+        // This is a file at this level
+        files.push(obj);
+      } else {
+        // This is a folder
+        const folderName = remainder.slice(0, slashIndex + 1);
+        folders.add(prefix + folderName);
+      }
+    });
+    
+    return { folders: Array.from(folders).sort(), files };
+  };
+
+  // Count objects in a folder
+  const countObjectsInFolder = (folderPrefix) => {
+    return allObjects.filter(obj => obj.key.startsWith(folderPrefix)).length;
+  };
+
+  // Render breadcrumb
+  const renderBreadcrumb = (prefix) => {
+    if (!folderBreadcrumb) return;
+    
+    if (!prefix && !hasFolders) {
+      folderBreadcrumb.classList.add('d-none');
+      return;
+    }
+    
+    folderBreadcrumb.classList.remove('d-none');
+    const ol = folderBreadcrumb.querySelector('ol');
+    ol.innerHTML = '';
+    
+    // Root item
+    const rootLi = document.createElement('li');
+    rootLi.className = 'breadcrumb-item';
+    if (!prefix) {
+      rootLi.classList.add('active');
+      rootLi.setAttribute('aria-current', 'page');
+      rootLi.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+          <path d="M8.354 1.146a.5.5 0 0 0-.708 0l-6 6A.5.5 0 0 0 1.5 7.5v7a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5v-4h2v4a.5.5 0 0 0 .5.5H14a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.146-.354L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293L8.354 1.146zM2.5 14V7.707l5.5-5.5 5.5 5.5V14H10v-4a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v4H2.5z"/>
+        </svg>
+        Root
+      `;
+    } else {
+      rootLi.innerHTML = `
+        <a href="#" data-folder-nav="" class="text-decoration-none">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M8.354 1.146a.5.5 0 0 0-.708 0l-6 6A.5.5 0 0 0 1.5 7.5v7a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5v-4h2v4a.5.5 0 0 0 .5.5H14a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.146-.354L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293L8.354 1.146zM2.5 14V7.707l5.5-5.5 5.5 5.5V14H10v-4a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v4H2.5z"/>
+          </svg>
+          Root
+        </a>
+      `;
+    }
+    ol.appendChild(rootLi);
+    
+    // Build path segments
+    if (prefix) {
+      const parts = prefix.split('/').filter(Boolean);
+      let accumulated = '';
+      parts.forEach((part, index) => {
+        accumulated += part + '/';
+        const li = document.createElement('li');
+        li.className = 'breadcrumb-item';
+        
+        if (index === parts.length - 1) {
+          li.classList.add('active');
+          li.setAttribute('aria-current', 'page');
+          li.textContent = part;
+        } else {
+          const a = document.createElement('a');
+          a.href = '#';
+          a.className = 'text-decoration-none';
+          a.dataset.folderNav = accumulated;
+          a.textContent = part;
+          li.appendChild(a);
+        }
+        ol.appendChild(li);
+      });
+    }
+    
+    // Add click handlers
+    ol.querySelectorAll('[data-folder-nav]').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateToFolder(link.dataset.folderNav);
+      });
+    });
+  };
+
+  // Get all objects inside a folder (for bulk selection)
+  const getObjectsInFolder = (folderPrefix) => {
+    return allObjects.filter(obj => obj.key.startsWith(folderPrefix));
+  };
+
+  // Create folder row element
+  const createFolderRow = (folderPath) => {
+    const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
+    const objectCount = countObjectsInFolder(folderPath);
+    
+    const tr = document.createElement('tr');
+    tr.className = 'folder-row';
+    tr.dataset.folderPath = folderPath;
+    tr.style.cursor = 'pointer';
+    
+    tr.innerHTML = `
+      <td class="text-center align-middle" onclick="event.stopPropagation();">
+        <input class="form-check-input" type="checkbox" data-folder-select="${escapeHtml(folderPath)}" aria-label="Select folder" />
+      </td>
+      <td class="object-key text-break">
+        <div class="fw-medium d-flex align-items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning flex-shrink-0" viewBox="0 0 16 16">
+            <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
+          </svg>
+          <span>${escapeHtml(folderName)}/</span>
+        </div>
+        <div class="text-muted small ms-4 ps-2">${objectCount} object${objectCount !== 1 ? 's' : ''}</div>
+      </td>
+      <td class="text-end text-nowrap">
+        <span class="text-muted small">—</span>
+      </td>
+      <td class="text-end">
+        <button type="button" class="btn btn-outline-primary btn-sm" title="Open folder">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
+          </svg>
+        </button>
+      </td>
+    `;
+    
+    // Handle folder checkbox
+    const checkbox = tr.querySelector('[data-folder-select]');
+    checkbox?.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const folderObjects = getObjectsInFolder(folderPath);
+      folderObjects.forEach(obj => {
+        const objCheckbox = obj.element.querySelector('[data-object-select]');
+        if (objCheckbox) {
+          objCheckbox.checked = checkbox.checked;
+        }
+        toggleRowSelection(obj.element, checkbox.checked);
+      });
+    });
+    
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
+      navigateToFolder(folderPath);
+    });
+    
+    return tr;
+  };
+
+  // Navigate to a folder
+  const navigateToFolder = (prefix) => {
+    currentPrefix = prefix;
+    renderBreadcrumb(prefix);
+    renderObjectsView();
+    // Clear selection when navigating
+    selectedRows.clear();
+    // Defer updateBulkDeleteState call to ensure it's defined
+    if (typeof updateBulkDeleteState === 'function') {
+      updateBulkDeleteState();
+    }
+    // Clear preview
+    if (previewPanel) previewPanel.classList.add('d-none');
+    if (previewEmpty) previewEmpty.classList.remove('d-none');
+    activeRow = null;
+  };
+
+  // Render objects view based on current prefix
+  const renderObjectsView = () => {
+    if (!objectsTableBody) return;
+    
+    const { folders, files } = getFoldersAtPrefix(currentPrefix);
+    
+    // Clear table
+    objectsTableBody.innerHTML = '';
+    
+    // Add folder rows first
+    folders.forEach(folderPath => {
+      objectsTableBody.appendChild(createFolderRow(folderPath));
+    });
+    
+    // Add file rows
+    files.forEach(obj => {
+      objectsTableBody.appendChild(obj.element);
+      obj.element.style.display = '';
+      // Update displayed key to show just filename when inside a folder
+      const keyCell = obj.element.querySelector('.object-key .fw-medium');
+      if (keyCell && currentPrefix) {
+        const displayName = obj.key.slice(currentPrefix.length);
+        keyCell.textContent = displayName;
+        keyCell.closest('.object-key').title = obj.key; // Full path in tooltip
+      } else if (keyCell) {
+        keyCell.textContent = obj.key; // Reset to full key at root
+      }
+    });
+    
+    // Hide files not in current view
+    allObjects.forEach(obj => {
+      if (!files.includes(obj)) {
+        obj.element.style.display = 'none';
+      }
+    });
+    
+    // Show empty state if no content
+    if (folders.length === 0 && files.length === 0) {
+      const emptyRow = document.createElement('tr');
+      emptyRow.innerHTML = `
+        <td colspan="4" class="py-5">
+          <div class="empty-state">
+            <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
+              </svg>
+            </div>
+            <h6 class="mb-2">Empty folder</h6>
+            <p class="text-muted small mb-0">This folder contains no objects.</p>
+          </div>
+        </td>
+      `;
+      objectsTableBody.appendChild(emptyRow);
+    }
+    
+    // Update select all checkbox state - deferred to ensure function is defined
+    if (typeof updateBulkDeleteState === 'function') {
+      updateBulkDeleteState();
+    }
+  };
+
+  // Folder view initialization moved after updateBulkDeleteState is defined
+  // ========== End Folder Navigation ==========
+
   const showMessage = ({ title = 'Notice', body = '', bodyHtml = null, variant = 'info', actionText = null, onAction = null }) => {
     if (!messageModal) {
       window.alert(body || title);
@@ -1589,10 +2305,15 @@
       bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
     }
     if (selectAllCheckbox) {
-      const total = rows.length;
+      // Count only visible rows in current folder view
+      const visibleRows = hasFolders
+        ? allObjects.filter(obj => obj.key.startsWith(currentPrefix) && !obj.key.slice(currentPrefix.length).includes('/')).map(obj => obj.element)
+        : Array.from(rows);
+      const total = visibleRows.filter(r => r.style.display !== 'none').length;
+      const visibleSelectedCount = visibleRows.filter(r => r.style.display !== 'none' && selectedRows.has(r.dataset.key)).length;
       selectAllCheckbox.disabled = total === 0;
-      selectAllCheckbox.checked = selectedCount > 0 && selectedCount === total && total > 0;
-      selectAllCheckbox.indeterminate = selectedCount > 0 && selectedCount < total;
+      selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
+      selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
     }
   };
 
@@ -2206,15 +2927,49 @@
 
   updateBulkDeleteState();
 
+  // Initialize folder view if there are folders (must be after updateBulkDeleteState is defined)
+  if (hasFolders) {
+    renderBreadcrumb('');
+    renderObjectsView();
+  }
+
   bulkDeleteButton?.addEventListener('click', () => openBulkDeleteModal());
   bulkDeleteConfirm?.addEventListener('click', () => performBulkDelete());
 
   document.getElementById('object-search')?.addEventListener('input', (event) => {
     const term = event.target.value.toLowerCase();
-    rows.forEach((row) => {
-      const key = row.dataset.key.toLowerCase();
-      row.style.display = key.includes(term) ? '' : 'none';
-    });
+    
+    if (hasFolders) {
+      // With folder navigation: re-render view with search filter
+      const { folders, files } = getFoldersAtPrefix(currentPrefix);
+      const tbody = objectsTableBody;
+      
+      // Clear and re-add matching content
+      tbody.innerHTML = '';
+      
+      // Filter and add matching folders
+      folders.forEach(folderPath => {
+        const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '').toLowerCase();
+        if (folderName.includes(term)) {
+          tbody.appendChild(createFolderRow(folderPath));
+        }
+      });
+      
+      // Filter and add matching files
+      files.forEach(obj => {
+        const keyName = obj.key.slice(currentPrefix.length).toLowerCase();
+        if (keyName.includes(term)) {
+          tbody.appendChild(obj.element);
+          obj.element.style.display = '';
+        }
+      });
+    } else {
+      // Original behavior without folders
+      rows.forEach((row) => {
+        const key = row.dataset.key.toLowerCase();
+        row.style.display = key.includes(term) ? '' : 'none';
+      });
+    }
   });
 
   refreshVersionsButton?.addEventListener('click', () => {
@@ -2247,35 +3002,283 @@
     if (!presignLink?.value) {
       return;
     }
-    try {
-      await navigator.clipboard.writeText(presignLink.value);
+    
+    // Helper function for fallback copy
+    const fallbackCopy = (text) => {
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-999999px';
+      textArea.style.top = '-999999px';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      let success = false;
+      try {
+        success = document.execCommand('copy');
+      } catch (err) {
+        success = false;
+      }
+      textArea.remove();
+      return success;
+    };
+    
+    let copied = false;
+    
+    // Try modern clipboard API first
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(presignLink.value);
+        copied = true;
+      } catch (error) {
+        // Fall through to fallback
+      }
+    }
+    
+    // Fallback for non-secure contexts
+    if (!copied) {
+      copied = fallbackCopy(presignLink.value);
+    }
+    
+    if (copied) {
       copyPresignLink.textContent = 'Copied!';
       window.setTimeout(() => {
         copyPresignLink.textContent = copyPresignDefaultLabel;
       }, 1500);
-    } catch (error) {
-      if (window.showToast) {
-        window.showToast('Unable to copy link to clipboard.', 'Copy failed', 'warning');
-      } else {
-        alert('Unable to copy link to clipboard.');
-      }
+    } else {
+      showMessage({ title: 'Copy Failed', body: 'Unable to copy link to clipboard. Please select the link and copy manually.', variant: 'warning' });
     }
   });
 
   if (uploadForm && uploadFileInput) {
+    const uploadSubmitBtn = document.getElementById('uploadSubmitBtn');
+    const uploadCancelBtn = document.getElementById('uploadCancelBtn');
+    const uploadBtnText = document.getElementById('uploadBtnText');
+    const bulkUploadProgress = document.getElementById('bulkUploadProgress');
+    const bulkUploadStatus = document.getElementById('bulkUploadStatus');
+    const bulkUploadCounter = document.getElementById('bulkUploadCounter');
+    const bulkUploadProgressBar = document.getElementById('bulkUploadProgressBar');
+    const bulkUploadCurrentFile = document.getElementById('bulkUploadCurrentFile');
+    const bulkUploadResults = document.getElementById('bulkUploadResults');
+    const bulkUploadSuccessAlert = document.getElementById('bulkUploadSuccessAlert');
+    const bulkUploadErrorAlert = document.getElementById('bulkUploadErrorAlert');
+    const bulkUploadSuccessCount = document.getElementById('bulkUploadSuccessCount');
+    const bulkUploadErrorCount = document.getElementById('bulkUploadErrorCount');
+    const bulkUploadErrorList = document.getElementById('bulkUploadErrorList');
+    const uploadKeyPrefix = document.getElementById('uploadKeyPrefix');
+    const singleFileOptions = document.getElementById('singleFileOptions');
+    let isUploading = false;
+
     const refreshUploadDropLabel = () => {
       if (!uploadDropZoneLabel) return;
       const files = uploadFileInput.files;
       if (!files || files.length === 0) {
         uploadDropZoneLabel.textContent = 'No file selected';
+        if (singleFileOptions) singleFileOptions.classList.remove('d-none');
         return;
       }
       uploadDropZoneLabel.textContent = files.length === 1 ? files[0].name : `${files.length} files selected`;
+      // Hide single file object key option when multiple files selected
+      if (singleFileOptions) {
+        singleFileOptions.classList.toggle('d-none', files.length > 1);
+      }
+    };
+
+    const updateUploadBtnText = () => {
+      if (!uploadBtnText) return;
+      const files = uploadFileInput.files;
+      if (!files || files.length <= 1) {
+        uploadBtnText.textContent = 'Upload';
+      } else {
+        uploadBtnText.textContent = `Upload ${files.length} files`;
+      }
+    };
+
+    const resetUploadUI = () => {
+      if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
+      if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
+      if (bulkUploadSuccessAlert) bulkUploadSuccessAlert.classList.remove('d-none');
+      if (bulkUploadErrorAlert) bulkUploadErrorAlert.classList.add('d-none');
+      if (bulkUploadErrorList) bulkUploadErrorList.innerHTML = '';
+      if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
+      if (uploadFileInput) uploadFileInput.disabled = false;
+      isUploading = false;
+    };
+
+    const uploadSingleFile = async (file, keyPrefix = '', metadata = null) => {
+      const formData = new FormData();
+      formData.append('object', file);
+      const objectKey = keyPrefix ? `${keyPrefix}${file.name}` : file.name;
+      formData.append('object_key', objectKey);
+      if (metadata) {
+        formData.append('metadata', JSON.stringify(metadata));
+      }
+      // Get CSRF token
+      const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
+      if (csrfToken) {
+        formData.append('csrf_token', csrfToken);
+      }
+      
+      const response = await fetch(uploadForm.action, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      });
+      
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.status === 'error') {
+        throw new Error(data.message || 'Upload failed');
+      }
+      return data;
+    };
+
+    const performBulkUpload = async (files) => {
+      if (isUploading || !files || files.length === 0) return;
+      
+      isUploading = true;
+      const keyPrefix = (uploadKeyPrefix?.value || '').trim();
+      const metadataRaw = uploadForm.querySelector('textarea[name="metadata"]')?.value?.trim();
+      let metadata = null;
+      if (metadataRaw) {
+        try {
+          metadata = JSON.parse(metadataRaw);
+        } catch {
+          showMessage({ title: 'Invalid metadata', body: 'Metadata must be valid JSON.', variant: 'danger' });
+          resetUploadUI();
+          return;
+        }
+      }
+
+      // Show progress UI
+      if (bulkUploadProgress) bulkUploadProgress.classList.remove('d-none');
+      if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
+      if (uploadSubmitBtn) uploadSubmitBtn.disabled = true;
+      if (uploadFileInput) uploadFileInput.disabled = true;
+
+      const successFiles = [];
+      const errorFiles = [];
+      const total = files.length;
+
+      for (let i = 0; i < total; i++) {
+        const file = files[i];
+        const current = i + 1;
+        
+        // Update progress
+        if (bulkUploadCounter) bulkUploadCounter.textContent = `${current}/${total}`;
+        if (bulkUploadCurrentFile) bulkUploadCurrentFile.textContent = `Uploading: ${file.name}`;
+        if (bulkUploadProgressBar) {
+          const percent = Math.round((current / total) * 100);
+          bulkUploadProgressBar.style.width = `${percent}%`;
+        }
+
+        try {
+          await uploadSingleFile(file, keyPrefix, metadata);
+          successFiles.push(file.name);
+        } catch (error) {
+          errorFiles.push({ name: file.name, error: error.message || 'Unknown error' });
+        }
+      }
+
+      // Show results
+      if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
+      if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
+      
+      if (bulkUploadSuccessCount) bulkUploadSuccessCount.textContent = successFiles.length;
+      if (successFiles.length === 0 && bulkUploadSuccessAlert) {
+        bulkUploadSuccessAlert.classList.add('d-none');
+      }
+      
+      if (errorFiles.length > 0) {
+        if (bulkUploadErrorCount) bulkUploadErrorCount.textContent = errorFiles.length;
+        if (bulkUploadErrorAlert) bulkUploadErrorAlert.classList.remove('d-none');
+        if (bulkUploadErrorList) {
+          bulkUploadErrorList.innerHTML = errorFiles
+            .map(f => `<li><strong>${escapeHtml(f.name)}</strong>: ${escapeHtml(f.error)}</li>`)
+            .join('');
+        }
+      }
+
+      isUploading = false;
+      
+      // Reload page if any files were uploaded successfully
+      if (successFiles.length > 0) {
+        // Keep button disabled and show uploading state until reload
+        if (uploadBtnText) uploadBtnText.textContent = 'Refreshing...';
+        // Short delay to show results, then reload
+        window.setTimeout(() => window.location.reload(), 800);
+      } else {
+        // Only re-enable if no success (all failed)
+        if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
+        if (uploadFileInput) uploadFileInput.disabled = false;
+      }
     };
 
     refreshUploadDropLabel();
-    uploadFileInput.addEventListener('change', refreshUploadDropLabel);
+    uploadFileInput.addEventListener('change', () => {
+      refreshUploadDropLabel();
+      updateUploadBtnText();
+      resetUploadUI();
+    });
     uploadDropZone?.addEventListener('click', () => uploadFileInput?.click());
+
+    // Handle form submission for bulk upload
+    uploadForm.addEventListener('submit', async (event) => {
+      const files = uploadFileInput.files;
+      if (!files || files.length === 0) return;
+      
+      const keyPrefix = (uploadKeyPrefix?.value || '').trim();
+      
+      // For single file with custom object key and NO prefix, use default form submission
+      if (files.length === 1 && !keyPrefix) {
+        const customKey = uploadForm.querySelector('input[name="object_key"]')?.value?.trim();
+        if (customKey) {
+          // Single file with custom key - let form submit normally
+          // Disable button immediately for feedback
+          if (uploadSubmitBtn) {
+            uploadSubmitBtn.disabled = true;
+            if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
+          }
+          return;
+        }
+      }
+      
+      // Bulk upload or prefix specified - handle with JavaScript
+      event.preventDefault();
+      
+      // Disable button immediately
+      if (uploadSubmitBtn) {
+        uploadSubmitBtn.disabled = true;
+        if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
+      }
+      
+      await performBulkUpload(Array.from(files));
+    });
+
+    // Pre-fill key prefix with current folder when modal opens
+    uploadModalEl?.addEventListener('show.bs.modal', () => {
+      if (hasFolders && currentPrefix) {
+        uploadKeyPrefix.value = currentPrefix;
+        // Auto-expand advanced options if there's a prefix
+        const advancedToggle = document.querySelector('[data-bs-target="#advancedUploadOptions"]');
+        const advancedCollapse = document.getElementById('advancedUploadOptions');
+        if (advancedToggle && advancedCollapse && !advancedCollapse.classList.contains('show')) {
+          new bootstrap.Collapse(advancedCollapse, { show: true });
+        }
+      } else if (uploadKeyPrefix) {
+        // Clear prefix when at root
+        uploadKeyPrefix.value = '';
+      }
+    });
+
+    // Reset UI when modal is closed
+    uploadModalEl?.addEventListener('hidden.bs.modal', () => {
+      resetUploadUI();
+      uploadFileInput.value = '';
+      refreshUploadDropLabel();
+      updateUploadBtnText();
+    });
 
     const preventDefaults = (event) => {
       event.preventDefault();
@@ -2344,14 +3347,34 @@
 
   selectAllCheckbox?.addEventListener('change', (event) => {
     const shouldSelect = Boolean(event.target?.checked);
-    rows.forEach((row) => {
-      const checkbox = row.querySelector('[data-object-select]');
-      if (!checkbox || checkbox.disabled) {
-        return;
-      }
-      checkbox.checked = shouldSelect;
-      toggleRowSelection(row, shouldSelect);
-    });
+    
+    if (hasFolders) {
+      // Select all objects that start with current prefix (including inside subfolders)
+      const objectsInCurrentView = allObjects.filter(obj => obj.key.startsWith(currentPrefix));
+      objectsInCurrentView.forEach(obj => {
+        const checkbox = obj.element.querySelector('[data-object-select]');
+        if (checkbox && !checkbox.disabled) {
+          checkbox.checked = shouldSelect;
+        }
+        toggleRowSelection(obj.element, shouldSelect);
+      });
+      
+      // Also toggle folder checkboxes
+      document.querySelectorAll('[data-folder-select]').forEach(cb => {
+        cb.checked = shouldSelect;
+      });
+    } else {
+      // Original behavior without folders
+      rows.forEach((row) => {
+        if (row.style.display === 'none') return;
+        const checkbox = row.querySelector('[data-object-select]');
+        if (!checkbox || checkbox.disabled) {
+          return;
+        }
+        checkbox.checked = shouldSelect;
+        toggleRowSelection(row, shouldSelect);
+      });
+    }
     setTimeout(updateBulkDownloadState, 0);
   });
 
@@ -2391,11 +3414,7 @@
       window.URL.revokeObjectURL(url);
       a.remove();
     } catch (error) {
-      if (window.showToast) {
-        window.showToast(error.message, 'Download Failed', 'error');
-      } else {
-        alert(error.message);
-      }
+      showMessage({ title: 'Download Failed', body: error.message, variant: 'danger' });
     } finally {
       bulkDownloadButton.disabled = false;
       bulkDownloadButton.innerHTML = originalHtml;
@@ -2461,5 +3480,33 @@
       loadReplicationStats();
     });
   }
+
+  // Encryption settings
+  const algoAes256Radio = document.getElementById('algo_aes256');
+  const algoKmsRadio = document.getElementById('algo_kms');
+  const kmsKeySection = document.getElementById('kmsKeySection');
+  const encryptionForm = document.getElementById('encryptionForm');
+  const encryptionAction = document.getElementById('encryptionAction');
+  const disableEncryptionBtn = document.getElementById('disableEncryptionBtn');
+
+  // Toggle KMS key section visibility based on selected algorithm
+  const updateKmsKeyVisibility = () => {
+    if (!kmsKeySection) return;
+    const showKms = algoKmsRadio?.checked;
+    kmsKeySection.style.display = showKms ? '' : 'none';
+  };
+
+  algoAes256Radio?.addEventListener('change', updateKmsKeyVisibility);
+  algoKmsRadio?.addEventListener('change', updateKmsKeyVisibility);
+
+  // Handle disable encryption button
+  disableEncryptionBtn?.addEventListener('click', () => {
+    if (encryptionAction && encryptionForm) {
+      if (confirm('Are you sure you want to disable default encryption? New objects will not be encrypted automatically.')) {
+        encryptionAction.value = 'disable';
+        encryptionForm.submit();
+      }
+    }
+  });
 </script>
 {% endblock %}

@@ -6,7 +6,7 @@ import uuid
 import psutil
 import shutil
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import boto3
 import requests
@@ -30,6 +30,7 @@ from .bucket_policies import BucketPolicyStore
 from .connections import ConnectionStore, RemoteConnection
 from .extensions import limiter
 from .iam import IamError
+from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage, StorageError
@@ -49,6 +50,9 @@ def _replication_manager() -> ReplicationManager:
 def _iam():
     return current_app.extensions["iam"]
 
+
+def _kms() -> KMSManager | None:
+    return current_app.extensions.get("kms")
 
 
 def _bucket_policies() -> BucketPolicyStore:
@@ -185,6 +189,7 @@ def inject_nav_state() -> dict[str, Any]:
     return {
         "principal": principal,
         "can_manage_iam": can_manage,
+        "can_view_metrics": can_manage,  # Only admins can view metrics
         "csrf_token": generate_csrf,
     }
 
@@ -255,9 +260,9 @@ def buckets_overview():
         visible_buckets.append({
             "meta": bucket,
             "summary": {
-                "objects": stats["objects"],
-                "total_bytes": stats["bytes"],
-                "human_size": _format_bytes(stats["bytes"]),
+                "objects": stats["total_objects"],
+                "total_bytes": stats["total_bytes"],
+                "human_size": _format_bytes(stats["total_bytes"]),
             },
             "access_label": access_label,
             "access_badge": access_badge,
@@ -336,9 +341,46 @@ def bucket_detail(bucket_name: str):
         except IamError:
             can_manage_versioning = False
 
+    # Check replication permission
+    can_manage_replication = False
+    if principal:
+        try:
+            _iam().authorize(principal, bucket_name, "replication")
+            can_manage_replication = True
+        except IamError:
+            can_manage_replication = False
+
+    # Check if user is admin (can configure replication settings, not just toggle)
+    is_replication_admin = False
+    if principal:
+        try:
+            _iam().authorize(principal, None, "iam:list_users")
+            is_replication_admin = True
+        except IamError:
+            is_replication_admin = False
+
     # Replication info - don't compute sync status here (it's slow), let JS fetch it async
     replication_rule = _replication().get_rule(bucket_name)
-    connections = _connections().list()
+    # Load connections for admin, or for non-admin if there's an existing rule (to show target name)
+    connections = _connections().list() if (is_replication_admin or replication_rule) else []
+
+    # Encryption settings
+    encryption_config = storage.get_bucket_encryption(bucket_name)
+    kms_manager = _kms()
+    kms_keys = kms_manager.list_keys() if kms_manager else []
+    kms_enabled = current_app.config.get("KMS_ENABLED", False)
+    encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
+    can_manage_encryption = can_manage_versioning  # Same as other bucket properties
+
+    # Quota settings (admin only)
+    bucket_quota = storage.get_bucket_quota(bucket_name)
+    bucket_stats = storage.bucket_stats(bucket_name)
+    can_manage_quota = False
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+        can_manage_quota = True
+    except IamError:
+        pass
 
     return render_template(
         "bucket_detail.html",
@@ -349,10 +391,20 @@ def bucket_detail(bucket_name: str):
         bucket_policy=bucket_policy,
         can_edit_policy=can_edit_policy,
         can_manage_versioning=can_manage_versioning,
+        can_manage_replication=can_manage_replication,
+        can_manage_encryption=can_manage_encryption,
+        is_replication_admin=is_replication_admin,
         default_policy=default_policy,
         versioning_enabled=versioning_enabled,
         replication_rule=replication_rule,
         connections=connections,
+        encryption_config=encryption_config,
+        kms_keys=kms_keys,
+        kms_enabled=kms_enabled,
+        encryption_enabled=encryption_enabled,
+        bucket_quota=bucket_quota,
+        bucket_stats=bucket_stats,
+        can_manage_quota=can_manage_quota,
     )
 
 
@@ -647,9 +699,18 @@ def bulk_download_objects(bucket_name: str):
                 # But strictly we should check. Let's check.
                 _authorize_ui(principal, bucket_name, "read", object_key=key)
                 
-                path = storage.get_object_path(bucket_name, key)
-                # Use the key as the filename in the zip
-                zf.write(path, arcname=key)
+                # Check if object is encrypted
+                metadata = storage.get_object_metadata(bucket_name, key)
+                is_encrypted = "x-amz-server-side-encryption" in metadata
+                
+                if is_encrypted and hasattr(storage, 'get_object_data'):
+                    # Decrypt and add to zip
+                    data, _ = storage.get_object_data(bucket_name, key)
+                    zf.writestr(key, data)
+                else:
+                    # Add unencrypted file directly
+                    path = storage.get_object_path(bucket_name, key)
+                    zf.write(path, arcname=key)
             except (StorageError, IamError):
                 # Skip files we can't read or don't exist
                 continue
@@ -691,13 +752,34 @@ def purge_object_versions(bucket_name: str, object_key: str):
 @ui_bp.get("/buckets/<bucket_name>/objects/<path:object_key>/preview")
 def object_preview(bucket_name: str, object_key: str) -> Response:
     principal = _current_principal()
+    storage = _storage()
     try:
         _authorize_ui(principal, bucket_name, "read", object_key=object_key)
-        path = _storage().get_object_path(bucket_name, object_key)
+        path = storage.get_object_path(bucket_name, object_key)
+        metadata = storage.get_object_metadata(bucket_name, object_key)
     except (StorageError, IamError) as exc:
         status = 403 if isinstance(exc, IamError) else 404
         return Response(str(exc), status=status)
+    
     download = request.args.get("download") == "1"
+    
+    # Check if object is encrypted and needs decryption
+    is_encrypted = "x-amz-server-side-encryption" in metadata
+    if is_encrypted and hasattr(storage, 'get_object_data'):
+        try:
+            data, _ = storage.get_object_data(bucket_name, object_key)
+            import io
+            import mimetypes
+            mimetype = mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+            return send_file(
+                io.BytesIO(data),
+                mimetype=mimetype,
+                as_attachment=download,
+                download_name=path.name
+            )
+        except StorageError as exc:
+            return Response(f"Decryption failed: {exc}", status=500)
+    
     return send_file(path, as_attachment=download, download_name=path.name)
 
 
@@ -712,12 +794,16 @@ def object_presign(bucket_name: str, object_key: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
     
-    connection_url = "http://127.0.0.1:5000"
-    url = f"{connection_url}/presign/{bucket_name}/{object_key}"
+    api_base = current_app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
+    api_base = api_base.rstrip("/")
+    encoded_key = quote(object_key, safe="")
+    url = f"{api_base}/presign/{bucket_name}/{encoded_key}"
     
+    # Use API base URL for forwarded headers so presigned URLs point to API, not UI
+    parsed_api = urlparse(api_base)
     headers = _api_headers()
-    headers["X-Forwarded-Host"] = request.host
-    headers["X-Forwarded-Proto"] = request.scheme
+    headers["X-Forwarded-Host"] = parsed_api.netloc or "127.0.0.1:5000"
+    headers["X-Forwarded-Proto"] = parsed_api.scheme or "http"
     headers["X-Forwarded-For"] = request.remote_addr or "127.0.0.1"
     
     try:
@@ -850,6 +936,127 @@ def update_bucket_versioning(bucket_name: str):
         flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     flash("Versioning enabled" if enable else "Versioning suspended", "success")
+    return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+
+@ui_bp.post("/buckets/<bucket_name>/quota")
+def update_bucket_quota(bucket_name: str):
+    """Update bucket quota configuration (admin only)."""
+    principal = _current_principal()
+    
+    # Quota management is admin-only
+    is_admin = False
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+        is_admin = True
+    except IamError:
+        pass
+    
+    if not is_admin:
+        flash("Only administrators can manage bucket quotas", "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    action = request.form.get("action", "set")
+    
+    if action == "remove":
+        try:
+            _storage().set_bucket_quota(bucket_name, max_bytes=None, max_objects=None)
+            flash("Bucket quota removed", "info")
+        except StorageError as exc:
+            flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    # Parse quota values
+    max_mb_str = request.form.get("max_mb", "").strip()
+    max_objects_str = request.form.get("max_objects", "").strip()
+    
+    max_bytes = None
+    max_objects = None
+    
+    if max_mb_str:
+        try:
+            max_mb = int(max_mb_str)
+            if max_mb < 1:
+                raise ValueError("Size must be at least 1 MB")
+            max_bytes = max_mb * 1024 * 1024  # Convert MB to bytes
+        except ValueError as exc:
+            flash(f"Invalid size value: {exc}", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    if max_objects_str:
+        try:
+            max_objects = int(max_objects_str)
+            if max_objects < 0:
+                raise ValueError("Object count must be non-negative")
+        except ValueError as exc:
+            flash(f"Invalid object count: {exc}", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    try:
+        _storage().set_bucket_quota(bucket_name, max_bytes=max_bytes, max_objects=max_objects)
+        if max_bytes is None and max_objects is None:
+            flash("Bucket quota removed", "info")
+        else:
+            flash("Bucket quota updated", "success")
+    except StorageError as exc:
+        flash(_friendly_error_message(exc), "danger")
+    
+    return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+
+@ui_bp.post("/buckets/<bucket_name>/encryption")
+def update_bucket_encryption(bucket_name: str):
+    """Update bucket default encryption configuration."""
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "write")
+    except IamError as exc:
+        flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    action = request.form.get("action", "enable")
+    
+    if action == "disable":
+        # Disable encryption
+        try:
+            _storage().set_bucket_encryption(bucket_name, None)
+            flash("Default encryption disabled", "info")
+        except StorageError as exc:
+            flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    # Enable or update encryption
+    algorithm = request.form.get("algorithm", "AES256")
+    kms_key_id = request.form.get("kms_key_id", "").strip() or None
+    
+    # Validate algorithm
+    if algorithm not in ("AES256", "aws:kms"):
+        flash("Invalid encryption algorithm", "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    # Build encryption config following AWS format
+    encryption_config: dict[str, Any] = {
+        "Rules": [
+            {
+                "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": algorithm,
+                }
+            }
+        ]
+    }
+    
+    if algorithm == "aws:kms" and kms_key_id:
+        encryption_config["Rules"][0]["ApplyServerSideEncryptionByDefault"]["KMSMasterKeyID"] = kms_key_id
+    
+    try:
+        _storage().set_bucket_encryption(bucket_name, encryption_config)
+        if algorithm == "aws:kms":
+            flash("Default KMS encryption enabled", "success")
+        else:
+            flash("Default AES-256 encryption enabled", "success")
+    except StorageError as exc:
+        flash(_friendly_error_message(exc), "danger")
+    
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
 
 
@@ -1168,17 +1375,52 @@ def delete_connection(connection_id: str):
 def update_bucket_replication(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "write")
+        _authorize_ui(principal, bucket_name, "replication")
     except IamError as exc:
         flash(str(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
+    
+    # Check if user is admin (required for create/delete operations)
+    is_admin = False
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+        is_admin = True
+    except IamError:
+        is_admin = False
         
     action = request.form.get("action")
     
     if action == "delete":
+        # Admin only - remove configuration entirely
+        if not is_admin:
+            flash("Only administrators can remove replication configuration", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
         _replication().delete_rule(bucket_name)
-        flash("Replication disabled", "info")
-    else:
+        flash("Replication configuration removed", "info")
+    elif action == "pause":
+        # Users can pause - just set enabled=False
+        rule = _replication().get_rule(bucket_name)
+        if rule:
+            rule.enabled = False
+            _replication().set_rule(rule)
+            flash("Replication paused", "info")
+        else:
+            flash("No replication configuration to pause", "warning")
+    elif action == "resume":
+        # Users can resume - just set enabled=True
+        rule = _replication().get_rule(bucket_name)
+        if rule:
+            rule.enabled = True
+            _replication().set_rule(rule)
+            flash("Replication resumed", "success")
+        else:
+            flash("No replication configuration to resume", "warning")
+    elif action == "create":
+        # Admin only - create new configuration
+        if not is_admin:
+            flash("Only administrators can configure replication settings", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
+            
         from .replication import REPLICATION_MODE_NEW_ONLY, REPLICATION_MODE_ALL
         import time
         
@@ -1205,6 +1447,8 @@ def update_bucket_replication(bucket_name: str):
                 flash("Replication configured. Existing objects are being replicated in the background.", "success")
             else:
                 flash("Replication configured. Only new uploads will be replicated.", "success")
+    else:
+        flash("Invalid action", "danger")
             
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
 
@@ -1214,7 +1458,7 @@ def get_replication_status(bucket_name: str):
     """Async endpoint to fetch replication sync status without blocking page load."""
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "read")
+        _authorize_ui(principal, bucket_name, "replication")
     except IamError:
         return jsonify({"error": "Access denied"}), 403
     
@@ -1254,6 +1498,13 @@ def connections_dashboard():
 def metrics_dashboard():
     principal = _current_principal()
     
+    # Metrics are restricted to admin users
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        flash("Access denied: Metrics require admin permissions", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+    
     cpu_percent = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
     
@@ -1266,13 +1517,16 @@ def metrics_dashboard():
     
     total_objects = 0
     total_bytes_used = 0
+    total_versions = 0
     
     # Note: Uses cached stats from storage layer to improve performance
     cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
     for bucket in buckets:
         stats = storage.bucket_stats(bucket.name, cache_ttl=cache_ttl)
-        total_objects += stats["objects"]
-        total_bytes_used += stats["bytes"]
+        # Use totals which include archived versions
+        total_objects += stats.get("total_objects", stats.get("objects", 0))
+        total_bytes_used += stats.get("total_bytes", stats.get("bytes", 0))
+        total_versions += stats.get("version_count", 0)
         
     return render_template(
         "metrics.html",
@@ -1293,6 +1547,7 @@ def metrics_dashboard():
         app={
             "buckets": total_buckets,
             "objects": total_objects,
+            "versions": total_versions,
             "storage_used": _format_bytes(total_bytes_used),
             "storage_raw": total_bytes_used,
         }

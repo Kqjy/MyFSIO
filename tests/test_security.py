@@ -116,7 +116,12 @@ def test_path_traversal_in_key(client, signer):
 
 def test_storage_path_traversal(app):
     storage = app.extensions["object_storage"]
-    from app.storage import StorageError
+    from app.storage import StorageError, ObjectStorage
+    from app.encrypted_storage import EncryptedObjectStorage
+    
+    # Get the underlying ObjectStorage if wrapped
+    if isinstance(storage, EncryptedObjectStorage):
+        storage = storage.storage
     
     with pytest.raises(StorageError, match="Object key contains parent directory references"):
         storage._sanitize_object_key("folder/../file.txt")
