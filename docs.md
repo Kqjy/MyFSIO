@@ -340,7 +340,71 @@ To verify an object is encrypted:
 2. Look for `.meta` files containing encryption metadata
 3. Download via the API/UI - the object should be automatically decrypted
 
-## 8. Site Replication
+## 8. Bucket Quotas
+
+MyFSIO supports **storage quotas** to limit how much data a bucket can hold. Quotas are enforced on uploads and multipart completions.
+
+### Quota Types
+
+| Limit | Description |
+|-------|-------------|
+| **Max Size (MB)** | Maximum total storage in megabytes (includes current objects + archived versions) |
+| **Max Objects** | Maximum number of objects (includes current objects + archived versions) |
+
+### Managing Quotas (Admin Only)
+
+Quota management is restricted to administrators (users with `iam:*` or `iam:list_users` permissions).
+
+#### Via UI
+
+1. Navigate to your bucket in the UI
+2. Click the **Properties** tab
+3. Find the **Storage Quota** card
+4. Enter limits:
+   - **Max Size (MB)**: Leave empty for unlimited
+   - **Max Objects**: Leave empty for unlimited
+5. Click **Update Quota**
+
+To remove a quota, click **Remove Quota**.
+
+#### Via API
+
+```bash
+# Set quota (max 100MB, max 1000 objects)
+curl -X PUT "http://localhost:5000/bucket/<bucket>?quota" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"max_bytes": 104857600, "max_objects": 1000}'
+
+# Get current quota
+curl "http://localhost:5000/bucket/<bucket>?quota" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Remove quota
+curl -X PUT "http://localhost:5000/bucket/<bucket>?quota" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"max_bytes": null, "max_objects": null}'
+```
+
+### Quota Behavior
+
+- **Version Counting**: When versioning is enabled, archived versions count toward the quota (similar to MinIO behavior)
+- **Enforcement Points**: Quotas are checked during `PUT` object and `CompleteMultipartUpload` operations
+- **Error Response**: When quota is exceeded, the API returns `HTTP 400` with error code `QuotaExceeded`
+- **Visibility**: All users can view quota usage in the bucket detail page, but only admins can modify quotas
+
+### Example Error
+
+```xml
+<Error>
+  <Code>QuotaExceeded</Code>
+  <Message>Bucket quota exceeded: storage limit reached</Message>
+  <BucketName>my-bucket</BucketName>
+</Error>
+```
+
+## 9. Site Replication
 
 ### Permission Model
 
@@ -477,7 +541,7 @@ To set up two-way replication (Server A ↔ Server B):
 
 **Note**: Deleting a bucket will automatically remove its associated replication configuration.
 
-## 9. Running Tests
+## 11. Running Tests
 
 ```bash
 pytest -q
@@ -487,7 +551,7 @@ The suite now includes a boto3 integration test that spins up a live HTTP server
 
 The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, and regression tests for anonymous reads when a Public policy is attached.
 
-## 10. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 | --- | --- | --- |
@@ -496,7 +560,7 @@ The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, an
 | Presign modal errors with 403 | IAM user lacks `read/write/delete` for target bucket or bucket policy denies | Update IAM inline policies or remove conflicting deny statements. |
 | Large upload rejected immediately | File exceeds `MAX_UPLOAD_SIZE` | Increase env var or shrink object. |
 
-## 11. API Matrix
+## 13. API Matrix
 
 ```
 GET    /                               # List buckets
@@ -510,9 +574,11 @@ POST   /presign/<bucket>/<key>          # Generate SigV4 URL
 GET    /bucket-policy/<bucket>          # Fetch policy
 PUT    /bucket-policy/<bucket>          # Upsert policy
 DELETE /bucket-policy/<bucket>          # Delete policy
+GET    /<bucket>?quota                  # Get bucket quota
+PUT    /<bucket>?quota                  # Set bucket quota (admin only)
 ```
 
-## 12. Next Steps
+## 14. Next Steps
 
 - Tailor IAM + policy JSON files for team-ready presets.
 - Wrap `run_api.py` with gunicorn or another WSGI server for long-running workloads.

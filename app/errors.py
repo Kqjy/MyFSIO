@@ -129,6 +129,25 @@ class EntityTooLargeError(AppError):
     status_code: int = 413
 
 
+@dataclass
+class QuotaExceededAppError(AppError):
+    """Bucket quota exceeded."""
+    code: str = "QuotaExceeded"
+    message: str = "The bucket quota has been exceeded"
+    status_code: int = 403
+    quota: Optional[Dict[str, Any]] = None
+    usage: Optional[Dict[str, int]] = None
+    
+    def __post_init__(self):
+        if self.quota or self.usage:
+            self.details = {}
+            if self.quota:
+                self.details["quota"] = self.quota
+            if self.usage:
+                self.details["usage"] = self.usage
+        super().__post_init__()
+
+
 def handle_app_error(error: AppError) -> Response:
     """Handle application errors with appropriate response format."""
     log_extra = {"error_code": error.code}
@@ -163,5 +182,6 @@ def register_error_handlers(app):
         ObjectNotFoundError, InvalidObjectKeyError,
         AccessDeniedError, InvalidCredentialsError,
         MalformedRequestError, InvalidArgumentError, EntityTooLargeError,
+        QuotaExceededAppError,
     ]:
         app.register_error_handler(error_class, handle_app_error)

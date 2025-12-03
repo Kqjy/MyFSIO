@@ -266,5 +266,11 @@ class EncryptedObjectStorage:
     def list_multipart_parts(self, bucket_name: str, upload_id: str):
         return self.storage.list_multipart_parts(bucket_name, upload_id)
     
+    def get_bucket_quota(self, bucket_name: str):
+        return self.storage.get_bucket_quota(bucket_name)
+    
+    def set_bucket_quota(self, bucket_name: str, *, max_bytes=None, max_objects=None):
+        return self.storage.set_bucket_quota(bucket_name, max_bytes=max_bytes, max_objects=max_objects)
+    
     def _compute_etag(self, path: Path) -> str:
         return self.storage._compute_etag(path)

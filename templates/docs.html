@@ -418,10 +418,78 @@ s3.complete_multipart_upload(
         </p>
       </div>
     </article>
+    <article id="quotas" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">10</span>
+          <h2 class="h4 mb-0">Bucket Quotas</h2>
+        </div>
+        <p class="text-muted">Limit how much data a bucket can hold using storage quotas. Quotas are enforced on uploads and multipart completions.</p>
+        
+        <h3 class="h6 text-uppercase text-muted mt-4">Quota Types</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Limit</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Max Size (MB)</strong></td>
+                <td>Maximum total storage in megabytes (includes current objects + archived versions)</td>
+              </tr>
+              <tr>
+                <td><strong>Max Objects</strong></td>
+                <td>Maximum number of objects (includes current objects + archived versions)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Managing Quotas (Admin Only)</h3>
+        <p class="small text-muted">Quota management is restricted to administrators (users with <code>iam:*</code> permissions).</p>
+        <ol class="docs-steps mb-3">
+          <li>Navigate to your bucket → <strong>Properties</strong> tab → <strong>Storage Quota</strong> card.</li>
+          <li>Enter limits: <strong>Max Size (MB)</strong> and/or <strong>Max Objects</strong>. Leave empty for unlimited.</li>
+          <li>Click <strong>Update Quota</strong> to save, or <strong>Remove Quota</strong> to clear limits.</li>
+        </ol>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
+<pre class="mb-3"><code class="language-bash"># Set quota (max 100MB, max 1000 objects)
+curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"max_bytes": 104857600, "max_objects": 1000}'
+
+# Get current quota
+curl "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Remove quota
+curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"max_bytes": null, "max_objects": null}'</code></pre>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Version Counting:</strong> When versioning is enabled, archived versions count toward the quota (similar to MinIO behavior). The quota is checked against total storage, not just current objects.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
     <article id="encryption" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">09</span>
+          <span class="docs-section-kicker">11</span>
           <h2 class="h4 mb-0">Encryption</h2>
         </div>
         <p class="text-muted">Protect data at rest with server-side encryption using AES-256-GCM. Objects are encrypted before being written to disk and decrypted transparently on read.</p>
@@ -515,7 +583,7 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
     <article id="troubleshooting" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">10</span>
+          <span class="docs-section-kicker">12</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -572,6 +640,7 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
           <li><a href="#api">REST endpoints</a></li>
           <li><a href="#examples">API Examples</a></li>
           <li><a href="#replication">Site Replication</a></li>
+          <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>
         </ul>

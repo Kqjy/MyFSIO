@@ -18,7 +18,7 @@ from .bucket_policies import BucketPolicyStore
 from .extensions import limiter
 from .iam import IamError, Principal
 from .replication import ReplicationManager
-from .storage import ObjectStorage, StorageError
+from .storage import ObjectStorage, StorageError, QuotaExceededError
 
 s3_api_bp = Blueprint("s3_api", __name__)
 
@@ -803,6 +803,7 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "acl": _bucket_acl_handler,
         "versions": _bucket_list_versions_handler,
         "lifecycle": _bucket_lifecycle_handler,
+        "quota": _bucket_quota_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -1400,6 +1401,87 @@ def _parse_lifecycle_config(payload: bytes) -> list:
     return rules
 
 
+def _bucket_quota_handler(bucket_name: str) -> Response:
+    """Handle bucket quota configuration (GET/PUT/DELETE /<bucket>?quota)."""
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+    
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    
+    storage = _storage()
+    
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    
+    if request.method == "GET":
+        quota = storage.get_bucket_quota(bucket_name)
+        if not quota:
+            return _error_response("NoSuchQuotaConfiguration", "No quota configuration found", 404)
+        
+        # Return as JSON for simplicity (not a standard S3 API)
+        stats = storage.bucket_stats(bucket_name)
+        return jsonify({
+            "quota": quota,
+            "usage": {
+                "bytes": stats.get("bytes", 0),
+                "objects": stats.get("objects", 0),
+            }
+        })
+    
+    if request.method == "DELETE":
+        try:
+            storage.set_bucket_quota(bucket_name, max_size_bytes=None, max_objects=None)
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        current_app.logger.info("Bucket quota deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+    
+    # PUT
+    payload = request.get_json(silent=True)
+    if not payload:
+        return _error_response("MalformedRequest", "Request body must be JSON with quota limits", 400)
+    
+    max_size_bytes = payload.get("max_size_bytes")
+    max_objects = payload.get("max_objects")
+    
+    if max_size_bytes is None and max_objects is None:
+        return _error_response("InvalidArgument", "At least one of max_size_bytes or max_objects is required", 400)
+    
+    # Validate types
+    if max_size_bytes is not None:
+        try:
+            max_size_bytes = int(max_size_bytes)
+            if max_size_bytes < 0:
+                raise ValueError("must be non-negative")
+        except (TypeError, ValueError) as exc:
+            return _error_response("InvalidArgument", f"max_size_bytes {exc}", 400)
+    
+    if max_objects is not None:
+        try:
+            max_objects = int(max_objects)
+            if max_objects < 0:
+                raise ValueError("must be non-negative")
+        except (TypeError, ValueError) as exc:
+            return _error_response("InvalidArgument", f"max_objects {exc}", 400)
+    
+    try:
+        storage.set_bucket_quota(bucket_name, max_size_bytes=max_size_bytes, max_objects=max_objects)
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+    
+    current_app.logger.info(
+        "Bucket quota updated",
+        extra={"bucket": bucket_name, "max_size_bytes": max_size_bytes, "max_objects": max_objects}
+    )
+    return Response(status=204)
+
+
 def _bulk_delete_handler(bucket_name: str) -> Response:
     principal, error = _require_principal()
     if error:
@@ -1749,6 +1831,8 @@ def object_handler(bucket_name: str, object_key: str):
                 stream,
                 metadata=metadata or None,
             )
+        except QuotaExceededError as exc:
+            return _error_response("QuotaExceeded", str(exc), 403)
         except StorageError as exc:
             message = str(exc)
             if "Bucket" in message:
@@ -2256,6 +2340,8 @@ def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
 
     try:
         meta = _storage().complete_multipart_upload(bucket_name, upload_id, parts)
+    except QuotaExceededError as exc:
+        return _error_response("QuotaExceeded", str(exc), 403)
     except StorageError as exc:
         if "NoSuchBucket" in str(exc):
             return _error_response("NoSuchBucket", str(exc), 404)

@@ -260,9 +260,9 @@ def buckets_overview():
         visible_buckets.append({
             "meta": bucket,
             "summary": {
-                "objects": stats["objects"],
-                "total_bytes": stats["bytes"],
-                "human_size": _format_bytes(stats["bytes"]),
+                "objects": stats["total_objects"],
+                "total_bytes": stats["total_bytes"],
+                "human_size": _format_bytes(stats["total_bytes"]),
             },
             "access_label": access_label,
             "access_badge": access_badge,
@@ -372,6 +372,16 @@ def bucket_detail(bucket_name: str):
     encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
     can_manage_encryption = can_manage_versioning  # Same as other bucket properties
 
+    # Quota settings (admin only)
+    bucket_quota = storage.get_bucket_quota(bucket_name)
+    bucket_stats = storage.bucket_stats(bucket_name)
+    can_manage_quota = False
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+        can_manage_quota = True
+    except IamError:
+        pass
+
     return render_template(
         "bucket_detail.html",
         bucket_name=bucket_name,
@@ -392,6 +402,9 @@ def bucket_detail(bucket_name: str):
         kms_keys=kms_keys,
         kms_enabled=kms_enabled,
         encryption_enabled=encryption_enabled,
+        bucket_quota=bucket_quota,
+        bucket_stats=bucket_stats,
+        can_manage_quota=can_manage_quota,
     )
 
 
@@ -925,6 +938,71 @@ def update_bucket_versioning(bucket_name: str):
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
 
 
+@ui_bp.post("/buckets/<bucket_name>/quota")
+def update_bucket_quota(bucket_name: str):
+    """Update bucket quota configuration (admin only)."""
+    principal = _current_principal()
+    
+    # Quota management is admin-only
+    is_admin = False
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+        is_admin = True
+    except IamError:
+        pass
+    
+    if not is_admin:
+        flash("Only administrators can manage bucket quotas", "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    action = request.form.get("action", "set")
+    
+    if action == "remove":
+        try:
+            _storage().set_bucket_quota(bucket_name, max_bytes=None, max_objects=None)
+            flash("Bucket quota removed", "info")
+        except StorageError as exc:
+            flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    # Parse quota values
+    max_mb_str = request.form.get("max_mb", "").strip()
+    max_objects_str = request.form.get("max_objects", "").strip()
+    
+    max_bytes = None
+    max_objects = None
+    
+    if max_mb_str:
+        try:
+            max_mb = int(max_mb_str)
+            if max_mb < 1:
+                raise ValueError("Size must be at least 1 MB")
+            max_bytes = max_mb * 1024 * 1024  # Convert MB to bytes
+        except ValueError as exc:
+            flash(f"Invalid size value: {exc}", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    if max_objects_str:
+        try:
+            max_objects = int(max_objects_str)
+            if max_objects < 0:
+                raise ValueError("Object count must be non-negative")
+        except ValueError as exc:
+            flash(f"Invalid object count: {exc}", "danger")
+            return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+    
+    try:
+        _storage().set_bucket_quota(bucket_name, max_bytes=max_bytes, max_objects=max_objects)
+        if max_bytes is None and max_objects is None:
+            flash("Bucket quota removed", "info")
+        else:
+            flash("Bucket quota updated", "success")
+    except StorageError as exc:
+        flash(_friendly_error_message(exc), "danger")
+    
+    return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+
 @ui_bp.post("/buckets/<bucket_name>/encryption")
 def update_bucket_encryption(bucket_name: str):
     """Update bucket default encryption configuration."""
@@ -1438,13 +1516,16 @@ def metrics_dashboard():
     
     total_objects = 0
     total_bytes_used = 0
+    total_versions = 0
     
     # Note: Uses cached stats from storage layer to improve performance
     cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
     for bucket in buckets:
         stats = storage.bucket_stats(bucket.name, cache_ttl=cache_ttl)
-        total_objects += stats["objects"]
-        total_bytes_used += stats["bytes"]
+        # Use totals which include archived versions
+        total_objects += stats.get("total_objects", stats.get("objects", 0))
+        total_bytes_used += stats.get("total_bytes", stats.get("bytes", 0))
+        total_versions += stats.get("version_count", 0)
         
     return render_template(
         "metrics.html",
@@ -1465,6 +1546,7 @@ def metrics_dashboard():
         app={
             "buckets": total_buckets,
             "objects": total_objects,
+            "versions": total_versions,
             "storage_used": _format_bytes(total_bytes_used),
             "storage_raw": total_bytes_used,
         }

@@ -730,6 +730,158 @@
             </div>
           </div>
           {% endif %}
+
+          <!-- Storage Quota Card -->
+          <div class="card shadow-sm mt-4" id="bucket-quota-card">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h3A1.5 1.5 0 0 1 7 2.5v3A1.5 1.5 0 0 1 5.5 7h-3A1.5 1.5 0 0 1 1 5.5v-3zM2.5 2a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zm6.5.5A1.5 1.5 0 0 1 10.5 1h3A1.5 1.5 0 0 1 15 2.5v3A1.5 1.5 0 0 1 13.5 7h-3A1.5 1.5 0 0 1 9 5.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zM1 10.5A1.5 1.5 0 0 1 2.5 9h3A1.5 1.5 0 0 1 7 10.5v3A1.5 1.5 0 0 1 5.5 15h-3A1.5 1.5 0 0 1 1 13.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3zm6.5.5A1.5 1.5 0 0 1 10.5 9h3a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-3A1.5 1.5 0 0 1 9 13.5v-3zm1.5-.5a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3z"/>
+              </svg>
+              <span class="fw-semibold">Storage Quota</span>
+            </div>
+            <div class="card-body">
+              {% set max_bytes = bucket_quota.get('max_bytes') %}
+              {% set max_objects = bucket_quota.get('max_objects') %}
+              {% set has_quota = max_bytes is not none or max_objects is not none %}
+              {% set current_objects = bucket_stats.get('objects', 0) %}
+              {% set version_count = bucket_stats.get('version_count', 0) %}
+              {% set total_objects = bucket_stats.get('total_objects', current_objects) %}
+              {% set current_bytes = bucket_stats.get('bytes', 0) %}
+              {% set version_bytes = bucket_stats.get('version_bytes', 0) %}
+              {% set total_bytes = bucket_stats.get('total_bytes', current_bytes) %}
+              
+              <!-- Current Usage Display -->
+              <div class="mb-4">
+                <h6 class="small fw-semibold mb-3">Current Usage</h6>
+                <div class="row g-3">
+                  <div class="col-6">
+                    <div class="border rounded p-3 text-center">
+                      <div class="fs-4 fw-bold text-primary">{{ total_objects }}</div>
+                      <div class="small text-muted">Total Objects</div>
+                      {% if max_objects is not none %}
+                      <div class="progress mt-2" style="height: 4px;">
+                        {% set obj_pct = (total_objects / max_objects * 100) | int if max_objects > 0 else 0 %}
+                        <div class="progress-bar {% if obj_pct >= 90 %}bg-danger{% elif obj_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {{ [obj_pct, 100] | min }}%"></div>
+                      </div>
+                      <div class="small text-muted mt-1">{{ obj_pct }}% of {{ max_objects }} limit</div>
+                      {% else %}
+                      <div class="small text-muted mt-2">No limit</div>
+                      {% endif %}
+                      {% if version_count > 0 %}
+                      <div class="small text-muted mt-1">
+                        <span class="text-body-secondary">({{ current_objects }} current + {{ version_count }} versions)</span>
+                      </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="col-6">
+                    <div class="border rounded p-3 text-center">
+                      <div class="fs-4 fw-bold text-primary">{{ total_bytes | filesizeformat }}</div>
+                      <div class="small text-muted">Total Storage</div>
+                      {% if max_bytes is not none %}
+                      <div class="progress mt-2" style="height: 4px;">
+                        {% set bytes_pct = (total_bytes / max_bytes * 100) | int if max_bytes > 0 else 0 %}
+                        <div class="progress-bar {% if bytes_pct >= 90 %}bg-danger{% elif bytes_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {{ [bytes_pct, 100] | min }}%"></div>
+                      </div>
+                      <div class="small text-muted mt-1">{{ bytes_pct }}% of {{ max_bytes | filesizeformat }} limit</div>
+                      {% else %}
+                      <div class="small text-muted mt-2">No limit</div>
+                      {% endif %}
+                      {% if version_bytes > 0 %}
+                      <div class="small text-muted mt-1">
+                        <span class="text-body-secondary">({{ current_bytes | filesizeformat }} current + {{ version_bytes | filesizeformat }} versions)</span>
+                      </div>
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {% if has_quota %}
+              <!-- Quota Enabled State -->
+              <div class="alert alert-info d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                </svg>
+                <div>
+                  <strong>Storage quota enabled</strong>
+                  <p class="mb-0 small">
+                    {% if max_bytes is not none and max_objects is not none %}
+                    Limited to {{ max_bytes | filesizeformat }} and {{ max_objects }} objects.
+                    {% elif max_bytes is not none %}
+                    Limited to {{ max_bytes | filesizeformat }} storage.
+                    {% else %}
+                    Limited to {{ max_objects }} objects.
+                    {% endif %}
+                  </p>
+                </div>
+              </div>
+              {% else %}
+              <!-- Quota Disabled State -->
+              <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                </svg>
+                <div>
+                  <strong>No storage quota</strong>
+                  <p class="mb-0 small">This bucket has no storage or object count limits. Set limits below to control usage.</p>
+                </div>
+              </div>
+              {% endif %}
+
+              {% if can_manage_quota %}
+              <form method="post" action="{{ url_for('ui.update_bucket_quota', bucket_name=bucket_name) }}" id="quotaForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                
+                <!-- Max Storage -->
+                <div class="mb-3">
+                  <label for="max_mb" class="form-label fw-medium">Maximum Storage Size</label>
+                  <div class="input-group">
+                    <input type="number" class="form-control" id="max_mb" name="max_mb" 
+                           value="{{ (max_bytes / 1048576) | int if max_bytes is not none else '' }}" 
+                           min="1" step="1" placeholder="Unlimited">
+                    <span class="input-group-text">MB</span>
+                  </div>
+                  <div class="form-text">Minimum 1 MB. Leave empty for unlimited.</div>
+                </div>
+
+                <!-- Max Objects -->
+                <div class="mb-4">
+                  <label for="max_objects" class="form-label fw-medium">Maximum Object Count</label>
+                  <input type="number" class="form-control" id="max_objects" name="max_objects" 
+                         value="{{ max_objects if max_objects is not none else '' }}" 
+                         min="0" step="1" placeholder="Unlimited">
+                  <div class="form-text">Maximum number of objects allowed. Leave empty for unlimited.</div>
+                </div>
+
+                <div class="d-flex gap-2 flex-wrap">
+                  <button class="btn btn-primary" type="submit">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M12.736 3.97a.733.733 0 0 1 1.047 0c.286.289.29.756.01 1.05L7.88 12.01a.733.733 0 0 1-1.065.02L3.217 8.384a.757.757 0 0 1 0-1.06.733.733 0 0 1 1.047 0l3.052 3.093 5.4-6.425a.247.247 0 0 1 .02-.022Z"/>
+                    </svg>
+                    Save Quota Settings
+                  </button>
+                  {% if has_quota %}
+                  <button type="submit" class="btn btn-outline-danger" id="removeQuotaBtn" name="action" value="remove">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                    </svg>
+                    Remove Quota
+                  </button>
+                  {% endif %}
+                </div>
+              </form>
+              {% else %}
+              <div class="text-center py-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
+                  <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                </svg>
+                <p class="text-muted mb-0 small">You do not have permission to modify quota settings for this bucket.</p>
+              </div>
+              {% endif %}
+            </div>
+          </div>
         </div>
 
         <!-- Sidebar -->
