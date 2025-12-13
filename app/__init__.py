@@ -185,14 +185,12 @@ def create_ui_app(test_config: Optional[Dict[str, Any]] = None) -> Flask:
 
 def _configure_cors(app: Flask) -> None:
     origins = app.config.get("CORS_ORIGINS", ["*"])
-    methods = app.config.get("CORS_METHODS", ["GET", "PUT", "POST", "DELETE", "OPTIONS"])
-    allow_headers = app.config.get(
-        "CORS_ALLOW_HEADERS",
-        ["Content-Type", "X-Access-Key", "X-Secret-Key", "X-Amz-Date", "X-Amz-SignedHeaders"],
-    )
+    methods = app.config.get("CORS_METHODS", ["GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD"])
+    allow_headers = app.config.get("CORS_ALLOW_HEADERS", ["*"])
+    expose_headers = app.config.get("CORS_EXPOSE_HEADERS", ["*"])
     CORS(
         app,
-        resources={r"/*": {"origins": origins, "methods": methods, "allow_headers": allow_headers}},
+        resources={r"/*": {"origins": origins, "methods": methods, "allow_headers": allow_headers, "expose_headers": expose_headers}},
         supports_credentials=True,
     )
 

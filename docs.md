@@ -577,9 +577,3 @@ DELETE /bucket-policy/<bucket>          # Delete policy
 GET    /<bucket>?quota                  # Get bucket quota
 PUT    /<bucket>?quota                  # Set bucket quota (admin only)
 ```
-
-## 14. Next Steps
-
-- Tailor IAM + policy JSON files for team-ready presets.
-- Wrap `run_api.py` with gunicorn or another WSGI server for long-running workloads.
-- Extend `bucket_policies.json` to cover Deny statements that simulate production security controls.
