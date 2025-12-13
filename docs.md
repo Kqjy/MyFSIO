@@ -33,6 +33,63 @@ python run.py --mode api   # API only (port 5000)
 python run.py --mode ui    # UI only (port 5100)
 ```
 
+### Configuration validation
+
+Validate your configuration before deploying:
+
+```bash
+# Show configuration summary
+python run.py --show-config
+./myfsio --show-config
+
+# Validate and check for issues (exits with code 1 if critical issues found)
+python run.py --check-config
+./myfsio --check-config
+```
+
+### Linux Installation (Recommended for Production)
+
+For production deployments on Linux, use the provided installation script:
+
+```bash
+# Download the binary and install script
+# Then run the installer with sudo:
+sudo ./scripts/install.sh --binary ./myfsio
+
+# Or with custom paths:
+sudo ./scripts/install.sh \
+  --binary ./myfsio \
+  --install-dir /opt/myfsio \
+  --data-dir /mnt/storage/myfsio \
+  --log-dir /var/log/myfsio \
+  --api-url https://s3.example.com \
+  --user myfsio
+
+# Non-interactive mode (for automation):
+sudo ./scripts/install.sh --binary ./myfsio -y
+```
+
+The installer will:
+1. Create a dedicated system user
+2. Set up directories with proper permissions
+3. Generate a secure `SECRET_KEY`
+4. Create an environment file at `/opt/myfsio/myfsio.env`
+5. Install and configure a systemd service
+
+After installation:
+```bash
+sudo systemctl start myfsio    # Start the service
+sudo systemctl enable myfsio   # Enable on boot
+sudo systemctl status myfsio   # Check status
+sudo journalctl -u myfsio -f   # View logs
+```
+
+To uninstall:
+```bash
+sudo ./scripts/uninstall.sh              # Full removal
+sudo ./scripts/uninstall.sh --keep-data  # Keep data directory
+```
+
 ### Docker quickstart
 
 The repo now ships a `Dockerfile` so you can run both services in one container:

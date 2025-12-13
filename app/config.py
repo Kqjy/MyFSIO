@@ -111,19 +111,19 @@ class AppConfig:
         iam_env_override = "IAM_CONFIG" in overrides or "IAM_CONFIG" in os.environ
         bucket_policy_override = "BUCKET_POLICY_PATH" in overrides or "BUCKET_POLICY_PATH" in os.environ
 
-        default_iam_path = PROJECT_ROOT / "data" / ".myfsio.sys" / "config" / "iam.json"
-        default_bucket_policy_path = PROJECT_ROOT / "data" / ".myfsio.sys" / "config" / "bucket_policies.json"
+        default_iam_path = storage_root / ".myfsio.sys" / "config" / "iam.json"
+        default_bucket_policy_path = storage_root / ".myfsio.sys" / "config" / "bucket_policies.json"
 
         iam_config_path = Path(_get("IAM_CONFIG", default_iam_path)).resolve()
         bucket_policy_path = Path(_get("BUCKET_POLICY_PATH", default_bucket_policy_path)).resolve()
 
         iam_config_path = _prepare_config_file(
             iam_config_path,
-            legacy_path=None if iam_env_override else PROJECT_ROOT / "data" / "iam.json",
+            legacy_path=None if iam_env_override else storage_root / "iam.json",
         )
         bucket_policy_path = _prepare_config_file(
             bucket_policy_path,
-            legacy_path=None if bucket_policy_override else PROJECT_ROOT / "data" / "bucket_policies.json",
+            legacy_path=None if bucket_policy_override else storage_root / "bucket_policies.json",
         )
         api_base_url = _get("API_BASE_URL", None)
         if api_base_url:
@@ -134,7 +134,7 @@ class AppConfig:
         enforce_ui_policies = str(_get("UI_ENFORCE_BUCKET_POLICIES", "0")).lower() in {"1", "true", "yes", "on"}
         log_level = str(_get("LOG_LEVEL", "INFO")).upper()
         log_to_file = str(_get("LOG_TO_FILE", "1")).lower() in {"1", "true", "yes", "on"}
-        log_dir = Path(_get("LOG_DIR", PROJECT_ROOT / "logs")).resolve()
+        log_dir = Path(_get("LOG_DIR", storage_root.parent / "logs")).resolve()
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / str(_get("LOG_FILE", "app.log"))
         log_max_bytes = int(_get("LOG_MAX_BYTES", 5 * 1024 * 1024))
@@ -197,6 +197,102 @@ class AppConfig:
                    kms_enabled=kms_enabled,
                    kms_keys_path=kms_keys_path,
                    default_encryption_algorithm=default_encryption_algorithm)
+
+    def validate_and_report(self) -> list[str]:
+        """Validate configuration and return a list of warnings/issues.
+        
+        Call this at startup to detect potential misconfigurations before
+        the application fully commits to running.
+        """
+        issues = []
+        
+        # Check if storage_root is writable
+        try:
+            test_file = self.storage_root / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+        except (OSError, PermissionError) as e:
+            issues.append(f"CRITICAL: STORAGE_ROOT '{self.storage_root}' is not writable: {e}")
+        
+        # Check if storage_root looks like a temp directory
+        storage_str = str(self.storage_root).lower()
+        if "/tmp" in storage_str or "\\temp" in storage_str or "appdata\\local\\temp" in storage_str:
+            issues.append(f"WARNING: STORAGE_ROOT '{self.storage_root}' appears to be a temporary directory. Data may be lost on reboot!")
+        
+        # Check if IAM config path is under storage_root
+        try:
+            self.iam_config_path.relative_to(self.storage_root)
+        except ValueError:
+            issues.append(f"WARNING: IAM_CONFIG '{self.iam_config_path}' is outside STORAGE_ROOT '{self.storage_root}'. Consider setting IAM_CONFIG explicitly or ensuring paths are aligned.")
+        
+        # Check if bucket policy path is under storage_root
+        try:
+            self.bucket_policy_path.relative_to(self.storage_root)
+        except ValueError:
+            issues.append(f"WARNING: BUCKET_POLICY_PATH '{self.bucket_policy_path}' is outside STORAGE_ROOT '{self.storage_root}'. Consider setting BUCKET_POLICY_PATH explicitly.")
+        
+        # Check if log path is writable
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            test_log = self.log_path.parent / ".write_test"
+            test_log.touch()
+            test_log.unlink()
+        except (OSError, PermissionError) as e:
+            issues.append(f"WARNING: Log directory '{self.log_path.parent}' is not writable: {e}")
+        
+        # Check log path location
+        log_str = str(self.log_path).lower()
+        if "/tmp" in log_str or "\\temp" in log_str or "appdata\\local\\temp" in log_str:
+            issues.append(f"WARNING: LOG_DIR '{self.log_path.parent}' appears to be a temporary directory. Logs may be lost on reboot!")
+        
+        # Check if encryption keys path is under storage_root (when encryption is enabled)
+        if self.encryption_enabled:
+            try:
+                self.encryption_master_key_path.relative_to(self.storage_root)
+            except ValueError:
+                issues.append(f"WARNING: ENCRYPTION_MASTER_KEY_PATH '{self.encryption_master_key_path}' is outside STORAGE_ROOT. Ensure proper backup procedures.")
+        
+        # Check if KMS keys path is under storage_root (when KMS is enabled)
+        if self.kms_enabled:
+            try:
+                self.kms_keys_path.relative_to(self.storage_root)
+            except ValueError:
+                issues.append(f"WARNING: KMS_KEYS_PATH '{self.kms_keys_path}' is outside STORAGE_ROOT. Ensure proper backup procedures.")
+        
+        # Warn about production settings
+        if self.secret_key == "dev-secret-key":
+            issues.append("WARNING: Using default SECRET_KEY. Set SECRET_KEY environment variable for production.")
+        
+        if "*" in self.cors_origins:
+            issues.append("INFO: CORS_ORIGINS is set to '*'. Consider restricting to specific domains in production.")
+        
+        return issues
+
+    def print_startup_summary(self) -> None:
+        """Print a summary of the configuration at startup."""
+        print("\n" + "=" * 60)
+        print("MyFSIO Configuration Summary")
+        print("=" * 60)
+        print(f"  STORAGE_ROOT:     {self.storage_root}")
+        print(f"  IAM_CONFIG:       {self.iam_config_path}")
+        print(f"  BUCKET_POLICY:    {self.bucket_policy_path}")
+        print(f"  LOG_PATH:         {self.log_path}")
+        if self.api_base_url:
+            print(f"  API_BASE_URL:     {self.api_base_url}")
+        if self.encryption_enabled:
+            print(f"  ENCRYPTION:       Enabled (Master key: {self.encryption_master_key_path})")
+        if self.kms_enabled:
+            print(f"  KMS:              Enabled (Keys: {self.kms_keys_path})")
+        print("=" * 60)
+        
+        issues = self.validate_and_report()
+        if issues:
+            print("\nConfiguration Issues Detected:")
+            for issue in issues:
+                print(f"  • {issue}")
+            print()
+        else:
+            print("  ✓ Configuration validated successfully\n")
 
     def to_flask_config(self) -> Dict[str, Any]:
         return {
