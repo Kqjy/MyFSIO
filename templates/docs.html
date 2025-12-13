@@ -200,7 +200,7 @@ WorkingDirectory=/opt/myfsio
 ExecStart=/opt/myfsio/myfsio
 Restart=on-failure
 RestartSec=5
-Environment=MYFSIO_DATA_DIR=/var/lib/myfsio
+Environment=STORAGE_ROOT=/var/lib/myfsio
 Environment=API_BASE_URL=https://s3.example.com
 
 [Install]

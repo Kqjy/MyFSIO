@@ -8,6 +8,7 @@ import warnings
 from multiprocessing import Process
 
 from app import create_api_app, create_ui_app
+from app.config import AppConfig
 
 
 def _server_host() -> str:
@@ -55,11 +56,47 @@ if __name__ == "__main__":
     parser.add_argument("--ui-port", type=int, default=5100)
     parser.add_argument("--prod", action="store_true", help="Run in production mode using Waitress")
     parser.add_argument("--dev", action="store_true", help="Force development mode (Flask dev server)")
+    parser.add_argument("--check-config", action="store_true", help="Validate configuration and exit")
+    parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
     args = parser.parse_args()
+
+    # Handle config check/show modes
+    if args.check_config or args.show_config:
+        config = AppConfig.from_env()
+        config.print_startup_summary()
+        if args.check_config:
+            issues = config.validate_and_report()
+            critical = [i for i in issues if i.startswith("CRITICAL:")]
+            sys.exit(1 if critical else 0)
+        sys.exit(0)
 
     # Default to production mode when running as compiled binary
     # unless --dev is explicitly passed
     prod_mode = args.prod or (_is_frozen() and not args.dev)
+    
+    # Validate configuration before starting
+    config = AppConfig.from_env()
+    
+    # Show startup summary only on first run (when marker file doesn't exist)
+    first_run_marker = config.storage_root / ".myfsio.sys" / ".initialized"
+    is_first_run = not first_run_marker.exists()
+    
+    if is_first_run:
+        config.print_startup_summary()
+        
+        # Check for critical issues that should prevent startup
+        issues = config.validate_and_report()
+        critical_issues = [i for i in issues if i.startswith("CRITICAL:")]
+        if critical_issues:
+            print("ABORTING: Critical configuration issues detected. Fix them before starting.")
+            sys.exit(1)
+        
+        # Create the marker file to indicate successful first run
+        try:
+            first_run_marker.parent.mkdir(parents=True, exist_ok=True)
+            first_run_marker.write_text(f"Initialized on {__import__('datetime').datetime.now().isoformat()}\n")
+        except OSError:
+            pass  # Non-critical, just skip marker creation
     
     if prod_mode:
         print("Running in production mode (Waitress)")
