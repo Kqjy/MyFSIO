@@ -59,6 +59,7 @@ class AppConfig:
     cors_origins: list[str]
     cors_methods: list[str]
     cors_allow_headers: list[str]
+    cors_expose_headers: list[str]
     session_lifetime_days: int
     auth_max_attempts: int
     auth_lockout_minutes: int
@@ -148,18 +149,9 @@ class AppConfig:
             return parts or default
 
         cors_origins = _csv(str(_get("CORS_ORIGINS", "*")), ["*"])
-        cors_methods = _csv(str(_get("CORS_METHODS", "GET,PUT,POST,DELETE,OPTIONS")), ["GET", "PUT", "POST", "DELETE", "OPTIONS"])
-        cors_allow_headers = _csv(str(_get("CORS_ALLOW_HEADERS", "Content-Type,X-Access-Key,X-Secret-Key,X-Amz-Algorithm,X-Amz-Credential,X-Amz-Date,X-Amz-Expires,X-Amz-SignedHeaders,X-Amz-Signature")), [
-            "Content-Type",
-            "X-Access-Key",
-            "X-Secret-Key",
-            "X-Amz-Algorithm",
-            "X-Amz-Credential",
-            "X-Amz-Date",
-            "X-Amz-Expires",
-            "X-Amz-SignedHeaders",
-            "X-Amz-Signature",
-        ])
+        cors_methods = _csv(str(_get("CORS_METHODS", "GET,PUT,POST,DELETE,OPTIONS,HEAD")), ["GET", "PUT", "POST", "DELETE", "OPTIONS", "HEAD"])
+        cors_allow_headers = _csv(str(_get("CORS_ALLOW_HEADERS", "*")), ["*"])
+        cors_expose_headers = _csv(str(_get("CORS_EXPOSE_HEADERS", "*")), ["*"])
         session_lifetime_days = int(_get("SESSION_LIFETIME_DAYS", 30))
         bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60))  # Default 60 seconds
         
@@ -191,6 +183,7 @@ class AppConfig:
                    cors_origins=cors_origins,
                    cors_methods=cors_methods,
                    cors_allow_headers=cors_allow_headers,
+                   cors_expose_headers=cors_expose_headers,
                    session_lifetime_days=session_lifetime_days,
                    auth_max_attempts=auth_max_attempts,
                    auth_lockout_minutes=auth_lockout_minutes,
@@ -234,6 +227,7 @@ class AppConfig:
             "CORS_ORIGINS": self.cors_origins,
             "CORS_METHODS": self.cors_methods,
             "CORS_ALLOW_HEADERS": self.cors_allow_headers,
+            "CORS_EXPOSE_HEADERS": self.cors_expose_headers,
             "SESSION_LIFETIME_DAYS": self.session_lifetime_days,
             "ENCRYPTION_ENABLED": self.encryption_enabled,
             "ENCRYPTION_MASTER_KEY_PATH": str(self.encryption_master_key_path),

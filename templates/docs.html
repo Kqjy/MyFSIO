@@ -55,8 +55,8 @@ python run.py --mode ui
             <tbody>
               <tr>
                 <td><code>API_BASE_URL</code></td>
-                <td><code>http://127.0.0.1:5000</code></td>
-                <td>The public URL of the API. <strong>Required</strong> if running behind a proxy or if the UI and API are on different domains. Ensures presigned URLs are generated correctly.</td>
+                <td><code>None</code></td>
+                <td>The public URL of the API. <strong>Required</strong> if running behind a proxy. Ensures presigned URLs are generated correctly.</td>
               </tr>
               <tr>
                 <td><code>STORAGE_ROOT</code></td>
@@ -65,13 +65,13 @@ python run.py --mode ui
               </tr>
               <tr>
                 <td><code>MAX_UPLOAD_SIZE</code></td>
-                <td><code>5 GB</code></td>
-                <td>Max request body size.</td>
+                <td><code>1 GB</code></td>
+                <td>Max request body size in bytes.</td>
               </tr>
               <tr>
                 <td><code>SECRET_KEY</code></td>
-                <td>(Random)</td>
-                <td>Flask session key. Set this in production.</td>
+                <td>(Auto-generated)</td>
+                <td>Flask session key. Auto-generates if not set. <strong>Set explicitly in production.</strong></td>
               </tr>
               <tr>
                 <td><code>APP_HOST</code></td>
@@ -81,7 +81,51 @@ python run.py --mode ui
               <tr>
                 <td><code>APP_PORT</code></td>
                 <td><code>5000</code></td>
-                <td>Listen port.</td>
+                <td>Listen port (UI uses 5100).</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">CORS Settings</td>
+              </tr>
+              <tr>
+                <td><code>CORS_ORIGINS</code></td>
+                <td><code>*</code></td>
+                <td>Allowed origins. <strong>Restrict in production.</strong></td>
+              </tr>
+              <tr>
+                <td><code>CORS_METHODS</code></td>
+                <td><code>GET,PUT,POST,DELETE,OPTIONS,HEAD</code></td>
+                <td>Allowed HTTP methods.</td>
+              </tr>
+              <tr>
+                <td><code>CORS_ALLOW_HEADERS</code></td>
+                <td><code>*</code></td>
+                <td>Allowed request headers.</td>
+              </tr>
+              <tr>
+                <td><code>CORS_EXPOSE_HEADERS</code></td>
+                <td><code>*</code></td>
+                <td>Response headers visible to browsers (e.g., <code>ETag</code>).</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Security Settings</td>
+              </tr>
+              <tr>
+                <td><code>AUTH_MAX_ATTEMPTS</code></td>
+                <td><code>5</code></td>
+                <td>Failed login attempts before lockout.</td>
+              </tr>
+              <tr>
+                <td><code>AUTH_LOCKOUT_MINUTES</code></td>
+                <td><code>15</code></td>
+                <td>Lockout duration after max failed attempts.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_DEFAULT</code></td>
+                <td><code>200 per minute</code></td>
+                <td>Default API rate limit.</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Encryption Settings</td>
               </tr>
               <tr>
                 <td><code>ENCRYPTION_ENABLED</code></td>
@@ -93,8 +137,24 @@ python run.py --mode ui
                 <td><code>false</code></td>
                 <td>Enable KMS key management for encryption.</td>
               </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Logging Settings</td>
+              </tr>
+              <tr>
+                <td><code>LOG_LEVEL</code></td>
+                <td><code>INFO</code></td>
+                <td>Log verbosity: DEBUG, INFO, WARNING, ERROR.</td>
+              </tr>
+              <tr>
+                <td><code>LOG_TO_FILE</code></td>
+                <td><code>true</code></td>
+                <td>Enable file logging.</td>
+              </tr>
             </tbody>
           </table>
+        </div>
+        <div class="alert alert-warning mt-3 mb-0 small">
+          <strong>Production Checklist:</strong> Set <code>SECRET_KEY</code>, restrict <code>CORS_ORIGINS</code>, configure <code>API_BASE_URL</code>, enable HTTPS via reverse proxy, and use <code>--prod</code> flag.
         </div>
       </div>
     </article>
