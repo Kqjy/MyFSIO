@@ -69,23 +69,97 @@ The repo now tracks a human-friendly release string inside `app/version.py` (see
 
 ## 3. Configuration Reference
 
+All configuration is done via environment variables. The table below lists every supported variable.
+
+### Core Settings
+
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `STORAGE_ROOT` | `<repo>/data` | Filesystem home for all buckets/objects. |
-| `MAX_UPLOAD_SIZE` | `1073741824` | Bytes. Caps incoming uploads in both API + UI. |
+| `MAX_UPLOAD_SIZE` | `1073741824` (1 GiB) | Bytes. Caps incoming uploads in both API + UI. |
 | `UI_PAGE_SIZE` | `100` | `MaxKeys` hint shown in listings. |
-| `SECRET_KEY` | `dev-secret-key` | Flask session key for UI auth. |
-| `IAM_CONFIG` | `<repo>/data/.myfsio.sys/config/iam.json` | Stores users, secrets, and inline policies. |
-| `BUCKET_POLICY_PATH` | `<repo>/data/.myfsio.sys/config/bucket_policies.json` | Bucket policy store (auto hot-reload). |
-| `API_BASE_URL` | `None` | Used by the UI to hit API endpoints (presign/policy). If unset, the UI will auto-detect the host or use `X-Forwarded-*` headers. |
+| `SECRET_KEY` | Auto-generated | Flask session key. Auto-generates and persists if not set. **Set explicitly in production.** |
+| `API_BASE_URL` | `None` | Public URL for presigned URLs. Required behind proxies. |
 | `AWS_REGION` | `us-east-1` | Region embedded in SigV4 credential scope. |
 | `AWS_SERVICE` | `s3` | Service string for SigV4. |
-| `ENCRYPTION_ENABLED` | `false` | Enable server-side encryption support. |
-| `KMS_ENABLED` | `false` | Enable KMS key management for encryption. |
-| `KMS_KEYS_PATH` | `data/kms_keys.json` | Path to store KMS key metadata. |
-| `ENCRYPTION_MASTER_KEY_PATH` | `data/master.key` | Path to the master encryption key file. |
 
-Set env vars (or pass overrides to `create_app`) to point the servers at custom paths.
+### IAM & Security
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `IAM_CONFIG` | `data/.myfsio.sys/config/iam.json` | Stores users, secrets, and inline policies. |
+| `BUCKET_POLICY_PATH` | `data/.myfsio.sys/config/bucket_policies.json` | Bucket policy store (auto hot-reload). |
+| `AUTH_MAX_ATTEMPTS` | `5` | Failed login attempts before lockout. |
+| `AUTH_LOCKOUT_MINUTES` | `15` | Lockout duration after max failed attempts. |
+| `SESSION_LIFETIME_DAYS` | `30` | How long UI sessions remain valid. |
+| `SECRET_TTL_SECONDS` | `300` | TTL for ephemeral secrets (presigned URLs). |
+| `UI_ENFORCE_BUCKET_POLICIES` | `false` | Whether the UI should enforce bucket policies. |
+
+### CORS (Cross-Origin Resource Sharing)
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `CORS_ORIGINS` | `*` | Comma-separated allowed origins. Use specific domains in production. |
+| `CORS_METHODS` | `GET,PUT,POST,DELETE,OPTIONS,HEAD` | Allowed HTTP methods. |
+| `CORS_ALLOW_HEADERS` | `*` | Allowed request headers. |
+| `CORS_EXPOSE_HEADERS` | `*` | Response headers visible to browsers (e.g., `ETag`). |
+
+### Rate Limiting
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `RATE_LIMIT_DEFAULT` | `200 per minute` | Default rate limit for API endpoints. |
+| `RATE_LIMIT_STORAGE_URI` | `memory://` | Storage backend for rate limits. Use `redis://host:port` for distributed setups. |
+
+### Logging
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `LOG_LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
+| `LOG_TO_FILE` | `true` | Enable file logging. |
+| `LOG_DIR` | `<repo>/logs` | Directory for log files. |
+| `LOG_FILE` | `app.log` | Log filename. |
+| `LOG_MAX_BYTES` | `5242880` (5 MB) | Max log file size before rotation. |
+| `LOG_BACKUP_COUNT` | `3` | Number of rotated log files to keep. |
+
+### Encryption
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ENCRYPTION_ENABLED` | `false` | Enable server-side encryption support. |
+| `ENCRYPTION_MASTER_KEY_PATH` | `data/.myfsio.sys/keys/master.key` | Path to the master encryption key file. |
+| `DEFAULT_ENCRYPTION_ALGORITHM` | `AES256` | Default algorithm for new encrypted objects. |
+| `KMS_ENABLED` | `false` | Enable KMS key management for encryption. |
+| `KMS_KEYS_PATH` | `data/.myfsio.sys/keys/kms_keys.json` | Path to store KMS key metadata. |
+
+### Performance Tuning
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `STREAM_CHUNK_SIZE` | `65536` (64 KB) | Chunk size for streaming large files. |
+| `MULTIPART_MIN_PART_SIZE` | `5242880` (5 MB) | Minimum part size for multipart uploads. |
+| `BUCKET_STATS_CACHE_TTL` | `60` | Seconds to cache bucket statistics. |
+| `BULK_DELETE_MAX_KEYS` | `500` | Maximum keys per bulk delete request. |
+
+### Server Settings
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `APP_HOST` | `0.0.0.0` | Network interface to bind to. |
+| `APP_PORT` | `5000` | API server port (UI uses 5100). |
+| `FLASK_DEBUG` | `0` | Enable Flask debug mode. **Never enable in production.** |
+
+### Production Checklist
+
+Before deploying to production, ensure you:
+
+1. **Set `SECRET_KEY`** - Use a strong, unique value (e.g., `openssl rand -base64 32`)
+2. **Restrict CORS** - Set `CORS_ORIGINS` to your specific domains instead of `*`
+3. **Configure `API_BASE_URL`** - Required for correct presigned URLs behind proxies
+4. **Enable HTTPS** - Use a reverse proxy (nginx, Cloudflare) with TLS termination
+5. **Review rate limits** - Adjust `RATE_LIMIT_DEFAULT` based on your needs
+6. **Secure master keys** - Back up `ENCRYPTION_MASTER_KEY_PATH` if using encryption
+7. **Use `--prod` flag** - Runs with Waitress instead of Flask dev server
 
 ### Proxy Configuration
 
