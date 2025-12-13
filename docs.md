@@ -169,6 +169,333 @@ If running behind a reverse proxy (e.g., Nginx, Cloudflare, or a tunnel), ensure
 
 The application automatically trusts these headers to generate correct presigned URLs (e.g., `https://s3.example.com/...` instead of `http://127.0.0.1:5000/...`). Alternatively, you can explicitly set `API_BASE_URL` to your public endpoint.
 
+## 4. Upgrading and Updates
+
+### Version Checking
+
+The application version is tracked in `app/version.py` and exposed via:
+- **Health endpoint:** `GET /healthz` returns JSON with `version` field
+- **Metrics dashboard:** Navigate to `/ui/metrics` to see the running version in the System Status card
+
+To check your current version:
+
+```bash
+# API health endpoint
+curl http://localhost:5000/healthz
+
+# Or inspect version.py directly
+cat app/version.py | grep APP_VERSION
+```
+
+### Pre-Update Backup Procedures
+
+**Always backup before upgrading to prevent data loss:**
+
+```bash
+# 1. Stop the application
+# Ctrl+C if running in terminal, or:
+docker stop myfsio  # if using Docker
+
+# 2. Backup configuration files (CRITICAL)
+mkdir -p backups/$(date +%Y%m%d_%H%M%S)
+cp -r data/.myfsio.sys/config backups/$(date +%Y%m%d_%H%M%S)/
+
+# 3. Backup all data (optional but recommended)
+tar -czf backups/data_$(date +%Y%m%d_%H%M%S).tar.gz data/
+
+# 4. Backup logs for audit trail
+cp -r logs backups/$(date +%Y%m%d_%H%M%S)/
+```
+
+**Windows PowerShell:**
+
+```powershell
+# Create timestamped backup
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+New-Item -ItemType Directory -Path "backups\$timestamp" -Force
+
+# Backup configs
+Copy-Item -Recurse "data\.myfsio.sys\config" "backups\$timestamp\"
+
+# Backup entire data directory
+Compress-Archive -Path "data\" -DestinationPath "backups\data_$timestamp.zip"
+```
+
+**Critical files to backup:**
+- `data/.myfsio.sys/config/iam.json` – User accounts and access keys
+- `data/.myfsio.sys/config/bucket_policies.json` – Bucket access policies
+- `data/.myfsio.sys/config/kms_keys.json` – Encryption keys (if using KMS)
+- `data/.myfsio.sys/config/secret_store.json` – Application secrets
+
+### Update Procedures
+
+#### Source Installation Updates
+
+```bash
+# 1. Backup (see above)
+# 2. Pull latest code
+git fetch origin
+git checkout main  # or your target branch/tag
+git pull
+
+# 3. Check for dependency changes
+pip install -r requirements.txt
+
+# 4. Review CHANGELOG/release notes for breaking changes
+cat CHANGELOG.md  # if available
+
+# 5. Run migration scripts (if any)
+# python scripts/migrate_vX_to_vY.py  # example
+
+# 6. Restart application
+python run.py
+```
+
+#### Docker Updates
+
+```bash
+# 1. Backup (see above)
+# 2. Pull/rebuild image
+docker pull yourregistry/myfsio:latest
+# OR rebuild from source:
+docker build -t myfsio:latest .
+
+# 3. Stop and remove old container
+docker stop myfsio
+docker rm myfsio
+
+# 4. Start new container with same volumes
+docker run -d \
+  --name myfsio \
+  -p 5000:5000 -p 5100:5100 \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/logs:/app/logs" \
+  -e SECRET_KEY="your-secret" \
+  myfsio:latest
+
+# 5. Verify health
+curl http://localhost:5000/healthz
+```
+
+### Version Compatibility Checks
+
+Before upgrading across major versions, verify compatibility:
+
+| From Version | To Version | Breaking Changes | Migration Required |
+|--------------|------------|------------------|-------------------|
+| 0.1.x | 0.2.x | None expected | No |
+| < 0.1.0 | >= 0.1.0 | New IAM config format | Yes - run migration script |
+
+**Automatic compatibility detection:**
+
+The application will log warnings on startup if config files need migration:
+
+```
+WARNING: IAM config format is outdated (v1). Please run: python scripts/migrate_iam.py
+```
+
+**Manual compatibility check:**
+
+```bash
+# Compare version schemas
+python -c "from app.version import APP_VERSION; print(f'Running: {APP_VERSION}')"
+python scripts/check_compatibility.py data/.myfsio.sys/config/
+```
+
+### Migration Steps for Breaking Changes
+
+When release notes indicate breaking changes, follow these steps:
+
+#### Config Format Migrations
+
+```bash
+# 1. Backup first (critical!)
+cp data/.myfsio.sys/config/iam.json data/.myfsio.sys/config/iam.json.backup
+
+# 2. Run provided migration script
+python scripts/migrate_iam_v1_to_v2.py
+
+# 3. Validate migration
+python scripts/validate_config.py
+
+# 4. Test with read-only mode first (if available)
+# python run.py --read-only
+
+# 5. Restart normally
+python run.py
+```
+
+#### Database/Storage Schema Changes
+
+If object metadata format changes:
+
+```bash
+# 1. Run storage migration script
+python scripts/migrate_storage.py --dry-run  # preview changes
+
+# 2. Apply migration
+python scripts/migrate_storage.py --apply
+
+# 3. Verify integrity
+python scripts/verify_storage.py
+```
+
+#### IAM Policy Updates
+
+If IAM action names change (e.g., `s3:Get` → `s3:GetObject`):
+
+```bash
+# Migration script will update all policies
+python scripts/migrate_policies.py \
+  --input data/.myfsio.sys/config/iam.json \
+  --backup data/.myfsio.sys/config/iam.json.v1
+
+# Review changes before committing
+python scripts/diff_policies.py \
+  data/.myfsio.sys/config/iam.json.v1 \
+  data/.myfsio.sys/config/iam.json
+```
+
+### Rollback Procedures
+
+If an update causes issues, rollback to the previous version:
+
+#### Quick Rollback (Source)
+
+```bash
+# 1. Stop application
+# Ctrl+C or kill process
+
+# 2. Revert code
+git checkout <previous-version-tag>
+# OR
+git reset --hard HEAD~1
+
+# 3. Restore configs from backup
+cp backups/20241213_103000/config/* data/.myfsio.sys/config/
+
+# 4. Downgrade dependencies if needed
+pip install -r requirements.txt
+
+# 5. Restart
+python run.py
+```
+
+#### Docker Rollback
+
+```bash
+# 1. Stop current container
+docker stop myfsio
+docker rm myfsio
+
+# 2. Start previous version
+docker run -d \
+  --name myfsio \
+  -p 5000:5000 -p 5100:5100 \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/logs:/app/logs" \
+  -e SECRET_KEY="your-secret" \
+  myfsio:0.1.3  # specify previous version tag
+
+# 3. Verify
+curl http://localhost:5000/healthz
+```
+
+#### Emergency Config Restore
+
+If only config is corrupted but code is fine:
+
+```bash
+# Stop app
+# Restore from latest backup
+cp backups/20241213_103000/config/iam.json data/.myfsio.sys/config/
+cp backups/20241213_103000/config/bucket_policies.json data/.myfsio.sys/config/
+
+# Restart app
+python run.py
+```
+
+### Blue-Green Deployment (Zero Downtime)
+
+For production environments requiring zero downtime:
+
+```bash
+# 1. Run new version on different port (e.g., 5001/5101)
+APP_PORT=5001 UI_PORT=5101 python run.py &
+
+# 2. Health check new instance
+curl http://localhost:5001/healthz
+
+# 3. Update load balancer to route to new ports
+
+# 4. Monitor for issues
+
+# 5. Gracefully stop old instance
+kill -SIGTERM <old-pid>
+```
+
+### Post-Update Verification
+
+After any update, verify functionality:
+
+```bash
+# 1. Health check
+curl http://localhost:5000/healthz
+
+# 2. Login to UI
+open http://localhost:5100/ui
+
+# 3. Test IAM authentication
+curl -H "X-Amz-Security-Token: <your-access-key>:<your-secret>" \
+  http://localhost:5000/
+
+# 4. Test presigned URL generation
+# Via UI or API
+
+# 5. Check logs for errors
+tail -n 100 logs/myfsio.log
+```
+
+### Automated Update Scripts
+
+Create a custom update script for your environment:
+
+```bash
+#!/bin/bash
+# update.sh - Automated update with rollback capability
+
+set -e  # Exit on error
+
+VERSION_NEW="$1"
+BACKUP_DIR="backups/$(date +%Y%m%d_%H%M%S)"
+
+echo "Creating backup..."
+mkdir -p "$BACKUP_DIR"
+cp -r data/.myfsio.sys/config "$BACKUP_DIR/"
+
+echo "Updating to version $VERSION_NEW..."
+git fetch origin
+git checkout "v$VERSION_NEW"
+pip install -r requirements.txt
+
+echo "Starting application..."
+python run.py &
+APP_PID=$!
+
+# Wait and health check
+sleep 5
+if curl -f http://localhost:5000/healthz; then
+  echo "Update successful!"
+else
+  echo "Health check failed, rolling back..."
+  kill $APP_PID
+  git checkout -
+  cp -r "$BACKUP_DIR/config/*" data/.myfsio.sys/config/
+  python run.py &
+  exit 1
+fi
+```
+
 ## 4. Authentication & IAM
 
 1. On first boot, `data/.myfsio.sys/config/iam.json` is seeded with `localadmin / localadmin` that has wildcard access.

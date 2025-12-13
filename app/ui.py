@@ -1505,6 +1505,9 @@ def metrics_dashboard():
         flash("Access denied: Metrics require admin permissions", "danger")
         return redirect(url_for("ui.buckets_overview"))
     
+    from app.version import APP_VERSION
+    import time
+    
     cpu_percent = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
     
@@ -1527,6 +1530,11 @@ def metrics_dashboard():
         total_objects += stats.get("total_objects", stats.get("objects", 0))
         total_bytes_used += stats.get("total_bytes", stats.get("bytes", 0))
         total_versions += stats.get("version_count", 0)
+    
+    # Calculate system uptime
+    boot_time = psutil.boot_time()
+    uptime_seconds = time.time() - boot_time
+    uptime_days = int(uptime_seconds / 86400)
         
     return render_template(
         "metrics.html",
@@ -1550,6 +1558,8 @@ def metrics_dashboard():
             "versions": total_versions,
             "storage_used": _format_bytes(total_bytes_used),
             "storage_raw": total_bytes_used,
+            "version": APP_VERSION,
+            "uptime_days": uptime_days,
         }
     )
 
