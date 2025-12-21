@@ -18,13 +18,6 @@
 
 set -e
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# Default values
 INSTALL_DIR="/opt/myfsio"
 DATA_DIR="/var/lib/myfsio"
 LOG_DIR="/var/log/myfsio"
@@ -33,7 +26,6 @@ KEEP_DATA=false
 KEEP_LOGS=false
 AUTO_YES=false
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --keep-data)
@@ -69,106 +61,184 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Unknown option: $1"
             exit 1
             ;;
     esac
 done
 
-echo -e "${RED}"
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║                 MyFSIO Uninstallation                    ║"
-echo "╚══════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
+echo ""
+echo "============================================================"
+echo "               MyFSIO Uninstallation Script"
+echo "============================================================"
+echo ""
+echo "Documentation: https://go.jzwsite.com/myfsio"
+echo ""
 
-# Check if running as root
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}Error: This script must be run as root (use sudo)${NC}"
+    echo "Error: This script must be run as root (use sudo)"
     exit 1
 fi
 
-echo -e "${YELLOW}The following will be removed:${NC}"
+echo "------------------------------------------------------------"
+echo "STEP 1: Review What Will Be Removed"
+echo "------------------------------------------------------------"
+echo ""
+echo "The following items will be removed:"
+echo ""
 echo "  Install directory: $INSTALL_DIR"
 if [[ "$KEEP_DATA" != true ]]; then
-    echo -e "  Data directory:    $DATA_DIR ${RED}(ALL YOUR DATA!)${NC}"
+    echo "  Data directory:    $DATA_DIR (ALL YOUR DATA WILL BE DELETED!)"
 else
-    echo "  Data directory:    $DATA_DIR (KEPT)"
+    echo "  Data directory:    $DATA_DIR (WILL BE KEPT)"
 fi
 if [[ "$KEEP_LOGS" != true ]]; then
     echo "  Log directory:     $LOG_DIR"
 else
-    echo "  Log directory:     $LOG_DIR (KEPT)"
+    echo "  Log directory:     $LOG_DIR (WILL BE KEPT)"
 fi
 echo "  Systemd service:   /etc/systemd/system/myfsio.service"
 echo "  System user:       $SERVICE_USER"
 echo ""
 
 if [[ "$AUTO_YES" != true ]]; then
-    echo -e "${RED}WARNING: This action cannot be undone!${NC}"
+    echo "WARNING: This action cannot be undone!"
+    echo ""
     read -p "Are you sure you want to uninstall MyFSIO? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo ""
         echo "Uninstallation cancelled."
         exit 0
+    fi
+    
+    if [[ "$KEEP_DATA" != true ]]; then
+        echo ""
+        read -p "This will DELETE ALL YOUR DATA. Type 'DELETE' to confirm: " CONFIRM
+        if [[ "$CONFIRM" != "DELETE" ]]; then
+            echo ""
+            echo "Uninstallation cancelled."
+            echo "Tip: Use --keep-data to preserve your data directory"
+            exit 0
+        fi
     fi
 fi
 
 echo ""
-echo -e "${GREEN}[1/5]${NC} Stopping service..."
+echo "------------------------------------------------------------"
+echo "STEP 2: Stopping Service"
+echo "------------------------------------------------------------"
+echo ""
 if systemctl is-active --quiet myfsio 2>/dev/null; then
     systemctl stop myfsio
-    echo "  Stopped myfsio service"
+    echo "  [OK] Stopped myfsio service"
 else
-    echo "  Service not running"
-fi
-
-echo -e "${GREEN}[2/5]${NC} Disabling service..."
-if systemctl is-enabled --quiet myfsio 2>/dev/null; then
-    systemctl disable myfsio
-    echo "  Disabled myfsio service"
-else
-    echo "  Service not enabled"
-fi
-
-echo -e "${GREEN}[3/5]${NC} Removing systemd service..."
-if [[ -f /etc/systemd/system/myfsio.service ]]; then
-    rm -f /etc/systemd/system/myfsio.service
-    systemctl daemon-reload
-    echo "  Removed /etc/systemd/system/myfsio.service"
-else
-    echo "  Service file not found"
-fi
-
-echo -e "${GREEN}[4/5]${NC} Removing directories..."
-if [[ -d "$INSTALL_DIR" ]]; then
-    rm -rf "$INSTALL_DIR"
-    echo "  Removed $INSTALL_DIR"
-fi
-
-if [[ "$KEEP_DATA" != true ]] && [[ -d "$DATA_DIR" ]]; then
-    rm -rf "$DATA_DIR"
-    echo "  Removed $DATA_DIR"
-elif [[ "$KEEP_DATA" == true ]]; then
-    echo "  Kept $DATA_DIR"
-fi
-
-if [[ "$KEEP_LOGS" != true ]] && [[ -d "$LOG_DIR" ]]; then
-    rm -rf "$LOG_DIR"
-    echo "  Removed $LOG_DIR"
-elif [[ "$KEEP_LOGS" == true ]]; then
-    echo "  Kept $LOG_DIR"
-fi
-
-echo -e "${GREEN}[5/5]${NC} Removing system user..."
-if id "$SERVICE_USER" &>/dev/null; then
-    userdel "$SERVICE_USER" 2>/dev/null || true
-    echo "  Removed user '$SERVICE_USER'"
-else
-    echo "  User not found"
+    echo "  [SKIP] Service not running"
 fi
 
 echo ""
-echo -e "${GREEN}MyFSIO has been uninstalled.${NC}"
-if [[ "$KEEP_DATA" == true ]]; then
-    echo -e "${YELLOW}Data preserved at: $DATA_DIR${NC}"
+echo "------------------------------------------------------------"
+echo "STEP 3: Disabling Service"
+echo "------------------------------------------------------------"
+echo ""
+if systemctl is-enabled --quiet myfsio 2>/dev/null; then
+    systemctl disable myfsio
+    echo "  [OK] Disabled myfsio service"
+else
+    echo "  [SKIP] Service not enabled"
 fi
+
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 4: Removing Systemd Service File"
+echo "------------------------------------------------------------"
+echo ""
+if [[ -f /etc/systemd/system/myfsio.service ]]; then
+    rm -f /etc/systemd/system/myfsio.service
+    systemctl daemon-reload
+    echo "  [OK] Removed /etc/systemd/system/myfsio.service"
+    echo "  [OK] Reloaded systemd daemon"
+else
+    echo "  [SKIP] Service file not found"
+fi
+
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 5: Removing Installation Directory"
+echo "------------------------------------------------------------"
+echo ""
+if [[ -d "$INSTALL_DIR" ]]; then
+    rm -rf "$INSTALL_DIR"
+    echo "  [OK] Removed $INSTALL_DIR"
+else
+    echo "  [SKIP] Directory not found: $INSTALL_DIR"
+fi
+
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 6: Removing Data Directory"
+echo "------------------------------------------------------------"
+echo ""
+if [[ "$KEEP_DATA" != true ]]; then
+    if [[ -d "$DATA_DIR" ]]; then
+        rm -rf "$DATA_DIR"
+        echo "  [OK] Removed $DATA_DIR"
+    else
+        echo "  [SKIP] Directory not found: $DATA_DIR"
+    fi
+else
+    echo "  [KEPT] Data preserved at: $DATA_DIR"
+fi
+
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 7: Removing Log Directory"
+echo "------------------------------------------------------------"
+echo ""
+if [[ "$KEEP_LOGS" != true ]]; then
+    if [[ -d "$LOG_DIR" ]]; then
+        rm -rf "$LOG_DIR"
+        echo "  [OK] Removed $LOG_DIR"
+    else
+        echo "  [SKIP] Directory not found: $LOG_DIR"
+    fi
+else
+    echo "  [KEPT] Logs preserved at: $LOG_DIR"
+fi
+
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 8: Removing System User"
+echo "------------------------------------------------------------"
+echo ""
+if id "$SERVICE_USER" &>/dev/null; then
+    userdel "$SERVICE_USER" 2>/dev/null || true
+    echo "  [OK] Removed user '$SERVICE_USER'"
+else
+    echo "  [SKIP] User not found: $SERVICE_USER"
+fi
+
+echo ""
+echo "============================================================"
+echo "            Uninstallation Complete!"
+echo "============================================================"
+echo ""
+
+if [[ "$KEEP_DATA" == true ]]; then
+    echo "Your data has been preserved at: $DATA_DIR"
+    echo ""
+    echo "To reinstall MyFSIO with existing data, run:"
+    echo "  curl -fsSL https://go.jzwsite.com/myfsio-install | sudo bash"
+    echo ""
+fi
+
+if [[ "$KEEP_LOGS" == true ]]; then
+    echo "Your logs have been preserved at: $LOG_DIR"
+    echo ""
+fi
+
+echo "Thank you for using MyFSIO."
+echo "Documentation: https://go.jzwsite.com/myfsio"
+echo ""
+echo "============================================================"
+echo ""
