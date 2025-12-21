@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 import time
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from flask import Flask, g, has_request_context, redirect, render_template, request, url_for
 from flask_cors import CORS
@@ -26,6 +27,33 @@ from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage
 from .version import get_version
+
+
+def _migrate_config_file(active_path: Path, legacy_paths: List[Path]) -> Path:
+    """Migrate config file from legacy locations to the active path.
+    
+    Checks each legacy path in order and moves the first one found to the active path.
+    This ensures backward compatibility for users upgrading from older versions.
+    """
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    if active_path.exists():
+        return active_path
+    
+    for legacy_path in legacy_paths:
+        if legacy_path.exists():
+            try:
+                shutil.move(str(legacy_path), str(active_path))
+            except OSError:
+                # Fall back to copy + delete if move fails (e.g., cross-device)
+                shutil.copy2(legacy_path, active_path)
+                try:
+                    legacy_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            break
+    
+    return active_path
 
 
 def create_app(
@@ -74,8 +102,26 @@ def create_app(
     secret_store = EphemeralSecretStore(default_ttl=app.config.get("SECRET_TTL_SECONDS", 300))
     
     # Initialize Replication components
-    connections_path = Path(app.config["STORAGE_ROOT"]) / ".connections.json"
-    replication_rules_path = Path(app.config["STORAGE_ROOT"]) / ".replication_rules.json"
+    # Store config files in the system config directory for consistency
+    storage_root = Path(app.config["STORAGE_ROOT"])
+    config_dir = storage_root / ".myfsio.sys" / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Define paths with migration from legacy locations
+    connections_path = _migrate_config_file(
+        active_path=config_dir / "connections.json",
+        legacy_paths=[
+            storage_root / ".myfsio.sys" / "connections.json",  # Previous location
+            storage_root / ".connections.json",  # Original legacy location
+        ],
+    )
+    replication_rules_path = _migrate_config_file(
+        active_path=config_dir / "replication_rules.json",
+        legacy_paths=[
+            storage_root / ".myfsio.sys" / "replication_rules.json",  # Previous location
+            storage_root / ".replication_rules.json",  # Original legacy location
+        ],
+    )
     
     connections = ConnectionStore(connections_path)
     replication = ReplicationManager(storage, connections, replication_rules_path)
