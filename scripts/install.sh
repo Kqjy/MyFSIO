@@ -4,8 +4,6 @@
 # This script sets up MyFSIO for production use on Linux systems.
 #
 # Usage:
-#   curl -fsSL https://example.com/install.sh | bash
-#   OR
 #   ./install.sh [OPTIONS]
 #
 # Options:
@@ -23,14 +21,6 @@
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Default values
 INSTALL_DIR="/opt/myfsio"
 DATA_DIR="/var/lib/myfsio"
 LOG_DIR="/var/log/myfsio"
@@ -42,7 +32,6 @@ SKIP_SYSTEMD=false
 BINARY_PATH=""
 AUTO_YES=false
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir)
@@ -90,27 +79,30 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Unknown option: $1"
             exit 1
             ;;
     esac
 done
 
-echo -e "${BLUE}"
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║                  MyFSIO Installation                     ║"
-echo "║           S3-Compatible Object Storage                   ║"
-echo "╚══════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
+echo ""
+echo "============================================================"
+echo "               MyFSIO Installation Script"
+echo "            S3-Compatible Object Storage"
+echo "============================================================"
+echo ""
+echo "Documentation: https://go.jzwsite.com/myfsio"
+echo ""
 
-# Check if running as root
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}Error: This script must be run as root (use sudo)${NC}"
+    echo "Error: This script must be run as root (use sudo)"
     exit 1
 fi
 
-# Display configuration
-echo -e "${YELLOW}Installation Configuration:${NC}"
+echo "------------------------------------------------------------"
+echo "STEP 1: Review Installation Configuration"
+echo "------------------------------------------------------------"
+echo ""
 echo "  Install directory:  $INSTALL_DIR"
 echo "  Data directory:     $DATA_DIR"
 echo "  Log directory:      $LOG_DIR"
@@ -125,9 +117,8 @@ if [[ -n "$BINARY_PATH" ]]; then
 fi
 echo ""
 
-# Confirm installation
 if [[ "$AUTO_YES" != true ]]; then
-    read -p "Proceed with installation? [y/N] " -n 1 -r
+    read -p "Do you want to proceed with these settings? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Installation cancelled."
@@ -136,48 +127,70 @@ if [[ "$AUTO_YES" != true ]]; then
 fi
 
 echo ""
-echo -e "${GREEN}[1/7]${NC} Creating system user..."
+echo "------------------------------------------------------------"
+echo "STEP 2: Creating System User"
+echo "------------------------------------------------------------"
+echo ""
 if id "$SERVICE_USER" &>/dev/null; then
-    echo "  User '$SERVICE_USER' already exists"
+    echo "  [OK] User '$SERVICE_USER' already exists"
 else
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
-    echo "  Created user '$SERVICE_USER'"
+    echo "  [OK] Created user '$SERVICE_USER'"
 fi
 
-echo -e "${GREEN}[2/7]${NC} Creating directories..."
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 3: Creating Directories"
+echo "------------------------------------------------------------"
+echo ""
 mkdir -p "$INSTALL_DIR"
+echo "  [OK] Created $INSTALL_DIR"
 mkdir -p "$DATA_DIR"
+echo "  [OK] Created $DATA_DIR"
 mkdir -p "$LOG_DIR"
-echo "  Created $INSTALL_DIR"
-echo "  Created $DATA_DIR"
-echo "  Created $LOG_DIR"
+echo "  [OK] Created $LOG_DIR"
 
-echo -e "${GREEN}[3/7]${NC} Installing binary..."
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 4: Installing Binary"
+echo "------------------------------------------------------------"
+echo ""
 if [[ -n "$BINARY_PATH" ]]; then
     if [[ -f "$BINARY_PATH" ]]; then
         cp "$BINARY_PATH" "$INSTALL_DIR/myfsio"
-        echo "  Copied binary from $BINARY_PATH"
+        echo "  [OK] Copied binary from $BINARY_PATH"
     else
-        echo -e "${RED}Error: Binary not found at $BINARY_PATH${NC}"
+        echo "  [ERROR] Binary not found at $BINARY_PATH"
         exit 1
     fi
 elif [[ -f "./myfsio" ]]; then
     cp "./myfsio" "$INSTALL_DIR/myfsio"
-    echo "  Copied binary from ./myfsio"
+    echo "  [OK] Copied binary from ./myfsio"
 else
-    echo -e "${RED}Error: No binary provided. Use --binary PATH or place 'myfsio' in current directory${NC}"
+    echo "  [ERROR] No binary provided."
+    echo "          Use --binary PATH or place 'myfsio' in current directory"
     exit 1
 fi
 chmod +x "$INSTALL_DIR/myfsio"
+echo "  [OK] Set executable permissions"
 
-echo -e "${GREEN}[4/7]${NC} Generating secret key..."
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 5: Generating Secret Key"
+echo "------------------------------------------------------------"
+echo ""
 SECRET_KEY=$(openssl rand -base64 32)
-echo "  Generated secure SECRET_KEY"
+echo "  [OK] Generated secure SECRET_KEY"
 
-echo -e "${GREEN}[5/7]${NC} Creating environment file..."
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 6: Creating Configuration File"
+echo "------------------------------------------------------------"
+echo ""
 cat > "$INSTALL_DIR/myfsio.env" << EOF
 # MyFSIO Configuration
 # Generated by install.sh on $(date)
+# Documentation: https://go.jzwsite.com/myfsio
 
 # Storage paths
 STORAGE_ROOT=$DATA_DIR
@@ -206,20 +219,30 @@ RATE_LIMIT_DEFAULT=200 per minute
 # KMS_ENABLED=true
 EOF
 chmod 600 "$INSTALL_DIR/myfsio.env"
-echo "  Created $INSTALL_DIR/myfsio.env"
+echo "  [OK] Created $INSTALL_DIR/myfsio.env"
 
-echo -e "${GREEN}[6/7]${NC} Setting permissions..."
+echo ""
+echo "------------------------------------------------------------"
+echo "STEP 7: Setting Permissions"
+echo "------------------------------------------------------------"
+echo ""
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
+echo "  [OK] Set ownership for $INSTALL_DIR"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
+echo "  [OK] Set ownership for $DATA_DIR"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"
-echo "  Set ownership to $SERVICE_USER"
+echo "  [OK] Set ownership for $LOG_DIR"
 
 if [[ "$SKIP_SYSTEMD" != true ]]; then
-    echo -e "${GREEN}[7/7]${NC} Creating systemd service..."
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "STEP 8: Creating Systemd Service"
+    echo "------------------------------------------------------------"
+    echo ""
     cat > /etc/systemd/system/myfsio.service << EOF
 [Unit]
 Description=MyFSIO S3-Compatible Storage
-Documentation=https://github.com/yourusername/myfsio
+Documentation=https://go.jzwsite.com/myfsio
 After=network.target
 
 [Service]
@@ -248,45 +271,100 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    echo "  Created /etc/systemd/system/myfsio.service"
+    echo "  [OK] Created /etc/systemd/system/myfsio.service"
+    echo "  [OK] Reloaded systemd daemon"
 else
-    echo -e "${GREEN}[7/7]${NC} Skipping systemd service (--no-systemd)"
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "STEP 8: Skipping Systemd Service (--no-systemd flag used)"
+    echo "------------------------------------------------------------"
 fi
 
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║              Installation Complete!                      ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+echo "============================================================"
+echo "               Installation Complete!"
+echo "============================================================"
 echo ""
-echo -e "${YELLOW}Next steps:${NC}"
+
+if [[ "$SKIP_SYSTEMD" != true ]]; then
+    echo "------------------------------------------------------------"
+    echo "STEP 9: Start the Service"
+    echo "------------------------------------------------------------"
+    echo ""
+    
+    if [[ "$AUTO_YES" != true ]]; then
+        read -p "Would you like to start MyFSIO now? [Y/n] " -n 1 -r
+        echo
+        START_SERVICE=true
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            START_SERVICE=false
+        fi
+    else
+        START_SERVICE=true
+    fi
+    
+    if [[ "$START_SERVICE" == true ]]; then
+        echo "  Starting MyFSIO service..."
+        systemctl start myfsio
+        echo "  [OK] Service started"
+        echo ""
+        
+        read -p "Would you like to enable MyFSIO to start on boot? [Y/n] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            systemctl enable myfsio
+            echo "  [OK] Service enabled on boot"
+        fi
+        echo ""
+        
+        sleep 2
+        echo "  Service Status:"
+        echo "  ---------------"
+        if systemctl is-active --quiet myfsio; then
+            echo "  [OK] MyFSIO is running"
+        else
+            echo "  [WARNING] MyFSIO may not have started correctly"
+            echo "            Check logs with: journalctl -u myfsio -f"
+        fi
+    else
+        echo "  [SKIPPED] Service not started"
+        echo ""
+        echo "  To start manually, run:"
+        echo "    sudo systemctl start myfsio"
+        echo ""
+        echo "  To enable on boot, run:"
+        echo "    sudo systemctl enable myfsio"
+    fi
+fi
+
 echo ""
-echo "  1. Review configuration:"
-echo "     ${BLUE}cat $INSTALL_DIR/myfsio.env${NC}"
+echo "============================================================"
+echo "                      Summary"
+echo "============================================================"
 echo ""
-echo "  2. Start the service:"
-echo "     ${BLUE}sudo systemctl start myfsio${NC}"
+echo "Access Points:"
+echo "  API:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost"):$API_PORT"
+echo "  UI:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost"):$UI_PORT/ui"
 echo ""
-echo "  3. Enable on boot:"
-echo "     ${BLUE}sudo systemctl enable myfsio${NC}"
-echo ""
-echo "  4. Check status:"
-echo "     ${BLUE}sudo systemctl status myfsio${NC}"
-echo ""
-echo "  5. View logs:"
-echo "     ${BLUE}sudo journalctl -u myfsio -f${NC}"
-echo "     ${BLUE}tail -f $LOG_DIR/app.log${NC}"
-echo ""
-echo -e "${YELLOW}Access:${NC}"
-echo "  API:  http://$(hostname -I | awk '{print $1}'):$API_PORT"
-echo "  UI:   http://$(hostname -I | awk '{print $1}'):$UI_PORT/ui"
-echo ""
-echo -e "${YELLOW}Default credentials:${NC}"
+echo "Default Credentials:"
 echo "  Username: localadmin"
 echo "  Password: localadmin"
-echo -e "  ${RED}⚠ Change these immediately after first login!${NC}"
+echo "  [!] WARNING: Change these immediately after first login!"
 echo ""
-echo -e "${YELLOW}Configuration files:${NC}"
+echo "Configuration Files:"
 echo "  Environment:     $INSTALL_DIR/myfsio.env"
 echo "  IAM Users:       $DATA_DIR/.myfsio.sys/config/iam.json"
 echo "  Bucket Policies: $DATA_DIR/.myfsio.sys/config/bucket_policies.json"
+echo ""
+echo "Useful Commands:"
+echo "  Check status:    sudo systemctl status myfsio"
+echo "  View logs:       sudo journalctl -u myfsio -f"
+echo "  Restart:         sudo systemctl restart myfsio"
+echo "  Stop:            sudo systemctl stop myfsio"
+echo ""
+echo "Documentation: https://go.jzwsite.com/myfsio"
+echo ""
+echo "============================================================"
+echo "          Thank you for installing MyFSIO!"
+echo "============================================================"
 echo ""
