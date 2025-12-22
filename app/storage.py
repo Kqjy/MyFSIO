@@ -128,11 +128,14 @@ class ObjectStorage:
     BUCKET_VERSIONS_DIR = "versions"
     MULTIPART_MANIFEST = "manifest.json"
     BUCKET_CONFIG_FILE = ".bucket.json"
+    KEY_INDEX_CACHE_TTL = 30  # seconds - longer TTL for better browsing performance
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
+        # In-memory object metadata cache: bucket_id -> (dict[key -> ObjectMeta], timestamp)
+        self._object_cache: Dict[str, tuple[Dict[str, ObjectMeta], float]] = {}
 
     def list_buckets(self) -> List[BucketMeta]:
         buckets: List[BucketMeta] = []
@@ -274,32 +277,26 @@ class ObjectStorage:
             raise StorageError("Bucket does not exist")
         bucket_id = bucket_path.name
 
-        # Collect all matching object keys first (lightweight - just paths)
-        all_keys: List[str] = []
-        for path in bucket_path.rglob("*"):
-            if path.is_file():
-                rel = path.relative_to(bucket_path)
-                if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
-                    continue
-                key = str(rel.as_posix())
-                if prefix and not key.startswith(prefix):
-                    continue
-                all_keys.append(key)
+        # Use cached object metadata for fast listing
+        object_cache = self._get_object_cache(bucket_id, bucket_path)
         
-        all_keys.sort()
+        # Get sorted keys
+        all_keys = sorted(object_cache.keys())
+        
+        # Apply prefix filter if specified
+        if prefix:
+            all_keys = [k for k in all_keys if k.startswith(prefix)]
+        
         total_count = len(all_keys)
         
         # Handle continuation token (the key to start after)
         start_index = 0
         if continuation_token:
             try:
-                # continuation_token is the last key from previous page
-                for i, key in enumerate(all_keys):
-                    if key > continuation_token:
-                        start_index = i
-                        break
-                else:
-                    # Token is past all keys
+                # Binary search for efficiency on large lists
+                import bisect
+                start_index = bisect.bisect_right(all_keys, continuation_token)
+                if start_index >= total_count:
                     return ListObjectsResult(
                         objects=[],
                         is_truncated=False,
@@ -314,27 +311,12 @@ class ObjectStorage:
         keys_slice = all_keys[start_index:end_index]
         is_truncated = end_index < total_count
         
-        # Now load full metadata only for the objects we're returning
+        # Build result from cached metadata (no file I/O!)
         objects: List[ObjectMeta] = []
         for key in keys_slice:
-            safe_key = self._sanitize_object_key(key)
-            path = bucket_path / safe_key
-            if not path.exists():
-                continue  # Object may have been deleted
-            try:
-                stat = path.stat()
-                metadata = self._read_metadata(bucket_id, safe_key)
-                objects.append(
-                    ObjectMeta(
-                        key=key,
-                        size=stat.st_size,
-                        last_modified=datetime.fromtimestamp(stat.st_mtime),
-                        etag=self._compute_etag(path),
-                        metadata=metadata or None,
-                    )
-                )
-            except OSError:
-                continue  # File may have been deleted during iteration
+            obj = object_cache.get(key)
+            if obj:
+                objects.append(obj)
         
         next_token = keys_slice[-1] if is_truncated and keys_slice else None
         
@@ -416,18 +398,21 @@ class ObjectStorage:
                 pass
 
         stat = destination.stat()
-        if metadata:
-            self._write_metadata(bucket_id, safe_key, metadata)
-        else:
-            self._delete_metadata(bucket_id, safe_key)
+        etag = checksum.hexdigest()
+        
+        # Always store internal metadata (etag, size) alongside user metadata
+        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
+        combined_meta = {**internal_meta, **(metadata or {})}
+        self._write_metadata(bucket_id, safe_key, combined_meta)
         
         self._invalidate_bucket_stats_cache(bucket_id)
+        self._invalidate_object_cache(bucket_id)
         
         return ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
             last_modified=datetime.fromtimestamp(stat.st_mtime),
-            etag=checksum.hexdigest(),
+            etag=etag,
             metadata=metadata,
         )
 
@@ -479,6 +464,7 @@ class ObjectStorage:
         self._delete_metadata(bucket_id, rel)
         
         self._invalidate_bucket_stats_cache(bucket_id)
+        self._invalidate_object_cache(bucket_id)
         self._cleanup_empty_parents(path, bucket_path)
 
     def purge_object(self, bucket_name: str, object_key: str) -> None:
@@ -501,6 +487,7 @@ class ObjectStorage:
         
         # Invalidate bucket stats cache
         self._invalidate_bucket_stats_cache(bucket_id)
+        self._invalidate_object_cache(bucket_id)
         self._cleanup_empty_parents(target, bucket_path)
 
     def is_versioning_enabled(self, bucket_name: str) -> bool:
@@ -1162,6 +1149,187 @@ class ObjectStorage:
 
     def _legacy_multipart_dir(self, bucket_name: str, upload_id: str) -> Path:
         return self._legacy_multipart_bucket_root(bucket_name) / upload_id
+
+    def _fast_list_keys(self, bucket_path: Path) -> List[str]:
+        """Fast directory walk using os.scandir instead of pathlib.rglob.
+        
+        This is significantly faster for large directories (10K+ files).
+        Returns just the keys (for backward compatibility).
+        """
+        return list(self._build_object_cache(bucket_path).keys())
+
+    def _build_object_cache(self, bucket_path: Path) -> Dict[str, ObjectMeta]:
+        """Build a complete object metadata cache for a bucket.
+        
+        Uses os.scandir for fast directory walking and a persistent etag index.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        
+        bucket_id = bucket_path.name
+        objects: Dict[str, ObjectMeta] = {}
+        bucket_str = str(bucket_path)
+        bucket_len = len(bucket_str) + 1  # +1 for the separator
+        
+        # Try to load persisted etag index first (single file read vs thousands)
+        etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        meta_cache: Dict[str, str] = {}
+        index_mtime: float = 0
+        
+        if etag_index_path.exists():
+            try:
+                index_mtime = etag_index_path.stat().st_mtime
+                with open(etag_index_path, 'r', encoding='utf-8') as f:
+                    meta_cache = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                meta_cache = {}
+        
+        # Check if we need to rebuild the index
+        meta_root = self._bucket_meta_root(bucket_id)
+        needs_rebuild = False
+        
+        if meta_root.exists() and index_mtime > 0:
+            # Quick check: if any meta file is newer than index, rebuild
+            def check_newer(dir_path: str) -> bool:
+                try:
+                    with os.scandir(dir_path) as it:
+                        for entry in it:
+                            if entry.is_dir(follow_symlinks=False):
+                                if check_newer(entry.path):
+                                    return True
+                            elif entry.is_file(follow_symlinks=False) and entry.name.endswith('.meta.json'):
+                                if entry.stat().st_mtime > index_mtime:
+                                    return True
+                except OSError:
+                    pass
+                return False
+            needs_rebuild = check_newer(str(meta_root))
+        elif not meta_cache:
+            needs_rebuild = True
+            
+        if needs_rebuild and meta_root.exists():
+            meta_str = str(meta_root)
+            meta_len = len(meta_str) + 1
+            meta_files: list[tuple[str, str]] = []
+            
+            # Collect all metadata file paths
+            def collect_meta_files(dir_path: str) -> None:
+                try:
+                    with os.scandir(dir_path) as it:
+                        for entry in it:
+                            if entry.is_dir(follow_symlinks=False):
+                                collect_meta_files(entry.path)
+                            elif entry.is_file(follow_symlinks=False) and entry.name.endswith('.meta.json'):
+                                rel = entry.path[meta_len:]
+                                key = rel[:-10].replace(os.sep, '/')
+                                meta_files.append((key, entry.path))
+                except OSError:
+                    pass
+            
+            collect_meta_files(meta_str)
+            
+            # Parallel read of metadata files - only extract __etag__
+            def read_meta_file(item: tuple[str, str]) -> tuple[str, str | None]:
+                key, path = item
+                try:
+                    with open(path, 'rb') as f:
+                        content = f.read()
+                    etag_marker = b'"__etag__"'
+                    idx = content.find(etag_marker)
+                    if idx != -1:
+                        start = content.find(b'"', idx + len(etag_marker) + 1)
+                        if start != -1:
+                            end = content.find(b'"', start + 1)
+                            if end != -1:
+                                return key, content[start+1:end].decode('utf-8')
+                    return key, None
+                except (OSError, UnicodeDecodeError):
+                    return key, None
+            
+            if meta_files:
+                meta_cache = {}
+                with ThreadPoolExecutor(max_workers=min(64, len(meta_files))) as executor:
+                    for key, etag in executor.map(read_meta_file, meta_files):
+                        if etag:
+                            meta_cache[key] = etag
+                
+                # Persist the index for next time
+                try:
+                    etag_index_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(etag_index_path, 'w', encoding='utf-8') as f:
+                        json.dump(meta_cache, f)
+                except OSError:
+                    pass
+        
+        # Now scan objects and use cached etags
+        def scan_dir(dir_path: str) -> None:
+            try:
+                with os.scandir(dir_path) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            # Skip internal folders
+                            rel_start = entry.path[bucket_len:].split(os.sep)[0] if len(entry.path) > bucket_len else entry.name
+                            if rel_start in self.INTERNAL_FOLDERS:
+                                continue
+                            scan_dir(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            # Get relative path and convert to POSIX
+                            rel = entry.path[bucket_len:]
+                            # Check if in internal folder
+                            first_part = rel.split(os.sep)[0] if os.sep in rel else rel
+                            if first_part in self.INTERNAL_FOLDERS:
+                                continue
+                            
+                            key = rel.replace(os.sep, '/')
+                            try:
+                                # Use entry.stat() which is cached from scandir
+                                stat = entry.stat()
+                                
+                                # Get etag from cache (now just a string, not dict)
+                                etag = meta_cache.get(key)
+                                
+                                # Use placeholder for legacy objects without stored etag
+                                if not etag:
+                                    etag = f'"{stat.st_size}-{int(stat.st_mtime)}"'
+                                
+                                objects[key] = ObjectMeta(
+                                    key=key,
+                                    size=stat.st_size,
+                                    last_modified=datetime.fromtimestamp(stat.st_mtime),
+                                    etag=etag,
+                                    metadata=None,  # Don't include user metadata in listing
+                                )
+                            except OSError:
+                                pass
+            except OSError:
+                pass
+        
+        scan_dir(bucket_str)
+        return objects
+
+    def _get_object_cache(self, bucket_id: str, bucket_path: Path) -> Dict[str, ObjectMeta]:
+        """Get cached object metadata for a bucket, refreshing if stale."""
+        now = time.time()
+        cached = self._object_cache.get(bucket_id)
+        
+        if cached:
+            objects, timestamp = cached
+            if now - timestamp < self.KEY_INDEX_CACHE_TTL:
+                return objects
+        
+        # Rebuild cache
+        objects = self._build_object_cache(bucket_path)
+        self._object_cache[bucket_id] = (objects, now)
+        return objects
+
+    def _invalidate_object_cache(self, bucket_id: str) -> None:
+        """Invalidate the object cache and etag index for a bucket."""
+        self._object_cache.pop(bucket_id, None)
+        # Also invalidate persisted etag index
+        etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        try:
+            etag_index_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _ensure_system_roots(self) -> None:
         for path in (

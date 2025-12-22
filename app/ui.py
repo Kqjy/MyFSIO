@@ -423,7 +423,7 @@ def list_bucket_objects(bucket_name: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
-    max_keys = min(int(request.args.get("max_keys", 100)), 1000)
+    max_keys = min(int(request.args.get("max_keys", 1000)), 10000)
     continuation_token = request.args.get("continuation_token") or None
     prefix = request.args.get("prefix") or None
 
@@ -738,41 +738,30 @@ def bulk_download_objects(bucket_name: str):
     unique_keys = list(dict.fromkeys(cleaned))
     storage = _storage()
     
-    # Check permissions for all keys first (or at least bucket read)
-    # We'll check bucket read once, then object read for each if needed?
-    # _authorize_ui checks bucket level if object_key is None, but we need to check each object if fine-grained policies exist.
-    # For simplicity/performance, we check bucket list/read.
+    # Verify permission to read bucket contents
     try:
         _authorize_ui(principal, bucket_name, "read")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
-    # Create ZIP
+    # Create ZIP archive of selected objects
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for key in unique_keys:
             try:
-                # Verify individual object permission if needed? 
-                # _authorize_ui(principal, bucket_name, "read", object_key=key) 
-                # This might be slow for many objects. Assuming bucket read is enough for now or we accept the overhead.
-                # Let's skip individual check for bulk speed, assuming bucket read implies object read unless denied.
-                # But strictly we should check. Let's check.
                 _authorize_ui(principal, bucket_name, "read", object_key=key)
                 
-                # Check if object is encrypted
                 metadata = storage.get_object_metadata(bucket_name, key)
                 is_encrypted = "x-amz-server-side-encryption" in metadata
                 
                 if is_encrypted and hasattr(storage, 'get_object_data'):
-                    # Decrypt and add to zip
                     data, _ = storage.get_object_data(bucket_name, key)
                     zf.writestr(key, data)
                 else:
-                    # Add unencrypted file directly
                     path = storage.get_object_path(bucket_name, key)
                     zf.write(path, arcname=key)
             except (StorageError, IamError):
-                # Skip files we can't read or don't exist
+                # Skip objects that can't be accessed
                 continue
     
     buffer.seek(0)
@@ -1077,7 +1066,6 @@ def update_bucket_encryption(bucket_name: str):
     action = request.form.get("action", "enable")
     
     if action == "disable":
-        # Disable encryption
         try:
             _storage().set_bucket_encryption(bucket_name, None)
             flash("Default encryption disabled", "info")
@@ -1085,16 +1073,14 @@ def update_bucket_encryption(bucket_name: str):
             flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     
-    # Enable or update encryption
     algorithm = request.form.get("algorithm", "AES256")
     kms_key_id = request.form.get("kms_key_id", "").strip() or None
     
-    # Validate algorithm
     if algorithm not in ("AES256", "aws:kms"):
         flash("Invalid encryption algorithm", "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     
-    # Build encryption config following AWS format
+    # Build encryption configuration in AWS S3 format
     encryption_config: dict[str, Any] = {
         "Rules": [
             {

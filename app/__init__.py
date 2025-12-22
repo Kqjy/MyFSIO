@@ -45,7 +45,7 @@ def _migrate_config_file(active_path: Path, legacy_paths: List[Path]) -> Path:
             try:
                 shutil.move(str(legacy_path), str(active_path))
             except OSError:
-                # Fall back to copy + delete if move fails (e.g., cross-device)
+                # Fall back to copy + delete for cross-device moves
                 shutil.copy2(legacy_path, active_path)
                 try:
                     legacy_path.unlink(missing_ok=True)
@@ -101,25 +101,24 @@ def create_app(
     bucket_policies = BucketPolicyStore(Path(app.config["BUCKET_POLICY_PATH"]))
     secret_store = EphemeralSecretStore(default_ttl=app.config.get("SECRET_TTL_SECONDS", 300))
     
-    # Initialize Replication components
-    # Store config files in the system config directory for consistency
+    # Initialize replication with system config directory for consistency
     storage_root = Path(app.config["STORAGE_ROOT"])
     config_dir = storage_root / ".myfsio.sys" / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     
-    # Define paths with migration from legacy locations
+    # Migrate connection configs from legacy locations
     connections_path = _migrate_config_file(
         active_path=config_dir / "connections.json",
         legacy_paths=[
-            storage_root / ".myfsio.sys" / "connections.json",  # Previous location
-            storage_root / ".connections.json",  # Original legacy location
+            storage_root / ".myfsio.sys" / "connections.json",
+            storage_root / ".connections.json",
         ],
     )
     replication_rules_path = _migrate_config_file(
         active_path=config_dir / "replication_rules.json",
         legacy_paths=[
-            storage_root / ".myfsio.sys" / "replication_rules.json",  # Previous location
-            storage_root / ".replication_rules.json",  # Original legacy location
+            storage_root / ".myfsio.sys" / "replication_rules.json",
+            storage_root / ".replication_rules.json",
         ],
     )
     

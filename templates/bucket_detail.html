@@ -172,15 +172,15 @@
           <button id="load-more-btn" class="btn btn-link btn-sm p-0 d-none" style="font-size: 0.75rem;">Load more</button>
         </div>
         <div class="d-flex align-items-center gap-1">
-          <span class="text-muted">Load</span>
+          <span class="text-muted">Batch</span>
           <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;">
-            <option value="50">50</option>
-            <option value="100" selected>100</option>
-            <option value="150">150</option>
-            <option value="200">200</option>
-            <option value="250">250</option>
+            <option value="1000">1K</option>
+            <option value="5000" selected>5K</option>
+            <option value="10000">10K</option>
+            <option value="25000">25K</option>
+            <option value="50000">50K</option>
           </select>
-          <span class="text-muted">per page</span>
+          <span class="text-muted">objects</span>
         </div>
       </div>
     </div>
@@ -1866,30 +1866,42 @@
   let isLoadingObjects = false;
   let hasMoreObjects = false;
   let currentFilterTerm = '';
-  let pageSize = 100;
+  let pageSize = 5000;  // Load large batches for virtual scrolling
+  let currentPrefix = '';  // Current folder prefix for navigation
+  let allObjects = [];  // All loaded object metadata (lightweight)
+  
+  // Virtual scrolling state
+  const ROW_HEIGHT = 53;  // Height of each table row in pixels
+  const BUFFER_ROWS = 10;  // Extra rows to render above/below viewport
+  let visibleItems = [];  // Current items to display (filtered by folder/search)
+  let renderedRange = { start: 0, end: 0 };  // Currently rendered row indices
 
-  const createObjectRow = (obj) => {
+  // Create a row element from object data (for virtual scrolling)
+  const createObjectRow = (obj, displayKey = null) => {
     const tr = document.createElement('tr');
     tr.dataset.objectRow = '';
     tr.dataset.key = obj.key;
     tr.dataset.size = obj.size;
-    tr.dataset.lastModified = obj.last_modified;
+    tr.dataset.lastModified = obj.lastModified || obj.last_modified;
     tr.dataset.etag = obj.etag;
-    tr.dataset.previewUrl = obj.preview_url;
-    tr.dataset.downloadUrl = obj.download_url;
-    tr.dataset.presignEndpoint = obj.presign_endpoint;
-    tr.dataset.deleteEndpoint = obj.delete_endpoint;
-    tr.dataset.metadata = JSON.stringify(obj.metadata || {});
-    tr.dataset.versionsEndpoint = obj.versions_endpoint;
-    tr.dataset.restoreTemplate = obj.restore_template;
+    tr.dataset.previewUrl = obj.previewUrl || obj.preview_url;
+    tr.dataset.downloadUrl = obj.downloadUrl || obj.download_url;
+    tr.dataset.presignEndpoint = obj.presignEndpoint || obj.presign_endpoint;
+    tr.dataset.deleteEndpoint = obj.deleteEndpoint || obj.delete_endpoint;
+    tr.dataset.metadata = typeof obj.metadata === 'string' ? obj.metadata : JSON.stringify(obj.metadata || {});
+    tr.dataset.versionsEndpoint = obj.versionsEndpoint || obj.versions_endpoint;
+    tr.dataset.restoreTemplate = obj.restoreTemplate || obj.restore_template;
+    
+    const keyToShow = displayKey || obj.key;
+    const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleDateString();
 
     tr.innerHTML = `
       <td class="text-center align-middle">
         <input class="form-check-input" type="checkbox" data-object-select aria-label="Select ${escapeHtml(obj.key)}" />
       </td>
       <td class="object-key text-break" title="${escapeHtml(obj.key)}">
-        <div class="fw-medium">${escapeHtml(obj.key)}</div>
-        <div class="text-muted small">Modified ${escapeHtml(obj.last_modified_display)}</div>
+        <div class="fw-medium">${escapeHtml(keyToShow)}</div>
+        <div class="text-muted small">Modified ${escapeHtml(lastModDisplay)}</div>
       </td>
       <td class="text-end text-nowrap">
         <span class="text-muted small">${formatBytes(obj.size)}</span>
@@ -1898,7 +1910,7 @@
         <div class="btn-group btn-group-sm" role="group">
           <a
             class="btn btn-outline-primary btn-icon"
-            href="${escapeHtml(obj.download_url)}"
+            href="${escapeHtml(obj.downloadUrl || obj.download_url)}"
             target="_blank"
             title="Download"
             aria-label="Download"
@@ -1987,12 +1999,178 @@
     }
   };
 
+  // ============== VIRTUAL SCROLLING SYSTEM ==============
+  
+  // Spacer elements for virtual scroll height
+  let topSpacer = null;
+  let bottomSpacer = null;
+  
+  const initVirtualScrollElements = () => {
+    if (!objectsTableBody) return;
+    
+    // Create spacer rows if they don't exist
+    if (!topSpacer) {
+      topSpacer = document.createElement('tr');
+      topSpacer.id = 'virtual-top-spacer';
+      topSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
+    }
+    if (!bottomSpacer) {
+      bottomSpacer = document.createElement('tr');
+      bottomSpacer.id = 'virtual-bottom-spacer';
+      bottomSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
+    }
+  };
+  
+  // Compute which items should be visible based on current view
+  const computeVisibleItems = () => {
+    const items = [];
+    const folders = new Set();
+    
+    allObjects.forEach(obj => {
+      if (!obj.key.startsWith(currentPrefix)) return;
+      
+      const remainder = obj.key.slice(currentPrefix.length);
+      const slashIndex = remainder.indexOf('/');
+      
+      if (slashIndex === -1) {
+        // File in current folder
+        if (!currentFilterTerm || obj.key.toLowerCase().includes(currentFilterTerm)) {
+          items.push({ type: 'file', data: obj, displayKey: remainder });
+        }
+      } else {
+        // Folder
+        const folderPath = currentPrefix + remainder.slice(0, slashIndex + 1);
+        if (!folders.has(folderPath)) {
+          folders.add(folderPath);
+          if (!currentFilterTerm || folderPath.toLowerCase().includes(currentFilterTerm)) {
+            items.push({ type: 'folder', path: folderPath, displayKey: remainder.slice(0, slashIndex) });
+          }
+        }
+      }
+    });
+    
+    // Sort: folders first, then files
+    items.sort((a, b) => {
+      if (a.type === 'folder' && b.type === 'file') return -1;
+      if (a.type === 'file' && b.type === 'folder') return 1;
+      const aKey = a.type === 'folder' ? a.path : a.data.key;
+      const bKey = b.type === 'folder' ? b.path : b.data.key;
+      return aKey.localeCompare(bKey);
+    });
+    
+    return items;
+  };
+  
+  // Render only the visible rows based on scroll position
+  const renderVirtualRows = () => {
+    if (!objectsTableBody || !scrollContainer) return;
+    
+    const containerHeight = scrollContainer.clientHeight;
+    const scrollTop = scrollContainer.scrollTop;
+    
+    // Calculate visible range
+    const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
+    const endIndex = Math.min(visibleItems.length, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+    
+    // Skip if range hasn't changed significantly
+    if (startIndex === renderedRange.start && endIndex === renderedRange.end) return;
+    
+    renderedRange = { start: startIndex, end: endIndex };
+    
+    // Clear and rebuild
+    objectsTableBody.innerHTML = '';
+    
+    // Add top spacer
+    initVirtualScrollElements();
+    topSpacer.querySelector('td').style.height = `${startIndex * ROW_HEIGHT}px`;
+    objectsTableBody.appendChild(topSpacer);
+    
+    // Render visible rows
+    for (let i = startIndex; i < endIndex; i++) {
+      const item = visibleItems[i];
+      if (!item) continue;
+      
+      let row;
+      if (item.type === 'folder') {
+        row = createFolderRow(item.path, item.displayKey);
+      } else {
+        row = createObjectRow(item.data, item.displayKey);
+      }
+      row.dataset.virtualIndex = i;
+      objectsTableBody.appendChild(row);
+    }
+    
+    // Add bottom spacer
+    const remainingRows = visibleItems.length - endIndex;
+    bottomSpacer.querySelector('td').style.height = `${remainingRows * ROW_HEIGHT}px`;
+    objectsTableBody.appendChild(bottomSpacer);
+    
+    // Re-attach handlers to new rows
+    attachRowHandlers();
+  };
+  
+  // Debounced scroll handler for virtual scrolling
+  let scrollTimeout = null;
+  const handleVirtualScroll = () => {
+    if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
+    scrollTimeout = requestAnimationFrame(renderVirtualRows);
+  };
+  
+  // Refresh the virtual list (after data changes or navigation)
+  const refreshVirtualList = () => {
+    visibleItems = computeVisibleItems();
+    renderedRange = { start: -1, end: -1 };  // Force re-render
+    
+    if (visibleItems.length === 0) {
+      if (allObjects.length === 0 && !hasMoreObjects) {
+        showEmptyState();
+      } else {
+        // Empty folder
+        objectsTableBody.innerHTML = `
+          <tr>
+            <td colspan="4" class="py-5">
+              <div class="empty-state">
+                <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
+                  </svg>
+                </div>
+                <h6 class="mb-2">Empty folder</h6>
+                <p class="text-muted small mb-0">This folder contains no objects${hasMoreObjects ? ' yet. Loading more...' : '.'}</p>
+              </div>
+            </td>
+          </tr>
+        `;
+      }
+    } else {
+      renderVirtualRows();
+    }
+    
+    updateFolderViewStatus();
+  };
+  
+  // Update status bar
+  const updateFolderViewStatus = () => {
+    const folderViewStatusEl = document.getElementById('folder-view-status');
+    if (!folderViewStatusEl) return;
+    
+    if (currentPrefix) {
+      const folderCount = visibleItems.filter(i => i.type === 'folder').length;
+      const fileCount = visibleItems.filter(i => i.type === 'file').length;
+      folderViewStatusEl.innerHTML = `<span class="text-muted">${folderCount} folder${folderCount !== 1 ? 's' : ''}, ${fileCount} file${fileCount !== 1 ? 's' : ''} in this view</span>`;
+      folderViewStatusEl.classList.remove('d-none');
+    } else {
+      folderViewStatusEl.classList.add('d-none');
+    }
+  };
+
+  // ============== DATA LOADING ==============
+
   const loadObjects = async (append = false) => {
     if (isLoadingObjects) return;
     isLoadingObjects = true;
 
     if (!append) {
-
       if (objectsLoadingRow) objectsLoadingRow.style.display = '';
       nextContinuationToken = null;
       loadedObjectCount = 0;
@@ -2026,35 +2204,18 @@
       totalObjectCount = data.total_count || 0;
       nextContinuationToken = data.next_continuation_token;
 
-      if (!append) {
-
-        if (objectsLoadingRow) objectsLoadingRow.remove();
-        
-        if (data.objects.length === 0) {
-          showEmptyState();
-          updateObjectCountBadge();
-          isLoadingObjects = false;
-          return;
-        }
-
-        objectsTableBody.innerHTML = '';
+      if (!append && objectsLoadingRow) {
+        objectsLoadingRow.remove();
       }
 
+      // Store lightweight object metadata (no DOM elements!)
       data.objects.forEach(obj => {
-        const row = createObjectRow(obj);
-        objectsTableBody.appendChild(row);
         loadedObjectCount++;
-
-        // Apply current filter to newly loaded objects
-        if (currentFilterTerm) {
-          const keyLower = obj.key.toLowerCase();
-          row.style.display = keyLower.includes(currentFilterTerm) ? '' : 'none';
-        }
-
         allObjects.push({
           key: obj.key,
           size: obj.size,
           lastModified: obj.last_modified,
+          lastModifiedDisplay: obj.last_modified_display,
           etag: obj.etag,
           previewUrl: obj.preview_url,
           downloadUrl: obj.download_url,
@@ -2062,86 +2223,28 @@
           deleteEndpoint: obj.delete_endpoint,
           metadata: JSON.stringify(obj.metadata || {}),
           versionsEndpoint: obj.versions_endpoint,
-          restoreTemplate: obj.restore_template,
-          element: row
+          restoreTemplate: obj.restore_template
         });
       });
 
       updateObjectCountBadge();
-
-      // Track if there are more objects to load
       hasMoreObjects = data.is_truncated;
       
       if (loadMoreStatus) {
         if (data.is_truncated) {
-          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} objects loaded`;
+          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} loaded`;
         } else {
-          loadMoreStatus.textContent = `All ${loadedObjectCount.toLocaleString()} objects loaded`;
+          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
         }
       }
       
-      // Update Load More button visibility
       if (typeof updateLoadMoreButton === 'function') {
         updateLoadMoreButton();
       }
 
-      // Track the count of items in current folder before re-rendering
-      let prevFolderItemCount = 0;
-      if (currentPrefix && append) {
-        const prevState = getFoldersAtPrefix(currentPrefix);
-        prevFolderItemCount = prevState.folders.length + prevState.files.length;
-      }
-
-      if (typeof initFolderNavigation === 'function') {
-        initFolderNavigation();
-      }
-
-      attachRowHandlers();
-
-      // If we're in a nested folder and loaded more objects, scroll to show newly loaded content
-      if (currentPrefix && append) {
-        const newState = getFoldersAtPrefix(currentPrefix);
-        const newFolderItemCount = newState.folders.length + newState.files.length;
-        const addedCount = newFolderItemCount - prevFolderItemCount;
-        
-        if (addedCount > 0) {
-          // Show a brief notification about newly loaded items in the current folder
-          const folderViewStatusEl = document.getElementById('folder-view-status');
-          if (folderViewStatusEl) {
-            folderViewStatusEl.innerHTML = `<span class="text-success fw-medium">+${addedCount} new item${addedCount !== 1 ? 's' : ''} loaded in this folder</span>`;
-            folderViewStatusEl.classList.remove('d-none');
-            // Reset to normal status after 3 seconds
-            setTimeout(() => {
-              if (typeof updateFolderViewStatus === 'function') {
-                updateFolderViewStatus();
-              }
-            }, 3000);
-          }
-          
-          // Scroll to show the first newly added item
-          const allRows = objectsTableBody.querySelectorAll('tr:not([style*="display: none"])');
-          if (allRows.length > prevFolderItemCount) {
-            const firstNewRow = allRows[prevFolderItemCount];
-            if (firstNewRow) {
-              firstNewRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              // Briefly highlight the new rows
-              for (let i = prevFolderItemCount; i < allRows.length; i++) {
-                allRows[i].classList.add('table-info');
-                setTimeout(() => {
-                  allRows[i].classList.remove('table-info');
-                }, 2000);
-              }
-            }
-          }
-        } else if (hasMoreObjects) {
-          // Objects were loaded but none were in the current folder - show a hint
-          const folderViewStatusEl = document.getElementById('folder-view-status');
-          if (folderViewStatusEl) {
-            folderViewStatusEl.innerHTML = `<span class="text-muted">Loaded more objects (not in this folder). <button type="button" class="btn btn-link btn-sm p-0" onclick="navigateToFolder('')">Go to root</button> to see all.</span>`;
-            folderViewStatusEl.classList.remove('d-none');
-          }
-        }
-      }
+      // Refresh virtual scroll view
+      refreshVirtualList();
+      renderBreadcrumb(currentPrefix);
 
     } catch (error) {
       console.error('Failed to load objects:', error);
@@ -2152,7 +2255,6 @@
       }
     } finally {
       isLoadingObjects = false;
-      // Hide loading spinner
       if (loadMoreSpinner) {
         loadMoreSpinner.classList.add('d-none');
       }
@@ -2160,16 +2262,15 @@
   };
 
   const attachRowHandlers = () => {
+    // Attach handlers to object rows
     const objectRows = document.querySelectorAll('[data-object-row]');
     objectRows.forEach(row => {
-
       if (row.dataset.handlersAttached) return;
       row.dataset.handlersAttached = 'true';
 
       const deleteBtn = row.querySelector('[data-delete-object]');
       deleteBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
-
         const deleteModalEl = document.getElementById('deleteObjectModal');
         const deleteModal = deleteModalEl ? bootstrap.Modal.getOrCreateInstance(deleteModalEl) : null;
         const deleteObjectForm = document.getElementById('deleteObjectForm');
@@ -2186,17 +2287,63 @@
       selectCheckbox?.addEventListener('change', () => {
         toggleRowSelection(row, selectCheckbox.checked);
       });
+      
+      // Restore selection state
+      if (selectedRows.has(row.dataset.key)) {
+        selectCheckbox.checked = true;
+        row.classList.add('table-active');
+      }
+    });
+    
+    // Attach handlers to folder rows
+    const folderRows = document.querySelectorAll('.folder-row');
+    folderRows.forEach(row => {
+      if (row.dataset.handlersAttached) return;
+      row.dataset.handlersAttached = 'true';
+      
+      const folderPath = row.dataset.folderPath;
+      
+      const checkbox = row.querySelector('[data-folder-select]');
+      checkbox?.addEventListener('change', (e) => {
+        e.stopPropagation();
+        // Select all objects in this folder
+        const folderObjects = allObjects.filter(obj => obj.key.startsWith(folderPath));
+        folderObjects.forEach(obj => {
+          if (checkbox.checked) {
+            selectedRows.set(obj.key, obj);
+          } else {
+            selectedRows.delete(obj.key);
+          }
+        });
+        updateBulkDeleteState();
+      });
+
+      const folderBtn = row.querySelector('button');
+      folderBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigateToFolder(folderPath);
+      });
+      
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
+        navigateToFolder(folderPath);
+      });
     });
 
     updateBulkDeleteState();
   };
 
-  // Infinite scroll: use IntersectionObserver to auto-load more objects
+  // Scroll container reference (needed for virtual scrolling)
   const scrollSentinel = document.getElementById('scroll-sentinel');
   const scrollContainer = document.querySelector('.objects-table-container');
   const loadMoreBtn = document.getElementById('load-more-btn');
   
-  // Load More button click handler (fallback for mobile)
+  // Virtual scroll: listen to scroll events
+  if (scrollContainer) {
+    scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
+  }
+  
+  // Load More button click handler (fallback)
   loadMoreBtn?.addEventListener('click', () => {
     if (hasMoreObjects && !isLoadingObjects) {
       loadObjects(true);
@@ -2210,8 +2357,8 @@
     }
   }
   
+  // Auto-load more when near bottom (for loading all data)
   if (scrollSentinel && scrollContainer) {
-    // Observer for scrolling within the container (desktop)
     const containerObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
@@ -2220,12 +2367,11 @@
       });
     }, {
       root: scrollContainer,
-      rootMargin: '100px',
+      rootMargin: '500px',  // Load more earlier for smoother experience
       threshold: 0
     });
     containerObserver.observe(scrollSentinel);
     
-    // Observer for page scrolling (mobile - when container is not scrollable)
     const viewportObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
@@ -2233,14 +2379,14 @@
         }
       });
     }, {
-      root: null, // viewport
-      rootMargin: '200px',
+      root: null,
+      rootMargin: '500px',
       threshold: 0
     });
     viewportObserver.observe(scrollSentinel);
   }
 
-  // Page size selector
+  // Page size selector (now controls batch size)
   const pageSizeSelect = document.getElementById('page-size-select');
   pageSizeSelect?.addEventListener('change', (e) => {
     pageSize = parseInt(e.target.value, 10);
@@ -2252,7 +2398,6 @@
 
   const folderBreadcrumb = document.getElementById('folder-breadcrumb');
   const objectsTableBody = document.querySelector('#objects-table tbody');
-  let currentPrefix = '';
 
   if (objectsTableBody) {
     objectsTableBody.addEventListener('click', (e) => {
@@ -2369,8 +2514,8 @@
     return allObjects.filter(obj => obj.key.startsWith(folderPrefix));
   };
 
-  const createFolderRow = (folderPath) => {
-    const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
+  const createFolderRow = (folderPath, displayName = null) => {
+    const folderName = displayName || folderPath.slice(currentPrefix.length).replace(/\/$/, '');
     const { count: objectCount, mayHaveMore } = countObjectsInFolder(folderPath);
     const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
     
@@ -2403,51 +2548,25 @@
         </button>
       </td>
     `;
-
-    const checkbox = tr.querySelector('[data-folder-select]');
-    checkbox?.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const folderObjects = getObjectsInFolder(folderPath);
-      folderObjects.forEach(obj => {
-        const objCheckbox = obj.element.querySelector('[data-object-select]');
-        if (objCheckbox) {
-          objCheckbox.checked = checkbox.checked;
-        }
-        toggleRowSelection(obj.element, checkbox.checked);
-      });
-    });
-
-    const folderBtn = tr.querySelector('button');
-    folderBtn?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      navigateToFolder(folderPath);
-    });
-    
-    tr.addEventListener('click', (e) => {
-      if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
-      navigateToFolder(folderPath);
-    });
     
     return tr;
   };
 
+  // Instant client-side folder navigation (no server round-trip!)
   const navigateToFolder = (prefix) => {
     currentPrefix = prefix;
+    
+    // Scroll to top when navigating
+    if (scrollContainer) scrollContainer.scrollTop = 0;
+    
+    // Instant re-render from already-loaded data
+    refreshVirtualList();
     renderBreadcrumb(prefix);
-    renderObjectsView();
 
     selectedRows.clear();
 
     if (typeof updateBulkDeleteState === 'function') {
       updateBulkDeleteState();
-    }
-
-    if (typeof updateFolderViewStatus === 'function') {
-      updateFolderViewStatus();
-    }
-
-    if (typeof updateFilterWarning === 'function') {
-      updateFilterWarning();
     }
 
     if (previewPanel) previewPanel.classList.add('d-none');
@@ -2651,12 +2770,10 @@
       bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
     }
     if (selectAllCheckbox) {
-
-      const visibleRowsRaw = hasFolders()
-        ? allObjects.filter(obj => obj.key.startsWith(currentPrefix) && !obj.key.slice(currentPrefix.length).includes('/')).map(obj => obj.element)
-        : Array.from(document.querySelectorAll('[data-object-row]'));
-      const total = visibleRowsRaw.filter(r => r.style.display !== 'none').length;
-      const visibleSelectedCount = visibleRowsRaw.filter(r => r.style.display !== 'none' && selectedRows.has(r.dataset.key)).length;
+      // With virtual scrolling, count files in current folder from visibleItems
+      const filesInView = visibleItems.filter(item => item.type === 'file');
+      const total = filesInView.length;
+      const visibleSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
       selectAllCheckbox.disabled = total === 0;
       selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
       selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
@@ -3284,28 +3401,6 @@
       filterWarning.classList.remove('d-none');
     } else {
       filterWarning.classList.add('d-none');
-    }
-  };
-
-  const updateFolderViewStatus = () => {
-    if (!folderViewStatus || !loadMoreStatus) return;
-    if (currentPrefix) {
-      const { folders, files } = getFoldersAtPrefix(currentPrefix);
-      const visibleCount = folders.length + files.length;
-      const folderObjectCount = allObjects.filter(obj => obj.key.startsWith(currentPrefix)).length;
-      const folderMayHaveMore = hasMoreObjects && folderObjectCount > 0;
-      if (folderMayHaveMore) {
-        folderViewStatus.textContent = `Showing ${visibleCount} items in folder • more may be available`;
-        folderViewStatus.classList.remove('d-none');
-        loadMoreStatus.classList.add('d-none');
-      } else {
-        folderViewStatus.textContent = `${visibleCount} items in folder`;
-        folderViewStatus.classList.remove('d-none');
-        loadMoreStatus.classList.add('d-none');
-      }
-    } else {
-      folderViewStatus.classList.add('d-none');
-      loadMoreStatus.classList.remove('d-none');
     }
   };
 
