@@ -333,12 +333,13 @@
                 <input type="hidden" name="mode" value="upsert" id="policyMode" />
                 
                 <div class="mb-4">
-                  <label class="form-label fw-semibold">
+                  <label class="form-label fw-semibold d-flex align-items-center">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path d="M8 4a.5.5 0 0 1 .5.5V6a.5.5 0 0 1-1 0V4.5A.5.5 0 0 1 8 4zM3.732 5.732a.5.5 0 0 1 .707 0l.915.914a.5.5 0 1 1-.708.708l-.914-.915a.5.5 0 0 1 0-.707zM2 10a.5.5 0 0 1 .5-.5h1.586a.5.5 0 0 1 0 1H2.5A.5.5 0 0 1 2 10zm9.5 0a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 0 1H12a.5.5 0 0 1-.5-.5zm.754-4.246a.5.5 0 0 0-.708 0l-.914.914a.5.5 0 0 0 .707.708l.915-.914a.5.5 0 0 0 0-.708z"/>
                       <path fill-rule="evenodd" d="M8 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-1 3a1 1 0 1 1 2 0 1 1 0 0 1-2 0z"/>
                     </svg>
                     Quick Presets
+                    <span class="badge bg-secondary-subtle text-secondary ms-2 fw-normal" style="font-size: 0.65rem;">Choose a template</span>
                   </label>
                   <div class="d-flex flex-wrap gap-2">
                     <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == 'private' %}active{% endif %}" data-preset="private">
@@ -364,15 +365,46 @@
                 </div>
 
                 <div class="mb-3">
-                  <label class="form-label fw-semibold">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-                      <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm1.639-3.708 1.33.886 1.854-1.855a.25.25 0 0 1 .289-.047l1.888.974V8.5a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V8s1.54-1.274 1.639-1.208z"/>
-                    </svg>
-                    Policy Document (JSON)
+                  <label class="form-label fw-semibold d-flex align-items-center justify-content-between">
+                    <span>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+                        <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm1.639-3.708 1.33.886 1.854-1.855a.25.25 0 0 1 .289-.047l1.888.974V8.5a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V8s1.54-1.274 1.639-1.208z"/>
+                      </svg>
+                      Policy Document (JSON)
+                    </span>
+                    <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none" id="formatPolicyBtn" title="Format JSON">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M5.854 4.854a.5.5 0 1 0-.708-.708l-3.5 3.5a.5.5 0 0 0 0 .708l3.5 3.5a.5.5 0 0 0 .708-.708L2.707 8l3.147-3.146zm4.292 0a.5.5 0 0 1 .708-.708l3.5 3.5a.5.5 0 0 1 0 .708l-3.5 3.5a.5.5 0 0 1-.708-.708L13.293 8l-3.147-3.146z"/>
+                      </svg>
+                      Format
+                    </button>
                   </label>
-                  <textarea class="form-control font-monospace" rows="12" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | tojson }}' spellcheck="false">{{ bucket_policy_text or default_policy }}</textarea>
-                  <div class="form-text">Use presets for common scenarios or switch to Custom JSON to paste AWS-style statements.</div>
+                  <div class="position-relative">
+                    <textarea class="form-control font-monospace" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | tojson }}' spellcheck="false" style="font-size: 0.85rem; line-height: 1.5; tab-size: 2;">{{ bucket_policy_text or default_policy }}</textarea>
+                    <div id="policyValidationStatus" class="position-absolute top-0 end-0 m-2 d-none">
+                      <span class="badge bg-success-subtle text-success" id="policyValidBadge">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                        </svg>
+                        Valid JSON
+                      </span>
+                      <span class="badge bg-danger-subtle text-danger d-none" id="policyInvalidBadge">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
+                        </svg>
+                        Invalid JSON
+                      </span>
+                    </div>
+                  </div>
+                  <div id="policyErrorDetail" class="text-danger small mt-1 d-none"></div>
+                  <div class="form-text d-flex align-items-start gap-2 mt-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="flex-shrink-0 mt-1 text-muted" viewBox="0 0 16 16">
+                      <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                      <path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/>
+                    </svg>
+                    <span>Use presets for common scenarios or select <strong>Custom JSON</strong> to write AWS IAM-style policy statements. The policy will be validated on save.</span>
+                  </div>
                 </div>
 
                 <div class="d-flex gap-2 flex-wrap">
@@ -1201,8 +1233,18 @@
                 
                 <div class="mb-3">
                   <label for="target_bucket" class="form-label fw-medium">Target Bucket Name</label>
-                  <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket">
-                  <div class="form-text">If the target bucket does not exist, it will be created automatically.</div>
+                  <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket" pattern="^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" minlength="3" maxlength="63">
+                  <div id="target_bucket_feedback" class="invalid-feedback"></div>
+                  <div class="form-text">
+                    <span id="target_bucket_hint">If the target bucket does not exist, it will be created automatically.</span>
+                    <div class="mt-1 text-muted small">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                        <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                      </svg>
+                      Rules: 3-63 characters, lowercase letters, numbers, hyphens, and periods only. Must start/end with letter or number.
+                    </div>
+                  </div>
                 </div>
                 
                 <div class="mb-4">
@@ -2043,11 +2085,63 @@
         updateLoadMoreButton();
       }
 
+      // Track the count of items in current folder before re-rendering
+      let prevFolderItemCount = 0;
+      if (currentPrefix && append) {
+        const prevState = getFoldersAtPrefix(currentPrefix);
+        prevFolderItemCount = prevState.folders.length + prevState.files.length;
+      }
+
       if (typeof initFolderNavigation === 'function') {
         initFolderNavigation();
       }
 
       attachRowHandlers();
+
+      // If we're in a nested folder and loaded more objects, scroll to show newly loaded content
+      if (currentPrefix && append) {
+        const newState = getFoldersAtPrefix(currentPrefix);
+        const newFolderItemCount = newState.folders.length + newState.files.length;
+        const addedCount = newFolderItemCount - prevFolderItemCount;
+        
+        if (addedCount > 0) {
+          // Show a brief notification about newly loaded items in the current folder
+          const folderViewStatusEl = document.getElementById('folder-view-status');
+          if (folderViewStatusEl) {
+            folderViewStatusEl.innerHTML = `<span class="text-success fw-medium">+${addedCount} new item${addedCount !== 1 ? 's' : ''} loaded in this folder</span>`;
+            folderViewStatusEl.classList.remove('d-none');
+            // Reset to normal status after 3 seconds
+            setTimeout(() => {
+              if (typeof updateFolderViewStatus === 'function') {
+                updateFolderViewStatus();
+              }
+            }, 3000);
+          }
+          
+          // Scroll to show the first newly added item
+          const allRows = objectsTableBody.querySelectorAll('tr:not([style*="display: none"])');
+          if (allRows.length > prevFolderItemCount) {
+            const firstNewRow = allRows[prevFolderItemCount];
+            if (firstNewRow) {
+              firstNewRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              // Briefly highlight the new rows
+              for (let i = prevFolderItemCount; i < allRows.length; i++) {
+                allRows[i].classList.add('table-info');
+                setTimeout(() => {
+                  allRows[i].classList.remove('table-info');
+                }, 2000);
+              }
+            }
+          }
+        } else if (hasMoreObjects) {
+          // Objects were loaded but none were in the current folder - show a hint
+          const folderViewStatusEl = document.getElementById('folder-view-status');
+          if (folderViewStatusEl) {
+            folderViewStatusEl.innerHTML = `<span class="text-muted">Loaded more objects (not in this folder). <button type="button" class="btn btn-link btn-sm p-0" onclick="navigateToFolder('')">Go to root</button> to see all.</span>`;
+            folderViewStatusEl.classList.remove('d-none');
+          }
+        }
+      }
 
     } catch (error) {
       console.error('Failed to load objects:', error);
@@ -3755,5 +3849,106 @@
       }
     }
   });
+
+  // Bucket name validation for replication setup
+  const targetBucketInput = document.getElementById('target_bucket');
+  const targetBucketFeedback = document.getElementById('target_bucket_feedback');
+  
+  const validateBucketName = (name) => {
+    if (!name) return { valid: false, error: 'Bucket name is required' };
+    if (name.length < 3) return { valid: false, error: 'Bucket name must be at least 3 characters' };
+    if (name.length > 63) return { valid: false, error: 'Bucket name must be 63 characters or less' };
+    if (!/^[a-z0-9]/.test(name)) return { valid: false, error: 'Bucket name must start with a lowercase letter or number' };
+    if (!/[a-z0-9]$/.test(name)) return { valid: false, error: 'Bucket name must end with a lowercase letter or number' };
+    if (/[A-Z]/.test(name)) return { valid: false, error: 'Bucket name must not contain uppercase letters' };
+    if (/_/.test(name)) return { valid: false, error: 'Bucket name must not contain underscores' };
+    if (/\.\.|--/.test(name)) return { valid: false, error: 'Bucket name must not contain consecutive periods or hyphens' };
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(name)) return { valid: false, error: 'Bucket name must not be formatted as an IP address' };
+    if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(name) && name.length > 2) return { valid: false, error: 'Bucket name contains invalid characters. Use only lowercase letters, numbers, hyphens, and periods.' };
+    return { valid: true, error: null };
+  };
+
+  const updateBucketNameValidation = () => {
+    if (!targetBucketInput || !targetBucketFeedback) return;
+    const name = targetBucketInput.value.trim();
+    if (!name) {
+      targetBucketInput.classList.remove('is-valid', 'is-invalid');
+      targetBucketFeedback.textContent = '';
+      return;
+    }
+    const result = validateBucketName(name);
+    targetBucketInput.classList.toggle('is-valid', result.valid);
+    targetBucketInput.classList.toggle('is-invalid', !result.valid);
+    targetBucketFeedback.textContent = result.error || '';
+  };
+
+  targetBucketInput?.addEventListener('input', updateBucketNameValidation);
+  targetBucketInput?.addEventListener('blur', updateBucketNameValidation);
+
+  // Prevent form submission if bucket name is invalid
+  const replicationForm = targetBucketInput?.closest('form');
+  replicationForm?.addEventListener('submit', (e) => {
+    const name = targetBucketInput.value.trim();
+    const result = validateBucketName(name);
+    if (!result.valid) {
+      e.preventDefault();
+      updateBucketNameValidation();
+      targetBucketInput.focus();
+      return false;
+    }
+  });
+
+  // Policy JSON validation and formatting
+  const formatPolicyBtn = document.getElementById('formatPolicyBtn');
+  const policyValidationStatus = document.getElementById('policyValidationStatus');
+  const policyValidBadge = document.getElementById('policyValidBadge');
+  const policyInvalidBadge = document.getElementById('policyInvalidBadge');
+  const policyErrorDetail = document.getElementById('policyErrorDetail');
+
+  const validatePolicyJson = () => {
+    if (!policyTextarea || !policyValidationStatus) return;
+    const value = policyTextarea.value.trim();
+    if (!value) {
+      policyValidationStatus.classList.add('d-none');
+      policyErrorDetail?.classList.add('d-none');
+      return;
+    }
+    policyValidationStatus.classList.remove('d-none');
+    try {
+      JSON.parse(value);
+      policyValidBadge?.classList.remove('d-none');
+      policyInvalidBadge?.classList.add('d-none');
+      policyErrorDetail?.classList.add('d-none');
+    } catch (err) {
+      policyValidBadge?.classList.add('d-none');
+      policyInvalidBadge?.classList.remove('d-none');
+      if (policyErrorDetail) {
+        policyErrorDetail.textContent = err.message;
+        policyErrorDetail.classList.remove('d-none');
+      }
+    }
+  };
+
+  policyTextarea?.addEventListener('input', validatePolicyJson);
+  policyTextarea?.addEventListener('blur', validatePolicyJson);
+
+  formatPolicyBtn?.addEventListener('click', () => {
+    if (!policyTextarea) return;
+    const value = policyTextarea.value.trim();
+    if (!value) return;
+    try {
+      const parsed = JSON.parse(value);
+      policyTextarea.value = JSON.stringify(parsed, null, 2);
+      validatePolicyJson();
+    } catch (err) {
+      // Show error in validation
+      validatePolicyJson();
+    }
+  });
+
+  // Initialize policy validation on page load
+  if (policyTextarea && policyPreset?.value === 'custom') {
+    validatePolicyJson();
+  }
 </script>
 {% endblock %}
