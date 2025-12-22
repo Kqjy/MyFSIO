@@ -150,25 +150,27 @@
         </table>
         <div id="scroll-sentinel" style="height: 1px;"></div>
       </div>
-      <div id="load-more-container" class="text-center py-2 d-none border-top">
-        <div id="load-more-spinner" class="d-none">
-          <div class="spinner-border spinner-border-sm text-primary me-2" role="status">
-            <span class="visually-hidden">Loading...</span>
+      <div id="pagination-controls" class="card-footer d-flex justify-content-between align-items-center py-1 px-3 bg-body-tertiary" style="font-size: 0.75rem;">
+        <div id="load-more-container" class="d-flex align-items-center gap-2">
+          <div id="load-more-spinner" class="d-none">
+            <div class="spinner-border spinner-border-sm text-primary me-1" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
           </div>
-          <span class="text-muted small">Loading more objects...</span>
+          <span id="load-more-status" class="text-muted"></span>
+          <button id="load-more-btn" class="btn btn-link btn-sm p-0 d-none" style="font-size: 0.75rem;">Load more</button>
         </div>
-        <p id="load-more-status" class="text-muted small mb-0"></p>
-      </div>
-      <div id="pagination-controls" class="card-footer d-flex justify-content-center align-items-center gap-1 py-1 bg-body-tertiary" style="font-size: 0.75rem;">
-        <span class="text-muted">Load</span>
-        <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;">
-          <option value="50">50</option>
-          <option value="100" selected>100</option>
-          <option value="150">150</option>
-          <option value="200">200</option>
-          <option value="250">250</option>
-        </select>
-        <span class="text-muted">per page</span>
+        <div class="d-flex align-items-center gap-1">
+          <span class="text-muted">Load</span>
+          <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="150">150</option>
+            <option value="200">200</option>
+            <option value="250">250</option>
+          </select>
+          <span class="text-muted">per page</span>
+        </div>
       </div>
     </div>
   </div>
@@ -2017,18 +2019,17 @@
       // Track if there are more objects to load
       hasMoreObjects = data.is_truncated;
       
-      if (data.is_truncated && loadMoreContainer) {
-        loadMoreContainer.classList.remove('d-none');
-        if (loadMoreStatus) {
-          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} objects loaded • Scroll down to load more`;
-        }
-      } else if (loadMoreContainer) {
-        // Show the container but update status to show all loaded
-        if (loadMoreStatus) {
+      if (loadMoreStatus) {
+        if (data.is_truncated) {
+          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} objects loaded`;
+        } else {
           loadMoreStatus.textContent = `All ${loadedObjectCount.toLocaleString()} objects loaded`;
         }
-        // Keep container visible but hide spinner
-        loadMoreContainer.classList.remove('d-none');
+      }
+      
+      // Update Load More button visibility
+      if (typeof updateLoadMoreButton === 'function') {
+        updateLoadMoreButton();
       }
 
       if (typeof initFolderNavigation === 'function') {
@@ -2088,20 +2089,50 @@
   // Infinite scroll: use IntersectionObserver to auto-load more objects
   const scrollSentinel = document.getElementById('scroll-sentinel');
   const scrollContainer = document.querySelector('.objects-table-container');
+  const loadMoreBtn = document.getElementById('load-more-btn');
+  
+  // Load More button click handler (fallback for mobile)
+  loadMoreBtn?.addEventListener('click', () => {
+    if (hasMoreObjects && !isLoadingObjects) {
+      loadObjects(true);
+    }
+  });
+  
+  // Show/hide Load More button based on hasMoreObjects
+  function updateLoadMoreButton() {
+    if (loadMoreBtn) {
+      loadMoreBtn.classList.toggle('d-none', !hasMoreObjects);
+    }
+  }
+  
   if (scrollSentinel && scrollContainer) {
-    const infiniteScrollObserver = new IntersectionObserver((entries) => {
+    // Observer for scrolling within the container (desktop)
+    const containerObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
           loadObjects(true);
         }
       });
     }, {
-      root: scrollContainer, // use the scrollable container as root
-      rootMargin: '100px', // trigger 100px before reaching the element
+      root: scrollContainer,
+      rootMargin: '100px',
       threshold: 0
     });
+    containerObserver.observe(scrollSentinel);
     
-    infiniteScrollObserver.observe(scrollSentinel);
+    // Observer for page scrolling (mobile - when container is not scrollable)
+    const viewportObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
+          loadObjects(true);
+        }
+      });
+    }, {
+      root: null, // viewport
+      rootMargin: '200px',
+      threshold: 0
+    });
+    viewportObserver.observe(scrollSentinel);
   }
 
   // Page size selector
