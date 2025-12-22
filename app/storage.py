@@ -99,6 +99,15 @@ class BucketMeta:
     created_at: datetime
 
 
+@dataclass
+class ListObjectsResult:
+    """Paginated result for object listing."""
+    objects: List[ObjectMeta]
+    is_truncated: bool
+    next_continuation_token: Optional[str]
+    total_count: Optional[int] = None  # Total objects in bucket (from stats cache)
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -241,31 +250,105 @@ class ObjectStorage:
         self._remove_tree(self._system_bucket_root(bucket_path.name))
         self._remove_tree(self._multipart_bucket_root(bucket_path.name))
 
-    def list_objects(self, bucket_name: str) -> List[ObjectMeta]:
+    def list_objects(
+        self,
+        bucket_name: str,
+        *,
+        max_keys: int = 1000,
+        continuation_token: Optional[str] = None,
+        prefix: Optional[str] = None,
+    ) -> ListObjectsResult:
+        """List objects in a bucket with pagination support.
+        
+        Args:
+            bucket_name: Name of the bucket
+            max_keys: Maximum number of objects to return (default 1000)
+            continuation_token: Token from previous request for pagination
+            prefix: Filter objects by key prefix
+            
+        Returns:
+            ListObjectsResult with objects, truncation status, and continuation token
+        """
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise StorageError("Bucket does not exist")
         bucket_id = bucket_path.name
 
-        objects: List[ObjectMeta] = []
+        # Collect all matching object keys first (lightweight - just paths)
+        all_keys: List[str] = []
         for path in bucket_path.rglob("*"):
             if path.is_file():
-                stat = path.stat()
                 rel = path.relative_to(bucket_path)
                 if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
                     continue
-                metadata = self._read_metadata(bucket_id, rel)
+                key = str(rel.as_posix())
+                if prefix and not key.startswith(prefix):
+                    continue
+                all_keys.append(key)
+        
+        all_keys.sort()
+        total_count = len(all_keys)
+        
+        # Handle continuation token (the key to start after)
+        start_index = 0
+        if continuation_token:
+            try:
+                # continuation_token is the last key from previous page
+                for i, key in enumerate(all_keys):
+                    if key > continuation_token:
+                        start_index = i
+                        break
+                else:
+                    # Token is past all keys
+                    return ListObjectsResult(
+                        objects=[],
+                        is_truncated=False,
+                        next_continuation_token=None,
+                        total_count=total_count,
+                    )
+            except Exception:
+                pass  # Invalid token, start from beginning
+        
+        # Get the slice we need
+        end_index = start_index + max_keys
+        keys_slice = all_keys[start_index:end_index]
+        is_truncated = end_index < total_count
+        
+        # Now load full metadata only for the objects we're returning
+        objects: List[ObjectMeta] = []
+        for key in keys_slice:
+            safe_key = self._sanitize_object_key(key)
+            path = bucket_path / safe_key
+            if not path.exists():
+                continue  # Object may have been deleted
+            try:
+                stat = path.stat()
+                metadata = self._read_metadata(bucket_id, safe_key)
                 objects.append(
                     ObjectMeta(
-                        key=str(rel.as_posix()),
+                        key=key,
                         size=stat.st_size,
                         last_modified=datetime.fromtimestamp(stat.st_mtime),
                         etag=self._compute_etag(path),
                         metadata=metadata or None,
                     )
                 )
-        objects.sort(key=lambda meta: meta.key)
-        return objects
+            except OSError:
+                continue  # File may have been deleted during iteration
+        
+        next_token = keys_slice[-1] if is_truncated and keys_slice else None
+        
+        return ListObjectsResult(
+            objects=objects,
+            is_truncated=is_truncated,
+            next_continuation_token=next_token,
+            total_count=total_count,
+        )
+
+    def list_objects_all(self, bucket_name: str) -> List[ObjectMeta]:
+        """List all objects in a bucket (no pagination). Use with caution for large buckets."""
+        result = self.list_objects(bucket_name, max_keys=100000)
+        return result.objects
 
     def put_object(
         self,

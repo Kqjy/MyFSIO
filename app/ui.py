@@ -294,7 +294,9 @@ def bucket_detail(bucket_name: str):
     storage = _storage()
     try:
         _authorize_ui(principal, bucket_name, "list")
-        objects = storage.list_objects(bucket_name)
+        # Don't load objects here - UI fetches them asynchronously via /buckets/<name>/objects
+        if not storage.bucket_exists(bucket_name):
+            raise StorageError("Bucket does not exist")
     except (StorageError, IamError) as exc:
         flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.buckets_overview"))
@@ -382,10 +384,13 @@ def bucket_detail(bucket_name: str):
     except IamError:
         pass
 
+    # Pass the objects API endpoint URL for async loading
+    objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
+
     return render_template(
         "bucket_detail.html",
         bucket_name=bucket_name,
-        objects=objects,
+        objects_api_url=objects_api_url,
         principal=principal,
         bucket_policy_text=policy_text,
         bucket_policy=bucket_policy,
@@ -406,6 +411,61 @@ def bucket_detail(bucket_name: str):
         bucket_stats=bucket_stats,
         can_manage_quota=can_manage_quota,
     )
+
+
+@ui_bp.get("/buckets/<bucket_name>/objects")
+def list_bucket_objects(bucket_name: str):
+    """API endpoint for paginated object listing."""
+    principal = _current_principal()
+    storage = _storage()
+    try:
+        _authorize_ui(principal, bucket_name, "list")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    max_keys = min(int(request.args.get("max_keys", 100)), 1000)
+    continuation_token = request.args.get("continuation_token") or None
+    prefix = request.args.get("prefix") or None
+
+    try:
+        result = storage.list_objects(
+            bucket_name,
+            max_keys=max_keys,
+            continuation_token=continuation_token,
+            prefix=prefix,
+        )
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    try:
+        versioning_enabled = storage.is_versioning_enabled(bucket_name)
+    except StorageError:
+        versioning_enabled = False
+
+    objects_data = []
+    for obj in result.objects:
+        objects_data.append({
+            "key": obj.key,
+            "size": obj.size,
+            "last_modified": obj.last_modified.isoformat(),
+            "last_modified_display": obj.last_modified.strftime("%b %d, %Y %H:%M"),
+            "etag": obj.etag,
+            "metadata": obj.metadata or {},
+            "preview_url": url_for("ui.object_preview", bucket_name=bucket_name, object_key=obj.key),
+            "download_url": url_for("ui.object_preview", bucket_name=bucket_name, object_key=obj.key) + "?download=1",
+            "presign_endpoint": url_for("ui.object_presign", bucket_name=bucket_name, object_key=obj.key),
+            "delete_endpoint": url_for("ui.delete_object", bucket_name=bucket_name, object_key=obj.key),
+            "versions_endpoint": url_for("ui.object_versions", bucket_name=bucket_name, object_key=obj.key),
+            "restore_template": url_for("ui.restore_object_version", bucket_name=bucket_name, object_key=obj.key, version_id="VERSION_ID_PLACEHOLDER"),
+        })
+
+    return jsonify({
+        "objects": objects_data,
+        "is_truncated": result.is_truncated,
+        "next_continuation_token": result.next_continuation_token,
+        "total_count": result.total_count,
+        "versioning_enabled": versioning_enabled,
+    })
 
 
 @ui_bp.post("/buckets/<bucket_name>/upload")

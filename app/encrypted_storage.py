@@ -188,8 +188,11 @@ class EncryptedObjectStorage:
     def bucket_stats(self, bucket_name: str, cache_ttl: int = 60):
         return self.storage.bucket_stats(bucket_name, cache_ttl)
     
-    def list_objects(self, bucket_name: str):
-        return self.storage.list_objects(bucket_name)
+    def list_objects(self, bucket_name: str, **kwargs):
+        return self.storage.list_objects(bucket_name, **kwargs)
+    
+    def list_objects_all(self, bucket_name: str):
+        return self.storage.list_objects_all(bucket_name)
     
     def get_object_path(self, bucket_name: str, object_key: str):
         return self.storage.get_object_path(bucket_name, object_key)

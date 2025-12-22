@@ -8,7 +8,7 @@ MyFSIO is a batteries-included, Flask-based recreation of Amazon S3 and IAM work
 - **IAM + access keys:** Users, access keys, key rotation, and bucket-scoped actions (`list/read/write/delete/policy`) now live in `data/.myfsio.sys/config/iam.json` and are editable from the IAM dashboard.
 - **Bucket policies + hot reload:** `data/.myfsio.sys/config/bucket_policies.json` uses AWS' policy grammar (Version `2012-10-17`) with a built-in watcher, so editing the JSON file applies immediately. The UI also ships Public/Private/Custom presets for faster edits.
 - **Presigned URLs everywhere:** Signature Version 4 presigned URLs respect IAM + bucket policies and replace the now-removed "share link" feature for public access scenarios.
-- **Modern UI:** Responsive tables, quick filters, preview sidebar, object-level delete buttons, a presign modal, and an inline JSON policy editor that respects dark mode keep bucket management friendly.
+- **Modern UI:** Responsive tables, quick filters, preview sidebar, object-level delete buttons, a presign modal, and an inline JSON policy editor that respects dark mode keep bucket management friendly. The object browser supports folder navigation, infinite scroll pagination, bulk operations, and automatic retry on load failures.
 - **Tests & health:** `/healthz` for smoke checks and `pytest` coverage for IAM, CRUD, presign, and policy flows.
 
 ## Architecture at a Glance

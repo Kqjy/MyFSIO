@@ -181,7 +181,6 @@
     </div>
 </div>
 
-<!-- Edit Connection Modal -->
 <div class="modal fade" id="editConnectionModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -247,7 +246,6 @@
     </div>
 </div>
 
-<!-- Delete Connection Modal -->
 <div class="modal fade" id="deleteConnectionModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -297,7 +295,6 @@
         }
     }
 
-    // Test Connection Logic
     async function testConnection(formId, resultId) {
         const form = document.getElementById(formId);
         const resultDiv = document.getElementById(resultId);
@@ -335,7 +332,6 @@
         testConnection('editConnectionForm', 'editTestResult');
     });
 
-    // Modal Event Listeners
     const editModal = document.getElementById('editConnectionModal');
     editModal.addEventListener('show.bs.modal', event => {
         const button = event.relatedTarget;

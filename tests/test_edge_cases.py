@@ -38,7 +38,7 @@ def test_unicode_bucket_and_object_names(tmp_path: Path):
     assert storage.get_object_path("unicode-test", key).exists()
     
     # Verify listing
-    objects = storage.list_objects("unicode-test")
+    objects = storage.list_objects_all("unicode-test")
     assert any(o.key == key for o in objects)
 
 def test_special_characters_in_metadata(tmp_path: Path):

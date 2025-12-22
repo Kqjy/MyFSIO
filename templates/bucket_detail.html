@@ -26,7 +26,10 @@
               </svg>
               {{ 'Versioning On' if versioning_enabled else 'Versioning Off' }}
             </span>
-            <span class="text-muted small">{{ objects|length }} object{{ 's' if objects|length != 1 else '' }}</span>
+            <span class="text-muted small" id="object-count-badge">
+              <span class="spinner-border spinner-border-sm" role="status" style="width: 0.75rem; height: 0.75rem;"></span>
+              Loading...
+            </span>
           </div>
         </div>
       </div>
@@ -42,7 +45,6 @@
     </div>
   </div>
 
-  <!-- Navigation Tabs -->
   <ul class="nav nav-tabs border-bottom-0" id="bucketTabs" role="tablist">
     <li class="nav-item" role="presentation">
       <button class="nav-link {{ 'active' if active_tab == 'objects' else '' }}" id="objects-tab" data-bs-toggle="tab" data-bs-target="#objects-pane" type="button" role="tab" aria-controls="objects-pane" aria-selected="{{ 'true' if active_tab == 'objects' else 'false' }}">
@@ -68,10 +70,8 @@
     {% endif %}
   </ul>
 
-  <!-- Tab Content -->
   <div class="tab-content" id="bucketTabsContent">
     
-    <!-- Objects Tab -->
     <div class="tab-pane fade {{ 'show active' if active_tab == 'objects' else '' }}" id="objects-pane" role="tabpanel" aria-labelledby="objects-tab" tabindex="0">
 <div class="row g-4">
   <div class="col-lg-7">
@@ -102,7 +102,6 @@
             Download
           </button>
         </div>
-        <!-- Folder breadcrumb navigation -->
         <nav id="folder-breadcrumb" class="mt-2 d-none" aria-label="Folder navigation">
           <ol class="breadcrumb mb-0 small">
             <li class="breadcrumb-item">
@@ -121,6 +120,7 @@
         id="objects-drop-zone"
         data-bucket="{{ bucket_name }}"
         data-versioning="{{ 'true' if versioning_enabled else 'false' }}"
+        data-objects-api="{{ objects_api_url }}"
         data-bulk-delete-endpoint="{{ url_for('ui.bulk_delete_objects', bucket_name=bucket_name) }}"
         data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
       >
@@ -136,85 +136,41 @@
             </tr>
           </thead>
           <tbody>
-            {% for obj in objects %}
-            <tr
-              data-object-row
-              data-key="{{ obj.key }}"
-              data-size="{{ obj.size }}"
-              data-last-modified="{{ obj.last_modified.isoformat() }}"
-              data-etag="{{ obj.etag }}"
-              data-preview-url="{{ url_for('ui.object_preview', bucket_name=bucket_name, object_key=obj.key) }}"
-              data-download-url="{{ url_for('ui.object_preview', bucket_name=bucket_name, object_key=obj.key) }}?download=1"
-              data-presign-endpoint="{{ url_for('ui.object_presign', bucket_name=bucket_name, object_key=obj.key) }}"
-              data-delete-endpoint="{{ url_for('ui.delete_object', bucket_name=bucket_name, object_key=obj.key) }}"
-              data-metadata='{{ (obj.metadata or {}) | tojson | safe }}'
-              data-versions-endpoint="{{ url_for('ui.object_versions', bucket_name=bucket_name, object_key=obj.key) }}"
-              data-restore-template="{{ url_for('ui.restore_object_version', bucket_name=bucket_name, object_key=obj.key, version_id='VERSION_ID_PLACEHOLDER') }}"
-            >
-              <td class="text-center align-middle">
-                <input class="form-check-input" type="checkbox" data-object-select aria-label="Select {{ obj.key }}" />
-              </td>
-              <td class="object-key text-break" title="{{ obj.key }}">
-                <div class="fw-medium">{{ obj.key }}</div>
-                <div class="text-muted small">Modified {{ obj.last_modified.strftime('%b %d, %Y %H:%M') }}</div>
-              </td>
-              <td class="text-end text-nowrap">
-                <span class="text-muted small">{{ obj.size | filesizeformat }}</span>
-              </td>
-              <td class="text-end">
-                <div class="btn-group btn-group-sm" role="group">
-                  <a
-                    class="btn btn-outline-primary btn-icon"
-                    href="{{ url_for('ui.object_preview', bucket_name=bucket_name, object_key=obj.key) }}?download=1"
-                    target="_blank"
-                    title="Download"
-                    aria-label="Download"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-download" viewBox="0 0 16 16" aria-hidden="true">
-                      <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z" />
-                      <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z" />
-                    </svg>
-                  </a>
-                  <button
-                    type="button"
-                    class="btn btn-outline-danger btn-icon"
-                    data-delete-object
-                    title="Delete"
-                    aria-label="Delete"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16" aria-hidden="true">
-                      <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z" />
-                      <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z" />
-                    </svg>
-                  </button>
-                </div>
-              </td>
-            </tr>
-            {% else %}
-            <tr>
+            <tr id="objects-loading-row">
               <td colspan="4" class="py-5">
-                <div class="empty-state">
-                  <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
-                      <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-                      <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
-                    </svg>
+                <div class="text-center">
+                  <div class="spinner-border text-primary mb-3" role="status">
+                    <span class="visually-hidden">Loading...</span>
                   </div>
-                  <h6 class="mb-2">No objects yet</h6>
-                  <p class="text-muted small mb-3">Drag and drop files here or click Upload to get started.</p>
-                  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-                      <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
-                    </svg>
-                    Upload Files
-                  </button>
+                  <p class="text-muted mb-0">Loading objects...</p>
                 </div>
               </td>
             </tr>
-            {% endfor %}
           </tbody>
         </table>
+        <div id="scroll-sentinel" style="height: 1px;"></div>
+      </div>
+      <div id="pagination-controls" class="card-footer d-flex justify-content-between align-items-center py-1 px-3 bg-body-tertiary" style="font-size: 0.75rem;">
+        <div id="load-more-container" class="d-flex align-items-center gap-2">
+          <div id="load-more-spinner" class="d-none">
+            <div class="spinner-border spinner-border-sm text-primary me-1" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+          </div>
+          <span id="load-more-status" class="text-muted"></span>
+          <button id="load-more-btn" class="btn btn-link btn-sm p-0 d-none" style="font-size: 0.75rem;">Load more</button>
+        </div>
+        <div class="d-flex align-items-center gap-1">
+          <span class="text-muted">Load</span>
+          <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="150">150</option>
+            <option value="200">200</option>
+            <option value="250">250</option>
+          </select>
+          <span class="text-muted">per page</span>
+        </div>
       </div>
     </div>
   </div>
@@ -320,10 +276,8 @@
 </div>
 </div>
 
-    <!-- Permissions Tab -->
     <div class="tab-pane fade {{ 'show active' if active_tab == 'permissions' else '' }}" id="permissions-pane" role="tabpanel" aria-labelledby="permissions-tab" tabindex="0">
       <div class="row g-4">
-        <!-- Main Content -->
         <div class="col-lg-8">
           <div class="card shadow-sm" id="bucket-policy-card">
             <div class="card-header d-flex align-items-center">
@@ -333,7 +287,6 @@
               <span class="fw-semibold">Bucket Policy</span>
             </div>
             <div class="card-body">
-              <!-- Status Banner -->
               {% if bucket_policy %}
               <div class="alert alert-info d-flex align-items-start mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
@@ -368,7 +321,6 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 <input type="hidden" name="mode" value="upsert" id="policyMode" />
                 
-                <!-- Policy Preset Selector -->
                 <div class="mb-4">
                   <label class="form-label fw-semibold">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -400,7 +352,6 @@
                   <input type="hidden" id="policyPreset" name="preset" value="{{ preset_choice }}" data-default="{{ preset_choice }}">
                 </div>
 
-                <!-- Policy Document Editor -->
                 <div class="mb-3">
                   <label class="form-label fw-semibold">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -443,7 +394,6 @@
           </div>
         </div>
 
-        <!-- Sidebar -->
         <div class="col-lg-4">
           <div class="card bg-body-tertiary border-0">
             <div class="card-body">
@@ -478,12 +428,9 @@
       </div>
     </div>
 
-    <!-- Properties Tab -->
     <div class="tab-pane fade {{ 'show active' if active_tab == 'properties' else '' }}" id="properties-pane" role="tabpanel" aria-labelledby="properties-tab" tabindex="0">
       <div class="row g-4">
-        <!-- Main Content -->
         <div class="col-lg-8">
-          <!-- Versioning Card -->
           <div class="card shadow-sm" id="bucket-versioning-card">
             <div class="card-header d-flex align-items-center">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
@@ -493,7 +440,6 @@
               <span class="fw-semibold">Versioning</span>
             </div>
             <div class="card-body">
-              <!-- Status Banner -->
               {% if versioning_enabled %}
               <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
@@ -550,7 +496,6 @@
             </div>
           </div>
 
-          <!-- Archived Objects Card -->
           {% if versioning_enabled %}
           <div
             class="card shadow-sm mt-4"
@@ -608,7 +553,6 @@
           </div>
           {% endif %}
 
-          <!-- Encryption Card -->
           {% if encryption_enabled %}
           <div class="card shadow-sm mt-4" id="bucket-encryption-card">
             <div class="card-header d-flex align-items-center">
@@ -625,7 +569,6 @@
               {% set enc_kms_key = enc_default.get('KMSMasterKeyID', '') %}
               
               {% if enc_algorithm %}
-              <!-- Encryption Enabled State -->
               <div class="alert alert-success d-flex align-items-start mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
                   <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
@@ -643,7 +586,6 @@
                 </div>
               </div>
               {% else %}
-              <!-- Encryption Disabled State -->
               <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
                   <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -661,7 +603,6 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 <input type="hidden" name="action" value="enable" id="encryptionAction" />
                 
-                <!-- Algorithm Selection -->
                 <div class="mb-3">
                   <label class="form-label fw-medium">Encryption Algorithm</label>
                   <div class="card border">
@@ -686,7 +627,6 @@
                   </div>
                 </div>
 
-                <!-- KMS Key Selection (visible only when KMS is selected) -->
                 {% if kms_enabled %}
                 <div class="mb-4" id="kmsKeySection" style="{{ 'display: none;' if enc_algorithm != 'aws:kms' else '' }}">
                   <label for="kms_key_id" class="form-label fw-medium">KMS Key</label>
@@ -731,7 +671,6 @@
           </div>
           {% endif %}
 
-          <!-- Storage Quota Card -->
           <div class="card shadow-sm mt-4" id="bucket-quota-card">
             <div class="card-header d-flex align-items-center">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
@@ -750,7 +689,6 @@
               {% set version_bytes = bucket_stats.get('version_bytes', 0) %}
               {% set total_bytes = bucket_stats.get('total_bytes', current_bytes) %}
               
-              <!-- Current Usage Display -->
               <div class="mb-4">
                 <h6 class="small fw-semibold mb-3">Current Usage</h6>
                 <div class="row g-3">
@@ -798,7 +736,6 @@
               </div>
 
               {% if has_quota %}
-              <!-- Quota Enabled State -->
               <div class="alert alert-info d-flex align-items-start mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
                   <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
@@ -817,7 +754,6 @@
                 </div>
               </div>
               {% else %}
-              <!-- Quota Disabled State -->
               <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
                   <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -834,7 +770,6 @@
               <form method="post" action="{{ url_for('ui.update_bucket_quota', bucket_name=bucket_name) }}" id="quotaForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 
-                <!-- Max Storage -->
                 <div class="mb-3">
                   <label for="max_mb" class="form-label fw-medium">Maximum Storage Size</label>
                   <div class="input-group">
@@ -846,7 +781,6 @@
                   <div class="form-text">Minimum 1 MB. Leave empty for unlimited.</div>
                 </div>
 
-                <!-- Max Objects -->
                 <div class="mb-4">
                   <label for="max_objects" class="form-label fw-medium">Maximum Object Count</label>
                   <input type="number" class="form-control" id="max_objects" name="max_objects" 
@@ -884,7 +818,6 @@
           </div>
         </div>
 
-        <!-- Sidebar -->
         <div class="col-lg-4">
           <div class="card bg-body-tertiary border-0">
             <div class="card-body">
@@ -965,7 +898,6 @@
     </div>
 
     {% if can_manage_replication %}
-    <!-- Replication Tab -->
     <div class="tab-pane fade {{ 'show active' if active_tab == 'replication' else '' }}" id="replication-pane" role="tabpanel" aria-labelledby="replication-tab" tabindex="0">
       <div class="row g-4">
         <div class="col-lg-8">
@@ -979,7 +911,6 @@
             </div>
             <div class="card-body">
               {% if replication_rule and replication_rule.enabled %}
-              <!-- Replication Active State -->
               <div class="alert alert-success d-flex align-items-center mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill flex-shrink-0 me-2" viewBox="0 0 16 16">
                   <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
@@ -994,7 +925,6 @@
                 </div>
               </div>
               
-              <!-- Replication Stats Cards (loaded asynchronously) -->
               <div class="row g-3 mb-4" id="replication-stats-cards" data-status-endpoint="{{ url_for('ui.get_replication_status', bucket_name=bucket_name) }}">
                 <div class="col-6 col-lg">
                   <div class="card bg-body-tertiary border-0 h-100">
@@ -1085,7 +1015,6 @@
                 <span data-stat="last-sync-key"></span>
               </div>
               
-              <!-- Current Rule Details -->
               <h6 class="text-muted text-uppercase small mb-3">Replication Target</h6>
               <div class="card border mb-4">
                 <div class="card-body">
@@ -1137,7 +1066,6 @@
                   </svg>
                   Refresh
                 </a>
-                <!-- Pause button - available to users with replication permission -->
                 <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                   <input type="hidden" name="action" value="pause">
@@ -1149,7 +1077,6 @@
                   </button>
                 </form>
                 {% if is_replication_admin %}
-                <!-- Delete button - admin only -->
                 <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                     <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
@@ -1161,7 +1088,6 @@
               </div>
 
               {% elif replication_rule and not replication_rule.enabled %}
-              <!-- Replication Paused State -->
               <div class="alert alert-warning d-flex align-items-center mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
                   <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
@@ -1172,7 +1098,6 @@
                 </div>
               </div>
               
-              <!-- Show target info even when paused -->
               <h6 class="text-muted text-uppercase small mb-3">Replication Target</h6>
               <div class="card border mb-4">
                 <div class="card-body">
@@ -1209,7 +1134,6 @@
               </div>
               
               <div class="d-flex gap-2">
-                <!-- Resume button -->
                 <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                   <input type="hidden" name="action" value="resume">
@@ -1221,7 +1145,6 @@
                   </button>
                 </form>
                 {% if is_replication_admin %}
-                <!-- Delete button - admin only -->
                 <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#disableReplicationModal">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                     <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
@@ -1233,7 +1156,6 @@
               </div>
               
               {% else %}
-              <!-- Replication Not Configured State -->
               <div class="text-center py-4">
                 <div class="rounded-circle bg-body-tertiary d-inline-flex align-items-center justify-content-center mb-3" style="width: 64px; height: 64px;">
                   <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
@@ -1371,7 +1293,6 @@
   </div>
 </div>
 
-<!-- Delete Policy Modal -->
 <div class="modal fade" id="deletePolicyModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1408,7 +1329,6 @@
   </div>
 </div>
 
-<!-- Upload Modal -->
 <div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
     <div class="modal-content">
@@ -1526,7 +1446,6 @@
   </div>
 </div>
 
-<!-- Delete bucket modal -->
 <div class="modal fade" id="deleteBucketModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1570,7 +1489,6 @@
   </div>
 </div>
 
-<!-- Message modal -->
 <div class="modal fade" id="messageModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1592,7 +1510,6 @@
   </div>
 </div>
 
-<!-- Bulk delete modal -->
 <div class="modal fade" id="bulkDeleteModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1641,7 +1558,6 @@
   </div>
 </div>
 
-<!-- Delete object modal -->
 <div class="modal fade" id="deleteObjectModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1693,7 +1609,6 @@
   </div>
 </div>
 
-<!-- Presign modal -->
 <div class="modal fade" id="presignModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1749,7 +1664,6 @@
   </div>
 </div>
 
-<!-- Disable Replication Modal -->
 <div class="modal fade" id="disableReplicationModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1819,7 +1733,6 @@
       .replace(/'/g, '&#039;');
   };
 
-  const rows = document.querySelectorAll('[data-object-row]');
   const selectAllCheckbox = document.querySelector('[data-select-all]');
   const bulkDeleteButton = document.querySelector('[data-bulk-delete-trigger]');
   const bulkDeleteLabel = bulkDeleteButton?.querySelector('[data-bulk-delete-label]');
@@ -1871,6 +1784,7 @@
   let isGeneratingPresign = false;
   const objectsContainer = document.querySelector('.objects-table-container[data-bucket]');
   const bulkDeleteEndpoint = objectsContainer?.dataset.bulkDeleteEndpoint || '';
+  const objectsApiUrl = objectsContainer?.dataset.objectsApi || '';
   const versionPanel = document.getElementById('version-panel');
   const versionList = document.getElementById('version-list');
   const refreshVersionsButton = document.getElementById('refreshVersionsButton');
@@ -1879,7 +1793,7 @@
   const archivedCountBadge = archivedCard?.querySelector('[data-archived-count]');
   const archivedRefreshButton = archivedCard?.querySelector('[data-archived-refresh]');
   const archivedEndpoint = archivedCard?.dataset.archivedEndpoint;
-  const versioningEnabled = objectsContainer?.dataset.versioning === 'true';
+  let versioningEnabled = objectsContainer?.dataset.versioning === 'true';
   const versionsCache = new Map();
   let activeRow = null;
   const selectedRows = new Map();
@@ -1888,34 +1802,368 @@
   if (generatePresignButton) generatePresignButton.disabled = true;
   if (downloadButton) downloadButton.classList.add('disabled');
 
-  // ========== Folder Navigation ==========
+  const objectCountBadge = document.getElementById('object-count-badge');
+  const loadMoreContainer = document.getElementById('load-more-container');
+  const loadMoreSpinner = document.getElementById('load-more-spinner');
+  const loadMoreStatus = document.getElementById('load-more-status');
+  const objectsLoadingRow = document.getElementById('objects-loading-row');
+  let nextContinuationToken = null;
+  let totalObjectCount = 0;
+  let loadedObjectCount = 0;
+  let isLoadingObjects = false;
+  let hasMoreObjects = false;
+  let currentFilterTerm = '';
+  let pageSize = 100;
+
+  const createObjectRow = (obj) => {
+    const tr = document.createElement('tr');
+    tr.dataset.objectRow = '';
+    tr.dataset.key = obj.key;
+    tr.dataset.size = obj.size;
+    tr.dataset.lastModified = obj.last_modified;
+    tr.dataset.etag = obj.etag;
+    tr.dataset.previewUrl = obj.preview_url;
+    tr.dataset.downloadUrl = obj.download_url;
+    tr.dataset.presignEndpoint = obj.presign_endpoint;
+    tr.dataset.deleteEndpoint = obj.delete_endpoint;
+    tr.dataset.metadata = JSON.stringify(obj.metadata || {});
+    tr.dataset.versionsEndpoint = obj.versions_endpoint;
+    tr.dataset.restoreTemplate = obj.restore_template;
+
+    tr.innerHTML = `
+      <td class="text-center align-middle">
+        <input class="form-check-input" type="checkbox" data-object-select aria-label="Select ${escapeHtml(obj.key)}" />
+      </td>
+      <td class="object-key text-break" title="${escapeHtml(obj.key)}">
+        <div class="fw-medium">${escapeHtml(obj.key)}</div>
+        <div class="text-muted small">Modified ${escapeHtml(obj.last_modified_display)}</div>
+      </td>
+      <td class="text-end text-nowrap">
+        <span class="text-muted small">${formatBytes(obj.size)}</span>
+      </td>
+      <td class="text-end">
+        <div class="btn-group btn-group-sm" role="group">
+          <a
+            class="btn btn-outline-primary btn-icon"
+            href="${escapeHtml(obj.download_url)}"
+            target="_blank"
+            title="Download"
+            aria-label="Download"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-download" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z" />
+              <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z" />
+            </svg>
+          </a>
+          <button
+            type="button"
+            class="btn btn-outline-danger btn-icon"
+            data-delete-object
+            title="Delete"
+            aria-label="Delete"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z" />
+              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z" />
+            </svg>
+          </button>
+        </div>
+      </td>
+    `;
+
+    return tr;
+  };
+
+  const showEmptyState = () => {
+    if (!objectsTableBody) return;
+    objectsTableBody.innerHTML = `
+      <tr>
+        <td colspan="4" class="py-5">
+          <div class="empty-state">
+            <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+              </svg>
+            </div>
+            <h6 class="mb-2">No objects yet</h6>
+            <p class="text-muted small mb-3">Drag and drop files here or click Upload to get started.</p>
+            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+              </svg>
+              Upload Files
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+  };
+
+  const showLoadError = (message) => {
+    if (!objectsTableBody) return;
+    objectsTableBody.innerHTML = `
+      <tr>
+        <td colspan="4" class="py-5">
+          <div class="text-center text-danger">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="mb-2" viewBox="0 0 16 16">
+              <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+            </svg>
+            <p class="mb-2">Failed to load objects</p>
+            <p class="small text-muted mb-3">${escapeHtml(message)}</p>
+            <button class="btn btn-outline-primary btn-sm" onclick="loadObjects()">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+              </svg>
+              Retry
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+  };
+
+  const updateObjectCountBadge = () => {
+    if (!objectCountBadge) return;
+    if (totalObjectCount === 0) {
+      objectCountBadge.textContent = '0 objects';
+    } else {
+      objectCountBadge.textContent = `${totalObjectCount.toLocaleString()} object${totalObjectCount !== 1 ? 's' : ''}`;
+    }
+  };
+
+  const loadObjects = async (append = false) => {
+    if (isLoadingObjects) return;
+    isLoadingObjects = true;
+
+    if (!append) {
+
+      if (objectsLoadingRow) objectsLoadingRow.style.display = '';
+      nextContinuationToken = null;
+      loadedObjectCount = 0;
+      allObjects = [];
+    }
+
+    // Show loading spinner when loading more
+    if (append && loadMoreSpinner) {
+      loadMoreSpinner.classList.remove('d-none');
+    }
+
+    try {
+      const params = new URLSearchParams({ max_keys: String(pageSize) });
+      if (nextContinuationToken) {
+        params.set('continuation_token', nextContinuationToken);
+      }
+
+      const response = await fetch(`${objectsApiUrl}?${params}`);
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      versioningEnabled = data.versioning_enabled;
+      if (objectsContainer) {
+        objectsContainer.dataset.versioning = versioningEnabled ? 'true' : 'false';
+      }
+
+      totalObjectCount = data.total_count || 0;
+      nextContinuationToken = data.next_continuation_token;
+
+      if (!append) {
+
+        if (objectsLoadingRow) objectsLoadingRow.remove();
+        
+        if (data.objects.length === 0) {
+          showEmptyState();
+          updateObjectCountBadge();
+          isLoadingObjects = false;
+          return;
+        }
+
+        objectsTableBody.innerHTML = '';
+      }
+
+      data.objects.forEach(obj => {
+        const row = createObjectRow(obj);
+        objectsTableBody.appendChild(row);
+        loadedObjectCount++;
+
+        // Apply current filter to newly loaded objects
+        if (currentFilterTerm) {
+          const keyLower = obj.key.toLowerCase();
+          row.style.display = keyLower.includes(currentFilterTerm) ? '' : 'none';
+        }
+
+        allObjects.push({
+          key: obj.key,
+          size: obj.size,
+          lastModified: obj.last_modified,
+          etag: obj.etag,
+          previewUrl: obj.preview_url,
+          downloadUrl: obj.download_url,
+          presignEndpoint: obj.presign_endpoint,
+          deleteEndpoint: obj.delete_endpoint,
+          metadata: JSON.stringify(obj.metadata || {}),
+          versionsEndpoint: obj.versions_endpoint,
+          restoreTemplate: obj.restore_template,
+          element: row
+        });
+      });
+
+      updateObjectCountBadge();
+
+      // Track if there are more objects to load
+      hasMoreObjects = data.is_truncated;
+      
+      if (loadMoreStatus) {
+        if (data.is_truncated) {
+          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} objects loaded`;
+        } else {
+          loadMoreStatus.textContent = `All ${loadedObjectCount.toLocaleString()} objects loaded`;
+        }
+      }
+      
+      // Update Load More button visibility
+      if (typeof updateLoadMoreButton === 'function') {
+        updateLoadMoreButton();
+      }
+
+      if (typeof initFolderNavigation === 'function') {
+        initFolderNavigation();
+      }
+
+      attachRowHandlers();
+
+    } catch (error) {
+      console.error('Failed to load objects:', error);
+      if (!append) {
+        showLoadError(error.message);
+      } else {
+        showMessage({ title: 'Load Failed', body: error.message, variant: 'danger' });
+      }
+    } finally {
+      isLoadingObjects = false;
+      // Hide loading spinner
+      if (loadMoreSpinner) {
+        loadMoreSpinner.classList.add('d-none');
+      }
+    }
+  };
+
+  const attachRowHandlers = () => {
+    const objectRows = document.querySelectorAll('[data-object-row]');
+    objectRows.forEach(row => {
+
+      if (row.dataset.handlersAttached) return;
+      row.dataset.handlersAttached = 'true';
+
+      const deleteBtn = row.querySelector('[data-delete-object]');
+      deleteBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+
+        const deleteModalEl = document.getElementById('deleteObjectModal');
+        const deleteModal = deleteModalEl ? bootstrap.Modal.getOrCreateInstance(deleteModalEl) : null;
+        const deleteObjectForm = document.getElementById('deleteObjectForm');
+        const deleteObjectKey = document.getElementById('deleteObjectKey');
+        if (deleteModal && deleteObjectForm) {
+          deleteObjectForm.action = row.dataset.deleteEndpoint;
+          if (deleteObjectKey) deleteObjectKey.textContent = row.dataset.key;
+          deleteModal.show();
+        }
+      });
+
+      const selectCheckbox = row.querySelector('[data-object-select]');
+      selectCheckbox?.addEventListener('click', (event) => event.stopPropagation());
+      selectCheckbox?.addEventListener('change', () => {
+        toggleRowSelection(row, selectCheckbox.checked);
+      });
+    });
+
+    updateBulkDeleteState();
+  };
+
+  // Infinite scroll: use IntersectionObserver to auto-load more objects
+  const scrollSentinel = document.getElementById('scroll-sentinel');
+  const scrollContainer = document.querySelector('.objects-table-container');
+  const loadMoreBtn = document.getElementById('load-more-btn');
+  
+  // Load More button click handler (fallback for mobile)
+  loadMoreBtn?.addEventListener('click', () => {
+    if (hasMoreObjects && !isLoadingObjects) {
+      loadObjects(true);
+    }
+  });
+  
+  // Show/hide Load More button based on hasMoreObjects
+  function updateLoadMoreButton() {
+    if (loadMoreBtn) {
+      loadMoreBtn.classList.toggle('d-none', !hasMoreObjects);
+    }
+  }
+  
+  if (scrollSentinel && scrollContainer) {
+    // Observer for scrolling within the container (desktop)
+    const containerObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
+          loadObjects(true);
+        }
+      });
+    }, {
+      root: scrollContainer,
+      rootMargin: '100px',
+      threshold: 0
+    });
+    containerObserver.observe(scrollSentinel);
+    
+    // Observer for page scrolling (mobile - when container is not scrollable)
+    const viewportObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
+          loadObjects(true);
+        }
+      });
+    }, {
+      root: null, // viewport
+      rootMargin: '200px',
+      threshold: 0
+    });
+    viewportObserver.observe(scrollSentinel);
+  }
+
+  // Page size selector
+  const pageSizeSelect = document.getElementById('page-size-select');
+  pageSizeSelect?.addEventListener('change', (e) => {
+    pageSize = parseInt(e.target.value, 10);
+  });
+
+  if (objectsApiUrl) {
+    loadObjects();
+  }
+
   const folderBreadcrumb = document.getElementById('folder-breadcrumb');
   const objectsTableBody = document.querySelector('#objects-table tbody');
   let currentPrefix = '';
-  let allObjects = []; // Store all object data for folder navigation
 
-  // Collect all object data from the table rows
-  rows.forEach(row => {
-    allObjects.push({
-      key: row.dataset.key,
-      size: row.dataset.size,
-      lastModified: row.dataset.lastModified,
-      etag: row.dataset.etag,
-      previewUrl: row.dataset.previewUrl,
-      downloadUrl: row.dataset.downloadUrl,
-      presignEndpoint: row.dataset.presignEndpoint,
-      deleteEndpoint: row.dataset.deleteEndpoint,
-      metadata: row.dataset.metadata,
-      versionsEndpoint: row.dataset.versionsEndpoint,
-      restoreTemplate: row.dataset.restoreTemplate,
-      element: row
+  if (objectsTableBody) {
+    objectsTableBody.addEventListener('click', (e) => {
+      const row = e.target.closest('[data-object-row]');
+      if (!row) return;
+
+      if (e.target.closest('[data-delete-object]') || e.target.closest('[data-object-select]') || e.target.closest('a')) {
+        return;
+      }
+      
+      selectRow(row);
     });
-  });
+  }
 
-  // Check if we have any prefixed objects (folders)
-  const hasFolders = allObjects.some(obj => obj.key.includes('/'));
+  const hasFolders = () => allObjects.some(obj => obj.key.includes('/'));
 
-  // Get unique folder prefixes at a given level
   const getFoldersAtPrefix = (prefix) => {
     const folders = new Set();
     const files = [];
@@ -1928,10 +2176,10 @@
       const slashIndex = remainder.indexOf('/');
       
       if (slashIndex === -1) {
-        // This is a file at this level
+
         files.push(obj);
       } else {
-        // This is a folder
+
         const folderName = remainder.slice(0, slashIndex + 1);
         folders.add(prefix + folderName);
       }
@@ -1940,16 +2188,14 @@
     return { folders: Array.from(folders).sort(), files };
   };
 
-  // Count objects in a folder
   const countObjectsInFolder = (folderPrefix) => {
     return allObjects.filter(obj => obj.key.startsWith(folderPrefix)).length;
   };
 
-  // Render breadcrumb
   const renderBreadcrumb = (prefix) => {
     if (!folderBreadcrumb) return;
     
-    if (!prefix && !hasFolders) {
+    if (!prefix && !hasFolders()) {
       folderBreadcrumb.classList.add('d-none');
       return;
     }
@@ -1957,8 +2203,7 @@
     folderBreadcrumb.classList.remove('d-none');
     const ol = folderBreadcrumb.querySelector('ol');
     ol.innerHTML = '';
-    
-    // Root item
+
     const rootLi = document.createElement('li');
     rootLi.className = 'breadcrumb-item';
     if (!prefix) {
@@ -1981,8 +2226,7 @@
       `;
     }
     ol.appendChild(rootLi);
-    
-    // Build path segments
+
     if (prefix) {
       const parts = prefix.split('/').filter(Boolean);
       let accumulated = '';
@@ -2006,8 +2250,7 @@
         ol.appendChild(li);
       });
     }
-    
-    // Add click handlers
+
     ol.querySelectorAll('[data-folder-nav]').forEach(link => {
       link.addEventListener('click', (e) => {
         e.preventDefault();
@@ -2016,12 +2259,10 @@
     });
   };
 
-  // Get all objects inside a folder (for bulk selection)
   const getObjectsInFolder = (folderPrefix) => {
     return allObjects.filter(obj => obj.key.startsWith(folderPrefix));
   };
 
-  // Create folder row element
   const createFolderRow = (folderPath) => {
     const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
     const objectCount = countObjectsInFolder(folderPath);
@@ -2055,8 +2296,7 @@
         </button>
       </td>
     `;
-    
-    // Handle folder checkbox
+
     const checkbox = tr.querySelector('[data-folder-select]');
     checkbox?.addEventListener('change', (e) => {
       e.stopPropagation();
@@ -2078,42 +2318,37 @@
     return tr;
   };
 
-  // Navigate to a folder
   const navigateToFolder = (prefix) => {
     currentPrefix = prefix;
     renderBreadcrumb(prefix);
     renderObjectsView();
-    // Clear selection when navigating
+
     selectedRows.clear();
-    // Defer updateBulkDeleteState call to ensure it's defined
+
     if (typeof updateBulkDeleteState === 'function') {
       updateBulkDeleteState();
     }
-    // Clear preview
+
     if (previewPanel) previewPanel.classList.add('d-none');
     if (previewEmpty) previewEmpty.classList.remove('d-none');
     activeRow = null;
   };
 
-  // Render objects view based on current prefix
   const renderObjectsView = () => {
     if (!objectsTableBody) return;
     
     const { folders, files } = getFoldersAtPrefix(currentPrefix);
-    
-    // Clear table
+
     objectsTableBody.innerHTML = '';
-    
-    // Add folder rows first
+
     folders.forEach(folderPath => {
       objectsTableBody.appendChild(createFolderRow(folderPath));
     });
-    
-    // Add file rows
+
     files.forEach(obj => {
       objectsTableBody.appendChild(obj.element);
       obj.element.style.display = '';
-      // Update displayed key to show just filename when inside a folder
+
       const keyCell = obj.element.querySelector('.object-key .fw-medium');
       if (keyCell && currentPrefix) {
         const displayName = obj.key.slice(currentPrefix.length);
@@ -2123,15 +2358,13 @@
         keyCell.textContent = obj.key; // Reset to full key at root
       }
     });
-    
-    // Hide files not in current view
+
     allObjects.forEach(obj => {
       if (!files.includes(obj)) {
         obj.element.style.display = 'none';
       }
     });
-    
-    // Show empty state if no content
+
     if (folders.length === 0 && files.length === 0) {
       const emptyRow = document.createElement('tr');
       emptyRow.innerHTML = `
@@ -2149,15 +2382,11 @@
       `;
       objectsTableBody.appendChild(emptyRow);
     }
-    
-    // Update select all checkbox state - deferred to ensure function is defined
+
     if (typeof updateBulkDeleteState === 'function') {
       updateBulkDeleteState();
     }
   };
-
-  // Folder view initialization moved after updateBulkDeleteState is defined
-  // ========== End Folder Navigation ==========
 
   const showMessage = ({ title = 'Notice', body = '', bodyHtml = null, variant = 'info', actionText = null, onAction = null }) => {
     if (!messageModal) {
@@ -2257,17 +2486,13 @@
     }
   });
 
-  // Handle button-based preset selector
   const presetButtons = document.querySelectorAll('.preset-btn[data-preset]');
   presetButtons.forEach(btn => {
     btn.addEventListener('click', () => {
       const preset = btn.dataset.preset;
-      // Update hidden input
       if (policyPreset) policyPreset.value = preset;
-      // Update button active states
       presetButtons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      // Apply preset
       applyPolicyPreset(preset);
     });
   });
@@ -2305,19 +2530,19 @@
       bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
     }
     if (selectAllCheckbox) {
-      // Count only visible rows in current folder view
-      const visibleRows = hasFolders
+
+      const visibleRowsRaw = hasFolders()
         ? allObjects.filter(obj => obj.key.startsWith(currentPrefix) && !obj.key.slice(currentPrefix.length).includes('/')).map(obj => obj.element)
-        : Array.from(rows);
-      const total = visibleRows.filter(r => r.style.display !== 'none').length;
-      const visibleSelectedCount = visibleRows.filter(r => r.style.display !== 'none' && selectedRows.has(r.dataset.key)).length;
+        : Array.from(document.querySelectorAll('[data-object-row]'));
+      const total = visibleRowsRaw.filter(r => r.style.display !== 'none').length;
+      const visibleSelectedCount = visibleRowsRaw.filter(r => r.style.display !== 'none' && selectedRows.has(r.dataset.key)).length;
       selectAllCheckbox.disabled = total === 0;
       selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
       selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
     }
   };
 
-  const toggleRowSelection = (row, shouldSelect) => {
+  function toggleRowSelection(row, shouldSelect) {
     if (!row || !row.dataset.key) return;
     if (shouldSelect) {
       selectedRows.set(row.dataset.key, row);
@@ -2325,7 +2550,7 @@
       selectedRows.delete(row.dataset.key);
     }
     updateBulkDeleteState();
-  };
+  }
 
   const renderBulkDeletePreview = () => {
     if (!bulkDeleteList) return;
@@ -2850,7 +3075,7 @@
     previewPlaceholder.classList.remove('d-none');
   };
 
-  const metadataFromRow = (row) => {
+  function metadataFromRow(row) {
     if (!row || !row.dataset.metadata) {
       return null;
     }
@@ -2863,10 +3088,10 @@
       console.warn('Failed to parse metadata for row', err);
     }
     return null;
-  };
+  }
 
-  const selectRow = (row) => {
-    rows.forEach((r) => r.classList.remove('table-active'));
+  function selectRow(row) {
+    document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('table-active'));
     row.classList.add('table-active');
     previewEmpty.classList.add('d-none');
     previewPanel.classList.remove('d-none');
@@ -2907,67 +3132,48 @@
       previewIframe.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
     }
-  };
-
-  rows.forEach((row) => {
-    row.addEventListener('click', () => selectRow(row));
-    row.querySelector('[data-delete-object]')?.addEventListener('click', (event) => {
-      event.stopPropagation();
-      if (!deleteModal || !deleteObjectForm) return;
-      deleteObjectForm.action = row.dataset.deleteEndpoint;
-      deleteObjectKey.textContent = row.dataset.key;
-      deleteModal.show();
-    });
-    const checkbox = row.querySelector('[data-object-select]');
-    checkbox?.addEventListener('click', (event) => event.stopPropagation());
-    checkbox?.addEventListener('change', (event) => {
-      toggleRowSelection(row, event.target.checked);
-    });
-  });
+  }
 
   updateBulkDeleteState();
 
-  // Initialize folder view if there are folders (must be after updateBulkDeleteState is defined)
-  if (hasFolders) {
-    renderBreadcrumb('');
-    renderObjectsView();
+  function initFolderNavigation() {
+    if (hasFolders()) {
+      renderBreadcrumb('');
+      renderObjectsView();
+    }
   }
 
   bulkDeleteButton?.addEventListener('click', () => openBulkDeleteModal());
   bulkDeleteConfirm?.addEventListener('click', () => performBulkDelete());
 
   document.getElementById('object-search')?.addEventListener('input', (event) => {
-    const term = event.target.value.toLowerCase();
+    currentFilterTerm = event.target.value.toLowerCase();
     
-    if (hasFolders) {
-      // With folder navigation: re-render view with search filter
+    if (hasFolders()) {
       const { folders, files } = getFoldersAtPrefix(currentPrefix);
       const tbody = objectsTableBody;
-      
-      // Clear and re-add matching content
+
       tbody.innerHTML = '';
-      
-      // Filter and add matching folders
+
       folders.forEach(folderPath => {
         const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '').toLowerCase();
-        if (folderName.includes(term)) {
+        if (folderName.includes(currentFilterTerm)) {
           tbody.appendChild(createFolderRow(folderPath));
         }
       });
-      
-      // Filter and add matching files
+
       files.forEach(obj => {
         const keyName = obj.key.slice(currentPrefix.length).toLowerCase();
-        if (keyName.includes(term)) {
+        if (keyName.includes(currentFilterTerm)) {
           tbody.appendChild(obj.element);
           obj.element.style.display = '';
         }
       });
     } else {
-      // Original behavior without folders
-      rows.forEach((row) => {
+      // Filter all loaded objects (including newly loaded ones)
+      document.querySelectorAll('[data-object-row]').forEach((row) => {
         const key = row.dataset.key.toLowerCase();
-        row.style.display = key.includes(term) ? '' : 'none';
+        row.style.display = key.includes(currentFilterTerm) ? '' : 'none';
       });
     }
   });
@@ -3002,8 +3208,7 @@
     if (!presignLink?.value) {
       return;
     }
-    
-    // Helper function for fallback copy
+
     const fallbackCopy = (text) => {
       const textArea = document.createElement('textarea');
       textArea.value = text;
@@ -3024,18 +3229,16 @@
     };
     
     let copied = false;
-    
-    // Try modern clipboard API first
+
     if (navigator.clipboard && window.isSecureContext) {
       try {
         await navigator.clipboard.writeText(presignLink.value);
         copied = true;
       } catch (error) {
-        // Fall through to fallback
+
       }
     }
-    
-    // Fallback for non-secure contexts
+
     if (!copied) {
       copied = fallbackCopy(presignLink.value);
     }
@@ -3078,7 +3281,7 @@
         return;
       }
       uploadDropZoneLabel.textContent = files.length === 1 ? files[0].name : `${files.length} files selected`;
-      // Hide single file object key option when multiple files selected
+
       if (singleFileOptions) {
         singleFileOptions.classList.toggle('d-none', files.length > 1);
       }
@@ -3113,7 +3316,7 @@
       if (metadata) {
         formData.append('metadata', JSON.stringify(metadata));
       }
-      // Get CSRF token
+
       const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
       if (csrfToken) {
         formData.append('csrf_token', csrfToken);
@@ -3151,7 +3354,6 @@
         }
       }
 
-      // Show progress UI
       if (bulkUploadProgress) bulkUploadProgress.classList.remove('d-none');
       if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
       if (uploadSubmitBtn) uploadSubmitBtn.disabled = true;
@@ -3164,8 +3366,7 @@
       for (let i = 0; i < total; i++) {
         const file = files[i];
         const current = i + 1;
-        
-        // Update progress
+
         if (bulkUploadCounter) bulkUploadCounter.textContent = `${current}/${total}`;
         if (bulkUploadCurrentFile) bulkUploadCurrentFile.textContent = `Uploading: ${file.name}`;
         if (bulkUploadProgressBar) {
@@ -3181,7 +3382,6 @@
         }
       }
 
-      // Show results
       if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
       if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
       
@@ -3201,15 +3401,14 @@
       }
 
       isUploading = false;
-      
-      // Reload page if any files were uploaded successfully
+
       if (successFiles.length > 0) {
-        // Keep button disabled and show uploading state until reload
+
         if (uploadBtnText) uploadBtnText.textContent = 'Refreshing...';
-        // Short delay to show results, then reload
+
         window.setTimeout(() => window.location.reload(), 800);
       } else {
-        // Only re-enable if no success (all failed)
+
         if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
         if (uploadFileInput) uploadFileInput.disabled = false;
       }
@@ -3223,19 +3422,16 @@
     });
     uploadDropZone?.addEventListener('click', () => uploadFileInput?.click());
 
-    // Handle form submission for bulk upload
     uploadForm.addEventListener('submit', async (event) => {
       const files = uploadFileInput.files;
       if (!files || files.length === 0) return;
       
       const keyPrefix = (uploadKeyPrefix?.value || '').trim();
-      
-      // For single file with custom object key and NO prefix, use default form submission
+
       if (files.length === 1 && !keyPrefix) {
         const customKey = uploadForm.querySelector('input[name="object_key"]')?.value?.trim();
         if (customKey) {
-          // Single file with custom key - let form submit normally
-          // Disable button immediately for feedback
+
           if (uploadSubmitBtn) {
             uploadSubmitBtn.disabled = true;
             if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
@@ -3243,11 +3439,9 @@
           return;
         }
       }
-      
-      // Bulk upload or prefix specified - handle with JavaScript
+
       event.preventDefault();
-      
-      // Disable button immediately
+
       if (uploadSubmitBtn) {
         uploadSubmitBtn.disabled = true;
         if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
@@ -3256,23 +3450,21 @@
       await performBulkUpload(Array.from(files));
     });
 
-    // Pre-fill key prefix with current folder when modal opens
     uploadModalEl?.addEventListener('show.bs.modal', () => {
-      if (hasFolders && currentPrefix) {
+      if (hasFolders() && currentPrefix) {
         uploadKeyPrefix.value = currentPrefix;
-        // Auto-expand advanced options if there's a prefix
+
         const advancedToggle = document.querySelector('[data-bs-target="#advancedUploadOptions"]');
         const advancedCollapse = document.getElementById('advancedUploadOptions');
         if (advancedToggle && advancedCollapse && !advancedCollapse.classList.contains('show')) {
           new bootstrap.Collapse(advancedCollapse, { show: true });
         }
       } else if (uploadKeyPrefix) {
-        // Clear prefix when at root
+
         uploadKeyPrefix.value = '';
       }
     });
 
-    // Reset UI when modal is closed
     uploadModalEl?.addEventListener('hidden.bs.modal', () => {
       resetUploadUI();
       uploadFileInput.value = '';
@@ -3339,17 +3531,11 @@
     }
   };
 
-  // Add listeners to update state
-  rows.forEach((row) => {
-    const checkbox = row.querySelector('[data-object-select]');
-    checkbox?.addEventListener('change', updateBulkDownloadState);
-  });
-
   selectAllCheckbox?.addEventListener('change', (event) => {
     const shouldSelect = Boolean(event.target?.checked);
     
-    if (hasFolders) {
-      // Select all objects that start with current prefix (including inside subfolders)
+    if (hasFolders()) {
+
       const objectsInCurrentView = allObjects.filter(obj => obj.key.startsWith(currentPrefix));
       objectsInCurrentView.forEach(obj => {
         const checkbox = obj.element.querySelector('[data-object-select]');
@@ -3358,14 +3544,13 @@
         }
         toggleRowSelection(obj.element, shouldSelect);
       });
-      
-      // Also toggle folder checkboxes
+
       document.querySelectorAll('[data-folder-select]').forEach(cb => {
         cb.checked = shouldSelect;
       });
     } else {
-      // Original behavior without folders
-      rows.forEach((row) => {
+
+      document.querySelectorAll('[data-object-row]').forEach((row) => {
         if (row.style.display === 'none') return;
         const checkbox = row.querySelector('[data-object-select]');
         if (!checkbox || checkbox.disabled) {
@@ -3421,7 +3606,6 @@
     }
   });
 
-  // Async load replication stats
   const replicationStatsContainer = document.getElementById('replication-stats-cards');
   if (replicationStatsContainer) {
     const statusEndpoint = replicationStatsContainer.dataset.statusEndpoint;
@@ -3438,8 +3622,7 @@
         const resp = await fetch(statusEndpoint);
         if (!resp.ok) throw new Error('Failed to fetch stats');
         const data = await resp.json();
-        
-        // Update stats
+
         if (syncedEl) syncedEl.textContent = data.objects_synced;
         if (pendingEl) {
           pendingEl.textContent = data.objects_pending;
@@ -3447,8 +3630,7 @@
         }
         if (orphanedEl) orphanedEl.textContent = data.objects_orphaned;
         if (bytesEl) bytesEl.textContent = formatBytes(data.bytes_synced);
-        
-        // Update last sync
+
         if (data.last_sync_at && lastSyncEl) {
           lastSyncEl.style.display = '';
           const date = new Date(data.last_sync_at * 1000);
@@ -3466,13 +3648,11 @@
       }
     };
 
-    // Load stats immediately
     loadReplicationStats();
 
-    // Also refresh when the refresh button is clicked
     const refreshBtn = document.querySelector('[data-refresh-replication]');
     refreshBtn?.addEventListener('click', () => {
-      // Show loading state
+
       if (syncedEl) syncedEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
       if (pendingEl) pendingEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
       if (orphanedEl) orphanedEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
@@ -3481,7 +3661,6 @@
     });
   }
 
-  // Encryption settings
   const algoAes256Radio = document.getElementById('algo_aes256');
   const algoKmsRadio = document.getElementById('algo_kms');
   const kmsKeySection = document.getElementById('kmsKeySection');
@@ -3489,7 +3668,6 @@
   const encryptionAction = document.getElementById('encryptionAction');
   const disableEncryptionBtn = document.getElementById('disableEncryptionBtn');
 
-  // Toggle KMS key section visibility based on selected algorithm
   const updateKmsKeyVisibility = () => {
     if (!kmsKeySection) return;
     const showKms = algoKmsRadio?.checked;
@@ -3499,7 +3677,6 @@
   algoAes256Radio?.addEventListener('change', updateKmsKeyVisibility);
   algoKmsRadio?.addEventListener('change', updateKmsKeyVisibility);
 
-  // Handle disable encryption button
   disableEncryptionBtn?.addEventListener('click', () => {
     if (encryptionAction && encryptionForm) {
       if (confirm('Are you sure you want to disable default encryption? New objects will not be encrypted automatically.')) {
