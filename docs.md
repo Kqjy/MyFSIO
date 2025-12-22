@@ -341,6 +341,7 @@ Before upgrading across major versions, verify compatibility:
 | From Version | To Version | Breaking Changes | Migration Required |
 |--------------|------------|------------------|-------------------|
 | 0.1.x | 0.2.x | None expected | No |
+| 0.1.6 | 0.1.7 | None | No |
 | < 0.1.0 | >= 0.1.0 | New IAM config format | Yes - run migration script |
 
 **Automatic compatibility detection:**
@@ -633,6 +634,48 @@ curl -X PUT http://127.0.0.1:5000/bucket-policy/test \
 ```
 
 The UI will reflect this change as soon as the request completes thanks to the hot reload.
+
+### UI Object Browser
+
+The bucket detail page includes a powerful object browser with the following features:
+
+#### Folder Navigation
+
+Objects with forward slashes (`/`) in their keys are displayed as a folder hierarchy. Click a folder row to navigate into it. A breadcrumb navigation bar shows your current path and allows quick navigation back to parent folders or the root.
+
+#### Pagination & Infinite Scroll
+
+- Objects load in configurable batches (50, 100, 150, 200, or 250 per page)
+- Scroll to the bottom to automatically load more objects (infinite scroll)
+- A **Load more** button is available as a fallback for touch devices or when infinite scroll doesn't trigger
+- The footer shows the current load status (e.g., "Showing 100 of 500 objects")
+
+#### Bulk Operations
+
+- Select multiple objects using checkboxes
+- **Bulk Delete**: Delete multiple objects at once
+- **Bulk Download**: Download selected objects as individual files
+
+#### Search & Filter
+
+Use the search box to filter objects by name in real-time. The filter applies to the currently loaded objects.
+
+#### Error Handling
+
+If object loading fails (e.g., network error), a friendly error message is displayed with a **Retry** button to attempt loading again.
+
+#### Object Preview
+
+Click any object row to view its details in the preview sidebar:
+- File size and last modified date
+- ETag (content hash)
+- Custom metadata (if present)
+- Download and presign (share link) buttons
+- Version history (when versioning is enabled)
+
+#### Drag & Drop Upload
+
+Drag files directly onto the objects table to upload them to the current bucket and folder path.
 
 ## 6. Presigned URLs
 
