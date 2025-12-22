@@ -155,7 +155,7 @@ class ReplicationManager:
         
         try:
             # Get source objects
-            source_objects = self.storage.list_objects(bucket_name)
+            source_objects = self.storage.list_objects_all(bucket_name)
             source_keys = {obj.key: obj.size for obj in source_objects}
             
             # Get destination objects
@@ -219,7 +219,7 @@ class ReplicationManager:
             return
         
         try:
-            objects = self.storage.list_objects(bucket_name)
+            objects = self.storage.list_objects_all(bucket_name)
             logger.info(f"Starting replication of {len(objects)} existing objects from {bucket_name}")
             for obj in objects:
                 self._executor.submit(self._replicate_task, bucket_name, obj.key, rule, connection, "write")

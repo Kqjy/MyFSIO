@@ -199,7 +199,7 @@
       })();
     </script>
     <script>
-      // Toast utility
+
       window.showToast = function(message, title = 'Notification', type = 'info') {
         const toastEl = document.getElementById('liveToast');
         const toastTitle = document.getElementById('toastTitle');
@@ -207,8 +207,7 @@
         
         toastTitle.textContent = title;
         toastMessage.textContent = message;
-        
-        // Reset classes
+
         toastEl.classList.remove('text-bg-primary', 'text-bg-success', 'text-bg-danger', 'text-bg-warning');
         
         if (type === 'success') toastEl.classList.add('text-bg-success');
@@ -221,13 +220,11 @@
     </script>
     <script>
       (function () {
-        // Show flashed messages as toasts
+
         {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
           {% for category, message in messages %}
-            // Map Flask categories to Toast types
-            // Flask: success, danger, warning, info
-            // Toast: success, error, warning, info
+
             var type = "{{ category }}";
             if (type === "danger") type = "error";
             window.showToast({{ message | tojson | safe }}, "Notification", type);

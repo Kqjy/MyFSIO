@@ -62,7 +62,7 @@ def test_bulk_delete_json_route(tmp_path: Path):
     assert set(payload["deleted"]) == {"first.txt", "missing.txt"}
     assert payload["errors"] == []
 
-    listing = storage.list_objects("demo")
+    listing = storage.list_objects_all("demo")
     assert {meta.key for meta in listing} == {"second.txt"}
 
 
@@ -92,5 +92,5 @@ def test_bulk_delete_validation(tmp_path: Path):
     assert limit_response.status_code == 400
     assert limit_response.get_json()["status"] == "error"
 
-    still_there = storage.list_objects("demo")
+    still_there = storage.list_objects_all("demo")
     assert {meta.key for meta in still_there} == {"keep.txt"}

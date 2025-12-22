@@ -220,7 +220,7 @@ def test_bucket_config_filename_allowed(tmp_path):
     storage.create_bucket("demo")
     storage.put_object("demo", ".bucket.json", io.BytesIO(b"{}"))
 
-    objects = storage.list_objects("demo")
+    objects = storage.list_objects_all("demo")
     assert any(meta.key == ".bucket.json" for meta in objects)
 
 

@@ -131,7 +131,7 @@
 {{ super() }}
 <script>
   (function () {
-    // Search functionality
+
     const searchInput = document.getElementById('bucket-search');
     const bucketItems = document.querySelectorAll('.bucket-item');
     const noBucketsMsg = document.querySelector('.text-center.py-5'); // The "No buckets found" empty state
@@ -153,7 +153,6 @@
       });
     }
 
-    // View toggle functionality
     const viewGrid = document.getElementById('view-grid');
     const viewList = document.getElementById('view-list');
     const container = document.getElementById('buckets-container');
@@ -168,8 +167,7 @@
         });
         cards.forEach(card => {
           card.classList.remove('h-100');
-          // Optional: Add flex-row to card-body content if we want a horizontal layout
-          // For now, full-width stacked cards is a good list view
+
         });
         localStorage.setItem('bucket-view-pref', 'list');
       } else {
@@ -188,7 +186,6 @@
       viewGrid.addEventListener('change', () => setView('grid'));
       viewList.addEventListener('change', () => setView('list'));
 
-      // Restore preference
       const pref = localStorage.getItem('bucket-view-pref');
       if (pref === 'list') {
         viewList.checked = true;

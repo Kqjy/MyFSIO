@@ -203,7 +203,6 @@
   {% endif %}
 </div>
 
-<!-- Create User Modal -->
 <div class="modal fade" id="createUserModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -252,7 +251,6 @@
   </div>
 </div>
 
-<!-- Policy Editor Modal -->
 <div class="modal fade" id="policyEditorModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
     <div class="modal-content">
@@ -303,7 +301,6 @@
   </div>
 </div>
 
-<!-- Edit User Modal -->
 <div class="modal fade" id="editUserModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -338,7 +335,6 @@
   </div>
 </div>
 
-<!-- Delete User Modal -->
 <div class="modal fade" id="deleteUserModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -382,7 +378,6 @@
   </div>
 </div>
 
-<!-- Rotate Secret Modal -->
 <div class="modal fade" id="rotateSecretModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -486,8 +481,7 @@
 
     const iamUsersData = document.getElementById('iamUsersJson');
     const users = iamUsersData ? JSON.parse(iamUsersData.textContent || '[]') : [];
-    
-    // Policy Editor Logic
+
     const policyModalEl = document.getElementById('policyEditorModal');
     const policyModal = new bootstrap.Modal(policyModalEl);
     const userLabelEl = document.getElementById('policyEditorUserLabel');
@@ -534,7 +528,6 @@
       button.addEventListener('click', () => applyTemplate(button.dataset.policyTemplate));
     });
 
-    // Create User modal template buttons
     const createUserPoliciesEl = document.getElementById('createUserPolicies');
     const createTemplateButtons = document.querySelectorAll('[data-create-policy-template]');
     
@@ -591,7 +584,6 @@
       });
     });
 
-    // Edit User Logic
     const editUserModal = new bootstrap.Modal(document.getElementById('editUserModal'));
     const editUserForm = document.getElementById('editUserForm');
     const editUserDisplayName = document.getElementById('editUserDisplayName');
@@ -606,7 +598,6 @@
         });
     });
 
-    // Delete User Logic
     const deleteUserModal = new bootstrap.Modal(document.getElementById('deleteUserModal'));
     const deleteUserForm = document.getElementById('deleteUserForm');
     const deleteUserLabel = document.getElementById('deleteUserLabel');
@@ -628,7 +619,6 @@
         });
     });
 
-    // Rotate Secret Logic
     const rotateSecretModal = new bootstrap.Modal(document.getElementById('rotateSecretModal'));
     const rotateUserLabel = document.getElementById('rotateUserLabel');
     const confirmRotateBtn = document.getElementById('confirmRotateBtn');
@@ -644,8 +634,7 @@
         btn.addEventListener('click', () => {
             currentRotateKey = btn.dataset.rotateUser;
             rotateUserLabel.textContent = currentRotateKey;
-            
-            // Reset Modal State
+
             rotateSecretConfirm.classList.remove('d-none');
             rotateSecretResult.classList.add('d-none');
             confirmRotateBtn.classList.remove('d-none');
@@ -679,8 +668,7 @@
             
             const data = await response.json();
             newSecretKeyInput.value = data.secret_key;
-            
-            // Show Result
+
             rotateSecretConfirm.classList.add('d-none');
             rotateSecretResult.classList.remove('d-none');
             confirmRotateBtn.classList.add('d-none');

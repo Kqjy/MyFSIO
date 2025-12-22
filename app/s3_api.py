@@ -1155,7 +1155,7 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
     storage = _storage()
     
     try:
-        objects = storage.list_objects(bucket_name)
+        objects = storage.list_objects_all(bucket_name)
     except StorageError as exc:
         return _error_response("NoSuchBucket", str(exc), 404)
     
@@ -1651,7 +1651,7 @@ def bucket_handler(bucket_name: str) -> Response:
             return error
         return _error_response("AccessDenied", str(exc), 403)
     try:
-        objects = storage.list_objects(bucket_name)
+        objects = storage.list_objects_all(bucket_name)
     except StorageError as exc:
         return _error_response("NoSuchBucket", str(exc), 404)
 

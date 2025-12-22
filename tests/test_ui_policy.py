@@ -70,8 +70,12 @@ def test_ui_bucket_policy_enforcement_toggle(tmp_path: Path, enforce: bool):
         assert b"Access denied by bucket policy" in response.data
     else:
         assert response.status_code == 200
-        assert b"vid.mp4" in response.data
         assert b"Access denied by bucket policy" not in response.data
+        # Objects are now loaded via async API - check the objects endpoint
+        objects_response = client.get("/ui/buckets/testbucket/objects")
+        assert objects_response.status_code == 200
+        data = objects_response.get_json()
+        assert any(obj["key"] == "vid.mp4" for obj in data["objects"])
 
 
 def test_ui_bucket_policy_disabled_by_default(tmp_path: Path):
@@ -109,5 +113,9 @@ def test_ui_bucket_policy_disabled_by_default(tmp_path: Path):
     client.post("/ui/login", data={"access_key": "test", "secret_key": "secret"}, follow_redirects=True)
     response = client.get("/ui/buckets/testbucket", follow_redirects=True)
     assert response.status_code == 200
-    assert b"vid.mp4" in response.data
     assert b"Access denied by bucket policy" not in response.data
+    # Objects are now loaded via async API - check the objects endpoint
+    objects_response = client.get("/ui/buckets/testbucket/objects")
+    assert objects_response.status_code == 200
+    data = objects_response.get_json()
+    assert any(obj["key"] == "vid.mp4" for obj in data["objects"])
