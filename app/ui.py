@@ -189,7 +189,7 @@ def inject_nav_state() -> dict[str, Any]:
     return {
         "principal": principal,
         "can_manage_iam": can_manage,
-        "can_view_metrics": can_manage,  # Only admins can view metrics
+        "can_view_metrics": can_manage, 
         "csrf_token": generate_csrf,
     }
 
@@ -294,7 +294,6 @@ def bucket_detail(bucket_name: str):
     storage = _storage()
     try:
         _authorize_ui(principal, bucket_name, "list")
-        # Don't load objects here - UI fetches them asynchronously via /buckets/<name>/objects
         if not storage.bucket_exists(bucket_name):
             raise StorageError("Bucket does not exist")
     except (StorageError, IamError) as exc:
@@ -343,7 +342,6 @@ def bucket_detail(bucket_name: str):
         except IamError:
             can_manage_versioning = False
 
-    # Check replication permission
     can_manage_replication = False
     if principal:
         try:
@@ -352,7 +350,6 @@ def bucket_detail(bucket_name: str):
         except IamError:
             can_manage_replication = False
 
-    # Check if user is admin (can configure replication settings, not just toggle)
     is_replication_admin = False
     if principal:
         try:
@@ -361,12 +358,9 @@ def bucket_detail(bucket_name: str):
         except IamError:
             is_replication_admin = False
 
-    # Replication info - don't compute sync status here (it's slow), let JS fetch it async
     replication_rule = _replication().get_rule(bucket_name)
-    # Load connections for admin, or for non-admin if there's an existing rule (to show target name)
     connections = _connections().list() if (is_replication_admin or replication_rule) else []
 
-    # Encryption settings
     encryption_config = storage.get_bucket_encryption(bucket_name)
     kms_manager = _kms()
     kms_keys = kms_manager.list_keys() if kms_manager else []
@@ -374,7 +368,6 @@ def bucket_detail(bucket_name: str):
     encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
     can_manage_encryption = can_manage_versioning  # Same as other bucket properties
 
-    # Quota settings (admin only)
     bucket_quota = storage.get_bucket_quota(bucket_name)
     bucket_stats = storage.bucket_stats(bucket_name)
     can_manage_quota = False
@@ -384,7 +377,6 @@ def bucket_detail(bucket_name: str):
     except IamError:
         pass
 
-    # Pass the objects API endpoint URL for async loading
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
 
     return render_template(
@@ -1256,7 +1248,6 @@ def delete_iam_user(access_key: str):
         return redirect(url_for("ui.iam_dashboard"))
 
     if access_key == principal.access_key:
-        # Self-deletion
         try:
             _iam().delete_user(access_key)
             session.pop("credentials", None)
@@ -1338,6 +1329,9 @@ def create_connection():
 
 @ui_bp.post("/connections/test")
 def test_connection():
+    from botocore.config import Config as BotoConfig
+    from botocore.exceptions import ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
+    
     principal = _current_principal()
     try:
         _iam().authorize(principal, None, "iam:list_users")
@@ -1354,18 +1348,32 @@ def test_connection():
         return jsonify({"status": "error", "message": "Missing credentials"}), 400
 
     try:
+        config = BotoConfig(
+            connect_timeout=5,
+            read_timeout=10,
+            retries={'max_attempts': 1}
+        )
         s3 = boto3.client(
             "s3",
             endpoint_url=endpoint,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region,
+            config=config,
         )
-        # Try to list buckets to verify credentials and endpoint
+
         s3.list_buckets()
         return jsonify({"status": "ok", "message": "Connection successful"})
+    except (ConnectTimeoutError, ReadTimeoutError):
+        return jsonify({"status": "error", "message": f"Connection timed out - endpoint may be down or unreachable: {endpoint}"}), 400
+    except EndpointConnectionError:
+        return jsonify({"status": "error", "message": f"Could not connect to endpoint: {endpoint}"}), 400
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        error_msg = e.response.get('Error', {}).get('Message', str(e))
+        return jsonify({"status": "error", "message": f"Connection failed ({error_code}): {error_msg}"}), 400
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
+        return jsonify({"status": "error", "message": f"Connection failed: {str(e)}"}), 400
 
 
 @ui_bp.post("/connections/<connection_id>/update")
@@ -1426,7 +1434,6 @@ def update_bucket_replication(bucket_name: str):
         flash(str(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
     
-    # Check if user is admin (required for create/delete operations)
     is_admin = False
     try:
         _iam().authorize(principal, None, "iam:list_users")
@@ -1437,14 +1444,12 @@ def update_bucket_replication(bucket_name: str):
     action = request.form.get("action")
     
     if action == "delete":
-        # Admin only - remove configuration entirely
         if not is_admin:
             flash("Only administrators can remove replication configuration", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
         _replication().delete_rule(bucket_name)
         flash("Replication configuration removed", "info")
     elif action == "pause":
-        # Users can pause - just set enabled=False
         rule = _replication().get_rule(bucket_name)
         if rule:
             rule.enabled = False
@@ -1453,7 +1458,6 @@ def update_bucket_replication(bucket_name: str):
         else:
             flash("No replication configuration to pause", "warning")
     elif action == "resume":
-        # Users can resume - just set enabled=True
         rule = _replication().get_rule(bucket_name)
         if rule:
             rule.enabled = True
@@ -1462,7 +1466,6 @@ def update_bucket_replication(bucket_name: str):
         else:
             flash("No replication configuration to resume", "warning")
     elif action == "create":
-        # Admin only - create new configuration
         if not is_admin:
             flash("Only administrators can configure replication settings", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
@@ -1487,7 +1490,6 @@ def update_bucket_replication(bucket_name: str):
             )
             _replication().set_rule(rule)
             
-            # If mode is "all", trigger replication of existing objects
             if replication_mode == REPLICATION_MODE_ALL:
                 _replication().replicate_existing_objects(bucket_name)
                 flash("Replication configured. Existing objects are being replicated in the background.", "success")
@@ -1512,10 +1514,31 @@ def get_replication_status(bucket_name: str):
     if not rule:
         return jsonify({"error": "No replication rule"}), 404
     
-    # This is the slow operation - compute sync status by comparing buckets
-    stats = _replication().get_sync_status(bucket_name)
+    connection = _connections().get(rule.target_connection_id)
+    endpoint_healthy = False
+    endpoint_error = None
+    if connection:
+        endpoint_healthy = _replication().check_endpoint_health(connection)
+        if not endpoint_healthy:
+            endpoint_error = f"Cannot reach endpoint: {connection.endpoint_url}"
+    else:
+        endpoint_error = "Target connection not found"
+    
+    stats = None
+    if endpoint_healthy:
+        stats = _replication().get_sync_status(bucket_name)
+    
     if not stats:
-        return jsonify({"error": "Failed to compute status"}), 500
+        return jsonify({
+            "objects_synced": 0,
+            "objects_pending": 0,
+            "objects_orphaned": 0,
+            "bytes_synced": 0,
+            "last_sync_at": rule.stats.last_sync_at if rule.stats else None,
+            "last_sync_key": rule.stats.last_sync_key if rule.stats else None,
+            "endpoint_healthy": endpoint_healthy,
+            "endpoint_error": endpoint_error,
+        })
     
     return jsonify({
         "objects_synced": stats.objects_synced,
@@ -1524,6 +1547,28 @@ def get_replication_status(bucket_name: str):
         "bytes_synced": stats.bytes_synced,
         "last_sync_at": stats.last_sync_at,
         "last_sync_key": stats.last_sync_key,
+        "endpoint_healthy": endpoint_healthy,
+        "endpoint_error": endpoint_error,
+    })
+
+
+@ui_bp.get("/connections/<connection_id>/health")
+def check_connection_health(connection_id: str):
+    """Check if a connection endpoint is reachable."""
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+    
+    conn = _connections().get(connection_id)
+    if not conn:
+        return jsonify({"healthy": False, "error": "Connection not found"}), 404
+    
+    healthy = _replication().check_endpoint_health(conn)
+    return jsonify({
+        "healthy": healthy,
+        "error": None if healthy else f"Cannot reach endpoint: {conn.endpoint_url}"
     })
 
 
@@ -1544,7 +1589,6 @@ def connections_dashboard():
 def metrics_dashboard():
     principal = _current_principal()
     
-    # Metrics are restricted to admin users
     try:
         _iam().authorize(principal, None, "iam:list_users")
     except IamError:
@@ -1568,16 +1612,13 @@ def metrics_dashboard():
     total_bytes_used = 0
     total_versions = 0
     
-    # Note: Uses cached stats from storage layer to improve performance
     cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
     for bucket in buckets:
         stats = storage.bucket_stats(bucket.name, cache_ttl=cache_ttl)
-        # Use totals which include archived versions
         total_objects += stats.get("total_objects", stats.get("objects", 0))
         total_bytes_used += stats.get("total_bytes", stats.get("bytes", 0))
         total_versions += stats.get("version_count", 0)
     
-    # Calculate system uptime
     boot_time = psutil.boot_time()
     uptime_seconds = time.time() - boot_time
     uptime_days = int(uptime_seconds / 86400)

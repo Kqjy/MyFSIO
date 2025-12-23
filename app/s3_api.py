@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse, unquote
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
 from flask import Blueprint, Response, current_app, jsonify, request, g
@@ -22,8 +22,6 @@ from .storage import ObjectStorage, StorageError, QuotaExceededError
 
 s3_api_bp = Blueprint("s3_api", __name__)
 
-
-# Helper functions for accessing app extensions and generating responses
 def _storage() -> ObjectStorage:
     return current_app.extensions["object_storage"]
 
@@ -68,8 +66,26 @@ def _get_signature_key(key: str, date_stamp: str, region_name: str, service_name
     return k_signing
 
 
+def _get_canonical_uri(req: Any) -> str:
+    """Get the canonical URI for SigV4 signature verification.
+    
+    AWS SigV4 requires the canonical URI to be URL-encoded exactly as the client
+    sent it. Flask/Werkzeug automatically URL-decodes request.path, so we need
+    to get the raw path from the environ.
+    
+    The canonical URI should have each path segment URL-encoded (with '/' preserved),
+    and the encoding should match what the client used when signing.
+    """
+    raw_uri = req.environ.get('RAW_URI') or req.environ.get('REQUEST_URI')
+    
+    if raw_uri:
+        path = raw_uri.split('?')[0]
+        return path
+    
+    return quote(req.path, safe="/-_.~")
+
+
 def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
-    # Parse Authorization header: AWS4-HMAC-SHA256 Credential=AKIA.../20230101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=...
     match = re.match(
         r"AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request, SignedHeaders=([^,]+), Signature=(.+)",
         auth_header,
@@ -82,9 +98,8 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     if not secret_key:
         raise IamError("Invalid access key")
 
-    # Build canonical request
     method = req.method
-    canonical_uri = quote(req.path, safe="/-_.~")
+    canonical_uri = _get_canonical_uri(req)
     
     query_args = []
     for key, value in req.args.items(multi=True):
@@ -124,13 +139,12 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
 
     now = datetime.now(timezone.utc)
     time_diff = abs((now - request_time).total_seconds())
-    if time_diff > 900:  # AWS standard: 15-minute request validity window
+    if time_diff > 900:
         raise IamError("Request timestamp too old or too far in the future")
 
     required_headers = {'host', 'x-amz-date'}
     signed_headers_set = set(signed_headers_str.split(';'))
     if not required_headers.issubset(signed_headers_set):
-        # Some clients use 'date' instead of 'x-amz-date'
         if 'date' in signed_headers_set:
             required_headers.remove('x-amz-date')
             required_headers.add('date')
@@ -177,9 +191,8 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     if not secret_key:
         raise IamError("Invalid access key")
 
-    # Build canonical request
     method = req.method
-    canonical_uri = quote(req.path, safe="/-_.~")
+    canonical_uri = _get_canonical_uri(req)
     
     query_args = []
     for key, value in req.args.items(multi=True):
@@ -211,7 +224,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         payload_hash
     ])
     
-    # Build signature
     algorithm = "AWS4-HMAC-SHA256"
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
     hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
@@ -479,7 +491,6 @@ def _generate_presigned_url(
     }
     canonical_query = _encode_query_params(query_params)
 
-    # Get presigned URL host and scheme from config or request headers
     api_base = current_app.config.get("API_BASE_URL")
     if api_base:
         parsed = urlparse(api_base)
@@ -839,7 +850,6 @@ def _bucket_versioning_handler(bucket_name: str) -> Response:
         current_app.logger.info("Bucket versioning updated", extra={"bucket": bucket_name, "status": status})
         return Response(status=200)
     
-    # GET
     try:
         enabled = storage.is_versioning_enabled(bucket_name)
     except StorageError as exc:
@@ -875,7 +885,7 @@ def _bucket_tagging_handler(bucket_name: str) -> Response:
             return _error_response("NoSuchBucket", str(exc), 404)
         current_app.logger.info("Bucket tags deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     try:
         tags = _parse_tagging_document(payload)
@@ -900,7 +910,6 @@ def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
     if error:
         return error
     
-    # Use read permission for GET, write for PUT/DELETE
     action = "read" if request.method == "GET" else "write"
     try:
         _authorize_action(principal, bucket_name, action, object_key=object_key)
@@ -1079,7 +1088,6 @@ def _bucket_location_handler(bucket_name: str) -> Response:
     if not storage.bucket_exists(bucket_name):
         return _error_response("NoSuchBucket", "Bucket does not exist", 404)
     
-    # Return bucket location (empty for us-east-1 per AWS spec)
     region = current_app.config.get("AWS_REGION", "us-east-1")
     root = Element("LocationConstraint")
     root.text = region if region != "us-east-1" else None
@@ -1106,7 +1114,6 @@ def _bucket_acl_handler(bucket_name: str) -> Response:
         current_app.logger.info("Bucket ACL set (canned)", extra={"bucket": bucket_name, "acl": canned_acl})
         return Response(status=200)
     
-    # Return basic ACL document showing owner's full control
     root = Element("AccessControlPolicy")
     owner = SubElement(root, "Owner")
     SubElement(owner, "ID").text = principal.access_key if principal else "anonymous"
@@ -1154,7 +1161,6 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
     if key_marker:
         objects = [obj for obj in objects if obj.key > key_marker]
     
-    # Build XML response
     root = Element("ListVersionsResult", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
     SubElement(root, "Name").text = bucket_name
     SubElement(root, "Prefix").text = prefix
@@ -1172,7 +1178,6 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
             is_truncated = True
             break
         
-        # Add current version to response
         version = SubElement(root, "Version")
         SubElement(version, "Key").text = obj.key
         SubElement(version, "VersionId").text = "null"
@@ -1189,7 +1194,6 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
         version_count += 1
         next_key_marker = obj.key
         
-        # Get historical versions
         try:
             versions = storage.list_object_versions(bucket_name, obj.key)
             for v in versions:
@@ -1273,14 +1277,12 @@ def _render_lifecycle_config(config: list) -> Element:
         rule_el = SubElement(root, "Rule")
         SubElement(rule_el, "ID").text = rule.get("ID", "")
         
-        # Filter
         filter_el = SubElement(rule_el, "Filter")
         if rule.get("Prefix"):
             SubElement(filter_el, "Prefix").text = rule.get("Prefix", "")
         
         SubElement(rule_el, "Status").text = rule.get("Status", "Enabled")
         
-        # Add expiration rule if present
         if "Expiration" in rule:
             exp = rule["Expiration"]
             exp_el = SubElement(rule_el, "Expiration")
@@ -1291,14 +1293,12 @@ def _render_lifecycle_config(config: list) -> Element:
             if exp.get("ExpiredObjectDeleteMarker"):
                 SubElement(exp_el, "ExpiredObjectDeleteMarker").text = "true"
         
-        # Add noncurrent version expiration if present
         if "NoncurrentVersionExpiration" in rule:
             nve = rule["NoncurrentVersionExpiration"]
             nve_el = SubElement(rule_el, "NoncurrentVersionExpiration")
             if "NoncurrentDays" in nve:
                 SubElement(nve_el, "NoncurrentDays").text = str(nve["NoncurrentDays"])
         
-        # Add incomplete multipart upload cleanup if present
         if "AbortIncompleteMultipartUpload" in rule:
             aimu = rule["AbortIncompleteMultipartUpload"]
             aimu_el = SubElement(rule_el, "AbortIncompleteMultipartUpload")
@@ -1322,29 +1322,24 @@ def _parse_lifecycle_config(payload: bytes) -> list:
     for rule_el in root.findall("{*}Rule") or root.findall("Rule"):
         rule: dict = {}
         
-        # Extract rule ID
         id_el = rule_el.find("{*}ID") or rule_el.find("ID")
         if id_el is not None and id_el.text:
             rule["ID"] = id_el.text.strip()
         
-        # Extract filter prefix
         filter_el = rule_el.find("{*}Filter") or rule_el.find("Filter")
         if filter_el is not None:
             prefix_el = filter_el.find("{*}Prefix") or filter_el.find("Prefix")
             if prefix_el is not None and prefix_el.text:
                 rule["Prefix"] = prefix_el.text
         
-        # Fall back to legacy Prefix element (outside Filter)
         if "Prefix" not in rule:
             prefix_el = rule_el.find("{*}Prefix") or rule_el.find("Prefix")
             if prefix_el is not None:
                 rule["Prefix"] = prefix_el.text or ""
         
-        # Extract status
         status_el = rule_el.find("{*}Status") or rule_el.find("Status")
         rule["Status"] = (status_el.text or "Enabled").strip() if status_el is not None else "Enabled"
         
-        # Parse expiration rule
         exp_el = rule_el.find("{*}Expiration") or rule_el.find("Expiration")
         if exp_el is not None:
             expiration: dict = {}
@@ -1360,7 +1355,6 @@ def _parse_lifecycle_config(payload: bytes) -> list:
             if expiration:
                 rule["Expiration"] = expiration
         
-        # NoncurrentVersionExpiration
         nve_el = rule_el.find("{*}NoncurrentVersionExpiration") or rule_el.find("NoncurrentVersionExpiration")
         if nve_el is not None:
             nve: dict = {}
@@ -1370,7 +1364,6 @@ def _parse_lifecycle_config(payload: bytes) -> list:
             if nve:
                 rule["NoncurrentVersionExpiration"] = nve
         
-        # AbortIncompleteMultipartUpload
         aimu_el = rule_el.find("{*}AbortIncompleteMultipartUpload") or rule_el.find("AbortIncompleteMultipartUpload")
         if aimu_el is not None:
             aimu: dict = {}
@@ -1408,7 +1401,6 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
         if not quota:
             return _error_response("NoSuchQuotaConfiguration", "No quota configuration found", 404)
         
-        # Return as JSON for simplicity (not a standard S3 API)
         stats = storage.bucket_stats(bucket_name)
         return jsonify({
             "quota": quota,
@@ -1437,7 +1429,6 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
     if max_size_bytes is None and max_objects is None:
         return _error_response("InvalidArgument", "At least one of max_size_bytes or max_objects is required", 400)
     
-    # Validate types
     if max_size_bytes is not None:
         try:
             max_size_bytes = int(max_size_bytes)
@@ -1548,7 +1539,6 @@ def _bulk_delete_handler(bucket_name: str) -> Response:
     return _xml_response(result, status=200)
 
 
-# Route handlers for S3 API endpoints
 @s3_api_bp.get("/")
 @limiter.limit("60 per minute")
 def list_buckets() -> Response:
@@ -1626,7 +1616,6 @@ def bucket_handler(bucket_name: str) -> Response:
         current_app.logger.info("Bucket deleted", extra={"bucket": bucket_name})
         return Response(status=204)
 
-    # Handle GET - list objects (supports both ListObjects and ListObjectsV2)
     principal, error = _require_principal()
     try:
         _authorize_action(principal, bucket_name, "list")
@@ -1640,7 +1629,6 @@ def bucket_handler(bucket_name: str) -> Response:
     delimiter = request.args.get("delimiter", "")
     max_keys = min(int(request.args.get("max-keys", current_app.config["UI_PAGE_SIZE"])), 1000)
     
-    # Use appropriate markers for pagination depending on API version
     marker = request.args.get("marker", "")  # ListObjects v1
     continuation_token = request.args.get("continuation-token", "")  # ListObjectsV2
     start_after = request.args.get("start-after", "")  # ListObjectsV2
@@ -1660,7 +1648,6 @@ def bucket_handler(bucket_name: str) -> Response:
     else:
         effective_start = marker
     
-    # Fetch with buffer for delimiter processing; delimiter requires extra objects to compute prefixes
     fetch_keys = max_keys * 10 if delimiter else max_keys
     try:
         list_result = storage.list_objects(
@@ -1680,7 +1667,6 @@ def bucket_handler(bucket_name: str) -> Response:
         for obj in objects:
             key_after_prefix = obj.key[len(prefix):] if prefix else obj.key
             if delimiter in key_after_prefix:
-                # Extract common prefix (folder-like structure)
                 common_prefix = prefix + key_after_prefix.split(delimiter)[0] + delimiter
                 if common_prefix not in seen_prefixes:
                     seen_prefixes.add(common_prefix)
@@ -1778,7 +1764,6 @@ def object_handler(bucket_name: str, object_key: str):
     if "tagging" in request.args:
         return _object_tagging_handler(bucket_name, object_key)
 
-    # Multipart Uploads
     if request.method == "POST":
         if "uploads" in request.args:
             return _initiate_multipart_upload(bucket_name, object_key)
@@ -1831,7 +1816,6 @@ def object_handler(bucket_name: str, object_key: str):
         response = Response(status=200)
         response.headers["ETag"] = f'"{meta.etag}"'
         
-        # Trigger replication for non-replication requests
         if "S3ReplicationAgent" not in request.headers.get("User-Agent", ""):
             _replication_manager().trigger_replication(bucket_name, object_key, action="write")
             
@@ -1851,7 +1835,6 @@ def object_handler(bucket_name: str, object_key: str):
         metadata = storage.get_object_metadata(bucket_name, object_key)
         mimetype = mimetypes.guess_type(object_key)[0] or "application/octet-stream"
         
-        # Decrypt encrypted objects
         is_encrypted = "x-amz-server-side-encryption" in metadata
         
         if request.method == "GET":
@@ -1865,15 +1848,12 @@ def object_handler(bucket_name: str, object_key: str):
                 except StorageError as exc:
                     return _error_response("InternalError", str(exc), 500)
             else:
-                # Stream unencrypted file directly
                 stat = path.stat()
                 response = Response(_stream_file(path), mimetype=mimetype, direct_passthrough=True)
                 logged_bytes = stat.st_size
                 etag = storage._compute_etag(path)
         else:
-            # HEAD request
             if is_encrypted and hasattr(storage, 'get_object_data'):
-                # For encrypted objects, we need to report decrypted size
                 try:
                     data, _ = storage.get_object_data(bucket_name, object_key)
                     response = Response(status=200)
@@ -1902,7 +1882,6 @@ def object_handler(bucket_name: str, object_key: str):
     storage.delete_object(bucket_name, object_key)
     current_app.logger.info("Object deleted", extra={"bucket": bucket_name, "key": object_key})
     
-    # Trigger replication if not a replication request
     user_agent = request.headers.get("User-Agent", "")
     if "S3ReplicationAgent" not in user_agent:
         _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
@@ -2183,7 +2162,6 @@ class AwsChunkedDecoder:
                 self.chunk_remaining -= len(chunk)
                 
                 if self.chunk_remaining == 0:
-                    # Read CRLF after chunk data
                     crlf = self.stream.read(2)
                     if crlf != b"\r\n":
                         raise IOError("Malformed chunk: missing CRLF")
@@ -2202,7 +2180,6 @@ class AwsChunkedDecoder:
                 
                 try:
                     line_str = line.decode("ascii").strip()
-                    # Handle chunk-signature extension if present (e.g. "1000;chunk-signature=...")
                     if ";" in line_str:
                         line_str = line_str.split(";")[0]
                     chunk_size = int(line_str, 16)
@@ -2358,7 +2335,6 @@ def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
     try:
         _storage().abort_multipart_upload(bucket_name, upload_id)
     except StorageError as exc:
-        # Abort is idempotent, but if bucket missing...
         if "Bucket does not exist" in str(exc):
             return _error_response("NoSuchBucket", str(exc), 404)
             
@@ -2368,7 +2344,6 @@ def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
 @s3_api_bp.before_request
 def resolve_principal():
     g.principal = None
-    # Try SigV4
     try:
         if ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
            (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
@@ -2377,7 +2352,6 @@ def resolve_principal():
     except Exception:
         pass
     
-    # Try simple auth headers (internal/testing)
     access_key = request.headers.get("X-Access-Key")
     secret_key = request.headers.get("X-Secret-Key")
     if access_key and secret_key:

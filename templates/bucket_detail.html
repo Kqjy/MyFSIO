@@ -954,7 +954,7 @@
             </div>
             <div class="card-body">
               {% if replication_rule and replication_rule.enabled %}
-              <div class="alert alert-success d-flex align-items-center mb-4" role="alert">
+              <div id="replication-status-alert" class="alert alert-success d-flex align-items-center mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill flex-shrink-0 me-2" viewBox="0 0 16 16">
                   <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
                 </svg>
@@ -965,6 +965,19 @@
                   {% else %}
                   New uploads to this bucket are automatically replicated.
                   {% endif %}
+                </div>
+              </div>
+              
+              <!-- Warning alert for unreachable endpoint (shown by JS if endpoint is down) -->
+              <div id="replication-endpoint-warning" class="alert alert-danger d-none mb-4" role="alert">
+                <div class="d-flex align-items-start">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+                    <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                  </svg>
+                  <div>
+                    <strong>Replication Endpoint Unreachable</strong>
+                    <p class="mb-0 small" id="replication-endpoint-error">The target endpoint is not responding. Replication is paused until the endpoint is available.</p>
+                  </div>
                 </div>
               </div>
               
@@ -1090,11 +1103,11 @@
                       {% endif %}
                     </div>
                     <div class="col-auto">
-                      <span class="badge bg-success-subtle text-success px-3 py-2">
+                      <span id="replication-status-badge" class="badge bg-success-subtle text-success px-3 py-2">
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                           <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
                         </svg>
-                        Enabled
+                        <span id="replication-status-text">Enabled</span>
                       </span>
                     </div>
                   </div>
@@ -1109,7 +1122,7 @@
                   </svg>
                   Refresh
                 </a>
-                <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
+                <form id="pause-replication-form" method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                   <input type="hidden" name="action" value="pause">
                   <button type="submit" class="btn btn-outline-warning">
@@ -2033,17 +2046,19 @@
       const slashIndex = remainder.indexOf('/');
       
       if (slashIndex === -1) {
-        // File in current folder
-        if (!currentFilterTerm || obj.key.toLowerCase().includes(currentFilterTerm)) {
+        // File in current folder - filter on the displayed filename (remainder)
+        if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
           items.push({ type: 'file', data: obj, displayKey: remainder });
         }
       } else {
         // Folder
-        const folderPath = currentPrefix + remainder.slice(0, slashIndex + 1);
+        const folderName = remainder.slice(0, slashIndex);
+        const folderPath = currentPrefix + folderName + '/';
         if (!folders.has(folderPath)) {
           folders.add(folderPath);
-          if (!currentFilterTerm || folderPath.toLowerCase().includes(currentFilterTerm)) {
-            items.push({ type: 'folder', path: folderPath, displayKey: remainder.slice(0, slashIndex) });
+          // Filter on the displayed folder name only
+          if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
+            items.push({ type: 'folder', path: folderPath, displayKey: folderName });
           }
         }
       }
@@ -3408,33 +3423,9 @@
     currentFilterTerm = event.target.value.toLowerCase();
     updateFilterWarning();
     
-    if (hasFolders()) {
-      const { folders, files } = getFoldersAtPrefix(currentPrefix);
-      const tbody = objectsTableBody;
-
-      tbody.innerHTML = '';
-
-      folders.forEach(folderPath => {
-        const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '').toLowerCase();
-        if (folderName.includes(currentFilterTerm)) {
-          tbody.appendChild(createFolderRow(folderPath));
-        }
-      });
-
-      files.forEach(obj => {
-        const keyName = obj.key.slice(currentPrefix.length).toLowerCase();
-        if (keyName.includes(currentFilterTerm)) {
-          tbody.appendChild(obj.element);
-          obj.element.style.display = '';
-        }
-      });
-    } else {
-      // Filter all loaded objects (including newly loaded ones)
-      document.querySelectorAll('[data-object-row]').forEach((row) => {
-        const key = row.dataset.key.toLowerCase();
-        row.style.display = key.includes(currentFilterTerm) ? '' : 'none';
-      });
-    }
+    // Use the virtual scrolling system for filtering - it properly handles
+    // both folder view and flat view, and works with large object counts
+    refreshVirtualList();
   });
 
   refreshVersionsButton?.addEventListener('click', () => {
@@ -3875,12 +3866,60 @@
     const lastSyncEl = document.getElementById('replication-last-sync');
     const lastSyncTimeEl = document.querySelector('[data-stat="last-sync-time"]');
     const lastSyncKeyEl = document.querySelector('[data-stat="last-sync-key"]');
+    const endpointWarning = document.getElementById('replication-endpoint-warning');
+    const endpointErrorEl = document.getElementById('replication-endpoint-error');
+    const statusAlert = document.getElementById('replication-status-alert');
+    const statusBadge = document.getElementById('replication-status-badge');
+    const statusText = document.getElementById('replication-status-text');
+    const pauseForm = document.getElementById('pause-replication-form');
 
     const loadReplicationStats = async () => {
       try {
         const resp = await fetch(statusEndpoint);
         if (!resp.ok) throw new Error('Failed to fetch stats');
         const data = await resp.json();
+
+        // Handle endpoint health status
+        if (data.endpoint_healthy === false) {
+          // Show warning and hide success alert
+          if (endpointWarning) {
+            endpointWarning.classList.remove('d-none');
+            if (endpointErrorEl && data.endpoint_error) {
+              endpointErrorEl.textContent = data.endpoint_error + '. Replication is paused until the endpoint is available.';
+            }
+          }
+          if (statusAlert) statusAlert.classList.add('d-none');
+          
+          // Update status badge to show "Paused" with warning styling
+          if (statusBadge) {
+            statusBadge.className = 'badge bg-warning-subtle text-warning px-3 py-2';
+            statusBadge.innerHTML = `
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+              </svg>
+              <span>Paused (Endpoint Unavailable)</span>`;
+          }
+          
+          // Hide the pause button since replication is effectively already paused
+          if (pauseForm) pauseForm.classList.add('d-none');
+        } else {
+          // Hide warning and show success alert
+          if (endpointWarning) endpointWarning.classList.add('d-none');
+          if (statusAlert) statusAlert.classList.remove('d-none');
+          
+          // Restore status badge to show "Enabled"
+          if (statusBadge) {
+            statusBadge.className = 'badge bg-success-subtle text-success px-3 py-2';
+            statusBadge.innerHTML = `
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+              </svg>
+              <span>Enabled</span>`;
+          }
+          
+          // Show the pause button
+          if (pauseForm) pauseForm.classList.remove('d-none');
+        }
 
         if (syncedEl) syncedEl.textContent = data.objects_synced;
         if (pendingEl) {

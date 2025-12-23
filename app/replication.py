@@ -22,6 +22,8 @@ from .storage import ObjectStorage, StorageError
 logger = logging.getLogger(__name__)
 
 REPLICATION_USER_AGENT = "S3ReplicationAgent/1.0"
+REPLICATION_CONNECT_TIMEOUT = 5  # seconds to wait for connection
+REPLICATION_READ_TIMEOUT = 30   # seconds to wait for response
 
 REPLICATION_MODE_NEW_ONLY = "new_only"
 REPLICATION_MODE_ALL = "all"
@@ -121,6 +123,34 @@ class ReplicationManager:
         with open(self.rules_path, "w") as f:
             json.dump(data, f, indent=2)
 
+    def check_endpoint_health(self, connection: RemoteConnection) -> bool:
+        """Check if a remote endpoint is reachable and responsive.
+        
+        Returns True if endpoint is healthy, False otherwise.
+        Uses short timeouts to prevent blocking.
+        """
+        try:
+            config = Config(
+                user_agent_extra=REPLICATION_USER_AGENT,
+                connect_timeout=REPLICATION_CONNECT_TIMEOUT,
+                read_timeout=REPLICATION_READ_TIMEOUT,
+                retries={'max_attempts': 1}  # Don't retry for health checks
+            )
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=connection.endpoint_url,
+                aws_access_key_id=connection.access_key,
+                aws_secret_access_key=connection.secret_key,
+                region_name=connection.region,
+                config=config,
+            )
+            # Simple list_buckets call to verify connectivity
+            s3.list_buckets()
+            return True
+        except Exception as e:
+            logger.warning(f"Endpoint health check failed for {connection.name} ({connection.endpoint_url}): {e}")
+            return False
+
     def get_rule(self, bucket_name: str) -> Optional[ReplicationRule]:
         return self._rules.get(bucket_name)
 
@@ -218,6 +248,11 @@ class ReplicationManager:
             logger.warning(f"Cannot replicate existing objects: Connection {rule.target_connection_id} not found")
             return
         
+        # Check endpoint health before starting bulk replication
+        if not self.check_endpoint_health(connection):
+            logger.warning(f"Cannot replicate existing objects: Endpoint {connection.name} ({connection.endpoint_url}) is not reachable")
+            return
+        
         try:
             objects = self.storage.list_objects_all(bucket_name)
             logger.info(f"Starting replication of {len(objects)} existing objects from {bucket_name}")
@@ -255,6 +290,11 @@ class ReplicationManager:
             logger.warning(f"Replication skipped for {bucket_name}/{object_key}: Connection {rule.target_connection_id} not found")
             return
 
+        # Check endpoint health before attempting replication to prevent hangs
+        if not self.check_endpoint_health(connection):
+            logger.warning(f"Replication skipped for {bucket_name}/{object_key}: Endpoint {connection.name} ({connection.endpoint_url}) is not reachable")
+            return
+
         self._executor.submit(self._replicate_task, bucket_name, object_key, rule, connection, action)
 
     def _replicate_task(self, bucket_name: str, object_key: str, rule: ReplicationRule, conn: RemoteConnection, action: str) -> None:
@@ -271,13 +311,20 @@ class ReplicationManager:
         
         file_size = 0
         try:
-            config = Config(user_agent_extra=REPLICATION_USER_AGENT)
+            config = Config(
+                user_agent_extra=REPLICATION_USER_AGENT,
+                connect_timeout=REPLICATION_CONNECT_TIMEOUT,
+                read_timeout=REPLICATION_READ_TIMEOUT,
+                retries={'max_attempts': 2},  # Limited retries to prevent long hangs
+                signature_version='s3v4',  # Force signature v4 for compatibility
+                s3={'addressing_style': 'path'}  # Use path-style addressing for compatibility
+            )
             s3 = boto3.client(
                 "s3",
                 endpoint_url=conn.endpoint_url,
                 aws_access_key_id=conn.access_key,
                 aws_secret_access_key=conn.secret_key,
-                region_name=conn.region,
+                region_name=conn.region or 'us-east-1',  # Default region if not set
                 config=config,
             )
 
@@ -309,16 +356,31 @@ class ReplicationManager:
             logger.info(f"Replicating {bucket_name}/{object_key}: Size={file_size}, ContentType={content_type}")
 
             def do_put_object() -> None:
-                """Helper to upload object."""
-                with path.open("rb") as f:
-                    s3.put_object(
-                        Bucket=rule.target_bucket,
-                        Key=object_key,
-                        Body=f,
-                        ContentLength=file_size,
-                        ContentType=content_type or "application/octet-stream",
-                        Metadata=metadata or {}
-                    )
+                """Helper to upload object.
+                
+                Reads the file content into memory first to avoid signature calculation
+                issues with certain binary file types (like GIFs) when streaming.
+                Do NOT set ContentLength explicitly - boto3 calculates it from the bytes
+                and setting it manually can cause SignatureDoesNotMatch errors.
+                """
+                file_content = path.read_bytes()
+                put_kwargs = {
+                    "Bucket": rule.target_bucket,
+                    "Key": object_key,
+                    "Body": file_content,
+                }
+                if content_type:
+                    put_kwargs["ContentType"] = content_type
+                if metadata:
+                    put_kwargs["Metadata"] = metadata
+                
+                # Debug logging for signature issues
+                logger.debug(f"PUT request details: bucket={rule.target_bucket}, key={repr(object_key)}, "
+                            f"content_type={content_type}, body_len={len(file_content)}, "
+                            f"endpoint={conn.endpoint_url}")
+                logger.debug(f"Key bytes: {object_key.encode('utf-8')}")
+                
+                s3.put_object(**put_kwargs)
 
             try:
                 do_put_object()
@@ -358,6 +420,14 @@ class ReplicationManager:
 
         except (ClientError, OSError, ValueError) as e:
             logger.error(f"Replication failed for {bucket_name}/{object_key}: {e}")
+            # Log additional debug info for signature errors
+            if isinstance(e, ClientError):
+                error_code = e.response.get('Error', {}).get('Code', '')
+                if 'Signature' in str(e) or 'Signature' in error_code:
+                    logger.error(f"Signature debug - Key repr: {repr(object_key)}, "
+                                f"Endpoint: {conn.endpoint_url}, "
+                                f"Region: {conn.region}, "
+                                f"Target bucket: {rule.target_bucket}")
         except Exception:
             logger.exception(f"Unexpected error during replication for {bucket_name}/{object_key}")
 

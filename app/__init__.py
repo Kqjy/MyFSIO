@@ -45,7 +45,6 @@ def _migrate_config_file(active_path: Path, legacy_paths: List[Path]) -> Path:
             try:
                 shutil.move(str(legacy_path), str(active_path))
             except OSError:
-                # Fall back to copy + delete for cross-device moves
                 shutil.copy2(legacy_path, active_path)
                 try:
                     legacy_path.unlink(missing_ok=True)
@@ -101,12 +100,10 @@ def create_app(
     bucket_policies = BucketPolicyStore(Path(app.config["BUCKET_POLICY_PATH"]))
     secret_store = EphemeralSecretStore(default_ttl=app.config.get("SECRET_TTL_SECONDS", 300))
     
-    # Initialize replication with system config directory for consistency
     storage_root = Path(app.config["STORAGE_ROOT"])
     config_dir = storage_root / ".myfsio.sys" / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     
-    # Migrate connection configs from legacy locations
     connections_path = _migrate_config_file(
         active_path=config_dir / "connections.json",
         legacy_paths=[
@@ -125,7 +122,6 @@ def create_app(
     connections = ConnectionStore(connections_path)
     replication = ReplicationManager(storage, connections, replication_rules_path)
     
-    # Initialize encryption and KMS
     encryption_config = {
         "encryption_enabled": app.config.get("ENCRYPTION_ENABLED", False),
         "encryption_master_key_path": app.config.get("ENCRYPTION_MASTER_KEY_PATH"),
@@ -140,7 +136,6 @@ def create_app(
         kms_manager = KMSManager(kms_keys_path, kms_master_key_path)
         encryption_manager.set_kms_provider(kms_manager)
 
-    # Wrap storage with encryption layer if encryption is enabled
     if app.config.get("ENCRYPTION_ENABLED", False):
         from .encrypted_storage import EncryptedObjectStorage
         storage = EncryptedObjectStorage(storage, encryption_manager)
@@ -243,7 +238,7 @@ def _configure_cors(app: Flask) -> None:
 class _RequestContextFilter(logging.Filter):
     """Inject request-specific attributes into log records."""
 
-    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple boilerplate
+    def filter(self, record: logging.LogRecord) -> bool:  
         if has_request_context():
             record.request_id = getattr(g, "request_id", "-")
             record.path = request.path

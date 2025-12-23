@@ -33,9 +33,6 @@ def _encryption():
 def _error_response(code: str, message: str, status: int) -> tuple[Dict[str, Any], int]:
     return {"__type": code, "message": message}, status
 
-
-# ---------------------- Key Management ----------------------
-
 @kms_api_bp.route("/keys", methods=["GET", "POST"])
 @limiter.limit("30 per minute")
 def list_or_create_keys():
@@ -65,7 +62,6 @@ def list_or_create_keys():
         except EncryptionError as exc:
             return _error_response("KMSInternalException", str(exc), 400)
     
-    # GET - List keys
     keys = kms.list_keys()
     return jsonify({
         "Keys": [{"KeyId": k.key_id, "KeyArn": k.arn} for k in keys],
@@ -96,7 +92,6 @@ def get_or_delete_key(key_id: str):
         except EncryptionError as exc:
             return _error_response("NotFoundException", str(exc), 404)
     
-    # GET
     key = kms.get_key(key_id)
     if not key:
         return _error_response("NotFoundException", f"Key not found: {key_id}", 404)
@@ -148,9 +143,6 @@ def disable_key(key_id: str):
         return Response(status=200)
     except EncryptionError as exc:
         return _error_response("NotFoundException", str(exc), 404)
-
-
-# ---------------------- Encryption Operations ----------------------
 
 @kms_api_bp.route("/encrypt", methods=["POST"])
 @limiter.limit("60 per minute")
@@ -251,7 +243,6 @@ def generate_data_key():
     try:
         plaintext_key, encrypted_key = kms.generate_data_key(key_id, context)
         
-        # Trim key if AES_128 requested
         if key_spec == "AES_128":
             plaintext_key = plaintext_key[:16]
         
@@ -322,10 +313,7 @@ def re_encrypt():
         return _error_response("ValidationException", "CiphertextBlob must be base64 encoded", 400)
     
     try:
-        # First decrypt, get source key id
         plaintext, source_key_id = kms.decrypt(ciphertext, source_context)
-        
-        # Re-encrypt with destination key
         new_ciphertext = kms.encrypt(destination_key_id, plaintext, destination_context)
         
         return jsonify({
@@ -364,9 +352,6 @@ def generate_random():
         })
     except EncryptionError as exc:
         return _error_response("ValidationException", str(exc), 400)
-
-
-# ---------------------- Client-Side Encryption Helpers ----------------------
 
 @kms_api_bp.route("/client/generate-key", methods=["POST"])
 @limiter.limit("30 per minute")
@@ -426,9 +411,6 @@ def client_decrypt():
         })
     except Exception as exc:
         return _error_response("DecryptionError", str(exc), 400)
-
-
-# ---------------------- Encryption Materials for S3 Client-Side Encryption ----------------------
 
 @kms_api_bp.route("/materials/<key_id>", methods=["POST"])
 @limiter.limit("60 per minute")

@@ -125,7 +125,6 @@ class IamService:
         except OSError:
             pass
 
-    # ---------------------- authz helpers ----------------------
     def authenticate(self, access_key: str, secret_key: str) -> Principal:
         self._maybe_reload()
         access_key = (access_key or "").strip()
@@ -218,7 +217,6 @@ class IamService:
                 return True
         return False
 
-    # ---------------------- management helpers ----------------------
     def list_users(self) -> List[Dict[str, Any]]:
         listing: List[Dict[str, Any]] = []
         for access_key, record in self._users.items():
@@ -291,7 +289,6 @@ class IamService:
         self._save()
         self._load()
 
-    # ---------------------- config helpers ----------------------
     def _load(self) -> None:
         try:
             self._last_load_time = self.config_path.stat().st_mtime
@@ -337,7 +334,6 @@ class IamService:
         except (OSError, PermissionError) as e:
             raise IamError(f"Cannot save IAM config: {e}")
 
-    # ---------------------- insight helpers ----------------------
     def config_summary(self) -> Dict[str, Any]:
         return {
             "path": str(self.config_path),
