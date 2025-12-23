@@ -303,10 +303,10 @@ class ReplicationManager:
                 user_agent_extra=REPLICATION_USER_AGENT,
                 connect_timeout=REPLICATION_CONNECT_TIMEOUT,
                 read_timeout=REPLICATION_READ_TIMEOUT,
-                retries={'max_attempts': 2},  # Limited retries to prevent long hangs
-                signature_version='s3v4',  # Force signature v4 for compatibility
+                retries={'max_attempts': 2}, 
+                signature_version='s3v4',  
                 s3={
-                    'addressing_style': 'path',  # Use path-style addressing for compatibility
+                    'addressing_style': 'path',
                 },
                 # Disable SDK automatic checksums - they cause SignatureDoesNotMatch errors
                 # with S3-compatible servers that don't support CRC32 checksum headers
@@ -318,7 +318,7 @@ class ReplicationManager:
                 endpoint_url=conn.endpoint_url,
                 aws_access_key_id=conn.access_key,
                 aws_secret_access_key=conn.secret_key,
-                region_name=conn.region or 'us-east-1',  # Default region if not set
+                region_name=conn.region or 'us-east-1',
                 config=config,
             )
 
