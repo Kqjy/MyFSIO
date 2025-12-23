@@ -8,7 +8,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse, unquote
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
 from flask import Blueprint, Response, current_app, jsonify, request, g
@@ -22,8 +22,6 @@ from .storage import ObjectStorage, StorageError, QuotaExceededError
 
 s3_api_bp = Blueprint("s3_api", __name__)
 
-
-# ---------------------- helpers ----------------------
 def _storage() -> ObjectStorage:
     return current_app.extensions["object_storage"]
 
@@ -68,9 +66,26 @@ def _get_signature_key(key: str, date_stamp: str, region_name: str, service_name
     return k_signing
 
 
+def _get_canonical_uri(req: Any) -> str:
+    """Get the canonical URI for SigV4 signature verification.
+    
+    AWS SigV4 requires the canonical URI to be URL-encoded exactly as the client
+    sent it. Flask/Werkzeug automatically URL-decodes request.path, so we need
+    to get the raw path from the environ.
+    
+    The canonical URI should have each path segment URL-encoded (with '/' preserved),
+    and the encoding should match what the client used when signing.
+    """
+    raw_uri = req.environ.get('RAW_URI') or req.environ.get('REQUEST_URI')
+    
+    if raw_uri:
+        path = raw_uri.split('?')[0]
+        return path
+    
+    return quote(req.path, safe="/-_.~")
+
+
 def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
-    # Parse Authorization header
-    # AWS4-HMAC-SHA256 Credential=AKIA.../20230101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=...
     match = re.match(
         r"AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request, SignedHeaders=([^,]+), Signature=(.+)",
         auth_header,
@@ -79,17 +94,13 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         return None
 
     access_key, date_stamp, region, service, signed_headers_str, signature = match.groups()
-
-    # Get secret key
     secret_key = _iam().get_secret_key(access_key)
     if not secret_key:
         raise IamError("Invalid access key")
 
-    # Canonical Request
     method = req.method
-    canonical_uri = quote(req.path, safe="/-_.~")
+    canonical_uri = _get_canonical_uri(req)
     
-    # Canonical Query String
     query_args = []
     for key, value in req.args.items(multi=True):
         query_args.append((key, value))
@@ -100,7 +111,6 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
     canonical_query_string = "&".join(canonical_query_parts)
 
-    # Canonical Headers
     signed_headers_list = signed_headers_str.split(";")
     canonical_headers_parts = []
     for header in signed_headers_list:
@@ -112,18 +122,22 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         canonical_headers_parts.append(f"{header.lower()}:{header_val}\n")
     canonical_headers = "".join(canonical_headers_parts)
 
-    # Payload Hash
     payload_hash = req.headers.get("X-Amz-Content-Sha256")
     if not payload_hash:
         payload_hash = hashlib.sha256(req.get_data()).hexdigest()
 
     canonical_request = f"{method}\n{canonical_uri}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
 
-    # String to Sign
-    amz_date = req.headers.get("X-Amz-Date")
-    if not amz_date:
-        amz_date = req.headers.get("Date")
-    
+    # Debug logging for signature issues
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"SigV4 Debug - Method: {method}, URI: {canonical_uri}")
+    logger.debug(f"SigV4 Debug - Payload hash from header: {req.headers.get('X-Amz-Content-Sha256')}")
+    logger.debug(f"SigV4 Debug - Signed headers: {signed_headers_str}")
+    logger.debug(f"SigV4 Debug - Content-Type: {req.headers.get('Content-Type')}")
+    logger.debug(f"SigV4 Debug - Content-Length: {req.headers.get('Content-Length')}")
+
+    amz_date = req.headers.get("X-Amz-Date") or req.headers.get("Date")
     if not amz_date:
         raise IamError("Missing Date header")
 
@@ -134,13 +148,12 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
 
     now = datetime.now(timezone.utc)
     time_diff = abs((now - request_time).total_seconds())
-    if time_diff > 900:  # 15 minutes
+    if time_diff > 900:
         raise IamError("Request timestamp too old or too far in the future")
 
     required_headers = {'host', 'x-amz-date'}
     signed_headers_set = set(signed_headers_str.split(';'))
     if not required_headers.issubset(signed_headers_set):
-        # Some clients might sign 'date' instead of 'x-amz-date'
         if 'date' in signed_headers_set:
             required_headers.remove('x-amz-date')
             required_headers.add('date')
@@ -154,6 +167,24 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(calculated_signature, signature):
+        # Debug logging for signature mismatch
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Signature mismatch for {req.path}")
+        logger.error(f"  Content-Type: {req.headers.get('Content-Type')}")
+        logger.error(f"  Content-Length: {req.headers.get('Content-Length')}")
+        logger.error(f"  X-Amz-Content-Sha256: {req.headers.get('X-Amz-Content-Sha256')}")
+        logger.error(f"  Canonical URI: {canonical_uri}")
+        logger.error(f"  Signed headers: {signed_headers_str}")
+        # Log each signed header's value
+        for h in signed_headers_list:
+            logger.error(f"  Header '{h}': {repr(req.headers.get(h))}")
+        logger.error(f"  Expected sig: {signature[:16]}...")
+        logger.error(f"  Calculated sig: {calculated_signature[:16]}...")
+        # Log first part of canonical request to compare
+        logger.error(f"  Canonical request hash: {hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()[:16]}...")
+        # Log the full canonical request for debugging
+        logger.error(f"  Canonical request:\n{canonical_request[:500]}...")
         raise IamError("SignatureDoesNotMatch")
 
     return _iam().get_principal(access_key)
@@ -187,11 +218,9 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     if not secret_key:
         raise IamError("Invalid access key")
 
-    # Canonical Request
     method = req.method
-    canonical_uri = quote(req.path, safe="/-_.~")
+    canonical_uri = _get_canonical_uri(req)
     
-    # Canonical Query String
     query_args = []
     for key, value in req.args.items(multi=True):
         if key != "X-Amz-Signature":
@@ -203,7 +232,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
     canonical_query_string = "&".join(canonical_query_parts)
     
-    # Canonical Headers
     signed_headers_list = signed_headers_str.split(";")
     canonical_headers_parts = []
     for header in signed_headers_list:
@@ -212,7 +240,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         canonical_headers_parts.append(f"{header}:{val}\n")
     canonical_headers = "".join(canonical_headers_parts)
     
-    # Payload Hash
     payload_hash = "UNSIGNED-PAYLOAD"
     
     canonical_request = "\n".join([
@@ -224,7 +251,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         payload_hash
     ])
     
-    # String to Sign
     algorithm = "AWS4-HMAC-SHA256"
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
     hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
@@ -235,7 +261,6 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         hashed_request
     ])
     
-    # Signature
     signing_key = _get_signature_key(secret_key, date_stamp, region, service)
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
     
@@ -493,7 +518,6 @@ def _generate_presigned_url(
     }
     canonical_query = _encode_query_params(query_params)
 
-    # Determine host and scheme from config or request
     api_base = current_app.config.get("API_BASE_URL")
     if api_base:
         parsed = urlparse(api_base)
@@ -853,7 +877,6 @@ def _bucket_versioning_handler(bucket_name: str) -> Response:
         current_app.logger.info("Bucket versioning updated", extra={"bucket": bucket_name, "status": status})
         return Response(status=200)
     
-    # GET
     try:
         enabled = storage.is_versioning_enabled(bucket_name)
     except StorageError as exc:
@@ -889,7 +912,7 @@ def _bucket_tagging_handler(bucket_name: str) -> Response:
             return _error_response("NoSuchBucket", str(exc), 404)
         current_app.logger.info("Bucket tags deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     try:
         tags = _parse_tagging_document(payload)
@@ -914,7 +937,6 @@ def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
     if error:
         return error
     
-    # For tagging, we use read permission for GET, write for PUT/DELETE
     action = "read" if request.method == "GET" else "write"
     try:
         _authorize_action(principal, bucket_name, action, object_key=object_key)
@@ -1093,10 +1115,8 @@ def _bucket_location_handler(bucket_name: str) -> Response:
     if not storage.bucket_exists(bucket_name):
         return _error_response("NoSuchBucket", "Bucket does not exist", 404)
     
-    # Return the configured AWS_REGION
     region = current_app.config.get("AWS_REGION", "us-east-1")
     root = Element("LocationConstraint")
-    # AWS returns empty for us-east-1, but we'll be explicit
     root.text = region if region != "us-east-1" else None
     return _xml_response(root)
 
@@ -1116,13 +1136,11 @@ def _bucket_acl_handler(bucket_name: str) -> Response:
         return _error_response("NoSuchBucket", "Bucket does not exist", 404)
     
     if request.method == "PUT":
-        # We don't fully implement ACLs, but we accept the request for compatibility
-        # Check for canned ACL header
+        # Accept canned ACL headers for S3 compatibility (not fully implemented)
         canned_acl = request.headers.get("x-amz-acl", "private")
         current_app.logger.info("Bucket ACL set (canned)", extra={"bucket": bucket_name, "acl": canned_acl})
         return Response(status=200)
     
-    # GET - Return a basic ACL document showing full control for owner
     root = Element("AccessControlPolicy")
     owner = SubElement(root, "Owner")
     SubElement(owner, "ID").text = principal.access_key if principal else "anonymous"
@@ -1170,7 +1188,6 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
     if key_marker:
         objects = [obj for obj in objects if obj.key > key_marker]
     
-    # Build XML response
     root = Element("ListVersionsResult", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
     SubElement(root, "Name").text = bucket_name
     SubElement(root, "Prefix").text = prefix
@@ -1188,10 +1205,9 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
             is_truncated = True
             break
         
-        # Current version
         version = SubElement(root, "Version")
         SubElement(version, "Key").text = obj.key
-        SubElement(version, "VersionId").text = "null"  # Current version ID
+        SubElement(version, "VersionId").text = "null"
         SubElement(version, "IsLatest").text = "true"
         SubElement(version, "LastModified").text = obj.last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         SubElement(version, "ETag").text = f'"{obj.etag}"'
@@ -1205,7 +1221,6 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
         version_count += 1
         next_key_marker = obj.key
         
-        # Get historical versions
         try:
             versions = storage.list_object_versions(bucket_name, obj.key)
             for v in versions:
@@ -1289,14 +1304,12 @@ def _render_lifecycle_config(config: list) -> Element:
         rule_el = SubElement(root, "Rule")
         SubElement(rule_el, "ID").text = rule.get("ID", "")
         
-        # Filter
         filter_el = SubElement(rule_el, "Filter")
         if rule.get("Prefix"):
             SubElement(filter_el, "Prefix").text = rule.get("Prefix", "")
         
         SubElement(rule_el, "Status").text = rule.get("Status", "Enabled")
         
-        # Expiration
         if "Expiration" in rule:
             exp = rule["Expiration"]
             exp_el = SubElement(rule_el, "Expiration")
@@ -1307,14 +1320,12 @@ def _render_lifecycle_config(config: list) -> Element:
             if exp.get("ExpiredObjectDeleteMarker"):
                 SubElement(exp_el, "ExpiredObjectDeleteMarker").text = "true"
         
-        # NoncurrentVersionExpiration
         if "NoncurrentVersionExpiration" in rule:
             nve = rule["NoncurrentVersionExpiration"]
             nve_el = SubElement(rule_el, "NoncurrentVersionExpiration")
             if "NoncurrentDays" in nve:
                 SubElement(nve_el, "NoncurrentDays").text = str(nve["NoncurrentDays"])
         
-        # AbortIncompleteMultipartUpload
         if "AbortIncompleteMultipartUpload" in rule:
             aimu = rule["AbortIncompleteMultipartUpload"]
             aimu_el = SubElement(rule_el, "AbortIncompleteMultipartUpload")
@@ -1338,29 +1349,24 @@ def _parse_lifecycle_config(payload: bytes) -> list:
     for rule_el in root.findall("{*}Rule") or root.findall("Rule"):
         rule: dict = {}
         
-        # ID
         id_el = rule_el.find("{*}ID") or rule_el.find("ID")
         if id_el is not None and id_el.text:
             rule["ID"] = id_el.text.strip()
         
-        # Filter/Prefix
         filter_el = rule_el.find("{*}Filter") or rule_el.find("Filter")
         if filter_el is not None:
             prefix_el = filter_el.find("{*}Prefix") or filter_el.find("Prefix")
             if prefix_el is not None and prefix_el.text:
                 rule["Prefix"] = prefix_el.text
         
-        # Legacy Prefix (outside Filter)
         if "Prefix" not in rule:
             prefix_el = rule_el.find("{*}Prefix") or rule_el.find("Prefix")
             if prefix_el is not None:
                 rule["Prefix"] = prefix_el.text or ""
         
-        # Status
         status_el = rule_el.find("{*}Status") or rule_el.find("Status")
         rule["Status"] = (status_el.text or "Enabled").strip() if status_el is not None else "Enabled"
         
-        # Expiration
         exp_el = rule_el.find("{*}Expiration") or rule_el.find("Expiration")
         if exp_el is not None:
             expiration: dict = {}
@@ -1376,7 +1382,6 @@ def _parse_lifecycle_config(payload: bytes) -> list:
             if expiration:
                 rule["Expiration"] = expiration
         
-        # NoncurrentVersionExpiration
         nve_el = rule_el.find("{*}NoncurrentVersionExpiration") or rule_el.find("NoncurrentVersionExpiration")
         if nve_el is not None:
             nve: dict = {}
@@ -1386,7 +1391,6 @@ def _parse_lifecycle_config(payload: bytes) -> list:
             if nve:
                 rule["NoncurrentVersionExpiration"] = nve
         
-        # AbortIncompleteMultipartUpload
         aimu_el = rule_el.find("{*}AbortIncompleteMultipartUpload") or rule_el.find("AbortIncompleteMultipartUpload")
         if aimu_el is not None:
             aimu: dict = {}
@@ -1424,7 +1428,6 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
         if not quota:
             return _error_response("NoSuchQuotaConfiguration", "No quota configuration found", 404)
         
-        # Return as JSON for simplicity (not a standard S3 API)
         stats = storage.bucket_stats(bucket_name)
         return jsonify({
             "quota": quota,
@@ -1453,7 +1456,6 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
     if max_size_bytes is None and max_objects is None:
         return _error_response("InvalidArgument", "At least one of max_size_bytes or max_objects is required", 400)
     
-    # Validate types
     if max_size_bytes is not None:
         try:
             max_size_bytes = int(max_size_bytes)
@@ -1564,7 +1566,6 @@ def _bulk_delete_handler(bucket_name: str) -> Response:
     return _xml_response(result, status=200)
 
 
-# ---------------------- routes ----------------------
 @s3_api_bp.get("/")
 @limiter.limit("60 per minute")
 def list_buckets() -> Response:
@@ -1642,7 +1643,6 @@ def bucket_handler(bucket_name: str) -> Response:
         current_app.logger.info("Bucket deleted", extra={"bucket": bucket_name})
         return Response(status=204)
 
-    # GET - list objects (supports both ListObjects and ListObjectsV2)
     principal, error = _require_principal()
     try:
         _authorize_action(principal, bucket_name, "list")
@@ -1650,18 +1650,12 @@ def bucket_handler(bucket_name: str) -> Response:
         if error:
             return error
         return _error_response("AccessDenied", str(exc), 403)
-    try:
-        objects = storage.list_objects_all(bucket_name)
-    except StorageError as exc:
-        return _error_response("NoSuchBucket", str(exc), 404)
 
-    # Check if this is ListObjectsV2 (list-type=2)
     list_type = request.args.get("list-type")
     prefix = request.args.get("prefix", "")
     delimiter = request.args.get("delimiter", "")
     max_keys = min(int(request.args.get("max-keys", current_app.config["UI_PAGE_SIZE"])), 1000)
     
-    # Pagination markers
     marker = request.args.get("marker", "")  # ListObjects v1
     continuation_token = request.args.get("continuation-token", "")  # ListObjectsV2
     start_after = request.args.get("start-after", "")  # ListObjectsV2
@@ -1681,11 +1675,17 @@ def bucket_handler(bucket_name: str) -> Response:
     else:
         effective_start = marker
     
-    if prefix:
-        objects = [obj for obj in objects if obj.key.startswith(prefix)]
-    
-    if effective_start:
-        objects = [obj for obj in objects if obj.key > effective_start]
+    fetch_keys = max_keys * 10 if delimiter else max_keys
+    try:
+        list_result = storage.list_objects(
+            bucket_name,
+            max_keys=fetch_keys,
+            continuation_token=effective_start or None,
+            prefix=prefix or None,
+        )
+        objects = list_result.objects
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
     
     common_prefixes: list[str] = []
     filtered_objects: list = []
@@ -1694,7 +1694,6 @@ def bucket_handler(bucket_name: str) -> Response:
         for obj in objects:
             key_after_prefix = obj.key[len(prefix):] if prefix else obj.key
             if delimiter in key_after_prefix:
-                # This is a "folder" - extract the common prefix
                 common_prefix = prefix + key_after_prefix.split(delimiter)[0] + delimiter
                 if common_prefix not in seen_prefixes:
                     seen_prefixes.add(common_prefix)
@@ -1705,7 +1704,7 @@ def bucket_handler(bucket_name: str) -> Response:
         common_prefixes = sorted(common_prefixes)
     
     total_items = len(objects) + len(common_prefixes)
-    is_truncated = total_items > max_keys
+    is_truncated = total_items > max_keys or list_result.is_truncated
     
     if len(objects) >= max_keys:
         objects = objects[:max_keys]
@@ -1792,7 +1791,6 @@ def object_handler(bucket_name: str, object_key: str):
     if "tagging" in request.args:
         return _object_tagging_handler(bucket_name, object_key)
 
-    # Multipart Uploads
     if request.method == "POST":
         if "uploads" in request.args:
             return _initiate_multipart_upload(bucket_name, object_key)
@@ -1845,9 +1843,7 @@ def object_handler(bucket_name: str, object_key: str):
         response = Response(status=200)
         response.headers["ETag"] = f'"{meta.etag}"'
         
-        # Trigger replication if not a replication request
-        user_agent = request.headers.get("User-Agent", "")
-        if "S3ReplicationAgent" not in user_agent:
+        if "S3ReplicationAgent" not in request.headers.get("User-Agent", ""):
             _replication_manager().trigger_replication(bucket_name, object_key, action="write")
             
         return response
@@ -1866,31 +1862,25 @@ def object_handler(bucket_name: str, object_key: str):
         metadata = storage.get_object_metadata(bucket_name, object_key)
         mimetype = mimetypes.guess_type(object_key)[0] or "application/octet-stream"
         
-        # Check if object is encrypted and needs decryption
         is_encrypted = "x-amz-server-side-encryption" in metadata
         
         if request.method == "GET":
             if is_encrypted and hasattr(storage, 'get_object_data'):
-                # Use encrypted storage to decrypt
                 try:
                     data, clean_metadata = storage.get_object_data(bucket_name, object_key)
                     response = Response(data, mimetype=mimetype)
                     logged_bytes = len(data)
-                    # Use decrypted size for Content-Length
                     response.headers["Content-Length"] = len(data)
                     etag = hashlib.md5(data).hexdigest()
                 except StorageError as exc:
                     return _error_response("InternalError", str(exc), 500)
             else:
-                # Stream unencrypted file directly
                 stat = path.stat()
                 response = Response(_stream_file(path), mimetype=mimetype, direct_passthrough=True)
                 logged_bytes = stat.st_size
                 etag = storage._compute_etag(path)
         else:
-            # HEAD request
             if is_encrypted and hasattr(storage, 'get_object_data'):
-                # For encrypted objects, we need to report decrypted size
                 try:
                     data, _ = storage.get_object_data(bucket_name, object_key)
                     response = Response(status=200)
@@ -1919,7 +1909,6 @@ def object_handler(bucket_name: str, object_key: str):
     storage.delete_object(bucket_name, object_key)
     current_app.logger.info("Object deleted", extra={"bucket": bucket_name, "key": object_key})
     
-    # Trigger replication if not a replication request
     user_agent = request.headers.get("User-Agent", "")
     if "S3ReplicationAgent" not in user_agent:
         _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
@@ -2200,7 +2189,6 @@ class AwsChunkedDecoder:
                 self.chunk_remaining -= len(chunk)
                 
                 if self.chunk_remaining == 0:
-                    # Read CRLF after chunk data
                     crlf = self.stream.read(2)
                     if crlf != b"\r\n":
                         raise IOError("Malformed chunk: missing CRLF")
@@ -2219,7 +2207,6 @@ class AwsChunkedDecoder:
                 
                 try:
                     line_str = line.decode("ascii").strip()
-                    # Handle chunk-signature extension if present (e.g. "1000;chunk-signature=...")
                     if ";" in line_str:
                         line_str = line_str.split(";")[0]
                     chunk_size = int(line_str, 16)
@@ -2375,7 +2362,6 @@ def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
     try:
         _storage().abort_multipart_upload(bucket_name, upload_id)
     except StorageError as exc:
-        # Abort is idempotent, but if bucket missing...
         if "Bucket does not exist" in str(exc):
             return _error_response("NoSuchBucket", str(exc), 404)
             
@@ -2385,7 +2371,6 @@ def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
 @s3_api_bp.before_request
 def resolve_principal():
     g.principal = None
-    # Try SigV4
     try:
         if ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
            (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
@@ -2394,7 +2379,6 @@ def resolve_principal():
     except Exception:
         pass
     
-    # Try simple auth headers (internal/testing)
     access_key = request.headers.get("X-Access-Key")
     secret_key = request.headers.get("X-Secret-Key")
     if access_key and secret_key:

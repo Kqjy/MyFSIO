@@ -86,7 +86,9 @@
             </svg>
             Upload
           </button>
-          <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
+          <div class="position-relative">
+            <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
+          </div>
           <button class="btn btn-outline-danger btn-sm d-none" type="button" data-bulk-delete-trigger disabled>
             <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
               <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
@@ -114,6 +116,14 @@
             </li>
           </ol>
         </nav>
+        <div id="filter-warning" class="alert alert-warning fade show d-none py-1 px-2 mt-2 mb-0 small d-flex align-items-center" role="alert">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
+            <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+            <path d="M7.002 11a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 4.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 4.995z"/>
+          </svg>
+          <span id="filter-warning-text" class="me-2">Filtering loaded objects only. Not all objects have been loaded yet.</span>
+          <button type="button" class="btn-close ms-auto flex-shrink-0" style="font-size: 0.5rem;" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
       </div>
       <div
         class="table-responsive objects-table-container drop-zone"
@@ -124,15 +134,15 @@
         data-bulk-delete-endpoint="{{ url_for('ui.bulk_delete_objects', bucket_name=bucket_name) }}"
         data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
       >
-        <table class="table table-hover align-middle mb-0" id="objects-table">
+        <table class="table table-hover align-middle mb-0" id="objects-table" style="table-layout: fixed;">
           <thead class="table-light">
             <tr>
               <th scope="col" class="text-center" style="width: 3rem;">
                 <input class="form-check-input" type="checkbox" data-select-all aria-label="Select all objects" />
               </th>
               <th scope="col">Key</th>
-              <th scope="col" class="text-end">Size</th>
-              <th scope="col" class="text-end">Actions</th>
+              <th scope="col" class="text-end" style="width: 6rem;">Size</th>
+              <th scope="col" class="text-end" style="width: 5.5rem;">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -158,18 +168,19 @@
             </div>
           </div>
           <span id="load-more-status" class="text-muted"></span>
+          <span id="folder-view-status" class="text-muted d-none"></span>
           <button id="load-more-btn" class="btn btn-link btn-sm p-0 d-none" style="font-size: 0.75rem;">Load more</button>
         </div>
         <div class="d-flex align-items-center gap-1">
-          <span class="text-muted">Load</span>
+          <span class="text-muted">Batch</span>
           <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;">
-            <option value="50">50</option>
-            <option value="100" selected>100</option>
-            <option value="150">150</option>
-            <option value="200">200</option>
-            <option value="250">250</option>
+            <option value="1000">1K</option>
+            <option value="5000" selected>5K</option>
+            <option value="10000">10K</option>
+            <option value="25000">25K</option>
+            <option value="50000">50K</option>
           </select>
-          <span class="text-muted">per page</span>
+          <span class="text-muted">objects</span>
         </div>
       </div>
     </div>
@@ -322,12 +333,13 @@
                 <input type="hidden" name="mode" value="upsert" id="policyMode" />
                 
                 <div class="mb-4">
-                  <label class="form-label fw-semibold">
+                  <label class="form-label fw-semibold d-flex align-items-center">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path d="M8 4a.5.5 0 0 1 .5.5V6a.5.5 0 0 1-1 0V4.5A.5.5 0 0 1 8 4zM3.732 5.732a.5.5 0 0 1 .707 0l.915.914a.5.5 0 1 1-.708.708l-.914-.915a.5.5 0 0 1 0-.707zM2 10a.5.5 0 0 1 .5-.5h1.586a.5.5 0 0 1 0 1H2.5A.5.5 0 0 1 2 10zm9.5 0a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 0 1H12a.5.5 0 0 1-.5-.5zm.754-4.246a.5.5 0 0 0-.708 0l-.914.914a.5.5 0 0 0 .707.708l.915-.914a.5.5 0 0 0 0-.708z"/>
                       <path fill-rule="evenodd" d="M8 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-1 3a1 1 0 1 1 2 0 1 1 0 0 1-2 0z"/>
                     </svg>
                     Quick Presets
+                    <span class="badge bg-secondary-subtle text-secondary ms-2 fw-normal" style="font-size: 0.65rem;">Choose a template</span>
                   </label>
                   <div class="d-flex flex-wrap gap-2">
                     <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == 'private' %}active{% endif %}" data-preset="private">
@@ -353,15 +365,46 @@
                 </div>
 
                 <div class="mb-3">
-                  <label class="form-label fw-semibold">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                      <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
-                      <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm1.639-3.708 1.33.886 1.854-1.855a.25.25 0 0 1 .289-.047l1.888.974V8.5a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V8s1.54-1.274 1.639-1.208z"/>
-                    </svg>
-                    Policy Document (JSON)
+                  <label class="form-label fw-semibold d-flex align-items-center justify-content-between">
+                    <span>
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+                        <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm1.639-3.708 1.33.886 1.854-1.855a.25.25 0 0 1 .289-.047l1.888.974V8.5a.5.5 0 0 1-.5.5H5a.5.5 0 0 1-.5-.5V8s1.54-1.274 1.639-1.208z"/>
+                      </svg>
+                      Policy Document (JSON)
+                    </span>
+                    <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none" id="formatPolicyBtn" title="Format JSON">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M5.854 4.854a.5.5 0 1 0-.708-.708l-3.5 3.5a.5.5 0 0 0 0 .708l3.5 3.5a.5.5 0 0 0 .708-.708L2.707 8l3.147-3.146zm4.292 0a.5.5 0 0 1 .708-.708l3.5 3.5a.5.5 0 0 1 0 .708l-3.5 3.5a.5.5 0 0 1-.708-.708L13.293 8l-3.147-3.146z"/>
+                      </svg>
+                      Format
+                    </button>
                   </label>
-                  <textarea class="form-control font-monospace" rows="12" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | tojson }}' spellcheck="false">{{ bucket_policy_text or default_policy }}</textarea>
-                  <div class="form-text">Use presets for common scenarios or switch to Custom JSON to paste AWS-style statements.</div>
+                  <div class="position-relative">
+                    <textarea class="form-control font-monospace" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | tojson }}' spellcheck="false" style="font-size: 0.85rem; line-height: 1.5; tab-size: 2;">{{ bucket_policy_text or default_policy }}</textarea>
+                    <div id="policyValidationStatus" class="position-absolute top-0 end-0 m-2 d-none">
+                      <span class="badge bg-success-subtle text-success" id="policyValidBadge">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                        </svg>
+                        Valid JSON
+                      </span>
+                      <span class="badge bg-danger-subtle text-danger d-none" id="policyInvalidBadge">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
+                        </svg>
+                        Invalid JSON
+                      </span>
+                    </div>
+                  </div>
+                  <div id="policyErrorDetail" class="text-danger small mt-1 d-none"></div>
+                  <div class="form-text d-flex align-items-start gap-2 mt-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="flex-shrink-0 mt-1 text-muted" viewBox="0 0 16 16">
+                      <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                      <path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/>
+                    </svg>
+                    <span>Use presets for common scenarios or select <strong>Custom JSON</strong> to write AWS IAM-style policy statements. The policy will be validated on save.</span>
+                  </div>
                 </div>
 
                 <div class="d-flex gap-2 flex-wrap">
@@ -911,7 +954,7 @@
             </div>
             <div class="card-body">
               {% if replication_rule and replication_rule.enabled %}
-              <div class="alert alert-success d-flex align-items-center mb-4" role="alert">
+              <div id="replication-status-alert" class="alert alert-success d-flex align-items-center mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill flex-shrink-0 me-2" viewBox="0 0 16 16">
                   <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
                 </svg>
@@ -922,6 +965,19 @@
                   {% else %}
                   New uploads to this bucket are automatically replicated.
                   {% endif %}
+                </div>
+              </div>
+              
+              <!-- Warning alert for unreachable endpoint (shown by JS if endpoint is down) -->
+              <div id="replication-endpoint-warning" class="alert alert-danger d-none mb-4" role="alert">
+                <div class="d-flex align-items-start">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+                    <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                  </svg>
+                  <div>
+                    <strong>Replication Endpoint Unreachable</strong>
+                    <p class="mb-0 small" id="replication-endpoint-error">The target endpoint is not responding. Replication is paused until the endpoint is available.</p>
+                  </div>
                 </div>
               </div>
               
@@ -1047,11 +1103,11 @@
                       {% endif %}
                     </div>
                     <div class="col-auto">
-                      <span class="badge bg-success-subtle text-success px-3 py-2">
+                      <span id="replication-status-badge" class="badge bg-success-subtle text-success px-3 py-2">
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                           <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
                         </svg>
-                        Enabled
+                        <span id="replication-status-text">Enabled</span>
                       </span>
                     </div>
                   </div>
@@ -1066,7 +1122,7 @@
                   </svg>
                   Refresh
                 </a>
-                <form method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
+                <form id="pause-replication-form" method="POST" action="{{ url_for('ui.update_bucket_replication', bucket_name=bucket_name) }}" class="d-inline">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                   <input type="hidden" name="action" value="pause">
                   <button type="submit" class="btn btn-outline-warning">
@@ -1190,8 +1246,18 @@
                 
                 <div class="mb-3">
                   <label for="target_bucket" class="form-label fw-medium">Target Bucket Name</label>
-                  <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket">
-                  <div class="form-text">If the target bucket does not exist, it will be created automatically.</div>
+                  <input type="text" class="form-control" id="target_bucket" name="target_bucket" required placeholder="e.g. my-backup-bucket" pattern="^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" minlength="3" maxlength="63">
+                  <div id="target_bucket_feedback" class="invalid-feedback"></div>
+                  <div class="form-text">
+                    <span id="target_bucket_hint">If the target bucket does not exist, it will be created automatically.</span>
+                    <div class="mt-1 text-muted small">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                        <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                      </svg>
+                      Rules: 3-63 characters, lowercase letters, numbers, hyphens, and periods only. Must start/end with letter or number.
+                    </div>
+                  </div>
                 </div>
                 
                 <div class="mb-4">
@@ -1813,30 +1879,42 @@
   let isLoadingObjects = false;
   let hasMoreObjects = false;
   let currentFilterTerm = '';
-  let pageSize = 100;
+  let pageSize = 5000;  // Load large batches for virtual scrolling
+  let currentPrefix = '';  // Current folder prefix for navigation
+  let allObjects = [];  // All loaded object metadata (lightweight)
+  
+  // Virtual scrolling state
+  const ROW_HEIGHT = 53;  // Height of each table row in pixels
+  const BUFFER_ROWS = 10;  // Extra rows to render above/below viewport
+  let visibleItems = [];  // Current items to display (filtered by folder/search)
+  let renderedRange = { start: 0, end: 0 };  // Currently rendered row indices
 
-  const createObjectRow = (obj) => {
+  // Create a row element from object data (for virtual scrolling)
+  const createObjectRow = (obj, displayKey = null) => {
     const tr = document.createElement('tr');
     tr.dataset.objectRow = '';
     tr.dataset.key = obj.key;
     tr.dataset.size = obj.size;
-    tr.dataset.lastModified = obj.last_modified;
+    tr.dataset.lastModified = obj.lastModified || obj.last_modified;
     tr.dataset.etag = obj.etag;
-    tr.dataset.previewUrl = obj.preview_url;
-    tr.dataset.downloadUrl = obj.download_url;
-    tr.dataset.presignEndpoint = obj.presign_endpoint;
-    tr.dataset.deleteEndpoint = obj.delete_endpoint;
-    tr.dataset.metadata = JSON.stringify(obj.metadata || {});
-    tr.dataset.versionsEndpoint = obj.versions_endpoint;
-    tr.dataset.restoreTemplate = obj.restore_template;
+    tr.dataset.previewUrl = obj.previewUrl || obj.preview_url;
+    tr.dataset.downloadUrl = obj.downloadUrl || obj.download_url;
+    tr.dataset.presignEndpoint = obj.presignEndpoint || obj.presign_endpoint;
+    tr.dataset.deleteEndpoint = obj.deleteEndpoint || obj.delete_endpoint;
+    tr.dataset.metadata = typeof obj.metadata === 'string' ? obj.metadata : JSON.stringify(obj.metadata || {});
+    tr.dataset.versionsEndpoint = obj.versionsEndpoint || obj.versions_endpoint;
+    tr.dataset.restoreTemplate = obj.restoreTemplate || obj.restore_template;
+    
+    const keyToShow = displayKey || obj.key;
+    const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleDateString();
 
     tr.innerHTML = `
       <td class="text-center align-middle">
         <input class="form-check-input" type="checkbox" data-object-select aria-label="Select ${escapeHtml(obj.key)}" />
       </td>
       <td class="object-key text-break" title="${escapeHtml(obj.key)}">
-        <div class="fw-medium">${escapeHtml(obj.key)}</div>
-        <div class="text-muted small">Modified ${escapeHtml(obj.last_modified_display)}</div>
+        <div class="fw-medium">${escapeHtml(keyToShow)}</div>
+        <div class="text-muted small">Modified ${escapeHtml(lastModDisplay)}</div>
       </td>
       <td class="text-end text-nowrap">
         <span class="text-muted small">${formatBytes(obj.size)}</span>
@@ -1845,7 +1923,7 @@
         <div class="btn-group btn-group-sm" role="group">
           <a
             class="btn btn-outline-primary btn-icon"
-            href="${escapeHtml(obj.download_url)}"
+            href="${escapeHtml(obj.downloadUrl || obj.download_url)}"
             target="_blank"
             title="Download"
             aria-label="Download"
@@ -1934,12 +2012,180 @@
     }
   };
 
+  // ============== VIRTUAL SCROLLING SYSTEM ==============
+  
+  // Spacer elements for virtual scroll height
+  let topSpacer = null;
+  let bottomSpacer = null;
+  
+  const initVirtualScrollElements = () => {
+    if (!objectsTableBody) return;
+    
+    // Create spacer rows if they don't exist
+    if (!topSpacer) {
+      topSpacer = document.createElement('tr');
+      topSpacer.id = 'virtual-top-spacer';
+      topSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
+    }
+    if (!bottomSpacer) {
+      bottomSpacer = document.createElement('tr');
+      bottomSpacer.id = 'virtual-bottom-spacer';
+      bottomSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
+    }
+  };
+  
+  // Compute which items should be visible based on current view
+  const computeVisibleItems = () => {
+    const items = [];
+    const folders = new Set();
+    
+    allObjects.forEach(obj => {
+      if (!obj.key.startsWith(currentPrefix)) return;
+      
+      const remainder = obj.key.slice(currentPrefix.length);
+      const slashIndex = remainder.indexOf('/');
+      
+      if (slashIndex === -1) {
+        // File in current folder - filter on the displayed filename (remainder)
+        if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
+          items.push({ type: 'file', data: obj, displayKey: remainder });
+        }
+      } else {
+        // Folder
+        const folderName = remainder.slice(0, slashIndex);
+        const folderPath = currentPrefix + folderName + '/';
+        if (!folders.has(folderPath)) {
+          folders.add(folderPath);
+          // Filter on the displayed folder name only
+          if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
+            items.push({ type: 'folder', path: folderPath, displayKey: folderName });
+          }
+        }
+      }
+    });
+    
+    // Sort: folders first, then files
+    items.sort((a, b) => {
+      if (a.type === 'folder' && b.type === 'file') return -1;
+      if (a.type === 'file' && b.type === 'folder') return 1;
+      const aKey = a.type === 'folder' ? a.path : a.data.key;
+      const bKey = b.type === 'folder' ? b.path : b.data.key;
+      return aKey.localeCompare(bKey);
+    });
+    
+    return items;
+  };
+  
+  // Render only the visible rows based on scroll position
+  const renderVirtualRows = () => {
+    if (!objectsTableBody || !scrollContainer) return;
+    
+    const containerHeight = scrollContainer.clientHeight;
+    const scrollTop = scrollContainer.scrollTop;
+    
+    // Calculate visible range
+    const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
+    const endIndex = Math.min(visibleItems.length, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+    
+    // Skip if range hasn't changed significantly
+    if (startIndex === renderedRange.start && endIndex === renderedRange.end) return;
+    
+    renderedRange = { start: startIndex, end: endIndex };
+    
+    // Clear and rebuild
+    objectsTableBody.innerHTML = '';
+    
+    // Add top spacer
+    initVirtualScrollElements();
+    topSpacer.querySelector('td').style.height = `${startIndex * ROW_HEIGHT}px`;
+    objectsTableBody.appendChild(topSpacer);
+    
+    // Render visible rows
+    for (let i = startIndex; i < endIndex; i++) {
+      const item = visibleItems[i];
+      if (!item) continue;
+      
+      let row;
+      if (item.type === 'folder') {
+        row = createFolderRow(item.path, item.displayKey);
+      } else {
+        row = createObjectRow(item.data, item.displayKey);
+      }
+      row.dataset.virtualIndex = i;
+      objectsTableBody.appendChild(row);
+    }
+    
+    // Add bottom spacer
+    const remainingRows = visibleItems.length - endIndex;
+    bottomSpacer.querySelector('td').style.height = `${remainingRows * ROW_HEIGHT}px`;
+    objectsTableBody.appendChild(bottomSpacer);
+    
+    // Re-attach handlers to new rows
+    attachRowHandlers();
+  };
+  
+  // Debounced scroll handler for virtual scrolling
+  let scrollTimeout = null;
+  const handleVirtualScroll = () => {
+    if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
+    scrollTimeout = requestAnimationFrame(renderVirtualRows);
+  };
+  
+  // Refresh the virtual list (after data changes or navigation)
+  const refreshVirtualList = () => {
+    visibleItems = computeVisibleItems();
+    renderedRange = { start: -1, end: -1 };  // Force re-render
+    
+    if (visibleItems.length === 0) {
+      if (allObjects.length === 0 && !hasMoreObjects) {
+        showEmptyState();
+      } else {
+        // Empty folder
+        objectsTableBody.innerHTML = `
+          <tr>
+            <td colspan="4" class="py-5">
+              <div class="empty-state">
+                <div class="empty-state-icon mx-auto" style="width: 64px; height: 64px;">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
+                  </svg>
+                </div>
+                <h6 class="mb-2">Empty folder</h6>
+                <p class="text-muted small mb-0">This folder contains no objects${hasMoreObjects ? ' yet. Loading more...' : '.'}</p>
+              </div>
+            </td>
+          </tr>
+        `;
+      }
+    } else {
+      renderVirtualRows();
+    }
+    
+    updateFolderViewStatus();
+  };
+  
+  // Update status bar
+  const updateFolderViewStatus = () => {
+    const folderViewStatusEl = document.getElementById('folder-view-status');
+    if (!folderViewStatusEl) return;
+    
+    if (currentPrefix) {
+      const folderCount = visibleItems.filter(i => i.type === 'folder').length;
+      const fileCount = visibleItems.filter(i => i.type === 'file').length;
+      folderViewStatusEl.innerHTML = `<span class="text-muted">${folderCount} folder${folderCount !== 1 ? 's' : ''}, ${fileCount} file${fileCount !== 1 ? 's' : ''} in this view</span>`;
+      folderViewStatusEl.classList.remove('d-none');
+    } else {
+      folderViewStatusEl.classList.add('d-none');
+    }
+  };
+
+  // ============== DATA LOADING ==============
+
   const loadObjects = async (append = false) => {
     if (isLoadingObjects) return;
     isLoadingObjects = true;
 
     if (!append) {
-
       if (objectsLoadingRow) objectsLoadingRow.style.display = '';
       nextContinuationToken = null;
       loadedObjectCount = 0;
@@ -1973,35 +2219,18 @@
       totalObjectCount = data.total_count || 0;
       nextContinuationToken = data.next_continuation_token;
 
-      if (!append) {
-
-        if (objectsLoadingRow) objectsLoadingRow.remove();
-        
-        if (data.objects.length === 0) {
-          showEmptyState();
-          updateObjectCountBadge();
-          isLoadingObjects = false;
-          return;
-        }
-
-        objectsTableBody.innerHTML = '';
+      if (!append && objectsLoadingRow) {
+        objectsLoadingRow.remove();
       }
 
+      // Store lightweight object metadata (no DOM elements!)
       data.objects.forEach(obj => {
-        const row = createObjectRow(obj);
-        objectsTableBody.appendChild(row);
         loadedObjectCount++;
-
-        // Apply current filter to newly loaded objects
-        if (currentFilterTerm) {
-          const keyLower = obj.key.toLowerCase();
-          row.style.display = keyLower.includes(currentFilterTerm) ? '' : 'none';
-        }
-
         allObjects.push({
           key: obj.key,
           size: obj.size,
           lastModified: obj.last_modified,
+          lastModifiedDisplay: obj.last_modified_display,
           etag: obj.etag,
           previewUrl: obj.preview_url,
           downloadUrl: obj.download_url,
@@ -2009,34 +2238,28 @@
           deleteEndpoint: obj.delete_endpoint,
           metadata: JSON.stringify(obj.metadata || {}),
           versionsEndpoint: obj.versions_endpoint,
-          restoreTemplate: obj.restore_template,
-          element: row
+          restoreTemplate: obj.restore_template
         });
       });
 
       updateObjectCountBadge();
-
-      // Track if there are more objects to load
       hasMoreObjects = data.is_truncated;
       
       if (loadMoreStatus) {
         if (data.is_truncated) {
-          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} objects loaded`;
+          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} loaded`;
         } else {
-          loadMoreStatus.textContent = `All ${loadedObjectCount.toLocaleString()} objects loaded`;
+          loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
         }
       }
       
-      // Update Load More button visibility
       if (typeof updateLoadMoreButton === 'function') {
         updateLoadMoreButton();
       }
 
-      if (typeof initFolderNavigation === 'function') {
-        initFolderNavigation();
-      }
-
-      attachRowHandlers();
+      // Refresh virtual scroll view
+      refreshVirtualList();
+      renderBreadcrumb(currentPrefix);
 
     } catch (error) {
       console.error('Failed to load objects:', error);
@@ -2047,7 +2270,6 @@
       }
     } finally {
       isLoadingObjects = false;
-      // Hide loading spinner
       if (loadMoreSpinner) {
         loadMoreSpinner.classList.add('d-none');
       }
@@ -2055,16 +2277,15 @@
   };
 
   const attachRowHandlers = () => {
+    // Attach handlers to object rows
     const objectRows = document.querySelectorAll('[data-object-row]');
     objectRows.forEach(row => {
-
       if (row.dataset.handlersAttached) return;
       row.dataset.handlersAttached = 'true';
 
       const deleteBtn = row.querySelector('[data-delete-object]');
       deleteBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
-
         const deleteModalEl = document.getElementById('deleteObjectModal');
         const deleteModal = deleteModalEl ? bootstrap.Modal.getOrCreateInstance(deleteModalEl) : null;
         const deleteObjectForm = document.getElementById('deleteObjectForm');
@@ -2081,17 +2302,63 @@
       selectCheckbox?.addEventListener('change', () => {
         toggleRowSelection(row, selectCheckbox.checked);
       });
+      
+      // Restore selection state
+      if (selectedRows.has(row.dataset.key)) {
+        selectCheckbox.checked = true;
+        row.classList.add('table-active');
+      }
+    });
+    
+    // Attach handlers to folder rows
+    const folderRows = document.querySelectorAll('.folder-row');
+    folderRows.forEach(row => {
+      if (row.dataset.handlersAttached) return;
+      row.dataset.handlersAttached = 'true';
+      
+      const folderPath = row.dataset.folderPath;
+      
+      const checkbox = row.querySelector('[data-folder-select]');
+      checkbox?.addEventListener('change', (e) => {
+        e.stopPropagation();
+        // Select all objects in this folder
+        const folderObjects = allObjects.filter(obj => obj.key.startsWith(folderPath));
+        folderObjects.forEach(obj => {
+          if (checkbox.checked) {
+            selectedRows.set(obj.key, obj);
+          } else {
+            selectedRows.delete(obj.key);
+          }
+        });
+        updateBulkDeleteState();
+      });
+
+      const folderBtn = row.querySelector('button');
+      folderBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigateToFolder(folderPath);
+      });
+      
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
+        navigateToFolder(folderPath);
+      });
     });
 
     updateBulkDeleteState();
   };
 
-  // Infinite scroll: use IntersectionObserver to auto-load more objects
+  // Scroll container reference (needed for virtual scrolling)
   const scrollSentinel = document.getElementById('scroll-sentinel');
   const scrollContainer = document.querySelector('.objects-table-container');
   const loadMoreBtn = document.getElementById('load-more-btn');
   
-  // Load More button click handler (fallback for mobile)
+  // Virtual scroll: listen to scroll events
+  if (scrollContainer) {
+    scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
+  }
+  
+  // Load More button click handler (fallback)
   loadMoreBtn?.addEventListener('click', () => {
     if (hasMoreObjects && !isLoadingObjects) {
       loadObjects(true);
@@ -2105,8 +2372,8 @@
     }
   }
   
+  // Auto-load more when near bottom (for loading all data)
   if (scrollSentinel && scrollContainer) {
-    // Observer for scrolling within the container (desktop)
     const containerObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
@@ -2115,12 +2382,11 @@
       });
     }, {
       root: scrollContainer,
-      rootMargin: '100px',
+      rootMargin: '500px',  // Load more earlier for smoother experience
       threshold: 0
     });
     containerObserver.observe(scrollSentinel);
     
-    // Observer for page scrolling (mobile - when container is not scrollable)
     const viewportObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
@@ -2128,14 +2394,14 @@
         }
       });
     }, {
-      root: null, // viewport
-      rootMargin: '200px',
+      root: null,
+      rootMargin: '500px',
       threshold: 0
     });
     viewportObserver.observe(scrollSentinel);
   }
 
-  // Page size selector
+  // Page size selector (now controls batch size)
   const pageSizeSelect = document.getElementById('page-size-select');
   pageSizeSelect?.addEventListener('change', (e) => {
     pageSize = parseInt(e.target.value, 10);
@@ -2147,7 +2413,6 @@
 
   const folderBreadcrumb = document.getElementById('folder-breadcrumb');
   const objectsTableBody = document.querySelector('#objects-table tbody');
-  let currentPrefix = '';
 
   if (objectsTableBody) {
     objectsTableBody.addEventListener('click', (e) => {
@@ -2189,7 +2454,8 @@
   };
 
   const countObjectsInFolder = (folderPrefix) => {
-    return allObjects.filter(obj => obj.key.startsWith(folderPrefix)).length;
+    const count = allObjects.filter(obj => obj.key.startsWith(folderPrefix)).length;
+    return { count, mayHaveMore: hasMoreObjects };
   };
 
   const renderBreadcrumb = (prefix) => {
@@ -2263,9 +2529,10 @@
     return allObjects.filter(obj => obj.key.startsWith(folderPrefix));
   };
 
-  const createFolderRow = (folderPath) => {
-    const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
-    const objectCount = countObjectsInFolder(folderPath);
+  const createFolderRow = (folderPath, displayName = null) => {
+    const folderName = displayName || folderPath.slice(currentPrefix.length).replace(/\/$/, '');
+    const { count: objectCount, mayHaveMore } = countObjectsInFolder(folderPath);
+    const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
     
     const tr = document.createElement('tr');
     tr.className = 'folder-row';
@@ -2283,7 +2550,7 @@
           </svg>
           <span>${escapeHtml(folderName)}/</span>
         </div>
-        <div class="text-muted small ms-4 ps-2">${objectCount} object${objectCount !== 1 ? 's' : ''}</div>
+        <div class="text-muted small ms-4 ps-2">${countDisplay} object${objectCount !== 1 ? 's' : ''}</div>
       </td>
       <td class="text-end text-nowrap">
         <span class="text-muted small">—</span>
@@ -2296,32 +2563,20 @@
         </button>
       </td>
     `;
-
-    const checkbox = tr.querySelector('[data-folder-select]');
-    checkbox?.addEventListener('change', (e) => {
-      e.stopPropagation();
-      const folderObjects = getObjectsInFolder(folderPath);
-      folderObjects.forEach(obj => {
-        const objCheckbox = obj.element.querySelector('[data-object-select]');
-        if (objCheckbox) {
-          objCheckbox.checked = checkbox.checked;
-        }
-        toggleRowSelection(obj.element, checkbox.checked);
-      });
-    });
-    
-    tr.addEventListener('click', (e) => {
-      if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
-      navigateToFolder(folderPath);
-    });
     
     return tr;
   };
 
+  // Instant client-side folder navigation (no server round-trip!)
   const navigateToFolder = (prefix) => {
     currentPrefix = prefix;
+    
+    // Scroll to top when navigating
+    if (scrollContainer) scrollContainer.scrollTop = 0;
+    
+    // Instant re-render from already-loaded data
+    refreshVirtualList();
     renderBreadcrumb(prefix);
-    renderObjectsView();
 
     selectedRows.clear();
 
@@ -2530,12 +2785,10 @@
       bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
     }
     if (selectAllCheckbox) {
-
-      const visibleRowsRaw = hasFolders()
-        ? allObjects.filter(obj => obj.key.startsWith(currentPrefix) && !obj.key.slice(currentPrefix.length).includes('/')).map(obj => obj.element)
-        : Array.from(document.querySelectorAll('[data-object-row]'));
-      const total = visibleRowsRaw.filter(r => r.style.display !== 'none').length;
-      const visibleSelectedCount = visibleRowsRaw.filter(r => r.style.display !== 'none' && selectedRows.has(r.dataset.key)).length;
+      // With virtual scrolling, count files in current folder from visibleItems
+      const filesInView = visibleItems.filter(item => item.type === 'file');
+      const total = filesInView.length;
+      const visibleSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
       selectAllCheckbox.disabled = total === 0;
       selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
       selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
@@ -3138,44 +3391,41 @@
 
   function initFolderNavigation() {
     if (hasFolders()) {
-      renderBreadcrumb('');
+      renderBreadcrumb(currentPrefix);
       renderObjectsView();
+    }
+    if (typeof updateFolderViewStatus === 'function') {
+      updateFolderViewStatus();
+    }
+    if (typeof updateFilterWarning === 'function') {
+      updateFilterWarning();
     }
   }
 
   bulkDeleteButton?.addEventListener('click', () => openBulkDeleteModal());
   bulkDeleteConfirm?.addEventListener('click', () => performBulkDelete());
 
+  const filterWarning = document.getElementById('filter-warning');
+  const filterWarningText = document.getElementById('filter-warning-text');
+  const folderViewStatus = document.getElementById('folder-view-status');
+
+  const updateFilterWarning = () => {
+    if (!filterWarning) return;
+    const isFiltering = currentFilterTerm.length > 0;
+    if (isFiltering && hasMoreObjects) {
+      filterWarning.classList.remove('d-none');
+    } else {
+      filterWarning.classList.add('d-none');
+    }
+  };
+
   document.getElementById('object-search')?.addEventListener('input', (event) => {
     currentFilterTerm = event.target.value.toLowerCase();
+    updateFilterWarning();
     
-    if (hasFolders()) {
-      const { folders, files } = getFoldersAtPrefix(currentPrefix);
-      const tbody = objectsTableBody;
-
-      tbody.innerHTML = '';
-
-      folders.forEach(folderPath => {
-        const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '').toLowerCase();
-        if (folderName.includes(currentFilterTerm)) {
-          tbody.appendChild(createFolderRow(folderPath));
-        }
-      });
-
-      files.forEach(obj => {
-        const keyName = obj.key.slice(currentPrefix.length).toLowerCase();
-        if (keyName.includes(currentFilterTerm)) {
-          tbody.appendChild(obj.element);
-          obj.element.style.display = '';
-        }
-      });
-    } else {
-      // Filter all loaded objects (including newly loaded ones)
-      document.querySelectorAll('[data-object-row]').forEach((row) => {
-        const key = row.dataset.key.toLowerCase();
-        row.style.display = key.includes(currentFilterTerm) ? '' : 'none';
-      });
-    }
+    // Use the virtual scrolling system for filtering - it properly handles
+    // both folder view and flat view, and works with large object counts
+    refreshVirtualList();
   });
 
   refreshVersionsButton?.addEventListener('click', () => {
@@ -3616,12 +3866,60 @@
     const lastSyncEl = document.getElementById('replication-last-sync');
     const lastSyncTimeEl = document.querySelector('[data-stat="last-sync-time"]');
     const lastSyncKeyEl = document.querySelector('[data-stat="last-sync-key"]');
+    const endpointWarning = document.getElementById('replication-endpoint-warning');
+    const endpointErrorEl = document.getElementById('replication-endpoint-error');
+    const statusAlert = document.getElementById('replication-status-alert');
+    const statusBadge = document.getElementById('replication-status-badge');
+    const statusText = document.getElementById('replication-status-text');
+    const pauseForm = document.getElementById('pause-replication-form');
 
     const loadReplicationStats = async () => {
       try {
         const resp = await fetch(statusEndpoint);
         if (!resp.ok) throw new Error('Failed to fetch stats');
         const data = await resp.json();
+
+        // Handle endpoint health status
+        if (data.endpoint_healthy === false) {
+          // Show warning and hide success alert
+          if (endpointWarning) {
+            endpointWarning.classList.remove('d-none');
+            if (endpointErrorEl && data.endpoint_error) {
+              endpointErrorEl.textContent = data.endpoint_error + '. Replication is paused until the endpoint is available.';
+            }
+          }
+          if (statusAlert) statusAlert.classList.add('d-none');
+          
+          // Update status badge to show "Paused" with warning styling
+          if (statusBadge) {
+            statusBadge.className = 'badge bg-warning-subtle text-warning px-3 py-2';
+            statusBadge.innerHTML = `
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+              </svg>
+              <span>Paused (Endpoint Unavailable)</span>`;
+          }
+          
+          // Hide the pause button since replication is effectively already paused
+          if (pauseForm) pauseForm.classList.add('d-none');
+        } else {
+          // Hide warning and show success alert
+          if (endpointWarning) endpointWarning.classList.add('d-none');
+          if (statusAlert) statusAlert.classList.remove('d-none');
+          
+          // Restore status badge to show "Enabled"
+          if (statusBadge) {
+            statusBadge.className = 'badge bg-success-subtle text-success px-3 py-2';
+            statusBadge.innerHTML = `
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+              </svg>
+              <span>Enabled</span>`;
+          }
+          
+          // Show the pause button
+          if (pauseForm) pauseForm.classList.remove('d-none');
+        }
 
         if (syncedEl) syncedEl.textContent = data.objects_synced;
         if (pendingEl) {
@@ -3685,5 +3983,106 @@
       }
     }
   });
+
+  // Bucket name validation for replication setup
+  const targetBucketInput = document.getElementById('target_bucket');
+  const targetBucketFeedback = document.getElementById('target_bucket_feedback');
+  
+  const validateBucketName = (name) => {
+    if (!name) return { valid: false, error: 'Bucket name is required' };
+    if (name.length < 3) return { valid: false, error: 'Bucket name must be at least 3 characters' };
+    if (name.length > 63) return { valid: false, error: 'Bucket name must be 63 characters or less' };
+    if (!/^[a-z0-9]/.test(name)) return { valid: false, error: 'Bucket name must start with a lowercase letter or number' };
+    if (!/[a-z0-9]$/.test(name)) return { valid: false, error: 'Bucket name must end with a lowercase letter or number' };
+    if (/[A-Z]/.test(name)) return { valid: false, error: 'Bucket name must not contain uppercase letters' };
+    if (/_/.test(name)) return { valid: false, error: 'Bucket name must not contain underscores' };
+    if (/\.\.|--/.test(name)) return { valid: false, error: 'Bucket name must not contain consecutive periods or hyphens' };
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(name)) return { valid: false, error: 'Bucket name must not be formatted as an IP address' };
+    if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(name) && name.length > 2) return { valid: false, error: 'Bucket name contains invalid characters. Use only lowercase letters, numbers, hyphens, and periods.' };
+    return { valid: true, error: null };
+  };
+
+  const updateBucketNameValidation = () => {
+    if (!targetBucketInput || !targetBucketFeedback) return;
+    const name = targetBucketInput.value.trim();
+    if (!name) {
+      targetBucketInput.classList.remove('is-valid', 'is-invalid');
+      targetBucketFeedback.textContent = '';
+      return;
+    }
+    const result = validateBucketName(name);
+    targetBucketInput.classList.toggle('is-valid', result.valid);
+    targetBucketInput.classList.toggle('is-invalid', !result.valid);
+    targetBucketFeedback.textContent = result.error || '';
+  };
+
+  targetBucketInput?.addEventListener('input', updateBucketNameValidation);
+  targetBucketInput?.addEventListener('blur', updateBucketNameValidation);
+
+  // Prevent form submission if bucket name is invalid
+  const replicationForm = targetBucketInput?.closest('form');
+  replicationForm?.addEventListener('submit', (e) => {
+    const name = targetBucketInput.value.trim();
+    const result = validateBucketName(name);
+    if (!result.valid) {
+      e.preventDefault();
+      updateBucketNameValidation();
+      targetBucketInput.focus();
+      return false;
+    }
+  });
+
+  // Policy JSON validation and formatting
+  const formatPolicyBtn = document.getElementById('formatPolicyBtn');
+  const policyValidationStatus = document.getElementById('policyValidationStatus');
+  const policyValidBadge = document.getElementById('policyValidBadge');
+  const policyInvalidBadge = document.getElementById('policyInvalidBadge');
+  const policyErrorDetail = document.getElementById('policyErrorDetail');
+
+  const validatePolicyJson = () => {
+    if (!policyTextarea || !policyValidationStatus) return;
+    const value = policyTextarea.value.trim();
+    if (!value) {
+      policyValidationStatus.classList.add('d-none');
+      policyErrorDetail?.classList.add('d-none');
+      return;
+    }
+    policyValidationStatus.classList.remove('d-none');
+    try {
+      JSON.parse(value);
+      policyValidBadge?.classList.remove('d-none');
+      policyInvalidBadge?.classList.add('d-none');
+      policyErrorDetail?.classList.add('d-none');
+    } catch (err) {
+      policyValidBadge?.classList.add('d-none');
+      policyInvalidBadge?.classList.remove('d-none');
+      if (policyErrorDetail) {
+        policyErrorDetail.textContent = err.message;
+        policyErrorDetail.classList.remove('d-none');
+      }
+    }
+  };
+
+  policyTextarea?.addEventListener('input', validatePolicyJson);
+  policyTextarea?.addEventListener('blur', validatePolicyJson);
+
+  formatPolicyBtn?.addEventListener('click', () => {
+    if (!policyTextarea) return;
+    const value = policyTextarea.value.trim();
+    if (!value) return;
+    try {
+      const parsed = JSON.parse(value);
+      policyTextarea.value = JSON.stringify(parsed, null, 2);
+      validatePolicyJson();
+    } catch (err) {
+      // Show error in validation
+      validatePolicyJson();
+    }
+  });
+
+  // Initialize policy validation on page load
+  if (policyTextarea && policyPreset?.value === 'custom') {
+    validatePolicyJson();
+  }
 </script>
 {% endblock %}

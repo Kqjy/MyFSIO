@@ -188,7 +188,6 @@ class BucketPolicyStore:
         except FileNotFoundError:
             return None
 
-    # ------------------------------------------------------------------
     def evaluate(
         self,
         access_key: Optional[str],
@@ -229,7 +228,6 @@ class BucketPolicyStore:
         self._policies.pop(bucket, None)
         self._persist()
 
-    # ------------------------------------------------------------------
     def _load(self) -> None:
         try:
             content = self.policy_path.read_text(encoding='utf-8')

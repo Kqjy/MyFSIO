@@ -66,8 +66,28 @@ html {
 	color: var(--myfsio-muted) !important;
 }
 
-.table-responsive { border-radius: 0.5rem; overflow: hidden; }
+.table-responsive { 
+	border-radius: 0.5rem; 
+	overflow-x: auto; 
+	-webkit-overflow-scrolling: touch;
+}
 .message-stack { position: sticky; top: 1rem; z-index: 100; }
+
+/* Mobile-friendly table improvements */
+.table-responsive table {
+	min-width: 600px;
+}
+
+.table-responsive table th,
+.table-responsive table td {
+	white-space: nowrap;
+}
+
+/* Allow text wrapping for description columns */
+.table-responsive table td.text-wrap {
+	white-space: normal;
+	min-width: 200px;
+}
 code { font-size: 0.85rem; }
 
 code {
@@ -389,8 +409,22 @@ code {
 .bucket-table th:last-child { white-space: nowrap; }
 
 .object-key {
-	word-break: break-word;
-	max-width: 32rem;
+	max-width: 0;
+	width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.object-key .fw-medium {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.object-key .text-muted {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .preview-card { top: 1rem; }
@@ -515,6 +549,22 @@ code {
 .objects-table-container {
 	max-height: 600px;
 	overflow-y: auto;
+}
+
+.objects-table-container thead {
+	position: sticky;
+	top: 0;
+	z-index: 10;
+}
+
+.objects-table-container thead th {
+	background-color: #f8f9fa;
+	border-bottom: 1px solid var(--myfsio-card-border);
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+[data-theme='dark'] .objects-table-container thead th {
+	background-color: #1e293b;
 }
 
 .btn-group form { display: inline; }
@@ -1536,6 +1586,41 @@ pre code {
 	.preview-card {
 		position: relative !important;
 		top: 0 !important;
+	}
+	
+	/* Ensure tables are scrollable on mobile */
+	.card-body .table-responsive {
+		margin: -1rem;
+		padding: 0;
+		width: calc(100% + 2rem);
+	}
+	
+	.card-body .table-responsive table {
+		margin-bottom: 0;
+	}
+	
+	/* IAM users table mobile adjustments */
+	.table th,
+	.table td {
+		padding: 0.5rem 0.75rem;
+	}
+	
+	/* Better touch scrolling indicator */
+	.table-responsive::after {
+		content: '';
+		position: absolute;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: 20px;
+		background: linear-gradient(to left, var(--myfsio-card-bg), transparent);
+		pointer-events: none;
+		opacity: 0;
+		transition: opacity 0.3s;
+	}
+	
+	.table-responsive:not(:hover)::after {
+		opacity: 0.8;
 	}
 }
 

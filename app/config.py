@@ -73,6 +73,7 @@ class AppConfig:
     kms_enabled: bool
     kms_keys_path: Path
     default_encryption_algorithm: str
+    display_timezone: str
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -153,15 +154,15 @@ class AppConfig:
         cors_allow_headers = _csv(str(_get("CORS_ALLOW_HEADERS", "*")), ["*"])
         cors_expose_headers = _csv(str(_get("CORS_EXPOSE_HEADERS", "*")), ["*"])
         session_lifetime_days = int(_get("SESSION_LIFETIME_DAYS", 30))
-        bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60))  # Default 60 seconds
+        bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60)) 
         
-        # Encryption settings
         encryption_enabled = str(_get("ENCRYPTION_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
         encryption_keys_dir = storage_root / ".myfsio.sys" / "keys"
         encryption_master_key_path = Path(_get("ENCRYPTION_MASTER_KEY_PATH", encryption_keys_dir / "master.key")).resolve()
         kms_enabled = str(_get("KMS_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
         kms_keys_path = Path(_get("KMS_KEYS_PATH", encryption_keys_dir / "kms_keys.json")).resolve()
         default_encryption_algorithm = str(_get("DEFAULT_ENCRYPTION_ALGORITHM", "AES256"))
+        display_timezone = str(_get("DISPLAY_TIMEZONE", "UTC"))
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -196,7 +197,8 @@ class AppConfig:
                    encryption_master_key_path=encryption_master_key_path,
                    kms_enabled=kms_enabled,
                    kms_keys_path=kms_keys_path,
-                   default_encryption_algorithm=default_encryption_algorithm)
+                   default_encryption_algorithm=default_encryption_algorithm,
+                   display_timezone=display_timezone)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -206,7 +208,6 @@ class AppConfig:
         """
         issues = []
         
-        # Check if storage_root is writable
         try:
             test_file = self.storage_root / ".write_test"
             test_file.touch()
@@ -214,24 +215,20 @@ class AppConfig:
         except (OSError, PermissionError) as e:
             issues.append(f"CRITICAL: STORAGE_ROOT '{self.storage_root}' is not writable: {e}")
         
-        # Check if storage_root looks like a temp directory
         storage_str = str(self.storage_root).lower()
         if "/tmp" in storage_str or "\\temp" in storage_str or "appdata\\local\\temp" in storage_str:
             issues.append(f"WARNING: STORAGE_ROOT '{self.storage_root}' appears to be a temporary directory. Data may be lost on reboot!")
         
-        # Check if IAM config path is under storage_root
         try:
             self.iam_config_path.relative_to(self.storage_root)
         except ValueError:
             issues.append(f"WARNING: IAM_CONFIG '{self.iam_config_path}' is outside STORAGE_ROOT '{self.storage_root}'. Consider setting IAM_CONFIG explicitly or ensuring paths are aligned.")
         
-        # Check if bucket policy path is under storage_root
         try:
             self.bucket_policy_path.relative_to(self.storage_root)
         except ValueError:
             issues.append(f"WARNING: BUCKET_POLICY_PATH '{self.bucket_policy_path}' is outside STORAGE_ROOT '{self.storage_root}'. Consider setting BUCKET_POLICY_PATH explicitly.")
         
-        # Check if log path is writable
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             test_log = self.log_path.parent / ".write_test"
@@ -240,26 +237,22 @@ class AppConfig:
         except (OSError, PermissionError) as e:
             issues.append(f"WARNING: Log directory '{self.log_path.parent}' is not writable: {e}")
         
-        # Check log path location
         log_str = str(self.log_path).lower()
         if "/tmp" in log_str or "\\temp" in log_str or "appdata\\local\\temp" in log_str:
             issues.append(f"WARNING: LOG_DIR '{self.log_path.parent}' appears to be a temporary directory. Logs may be lost on reboot!")
         
-        # Check if encryption keys path is under storage_root (when encryption is enabled)
         if self.encryption_enabled:
             try:
                 self.encryption_master_key_path.relative_to(self.storage_root)
             except ValueError:
                 issues.append(f"WARNING: ENCRYPTION_MASTER_KEY_PATH '{self.encryption_master_key_path}' is outside STORAGE_ROOT. Ensure proper backup procedures.")
         
-        # Check if KMS keys path is under storage_root (when KMS is enabled)
         if self.kms_enabled:
             try:
                 self.kms_keys_path.relative_to(self.storage_root)
             except ValueError:
                 issues.append(f"WARNING: KMS_KEYS_PATH '{self.kms_keys_path}' is outside STORAGE_ROOT. Ensure proper backup procedures.")
         
-        # Warn about production settings
         if self.secret_key == "dev-secret-key":
             issues.append("WARNING: Using default SECRET_KEY. Set SECRET_KEY environment variable for production.")
         
@@ -330,4 +323,5 @@ class AppConfig:
             "KMS_ENABLED": self.kms_enabled,
             "KMS_KEYS_PATH": str(self.kms_keys_path),
             "DEFAULT_ENCRYPTION_ALGORITHM": self.default_encryption_algorithm,
+            "DISPLAY_TIMEZONE": self.display_timezone,
         }

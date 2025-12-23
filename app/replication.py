@@ -22,6 +22,8 @@ from .storage import ObjectStorage, StorageError
 logger = logging.getLogger(__name__)
 
 REPLICATION_USER_AGENT = "S3ReplicationAgent/1.0"
+REPLICATION_CONNECT_TIMEOUT = 5
+REPLICATION_READ_TIMEOUT = 30
 
 REPLICATION_MODE_NEW_ONLY = "new_only"
 REPLICATION_MODE_ALL = "all"
@@ -30,10 +32,10 @@ REPLICATION_MODE_ALL = "all"
 @dataclass
 class ReplicationStats:
     """Statistics for replication operations - computed dynamically."""
-    objects_synced: int = 0          # Objects that exist in both source and destination
-    objects_pending: int = 0         # Objects in source but not in destination
-    objects_orphaned: int = 0        # Objects in destination but not in source (will be deleted)
-    bytes_synced: int = 0            # Total bytes synced to destination
+    objects_synced: int = 0
+    objects_pending: int = 0
+    objects_orphaned: int = 0
+    bytes_synced: int = 0      
     last_sync_at: Optional[float] = None
     last_sync_key: Optional[str] = None
     
@@ -83,7 +85,6 @@ class ReplicationRule:
     @classmethod
     def from_dict(cls, data: dict) -> "ReplicationRule":
         stats_data = data.pop("stats", {})
-        # Handle old rules without mode/created_at
         if "mode" not in data:
             data["mode"] = REPLICATION_MODE_NEW_ONLY
         if "created_at" not in data:
@@ -121,6 +122,33 @@ class ReplicationManager:
         with open(self.rules_path, "w") as f:
             json.dump(data, f, indent=2)
 
+    def check_endpoint_health(self, connection: RemoteConnection) -> bool:
+        """Check if a remote endpoint is reachable and responsive.
+        
+        Returns True if endpoint is healthy, False otherwise.
+        Uses short timeouts to prevent blocking.
+        """
+        try:
+            config = Config(
+                user_agent_extra=REPLICATION_USER_AGENT,
+                connect_timeout=REPLICATION_CONNECT_TIMEOUT,
+                read_timeout=REPLICATION_READ_TIMEOUT,
+                retries={'max_attempts': 1}
+            )
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=connection.endpoint_url,
+                aws_access_key_id=connection.access_key,
+                aws_secret_access_key=connection.secret_key,
+                region_name=connection.region,
+                config=config,
+            )
+            s3.list_buckets()
+            return True
+        except Exception as e:
+            logger.warning(f"Endpoint health check failed for {connection.name} ({connection.endpoint_url}): {e}")
+            return False
+
     def get_rule(self, bucket_name: str) -> Optional[ReplicationRule]:
         return self._rules.get(bucket_name)
 
@@ -151,14 +179,12 @@ class ReplicationManager:
         
         connection = self.connections.get(rule.target_connection_id)
         if not connection:
-            return rule.stats  # Return cached stats if connection unavailable
+            return rule.stats
         
         try:
-            # Get source objects
             source_objects = self.storage.list_objects_all(bucket_name)
             source_keys = {obj.key: obj.size for obj in source_objects}
             
-            # Get destination objects
             s3 = boto3.client(
                 "s3",
                 endpoint_url=connection.endpoint_url,
@@ -178,24 +204,18 @@ class ReplicationManager:
                             bytes_synced += obj.get('Size', 0)
             except ClientError as e:
                 if e.response['Error']['Code'] == 'NoSuchBucket':
-                    # Destination bucket doesn't exist yet
                     dest_keys = set()
                 else:
                     raise
             
-            # Compute stats
-            synced = source_keys.keys() & dest_keys  # Objects in both
-            orphaned = dest_keys - source_keys.keys()  # In dest but not source
+            synced = source_keys.keys() & dest_keys  
+            orphaned = dest_keys - source_keys.keys() 
             
-            # For "new_only" mode, we can't determine pending since we don't know
-            # which objects existed before replication was enabled. Only "all" mode
-            # should show pending (objects that should be replicated but aren't yet).
             if rule.mode == REPLICATION_MODE_ALL:
-                pending = source_keys.keys() - dest_keys  # In source but not dest
+                pending = source_keys.keys() - dest_keys 
             else:
-                pending = set()  # New-only mode: don't show pre-existing as pending
+                pending = set()
             
-            # Update cached stats with computed values
             rule.stats.objects_synced = len(synced)
             rule.stats.objects_pending = len(pending)
             rule.stats.objects_orphaned = len(orphaned)
@@ -205,7 +225,7 @@ class ReplicationManager:
             
         except (ClientError, StorageError) as e:
             logger.error(f"Failed to compute sync status for {bucket_name}: {e}")
-            return rule.stats  # Return cached stats on error
+            return rule.stats
     
     def replicate_existing_objects(self, bucket_name: str) -> None:
         """Trigger replication for all existing objects in a bucket."""
@@ -216,6 +236,10 @@ class ReplicationManager:
         connection = self.connections.get(rule.target_connection_id)
         if not connection:
             logger.warning(f"Cannot replicate existing objects: Connection {rule.target_connection_id} not found")
+            return
+        
+        if not self.check_endpoint_health(connection):
+            logger.warning(f"Cannot replicate existing objects: Endpoint {connection.name} ({connection.endpoint_url}) is not reachable")
             return
         
         try:
@@ -255,6 +279,10 @@ class ReplicationManager:
             logger.warning(f"Replication skipped for {bucket_name}/{object_key}: Connection {rule.target_connection_id} not found")
             return
 
+        if not self.check_endpoint_health(connection):
+            logger.warning(f"Replication skipped for {bucket_name}/{object_key}: Endpoint {connection.name} ({connection.endpoint_url}) is not reachable")
+            return
+
         self._executor.submit(self._replicate_task, bucket_name, object_key, rule, connection, action)
 
     def _replicate_task(self, bucket_name: str, object_key: str, rule: ReplicationRule, conn: RemoteConnection, action: str) -> None:
@@ -271,13 +299,26 @@ class ReplicationManager:
         
         file_size = 0
         try:
-            config = Config(user_agent_extra=REPLICATION_USER_AGENT)
+            config = Config(
+                user_agent_extra=REPLICATION_USER_AGENT,
+                connect_timeout=REPLICATION_CONNECT_TIMEOUT,
+                read_timeout=REPLICATION_READ_TIMEOUT,
+                retries={'max_attempts': 2}, 
+                signature_version='s3v4',  
+                s3={
+                    'addressing_style': 'path',
+                },
+                # Disable SDK automatic checksums - they cause SignatureDoesNotMatch errors
+                # with S3-compatible servers that don't support CRC32 checksum headers
+                request_checksum_calculation='when_required',
+                response_checksum_validation='when_required',
+            )
             s3 = boto3.client(
                 "s3",
                 endpoint_url=conn.endpoint_url,
                 aws_access_key_id=conn.access_key,
                 aws_secret_access_key=conn.secret_key,
-                region_name=conn.region,
+                region_name=conn.region or 'us-east-1',
                 config=config,
             )
 
@@ -296,54 +337,59 @@ class ReplicationManager:
                 logger.error(f"Source object not found: {bucket_name}/{object_key}")
                 return
 
-            metadata = self.storage.get_object_metadata(bucket_name, object_key)
-
-            extra_args = {}
-            if metadata:
-                extra_args["Metadata"] = metadata
+            # Don't replicate metadata - destination server will generate its own
+            # __etag__ and __size__. Replicating them causes signature mismatches when they have None/empty values.
             
-            # Guess content type to prevent corruption/wrong handling
             content_type, _ = mimetypes.guess_type(path)
             file_size = path.stat().st_size
 
             logger.info(f"Replicating {bucket_name}/{object_key}: Size={file_size}, ContentType={content_type}")
 
+            def do_put_object() -> None:
+                """Helper to upload object.
+                
+                Reads the file content into memory first to avoid signature calculation
+                issues with certain binary file types (like GIFs) when streaming.
+                Do NOT set ContentLength explicitly - boto3 calculates it from the bytes
+                and setting it manually can cause SignatureDoesNotMatch errors.
+                """
+                file_content = path.read_bytes()
+                put_kwargs = {
+                    "Bucket": rule.target_bucket,
+                    "Key": object_key,
+                    "Body": file_content,
+                }
+                if content_type:
+                    put_kwargs["ContentType"] = content_type
+                s3.put_object(**put_kwargs)
+
             try:
-                with path.open("rb") as f:
-                    s3.put_object(
-                        Bucket=rule.target_bucket,
-                        Key=object_key,
-                        Body=f,
-                        ContentLength=file_size,
-                        ContentType=content_type or "application/octet-stream",
-                        Metadata=metadata or {}
-                    )
+                do_put_object()
             except (ClientError, S3UploadFailedError) as e:
-                is_no_bucket = False
+                error_code = None
                 if isinstance(e, ClientError):
-                    if e.response['Error']['Code'] == 'NoSuchBucket':
-                        is_no_bucket = True
+                    error_code = e.response['Error']['Code']
                 elif isinstance(e, S3UploadFailedError):
                     if "NoSuchBucket" in str(e):
-                        is_no_bucket = True
+                        error_code = 'NoSuchBucket'
 
-                if is_no_bucket:
+                if error_code == 'NoSuchBucket':
                     logger.info(f"Target bucket {rule.target_bucket} not found. Attempting to create it.")
+                    bucket_ready = False
                     try:
                         s3.create_bucket(Bucket=rule.target_bucket)
-                        # Retry upload
-                        with path.open("rb") as f:
-                            s3.put_object(
-                                Bucket=rule.target_bucket,
-                                Key=object_key,
-                                Body=f,
-                                ContentLength=file_size,
-                                ContentType=content_type or "application/octet-stream",
-                                Metadata=metadata or {}
-                            )
-                    except Exception as create_err:
-                        logger.error(f"Failed to create target bucket {rule.target_bucket}: {create_err}")
-                        raise e # Raise original error
+                        bucket_ready = True
+                        logger.info(f"Created target bucket {rule.target_bucket}")
+                    except ClientError as bucket_err:
+                        if bucket_err.response['Error']['Code'] in ('BucketAlreadyExists', 'BucketAlreadyOwnedByYou'):
+                            logger.debug(f"Bucket {rule.target_bucket} already exists (created by another thread)")
+                            bucket_ready = True
+                        else:
+                            logger.error(f"Failed to create target bucket {rule.target_bucket}: {bucket_err}")
+                            raise e 
+                    
+                    if bucket_ready:
+                        do_put_object()
                 else:
                     raise e
             
@@ -354,3 +400,4 @@ class ReplicationManager:
             logger.error(f"Replication failed for {bucket_name}/{object_key}: {e}")
         except Exception:
             logger.exception(f"Unexpected error during replication for {bucket_name}/{object_key}")
+
