@@ -167,6 +167,19 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(calculated_signature, signature):
+        # Debug logging for signature mismatch
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Signature mismatch for {req.path}")
+        logger.error(f"  Content-Type: {req.headers.get('Content-Type')}")
+        logger.error(f"  Content-Length: {req.headers.get('Content-Length')}")
+        logger.error(f"  X-Amz-Content-Sha256: {req.headers.get('X-Amz-Content-Sha256')}")
+        logger.error(f"  Canonical URI: {canonical_uri}")
+        logger.error(f"  Signed headers: {signed_headers_str}")
+        logger.error(f"  Expected sig: {signature[:16]}...")
+        logger.error(f"  Calculated sig: {calculated_signature[:16]}...")
+        # Log first part of canonical request to compare
+        logger.error(f"  Canonical request hash: {hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()[:16]}...")
         raise IamError("SignatureDoesNotMatch")
 
     return _iam().get_principal(access_key)
