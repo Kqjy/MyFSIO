@@ -409,8 +409,22 @@ code {
 .bucket-table th:last-child { white-space: nowrap; }
 
 .object-key {
-	word-break: break-word;
-	max-width: 32rem;
+	max-width: 0;
+	width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.object-key .fw-medium {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.object-key .text-muted {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .preview-card { top: 1rem; }
