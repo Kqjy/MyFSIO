@@ -128,6 +128,15 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
 
     canonical_request = f"{method}\n{canonical_uri}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
 
+    # Debug logging for signature issues
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"SigV4 Debug - Method: {method}, URI: {canonical_uri}")
+    logger.debug(f"SigV4 Debug - Payload hash from header: {req.headers.get('X-Amz-Content-Sha256')}")
+    logger.debug(f"SigV4 Debug - Signed headers: {signed_headers_str}")
+    logger.debug(f"SigV4 Debug - Content-Type: {req.headers.get('Content-Type')}")
+    logger.debug(f"SigV4 Debug - Content-Length: {req.headers.get('Content-Length')}")
+
     amz_date = req.headers.get("X-Amz-Date") or req.headers.get("Date")
     if not amz_date:
         raise IamError("Missing Date header")
