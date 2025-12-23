@@ -176,10 +176,15 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         logger.error(f"  X-Amz-Content-Sha256: {req.headers.get('X-Amz-Content-Sha256')}")
         logger.error(f"  Canonical URI: {canonical_uri}")
         logger.error(f"  Signed headers: {signed_headers_str}")
+        # Log each signed header's value
+        for h in signed_headers_list:
+            logger.error(f"  Header '{h}': {repr(req.headers.get(h))}")
         logger.error(f"  Expected sig: {signature[:16]}...")
         logger.error(f"  Calculated sig: {calculated_signature[:16]}...")
         # Log first part of canonical request to compare
         logger.error(f"  Canonical request hash: {hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()[:16]}...")
+        # Log the full canonical request for debugging
+        logger.error(f"  Canonical request:\n{canonical_request[:500]}...")
         raise IamError("SignatureDoesNotMatch")
 
     return _iam().get_principal(access_key)
