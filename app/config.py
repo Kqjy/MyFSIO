@@ -73,6 +73,7 @@ class AppConfig:
     kms_enabled: bool
     kms_keys_path: Path
     default_encryption_algorithm: str
+    display_timezone: str
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -161,6 +162,7 @@ class AppConfig:
         kms_enabled = str(_get("KMS_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
         kms_keys_path = Path(_get("KMS_KEYS_PATH", encryption_keys_dir / "kms_keys.json")).resolve()
         default_encryption_algorithm = str(_get("DEFAULT_ENCRYPTION_ALGORITHM", "AES256"))
+        display_timezone = str(_get("DISPLAY_TIMEZONE", "UTC"))
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -195,7 +197,8 @@ class AppConfig:
                    encryption_master_key_path=encryption_master_key_path,
                    kms_enabled=kms_enabled,
                    kms_keys_path=kms_keys_path,
-                   default_encryption_algorithm=default_encryption_algorithm)
+                   default_encryption_algorithm=default_encryption_algorithm,
+                   display_timezone=display_timezone)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -320,4 +323,5 @@ class AppConfig:
             "KMS_ENABLED": self.kms_enabled,
             "KMS_KEYS_PATH": str(self.kms_keys_path),
             "DEFAULT_ENCRYPTION_ALGORITHM": self.default_encryption_algorithm,
+            "DISPLAY_TIMEZONE": self.display_timezone,
         }

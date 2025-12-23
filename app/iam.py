@@ -6,7 +6,7 @@ import math
 import secrets
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set
 
@@ -148,7 +148,7 @@ class IamService:
             return
         attempts = self._failed_attempts.setdefault(access_key, deque())
         self._prune_attempts(attempts)
-        attempts.append(datetime.now())
+        attempts.append(datetime.now(timezone.utc))
 
     def _clear_failed_attempts(self, access_key: str) -> None:
         if not access_key:
@@ -156,7 +156,7 @@ class IamService:
         self._failed_attempts.pop(access_key, None)
 
     def _prune_attempts(self, attempts: Deque[datetime]) -> None:
-        cutoff = datetime.now() - self.auth_lockout_window
+        cutoff = datetime.now(timezone.utc) - self.auth_lockout_window
         while attempts and attempts[0] < cutoff:
             attempts.popleft()
 
@@ -177,7 +177,7 @@ class IamService:
         if len(attempts) < self.auth_max_attempts:
             return 0
         oldest = attempts[0]
-        elapsed = (datetime.now() - oldest).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - oldest).total_seconds()
         return int(max(0, self.auth_lockout_window.total_seconds() - elapsed))
 
     def principal_for_key(self, access_key: str) -> Principal:

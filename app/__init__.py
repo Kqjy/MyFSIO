@@ -171,13 +171,22 @@ def create_app(
 
     @app.template_filter("timestamp_to_datetime")
     def timestamp_to_datetime(value: float) -> str:
-        """Format Unix timestamp as human-readable datetime."""
-        from datetime import datetime
+        """Format Unix timestamp as human-readable datetime in configured timezone."""
+        from datetime import datetime, timezone as dt_timezone
+        from zoneinfo import ZoneInfo
         if not value:
             return "Never"
         try:
-            dt = datetime.fromtimestamp(value)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
+            dt_utc = datetime.fromtimestamp(value, dt_timezone.utc)
+            display_tz = app.config.get("DISPLAY_TIMEZONE", "UTC")
+            if display_tz and display_tz != "UTC":
+                try:
+                    tz = ZoneInfo(display_tz)
+                    dt_local = dt_utc.astimezone(tz)
+                    return dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                except (KeyError, ValueError):
+                    pass 
+            return dt_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
         except (ValueError, OSError):
             return "Unknown"
 
