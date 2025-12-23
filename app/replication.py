@@ -349,15 +349,9 @@ class ReplicationManager:
                 logger.error(f"Source object not found: {bucket_name}/{object_key}")
                 return
 
-            metadata = self.storage.get_object_metadata(bucket_name, object_key)
-
-            extra_args = {}
-            if metadata:
-                # Filter out metadata with None or empty values to prevent signature issues
-                # boto3 signs all metadata headers, so None values cause mismatches
-                filtered_metadata = {k: v for k, v in metadata.items() if v is not None and v != ''}
-                if filtered_metadata:
-                    extra_args["Metadata"] = filtered_metadata
+            # Don't replicate metadata - destination server will generate its own
+            # __etag__ and __size__. Replicating them causes signature mismatches
+            # when they have None/empty values.
             
             # Guess content type to prevent corruption/wrong handling
             content_type, _ = mimetypes.guess_type(path)
@@ -381,11 +375,7 @@ class ReplicationManager:
                 }
                 if content_type:
                     put_kwargs["ContentType"] = content_type
-                # Only add metadata if we have valid filtered values
-                if metadata:
-                    filtered = {k: v for k, v in metadata.items() if v is not None and v != ''}
-                    if filtered:
-                        put_kwargs["Metadata"] = filtered
+                # Metadata is not replicated - destination generates its own
                 
                 # Debug logging for signature issues
                 logger.debug(f"PUT request details: bucket={rule.target_bucket}, key={repr(object_key)}, "
