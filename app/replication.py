@@ -317,7 +317,13 @@ class ReplicationManager:
                 read_timeout=REPLICATION_READ_TIMEOUT,
                 retries={'max_attempts': 2},  # Limited retries to prevent long hangs
                 signature_version='s3v4',  # Force signature v4 for compatibility
-                s3={'addressing_style': 'path'}  # Use path-style addressing for compatibility
+                s3={
+                    'addressing_style': 'path',  # Use path-style addressing for compatibility
+                },
+                # Disable SDK automatic checksums - they cause SignatureDoesNotMatch errors
+                # with S3-compatible servers that don't support CRC32 checksum headers
+                request_checksum_calculation='when_required',
+                response_checksum_validation='when_required',
             )
             s3 = boto3.client(
                 "s3",
@@ -347,7 +353,11 @@ class ReplicationManager:
 
             extra_args = {}
             if metadata:
-                extra_args["Metadata"] = metadata
+                # Filter out metadata with None or empty values to prevent signature issues
+                # boto3 signs all metadata headers, so None values cause mismatches
+                filtered_metadata = {k: v for k, v in metadata.items() if v is not None and v != ''}
+                if filtered_metadata:
+                    extra_args["Metadata"] = filtered_metadata
             
             # Guess content type to prevent corruption/wrong handling
             content_type, _ = mimetypes.guess_type(path)
@@ -371,8 +381,11 @@ class ReplicationManager:
                 }
                 if content_type:
                     put_kwargs["ContentType"] = content_type
+                # Only add metadata if we have valid filtered values
                 if metadata:
-                    put_kwargs["Metadata"] = metadata
+                    filtered = {k: v for k, v in metadata.items() if v is not None and v != ''}
+                    if filtered:
+                        put_kwargs["Metadata"] = filtered
                 
                 # Debug logging for signature issues
                 logger.debug(f"PUT request details: bucket={rule.target_bucket}, key={repr(object_key)}, "
