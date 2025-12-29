@@ -173,14 +173,16 @@
         </div>
         <div class="d-flex align-items-center gap-1">
           <span class="text-muted">Batch</span>
-          <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;">
+          <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;" title="Number of objects to load per batch">
             <option value="1000">1K</option>
             <option value="5000" selected>5K</option>
             <option value="10000">10K</option>
             <option value="25000">25K</option>
             <option value="50000">50K</option>
+            <option value="75000">75K</option>
+            <option value="100000">100K</option>
           </select>
-          <span class="text-muted">objects</span>
+          <span class="text-muted">per batch</span>
         </div>
       </div>
     </div>
@@ -1144,13 +1146,18 @@
               </div>
 
               {% elif replication_rule and not replication_rule.enabled %}
-              <div class="alert alert-warning d-flex align-items-center mb-4" role="alert">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+              <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
                   <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
                 </svg>
                 <div>
-                  <strong>Replication Paused</strong> — 
-                  Replication is configured but currently paused. New uploads will not be replicated until resumed.
+                  <strong>Replication Paused</strong>
+                  <p class="mb-1">Replication is configured but currently paused. New uploads will not be replicated until resumed.</p>
+                  {% if replication_rule.mode == 'all' %}
+                  <p class="mb-0 small text-dark"><strong>Tip:</strong> When you resume, any objects uploaded while paused will be automatically synced to the target.</p>
+                  {% else %}
+                  <p class="mb-0 small text-dark"><strong>Note:</strong> Objects uploaded while paused will not be synced (mode: new_only). Consider switching to "All Objects" mode if you need to sync missed uploads.</p>
+                  {% endif %}
                 </div>
               </div>
               
@@ -1882,7 +1889,14 @@
   let pageSize = 5000;  // Load large batches for virtual scrolling
   let currentPrefix = '';  // Current folder prefix for navigation
   let allObjects = [];  // All loaded object metadata (lightweight)
-  
+  let urlTemplates = null;  // URL templates from API for constructing object URLs
+
+  // Helper to build URL from template by replacing KEY_PLACEHOLDER with encoded key
+  const buildUrlFromTemplate = (template, key) => {
+    if (!template) return '';
+    return template.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/'));
+  };
+
   // Virtual scrolling state
   const ROW_HEIGHT = 53;  // Height of each table row in pixels
   const BUFFER_ROWS = 10;  // Extra rows to render above/below viewport
@@ -2223,22 +2237,26 @@
         objectsLoadingRow.remove();
       }
 
-      // Store lightweight object metadata (no DOM elements!)
+      if (data.url_templates && !urlTemplates) {
+        urlTemplates = data.url_templates;
+      }
+
       data.objects.forEach(obj => {
         loadedObjectCount++;
+        const key = obj.key;
         allObjects.push({
-          key: obj.key,
+          key: key,
           size: obj.size,
           lastModified: obj.last_modified,
           lastModifiedDisplay: obj.last_modified_display,
           etag: obj.etag,
-          previewUrl: obj.preview_url,
-          downloadUrl: obj.download_url,
-          presignEndpoint: obj.presign_endpoint,
-          deleteEndpoint: obj.delete_endpoint,
-          metadata: JSON.stringify(obj.metadata || {}),
-          versionsEndpoint: obj.versions_endpoint,
-          restoreTemplate: obj.restore_template
+          previewUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.preview, key) : '',
+          downloadUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.download, key) : '',
+          presignEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.presign, key) : '',
+          deleteEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.delete, key) : '',
+          metadata: '{}',
+          versionsEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.versions, key) : '',
+          restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : ''
         });
       });
 

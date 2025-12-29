@@ -150,16 +150,21 @@ class TestPaginatedObjectListing:
             
             assert len(data["objects"]) == 1
             obj = data["objects"][0]
-            
+
             # Check all expected fields
             assert obj["key"] == "test.txt"
             assert obj["size"] == 12  # len("test content")
             assert "last_modified" in obj
             assert "last_modified_display" in obj
             assert "etag" in obj
-            assert "preview_url" in obj
-            assert "download_url" in obj
-            assert "delete_endpoint" in obj
+
+            # URLs are now returned as templates (not per-object) for performance
+            assert "url_templates" in data
+            templates = data["url_templates"]
+            assert "preview" in templates
+            assert "download" in templates
+            assert "delete" in templates
+            assert "KEY_PLACEHOLDER" in templates["preview"]
     
     def test_bucket_detail_page_loads_without_objects(self, tmp_path):
         """Bucket detail page should load even with many objects."""

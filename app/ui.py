@@ -415,7 +415,7 @@ def list_bucket_objects(bucket_name: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
-    max_keys = min(int(request.args.get("max_keys", 1000)), 10000)
+    max_keys = min(int(request.args.get("max_keys", 1000)), 100000)
     continuation_token = request.args.get("continuation_token") or None
     prefix = request.args.get("prefix") or None
 
@@ -434,6 +434,14 @@ def list_bucket_objects(bucket_name: str):
     except StorageError:
         versioning_enabled = False
 
+    # Pre-compute URL templates once (not per-object) for performance
+    # Frontend will construct actual URLs by replacing KEY_PLACEHOLDER
+    preview_template = url_for("ui.object_preview", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    delete_template = url_for("ui.delete_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    presign_template = url_for("ui.object_presign", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    versions_template = url_for("ui.object_versions", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    restore_template = url_for("ui.restore_object_version", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER", version_id="VERSION_ID_PLACEHOLDER")
+
     objects_data = []
     for obj in result.objects:
         objects_data.append({
@@ -442,13 +450,6 @@ def list_bucket_objects(bucket_name: str):
             "last_modified": obj.last_modified.isoformat(),
             "last_modified_display": obj.last_modified.strftime("%b %d, %Y %H:%M"),
             "etag": obj.etag,
-            "metadata": obj.metadata or {},
-            "preview_url": url_for("ui.object_preview", bucket_name=bucket_name, object_key=obj.key),
-            "download_url": url_for("ui.object_preview", bucket_name=bucket_name, object_key=obj.key) + "?download=1",
-            "presign_endpoint": url_for("ui.object_presign", bucket_name=bucket_name, object_key=obj.key),
-            "delete_endpoint": url_for("ui.delete_object", bucket_name=bucket_name, object_key=obj.key),
-            "versions_endpoint": url_for("ui.object_versions", bucket_name=bucket_name, object_key=obj.key),
-            "restore_template": url_for("ui.restore_object_version", bucket_name=bucket_name, object_key=obj.key, version_id="VERSION_ID_PLACEHOLDER"),
         })
 
     return jsonify({
@@ -457,6 +458,14 @@ def list_bucket_objects(bucket_name: str):
         "next_continuation_token": result.next_continuation_token,
         "total_count": result.total_count,
         "versioning_enabled": versioning_enabled,
+        "url_templates": {
+            "preview": preview_template,
+            "download": preview_template + "?download=1",
+            "presign": presign_template,
+            "delete": delete_template,
+            "versions": versions_template,
+            "restore": restore_template,
+        },
     })
 
 
@@ -1458,11 +1467,17 @@ def update_bucket_replication(bucket_name: str):
         else:
             flash("No replication configuration to pause", "warning")
     elif action == "resume":
+        from .replication import REPLICATION_MODE_ALL
         rule = _replication().get_rule(bucket_name)
         if rule:
             rule.enabled = True
             _replication().set_rule(rule)
-            flash("Replication resumed", "success")
+            # When resuming, sync any pending objects that accumulated while paused
+            if rule.mode == REPLICATION_MODE_ALL:
+                _replication().replicate_existing_objects(bucket_name)
+                flash("Replication resumed. Syncing pending objects in background.", "success")
+            else:
+                flash("Replication resumed", "success")
         else:
             flash("No replication configuration to resume", "warning")
     elif action == "create":
