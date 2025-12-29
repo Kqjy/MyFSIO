@@ -362,6 +362,68 @@ code {
 	color: #2563eb;
 }
 
+.docs-sidebar-mobile {
+	border-radius: 0.75rem;
+	border: 1px solid var(--myfsio-card-border);
+}
+
+.docs-sidebar-mobile .docs-toc {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 1rem;
+	padding-top: 0.5rem;
+}
+
+.docs-sidebar-mobile .docs-toc li {
+	flex: 1 0 45%;
+}
+
+.min-width-0 {
+	min-width: 0;
+}
+
+/* Ensure pre blocks don't overflow on mobile */
+.alert pre {
+	max-width: 100%;
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+/* IAM User Cards */
+.iam-user-card {
+	border: 1px solid var(--myfsio-card-border);
+	border-radius: 0.75rem;
+	transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.iam-user-card:hover {
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] .iam-user-card:hover {
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.user-avatar-lg {
+	width: 48px;
+	height: 48px;
+	border-radius: 12px;
+}
+
+.btn-icon {
+	padding: 0.25rem;
+	line-height: 1;
+	border: none;
+	background: transparent;
+	color: var(--myfsio-muted);
+	border-radius: 0.375rem;
+}
+
+.btn-icon:hover {
+	background: var(--myfsio-hover-bg);
+	color: var(--myfsio-text);
+}
+
 .badge { 
 	font-weight: 500;
 	padding: 0.35em 0.65em;

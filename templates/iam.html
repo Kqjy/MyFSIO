@@ -10,6 +10,7 @@
       </svg>
       IAM Configuration
     </h1>
+    <p class="text-muted mb-0 mt-1">Create and manage users with fine-grained bucket permissions.</p>
   </div>
   <div class="d-flex gap-2">
     {% if not iam_locked %}
@@ -109,35 +110,68 @@
   {% else %}
   <div class="card-body px-4 pb-4">
     {% if users %}
-    <div class="table-responsive">
-      <table class="table table-hover align-middle mb-0">
-        <thead class="table-light">
-          <tr>
-            <th scope="col">User</th>
-            <th scope="col">Policies</th>
-            <th scope="col" class="text-end">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for user in users %}
-          <tr>
-            <td>
+    <div class="row g-3">
+      {% for user in users %}
+      <div class="col-md-6 col-xl-4">
+        <div class="card h-100 iam-user-card">
+          <div class="card-body">
+            <div class="d-flex align-items-start justify-content-between mb-3">
               <div class="d-flex align-items-center gap-3">
-                <div class="user-avatar">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+                <div class="user-avatar user-avatar-lg">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
                     <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
                   </svg>
                 </div>
-                <div>
-                  <div class="fw-medium">{{ user.display_name }}</div>
-                  <code class="small text-muted">{{ user.access_key }}</code>
+                <div class="min-width-0">
+                  <h6 class="fw-semibold mb-0 text-truncate" title="{{ user.display_name }}">{{ user.display_name }}</h6>
+                  <code class="small text-muted d-block text-truncate" title="{{ user.access_key }}">{{ user.access_key }}</code>
                 </div>
               </div>
-            </td>
-            <td>
+              <div class="dropdown">
+                <button class="btn btn-sm btn-icon" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+                  </svg>
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                  <li>
+                    <button class="dropdown-item" type="button" data-edit-user="{{ user.access_key }}" data-display-name="{{ user.display_name }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                        <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
+                      </svg>
+                      Edit Name
+                    </button>
+                  </li>
+                  <li>
+                    <button class="dropdown-item" type="button" data-rotate-user="{{ user.access_key }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                        <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
+                        <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
+                      </svg>
+                      Rotate Secret
+                    </button>
+                  </li>
+                  <li><hr class="dropdown-divider"></li>
+                  <li>
+                    <button class="dropdown-item text-danger" type="button" data-delete-user="{{ user.access_key }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                        <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
+                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                      </svg>
+                      Delete User
+                    </button>
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <div class="mb-3">
+              <div class="small text-muted mb-2">Bucket Permissions</div>
               <div class="d-flex flex-wrap gap-1">
                 {% for policy in user.policies %}
                   <span class="badge bg-primary bg-opacity-10 text-primary">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+                    </svg>
                     {{ policy.bucket }}
                     {% if '*' in policy.actions %}
                       <span class="opacity-75">(full)</span>
@@ -149,38 +183,18 @@
                   <span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>
                 {% endfor %}
               </div>
-            </td>
-            <td class="text-end">
-              <div class="btn-group btn-group-sm" role="group">
-                <button class="btn btn-outline-primary" type="button" data-rotate-user="{{ user.access_key }}" title="Rotate Secret">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
-                    <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
-                  </svg>
-                </button>
-                <button class="btn btn-outline-secondary" type="button" data-edit-user="{{ user.access_key }}" data-display-name="{{ user.display_name }}" title="Edit User">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
-                  </svg>
-                </button>
-                <button class="btn btn-outline-secondary" type="button" data-policy-editor data-access-key="{{ user.access_key }}" title="Edit Policies">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
-                    <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319z"/>
-                  </svg>
-                </button>
-                <button class="btn btn-outline-danger" type="button" data-delete-user="{{ user.access_key }}" title="Delete User">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                    <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
-                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-                  </svg>
-                </button>
-              </div>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+            </div>
+            <button class="btn btn-outline-primary btn-sm w-100" type="button" data-policy-editor data-access-key="{{ user.access_key }}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
+                <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319z"/>
+              </svg>
+              Manage Policies
+            </button>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
     </div>
     {% else %}
     <div class="empty-state text-center py-5">
@@ -442,6 +456,95 @@
 {{ super() }}
 <script>
   (function () {
+    // Auto-indent for JSON textareas
+    function setupJsonAutoIndent(textarea) {
+      if (!textarea) return;
+
+      textarea.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+
+          const start = this.selectionStart;
+          const end = this.selectionEnd;
+          const value = this.value;
+
+          // Get the current line
+          const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+          const currentLine = value.substring(lineStart, start);
+
+          // Calculate base indentation (leading whitespace of current line)
+          const indentMatch = currentLine.match(/^(\s*)/);
+          let indent = indentMatch ? indentMatch[1] : '';
+
+          // Check if the line ends with { or [ (should increase indent)
+          const trimmedLine = currentLine.trim();
+          const lastChar = trimmedLine.slice(-1);
+
+          // Check the character before cursor
+          const charBeforeCursor = value.substring(start - 1, start).trim();
+
+          let newIndent = indent;
+          let insertAfter = '';
+
+          if (lastChar === '{' || lastChar === '[') {
+            // Add extra indentation
+            newIndent = indent + '  ';
+
+            // Check if we need to add closing bracket on new line
+            const charAfterCursor = value.substring(start, start + 1).trim();
+            if ((lastChar === '{' && charAfterCursor === '}') ||
+                (lastChar === '[' && charAfterCursor === ']')) {
+              insertAfter = '\n' + indent;
+            }
+          } else if (lastChar === ',' || lastChar === ':') {
+            // Keep same indentation for continuation
+            newIndent = indent;
+          }
+
+          // Insert newline with proper indentation
+          const insertion = '\n' + newIndent + insertAfter;
+          const newValue = value.substring(0, start) + insertion + value.substring(end);
+
+          this.value = newValue;
+
+          // Set cursor position after the indentation
+          const newCursorPos = start + 1 + newIndent.length;
+          this.selectionStart = this.selectionEnd = newCursorPos;
+
+          // Trigger input event for any listeners
+          this.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // Handle Tab key for indentation
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const start = this.selectionStart;
+          const end = this.selectionEnd;
+
+          if (e.shiftKey) {
+            // Outdent: remove 2 spaces from start of line
+            const lineStart = this.value.lastIndexOf('\n', start - 1) + 1;
+            const lineContent = this.value.substring(lineStart, start);
+            if (lineContent.startsWith('  ')) {
+              this.value = this.value.substring(0, lineStart) +
+                           this.value.substring(lineStart + 2);
+              this.selectionStart = this.selectionEnd = Math.max(lineStart, start - 2);
+            }
+          } else {
+            // Indent: insert 2 spaces
+            this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
+            this.selectionStart = this.selectionEnd = start + 2;
+          }
+
+          this.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      });
+    }
+
+    // Apply auto-indent to policy editor textareas
+    setupJsonAutoIndent(document.getElementById('policyEditorDocument'));
+    setupJsonAutoIndent(document.getElementById('createUserPolicies'));
+
     const currentUserKey = {{ principal.access_key | tojson }};
     const configCopyButtons = document.querySelectorAll('.config-copy');
     configCopyButtons.forEach((button) => {

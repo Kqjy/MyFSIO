@@ -14,6 +14,36 @@
   </div>
 </section>
 <div class="row g-4">
+  <div class="col-12 d-xl-none">
+    <div class="card shadow-sm docs-sidebar-mobile mb-0">
+      <div class="card-body py-3">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <h3 class="h6 text-uppercase text-muted mb-0">On this page</h3>
+          <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#mobileDocsToc" aria-expanded="false" aria-controls="mobileDocsToc">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="collapse" id="mobileDocsToc">
+          <ul class="list-unstyled docs-toc mb-0 small">
+            <li><a href="#setup">Set up &amp; run</a></li>
+            <li><a href="#background">Running in background</a></li>
+            <li><a href="#auth">Authentication &amp; IAM</a></li>
+            <li><a href="#console">Console tour</a></li>
+            <li><a href="#automation">Automation / CLI</a></li>
+            <li><a href="#api">REST endpoints</a></li>
+            <li><a href="#examples">API Examples</a></li>
+            <li><a href="#replication">Site Replication</a></li>
+            <li><a href="#versioning">Object Versioning</a></li>
+            <li><a href="#quotas">Bucket Quotas</a></li>
+            <li><a href="#encryption">Encryption</a></li>
+            <li><a href="#troubleshooting">Troubleshooting</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="col-xl-8">
     <article id="setup" class="card shadow-sm docs-section">
       <div class="card-body">
@@ -526,15 +556,46 @@ curl -X POST "{{ api_base }}/presign/mybucket/upload.bin" \
             </li>
         </ol>
 
-        <div class="alert alert-light border mb-0">
-            <div class="d-flex gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1" viewBox="0 0 16 16">
+        <div class="alert alert-light border mb-3 overflow-hidden">
+            <div class="d-flex flex-column flex-sm-row gap-2 mb-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1 flex-shrink-0 d-none d-sm-block" viewBox="0 0 16 16">
                   <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
                   <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
                 </svg>
-                <div>
-                    <strong>Headless Target Setup?</strong>
-                    <p class="small text-muted mb-0">If your target server has no UI, use the Python API directly to bootstrap credentials. See <code>docs.md</code> in the project root for the <code>setup_target.py</code> script.</p>
+                <div class="flex-grow-1 min-width-0">
+                    <strong>Headless Target Setup</strong>
+                    <p class="small text-muted mb-2">If your target server has no UI, create a <code>setup_target.py</code> script to bootstrap credentials:</p>
+<pre class="mb-0 overflow-auto" style="max-width: 100%;"><code class="language-python"># setup_target.py
+from pathlib import Path
+from app.iam import IamService
+from app.storage import ObjectStorage
+
+# Initialize services (paths match default config)
+data_dir = Path("data")
+iam = IamService(data_dir / ".myfsio.sys" / "config" / "iam.json")
+storage = ObjectStorage(data_dir)
+
+# 1. Create the bucket
+bucket_name = "backup-bucket"
+try:
+    storage.create_bucket(bucket_name)
+    print(f"Bucket '{bucket_name}' created.")
+except Exception as e:
+    print(f"Bucket creation skipped: {e}")
+
+# 2. Create the user
+try:
+    creds = iam.create_user(
+        display_name="Replication User",
+        policies=[{"bucket": bucket_name, "actions": ["write", "read", "list"]}]
+    )
+    print("\n--- CREDENTIALS GENERATED ---")
+    print(f"Access Key: {creds['access_key']}")
+    print(f"Secret Key: {creds['secret_key']}")
+    print("-----------------------------")
+except Exception as e:
+    print(f"User creation failed: {e}")</code></pre>
+                    <p class="small text-muted mt-2 mb-0">Save and run: <code>python setup_target.py</code></p>
                 </div>
             </div>
         </div>

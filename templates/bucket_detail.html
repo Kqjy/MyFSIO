@@ -13,8 +13,7 @@
       <div class="d-flex align-items-center gap-3">
         <div class="bucket-icon" style="width: 48px; height: 48px; border-radius: 12px;">
           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
-            <path d="M4.5 5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1zM3 4.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"/>
-            <path d="M0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H8.5v3a1.5 1.5 0 0 1 1.5 1.5H11a.5.5 0 0 1 0 1h-1v1h1a.5.5 0 0 1 0 1h-1v1a.5.5 0 0 1-1 0v-1H6v1a.5.5 0 0 1-1 0v-1H4a.5.5 0 0 1 0-1h1v-1H4a.5.5 0 0 1 0-1h1.5A1.5 1.5 0 0 1 7 10.5V7H2a2 2 0 0 1-2-2V4zm1 0v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1zm5 7.5v1h3v-1a.5.5 0 0 0-.5-.5h-2a.5.5 0 0 0-.5.5z"/>
+            <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
           </svg>
         </div>
         <div>
@@ -1784,6 +1783,91 @@
 
 {% block extra_scripts %}
 <script>
+  // Auto-indent for JSON textareas
+  function setupJsonAutoIndent(textarea) {
+    if (!textarea) return;
+
+    textarea.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+
+        const start = this.selectionStart;
+        const end = this.selectionEnd;
+        const value = this.value;
+
+        // Get the current line
+        const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+        const currentLine = value.substring(lineStart, start);
+
+        // Calculate base indentation (leading whitespace of current line)
+        const indentMatch = currentLine.match(/^(\s*)/);
+        let indent = indentMatch ? indentMatch[1] : '';
+
+        // Check if the line ends with { or [ (should increase indent)
+        const trimmedLine = currentLine.trim();
+        const lastChar = trimmedLine.slice(-1);
+
+        let newIndent = indent;
+        let insertAfter = '';
+
+        if (lastChar === '{' || lastChar === '[') {
+          // Add extra indentation
+          newIndent = indent + '  ';
+
+          // Check if we need to add closing bracket on new line
+          const charAfterCursor = value.substring(start, start + 1).trim();
+          if ((lastChar === '{' && charAfterCursor === '}') ||
+              (lastChar === '[' && charAfterCursor === ']')) {
+            insertAfter = '\n' + indent;
+          }
+        } else if (lastChar === ',' || lastChar === ':') {
+          // Keep same indentation for continuation
+          newIndent = indent;
+        }
+
+        // Insert newline with proper indentation
+        const insertion = '\n' + newIndent + insertAfter;
+        const newValue = value.substring(0, start) + insertion + value.substring(end);
+
+        this.value = newValue;
+
+        // Set cursor position after the indentation
+        const newCursorPos = start + 1 + newIndent.length;
+        this.selectionStart = this.selectionEnd = newCursorPos;
+
+        // Trigger input event for any listeners
+        this.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      // Handle Tab key for indentation
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = this.selectionStart;
+        const end = this.selectionEnd;
+
+        if (e.shiftKey) {
+          // Outdent: remove 2 spaces from start of line
+          const lineStart = this.value.lastIndexOf('\n', start - 1) + 1;
+          const lineContent = this.value.substring(lineStart, start);
+          if (lineContent.startsWith('  ')) {
+            this.value = this.value.substring(0, lineStart) +
+                         this.value.substring(lineStart + 2);
+            this.selectionStart = this.selectionEnd = Math.max(lineStart, start - 2);
+          }
+        } else {
+          // Indent: insert 2 spaces
+          this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
+          this.selectionStart = this.selectionEnd = start + 2;
+        }
+
+        this.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+  }
+
+  // Apply auto-indent to policy editor textarea
+  setupJsonAutoIndent(document.getElementById('policyDocument'));
+
   const formatBytes = (bytes) => {
     if (!Number.isFinite(bytes)) return `${bytes} bytes`;
     const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
