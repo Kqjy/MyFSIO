@@ -407,10 +407,62 @@ curl -X POST {{ api_base }}/presign/demo/notes.txt \
           <span class="docs-section-kicker">07</span>
           <h2 class="h4 mb-0">API Examples</h2>
         </div>
-        <p class="text-muted">Common operations using boto3.</p>
-        
-        <h5 class="mt-4">Multipart Upload</h5>
-<pre><code class="language-python">import boto3
+        <p class="text-muted">Common operations using popular SDKs and tools.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Python (boto3)</h3>
+<pre class="mb-4"><code class="language-python">import boto3
+
+s3 = boto3.client(
+    's3',
+    endpoint_url='{{ api_base }}',
+    aws_access_key_id='&lt;access_key&gt;',
+    aws_secret_access_key='&lt;secret_key&gt;'
+)
+
+# List buckets
+buckets = s3.list_buckets()['Buckets']
+
+# Create bucket
+s3.create_bucket(Bucket='mybucket')
+
+# Upload file
+s3.upload_file('local.txt', 'mybucket', 'remote.txt')
+
+# Download file
+s3.download_file('mybucket', 'remote.txt', 'downloaded.txt')
+
+# Generate presigned URL (valid 1 hour)
+url = s3.generate_presigned_url(
+    'get_object',
+    Params={'Bucket': 'mybucket', 'Key': 'remote.txt'},
+    ExpiresIn=3600
+)</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">JavaScript (AWS SDK v3)</h3>
+<pre class="mb-4"><code class="language-javascript">import { S3Client, ListBucketsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+
+const s3 = new S3Client({
+  endpoint: '{{ api_base }}',
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: '&lt;access_key&gt;',
+    secretAccessKey: '&lt;secret_key&gt;'
+  },
+  forcePathStyle: true  // Required for S3-compatible services
+});
+
+// List buckets
+const { Buckets } = await s3.send(new ListBucketsCommand({}));
+
+// Upload object
+await s3.send(new PutObjectCommand({
+  Bucket: 'mybucket',
+  Key: 'hello.txt',
+  Body: 'Hello, World!'
+}));</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Multipart Upload (Python)</h3>
+<pre class="mb-4"><code class="language-python">import boto3
 
 s3 = boto3.client('s3', endpoint_url='{{ api_base }}')
 
@@ -418,9 +470,9 @@ s3 = boto3.client('s3', endpoint_url='{{ api_base }}')
 response = s3.create_multipart_upload(Bucket='mybucket', Key='large.bin')
 upload_id = response['UploadId']
 
-# Upload parts
+# Upload parts (minimum 5MB each, except last part)
 parts = []
-chunks = [b'chunk1', b'chunk2'] # Example data chunks
+chunks = [b'chunk1...', b'chunk2...']
 for part_number, chunk in enumerate(chunks, start=1):
     response = s3.upload_part(
         Bucket='mybucket',
@@ -438,6 +490,19 @@ s3.complete_multipart_upload(
     UploadId=upload_id,
     MultipartUpload={'Parts': parts}
 )</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Presigned URLs for Sharing</h3>
+<pre class="mb-0"><code class="language-bash"># Generate a download link valid for 15 minutes
+curl -X POST "{{ api_base }}/presign/mybucket/photo.jpg" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"method": "GET", "expires_in": 900}'
+
+# Generate an upload link (PUT) valid for 1 hour
+curl -X POST "{{ api_base }}/presign/mybucket/upload.bin" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"method": "PUT", "expires_in": 3600}'</code></pre>
       </div>
     </article>
     <article id="replication" class="card shadow-sm docs-section">
@@ -485,6 +550,86 @@ s3.complete_multipart_upload(
             <br>
             <strong>Deletes:</strong> Deleting an object on one server will propagate the deletion to the other server.
         </p>
+      </div>
+    </article>
+    <article id="versioning" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">09</span>
+          <h2 class="h4 mb-0">Object Versioning</h2>
+        </div>
+        <p class="text-muted">Keep multiple versions of objects to protect against accidental deletions and overwrites. Restore previous versions at any time.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Versioning</h3>
+        <ol class="docs-steps mb-3">
+          <li>Navigate to your bucket's <strong>Properties</strong> tab.</li>
+          <li>Find the <strong>Versioning</strong> card and click <strong>Enable</strong>.</li>
+          <li>All subsequent uploads will create new versions instead of overwriting.</li>
+        </ol>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Version Operations</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Operation</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>View Versions</strong></td>
+                <td>Click the version icon on any object to see all historical versions with timestamps and sizes.</td>
+              </tr>
+              <tr>
+                <td><strong>Restore Version</strong></td>
+                <td>Click <strong>Restore</strong> on any version to make it the current version (creates a copy).</td>
+              </tr>
+              <tr>
+                <td><strong>Delete Current</strong></td>
+                <td>Deleting an object archives it. Previous versions remain accessible.</td>
+              </tr>
+              <tr>
+                <td><strong>Purge All</strong></td>
+                <td>Permanently delete an object and all its versions. This cannot be undone.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Archived Objects</h3>
+        <p class="small text-muted mb-3">When you delete a versioned object, it becomes "archived" - the current version is removed but historical versions remain. The <strong>Archived</strong> tab shows these objects so you can restore them.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
+<pre class="mb-3"><code class="language-bash"># Enable versioning
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?versioning" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"Status": "Enabled"}'
+
+# Get versioning status
+curl "{{ api_base }}/&lt;bucket&gt;?versioning" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# List object versions
+curl "{{ api_base }}/&lt;bucket&gt;?versions" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Get specific version
+curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Storage Impact:</strong> Each version consumes storage. Enable quotas to limit total bucket size including all versions.
+            </div>
+          </div>
+        </div>
       </div>
     </article>
     <article id="quotas" class="card shadow-sm docs-section">
@@ -709,6 +854,7 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
           <li><a href="#api">REST endpoints</a></li>
           <li><a href="#examples">API Examples</a></li>
           <li><a href="#replication">Site Replication</a></li>
+          <li><a href="#versioning">Object Versioning</a></li>
           <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>

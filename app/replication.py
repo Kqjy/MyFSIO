@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import boto3
 from botocore.config import Config
@@ -24,9 +24,40 @@ logger = logging.getLogger(__name__)
 REPLICATION_USER_AGENT = "S3ReplicationAgent/1.0"
 REPLICATION_CONNECT_TIMEOUT = 5
 REPLICATION_READ_TIMEOUT = 30
+STREAMING_THRESHOLD_BYTES = 10 * 1024 * 1024  # 10 MiB - use streaming for larger files
 
 REPLICATION_MODE_NEW_ONLY = "new_only"
 REPLICATION_MODE_ALL = "all"
+
+
+def _create_s3_client(connection: RemoteConnection, *, health_check: bool = False) -> Any:
+    """Create a boto3 S3 client for the given connection.
+
+    Args:
+        connection: Remote S3 connection configuration
+        health_check: If True, use minimal retries for quick health checks
+
+    Returns:
+        Configured boto3 S3 client
+    """
+    config = Config(
+        user_agent_extra=REPLICATION_USER_AGENT,
+        connect_timeout=REPLICATION_CONNECT_TIMEOUT,
+        read_timeout=REPLICATION_READ_TIMEOUT,
+        retries={'max_attempts': 1 if health_check else 2},
+        signature_version='s3v4',
+        s3={'addressing_style': 'path'},
+        request_checksum_calculation='when_required',
+        response_checksum_validation='when_required',
+    )
+    return boto3.client(
+        "s3",
+        endpoint_url=connection.endpoint_url,
+        aws_access_key_id=connection.access_key,
+        aws_secret_access_key=connection.secret_key,
+        region_name=connection.region or 'us-east-1',
+        config=config,
+    )
 
 
 @dataclass
@@ -102,7 +133,18 @@ class ReplicationManager:
         self._rules: Dict[str, ReplicationRule] = {}
         self._stats_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ReplicationWorker")
+        self._shutdown = False
         self.reload_rules()
+
+    def shutdown(self, wait: bool = True) -> None:
+        """Shutdown the replication executor gracefully.
+
+        Args:
+            wait: If True, wait for pending tasks to complete
+        """
+        self._shutdown = True
+        self._executor.shutdown(wait=wait)
+        logger.info("Replication manager shut down")
 
     def reload_rules(self) -> None:
         if not self.rules_path.exists():
@@ -124,25 +166,12 @@ class ReplicationManager:
 
     def check_endpoint_health(self, connection: RemoteConnection) -> bool:
         """Check if a remote endpoint is reachable and responsive.
-        
+
         Returns True if endpoint is healthy, False otherwise.
         Uses short timeouts to prevent blocking.
         """
         try:
-            config = Config(
-                user_agent_extra=REPLICATION_USER_AGENT,
-                connect_timeout=REPLICATION_CONNECT_TIMEOUT,
-                read_timeout=REPLICATION_READ_TIMEOUT,
-                retries={'max_attempts': 1}
-            )
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=connection.endpoint_url,
-                aws_access_key_id=connection.access_key,
-                aws_secret_access_key=connection.secret_key,
-                region_name=connection.region,
-                config=config,
-            )
+            s3 = _create_s3_client(connection, health_check=True)
             s3.list_buckets()
             return True
         except Exception as e:
@@ -184,15 +213,9 @@ class ReplicationManager:
         try:
             source_objects = self.storage.list_objects_all(bucket_name)
             source_keys = {obj.key: obj.size for obj in source_objects}
-            
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=connection.endpoint_url,
-                aws_access_key_id=connection.access_key,
-                aws_secret_access_key=connection.secret_key,
-                region_name=connection.region,
-            )
-            
+
+            s3 = _create_s3_client(connection)
+
             dest_keys = set()
             bytes_synced = 0
             paginator = s3.get_paginator('list_objects_v2')
@@ -257,13 +280,7 @@ class ReplicationManager:
             raise ValueError(f"Connection {connection_id} not found")
 
         try:
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=connection.endpoint_url,
-                aws_access_key_id=connection.access_key,
-                aws_secret_access_key=connection.secret_key,
-                region_name=connection.region,
-            )
+            s3 = _create_s3_client(connection)
             s3.create_bucket(Bucket=bucket_name)
         except ClientError as e:
             logger.error(f"Failed to create remote bucket {bucket_name}: {e}")
@@ -286,41 +303,28 @@ class ReplicationManager:
         self._executor.submit(self._replicate_task, bucket_name, object_key, rule, connection, action)
 
     def _replicate_task(self, bucket_name: str, object_key: str, rule: ReplicationRule, conn: RemoteConnection, action: str) -> None:
+        if self._shutdown:
+            return
+
+        # Re-check if rule is still enabled (may have been paused after task was submitted)
+        current_rule = self.get_rule(bucket_name)
+        if not current_rule or not current_rule.enabled:
+            logger.debug(f"Replication skipped for {bucket_name}/{object_key}: rule disabled or removed")
+            return
+
         if ".." in object_key or object_key.startswith("/") or object_key.startswith("\\"):
             logger.error(f"Invalid object key in replication (path traversal attempt): {object_key}")
             return
-        
+
         try:
             from .storage import ObjectStorage
             ObjectStorage._sanitize_object_key(object_key)
         except StorageError as e:
             logger.error(f"Object key validation failed in replication: {e}")
             return
-        
-        file_size = 0
+
         try:
-            config = Config(
-                user_agent_extra=REPLICATION_USER_AGENT,
-                connect_timeout=REPLICATION_CONNECT_TIMEOUT,
-                read_timeout=REPLICATION_READ_TIMEOUT,
-                retries={'max_attempts': 2}, 
-                signature_version='s3v4',  
-                s3={
-                    'addressing_style': 'path',
-                },
-                # Disable SDK automatic checksums - they cause SignatureDoesNotMatch errors
-                # with S3-compatible servers that don't support CRC32 checksum headers
-                request_checksum_calculation='when_required',
-                response_checksum_validation='when_required',
-            )
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=conn.endpoint_url,
-                aws_access_key_id=conn.access_key,
-                aws_secret_access_key=conn.secret_key,
-                region_name=conn.region or 'us-east-1',
-                config=config,
-            )
+            s3 = _create_s3_client(conn)
 
             if action == "delete":
                 try:
@@ -337,34 +341,42 @@ class ReplicationManager:
                 logger.error(f"Source object not found: {bucket_name}/{object_key}")
                 return
 
-            # Don't replicate metadata - destination server will generate its own
-            # __etag__ and __size__. Replicating them causes signature mismatches when they have None/empty values.
-            
             content_type, _ = mimetypes.guess_type(path)
             file_size = path.stat().st_size
 
             logger.info(f"Replicating {bucket_name}/{object_key}: Size={file_size}, ContentType={content_type}")
 
-            def do_put_object() -> None:
-                """Helper to upload object.
-                
-                Reads the file content into memory first to avoid signature calculation
-                issues with certain binary file types (like GIFs) when streaming.
-                Do NOT set ContentLength explicitly - boto3 calculates it from the bytes
-                and setting it manually can cause SignatureDoesNotMatch errors.
+            def do_upload() -> None:
+                """Upload object using appropriate method based on file size.
+
+                For small files (< 10 MiB): Read into memory for simpler handling
+                For large files: Use streaming upload to avoid memory issues
                 """
-                file_content = path.read_bytes()
-                put_kwargs = {
-                    "Bucket": rule.target_bucket,
-                    "Key": object_key,
-                    "Body": file_content,
-                }
+                extra_args = {}
                 if content_type:
-                    put_kwargs["ContentType"] = content_type
-                s3.put_object(**put_kwargs)
+                    extra_args["ContentType"] = content_type
+
+                if file_size >= STREAMING_THRESHOLD_BYTES:
+                    # Use multipart upload for large files
+                    s3.upload_file(
+                        str(path),
+                        rule.target_bucket,
+                        object_key,
+                        ExtraArgs=extra_args if extra_args else None,
+                    )
+                else:
+                    # Read small files into memory
+                    file_content = path.read_bytes()
+                    put_kwargs = {
+                        "Bucket": rule.target_bucket,
+                        "Key": object_key,
+                        "Body": file_content,
+                        **extra_args,
+                    }
+                    s3.put_object(**put_kwargs)
 
             try:
-                do_put_object()
+                do_upload()
             except (ClientError, S3UploadFailedError) as e:
                 error_code = None
                 if isinstance(e, ClientError):
@@ -386,13 +398,13 @@ class ReplicationManager:
                             bucket_ready = True
                         else:
                             logger.error(f"Failed to create target bucket {rule.target_bucket}: {bucket_err}")
-                            raise e 
-                    
+                            raise e
+
                     if bucket_ready:
-                        do_put_object()
+                        do_upload()
                 else:
                     raise e
-            
+
             logger.info(f"Replicated {bucket_name}/{object_key} to {conn.name} ({rule.target_bucket})")
             self._update_last_sync(bucket_name, object_key)
 

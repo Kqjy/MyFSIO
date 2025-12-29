@@ -1,7 +1,7 @@
 """Central location for the application version string."""
 from __future__ import annotations
 
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 
 
 def get_version() -> str:

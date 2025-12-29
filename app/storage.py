@@ -7,9 +7,11 @@ import os
 import re
 import shutil
 import stat
+import threading
 import time
 import unicodedata
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -129,12 +131,17 @@ class ObjectStorage:
     MULTIPART_MANIFEST = "manifest.json"
     BUCKET_CONFIG_FILE = ".bucket.json"
     KEY_INDEX_CACHE_TTL = 30
+    OBJECT_CACHE_MAX_SIZE = 100  # Maximum number of buckets to cache
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
-        self._object_cache: Dict[str, tuple[Dict[str, ObjectMeta], float]] = {}
+        # LRU cache for object metadata with thread-safe access
+        self._object_cache: OrderedDict[str, tuple[Dict[str, ObjectMeta], float]] = OrderedDict()
+        self._cache_lock = threading.Lock()
+        # Cache version counter for detecting stale reads
+        self._cache_version: Dict[str, int] = {}
 
     def list_buckets(self) -> List[BucketMeta]:
         buckets: List[BucketMeta] = []
@@ -731,8 +738,6 @@ class ObjectStorage:
         version_dir = self._version_dir(bucket_id, safe_key)
         if not version_dir.exists():
             version_dir = self._legacy_version_dir(bucket_id, safe_key)
-        if not version_dir.exists():
-            version_dir = self._legacy_version_dir(bucket_id, safe_key)
             if not version_dir.exists():
                 return []
         versions: List[Dict[str, Any]] = []
@@ -879,41 +884,73 @@ class ObjectStorage:
         part_number: int,
         stream: BinaryIO,
     ) -> str:
+        """Upload a part for a multipart upload.
+
+        Uses file locking to safely update the manifest and handle concurrent uploads.
+        """
         if part_number < 1:
             raise StorageError("part_number must be >= 1")
         bucket_path = self._bucket_path(bucket_name)
-        
+
         upload_root = self._multipart_dir(bucket_path.name, upload_id)
         if not upload_root.exists():
             upload_root = self._legacy_multipart_dir(bucket_path.name, upload_id)
         if not upload_root.exists():
             raise StorageError("Multipart upload not found")
-        
+
+        # Write part to temporary file first, then rename atomically
         checksum = hashlib.md5()
         part_filename = f"part-{part_number:05d}.part"
         part_path = upload_root / part_filename
-        with part_path.open("wb") as target:
-            shutil.copyfileobj(_HashingReader(stream, checksum), target)
+        temp_path = upload_root / f".{part_filename}.tmp"
+
+        try:
+            with temp_path.open("wb") as target:
+                shutil.copyfileobj(_HashingReader(stream, checksum), target)
+
+            # Atomic rename (or replace on Windows)
+            temp_path.replace(part_path)
+        except OSError:
+            # Clean up temp file on failure
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
         record = {
             "etag": checksum.hexdigest(),
             "size": part_path.stat().st_size,
             "filename": part_filename,
         }
-        
+
         manifest_path = upload_root / self.MULTIPART_MANIFEST
         lock_path = upload_root / ".manifest.lock"
-        
-        with lock_path.open("w") as lock_file:
-            with _file_lock(lock_file):
-                try:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as exc:
-                    raise StorageError("Multipart manifest unreadable") from exc
-                
-                parts = manifest.setdefault("parts", {})
-                parts[str(part_number)] = record
-                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        
+
+        # Retry loop for handling transient lock/read failures
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with lock_path.open("w") as lock_file:
+                    with _file_lock(lock_file):
+                        try:
+                            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError) as exc:
+                            if attempt < max_retries - 1:
+                                time.sleep(0.1 * (attempt + 1))
+                                continue
+                            raise StorageError("Multipart manifest unreadable") from exc
+
+                        parts = manifest.setdefault("parts", {})
+                        parts[str(part_number)] = record
+                        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                break
+            except OSError as exc:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise StorageError(f"Failed to update multipart manifest: {exc}") from exc
+
         return record["etag"]
 
     def complete_multipart_upload(
@@ -1015,9 +1052,10 @@ class ObjectStorage:
                 pass
 
         shutil.rmtree(upload_root, ignore_errors=True)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        
+        self._invalidate_object_cache(bucket_id)
+
         stat = destination.stat()
         return ObjectMeta(
             key=safe_key.as_posix(),
@@ -1264,22 +1302,52 @@ class ObjectStorage:
         return objects
 
     def _get_object_cache(self, bucket_id: str, bucket_path: Path) -> Dict[str, ObjectMeta]:
-        """Get cached object metadata for a bucket, refreshing if stale."""
+        """Get cached object metadata for a bucket, refreshing if stale.
+
+        Uses LRU eviction to prevent unbounded cache growth.
+        Thread-safe with version tracking to detect concurrent invalidations.
+        """
         now = time.time()
-        cached = self._object_cache.get(bucket_id)
-        
-        if cached:
-            objects, timestamp = cached
-            if now - timestamp < self.KEY_INDEX_CACHE_TTL:
-                return objects
-        
+
+        with self._cache_lock:
+            cached = self._object_cache.get(bucket_id)
+            cache_version = self._cache_version.get(bucket_id, 0)
+
+            if cached:
+                objects, timestamp = cached
+                if now - timestamp < self.KEY_INDEX_CACHE_TTL:
+                    # Move to end (most recently used)
+                    self._object_cache.move_to_end(bucket_id)
+                    return objects
+
+        # Build cache outside lock to avoid holding lock during I/O
         objects = self._build_object_cache(bucket_path)
-        self._object_cache[bucket_id] = (objects, now)
+
+        with self._cache_lock:
+            # Check if cache was invalidated while we were building
+            current_version = self._cache_version.get(bucket_id, 0)
+            if current_version != cache_version:
+                # Cache was invalidated, rebuild
+                objects = self._build_object_cache(bucket_path)
+
+            # Evict oldest entries if cache is full
+            while len(self._object_cache) >= self.OBJECT_CACHE_MAX_SIZE:
+                self._object_cache.popitem(last=False)
+
+            self._object_cache[bucket_id] = (objects, time.time())
+            self._object_cache.move_to_end(bucket_id)
+
         return objects
 
     def _invalidate_object_cache(self, bucket_id: str) -> None:
-        """Invalidate the object cache and etag index for a bucket."""
-        self._object_cache.pop(bucket_id, None)
+        """Invalidate the object cache and etag index for a bucket.
+
+        Increments version counter to signal stale reads.
+        """
+        with self._cache_lock:
+            self._object_cache.pop(bucket_id, None)
+            self._cache_version[bucket_id] = self._cache_version.get(bucket_id, 0) + 1
+
         etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
         try:
             etag_index_path.unlink(missing_ok=True)
