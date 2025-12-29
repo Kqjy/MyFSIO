@@ -1,13 +1,15 @@
 """Flask blueprint exposing a subset of the S3 REST API."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import logging
 import mimetypes
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import quote, urlencode, urlparse, unquote
 from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, ParseError
 
@@ -19,6 +21,8 @@ from .extensions import limiter
 from .iam import IamError, Principal
 from .replication import ReplicationManager
 from .storage import ObjectStorage, StorageError, QuotaExceededError
+
+logger = logging.getLogger(__name__)
 
 s3_api_bp = Blueprint("s3_api", __name__)
 
@@ -118,6 +122,9 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         if header_val is None:
              header_val = ""
         
+        if header.lower() == 'expect' and header_val == "":
+            header_val = "100-continue"
+        
         header_val = " ".join(header_val.split())
         canonical_headers_parts.append(f"{header.lower()}:{header_val}\n")
     canonical_headers = "".join(canonical_headers_parts)
@@ -127,15 +134,6 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         payload_hash = hashlib.sha256(req.get_data()).hexdigest()
 
     canonical_request = f"{method}\n{canonical_uri}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
-
-    # Debug logging for signature issues
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.debug(f"SigV4 Debug - Method: {method}, URI: {canonical_uri}")
-    logger.debug(f"SigV4 Debug - Payload hash from header: {req.headers.get('X-Amz-Content-Sha256')}")
-    logger.debug(f"SigV4 Debug - Signed headers: {signed_headers_str}")
-    logger.debug(f"SigV4 Debug - Content-Type: {req.headers.get('Content-Type')}")
-    logger.debug(f"SigV4 Debug - Content-Length: {req.headers.get('Content-Length')}")
 
     amz_date = req.headers.get("X-Amz-Date") or req.headers.get("Date")
     if not amz_date:
@@ -167,24 +165,18 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(calculated_signature, signature):
-        # Debug logging for signature mismatch
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Signature mismatch for {req.path}")
-        logger.error(f"  Content-Type: {req.headers.get('Content-Type')}")
-        logger.error(f"  Content-Length: {req.headers.get('Content-Length')}")
-        logger.error(f"  X-Amz-Content-Sha256: {req.headers.get('X-Amz-Content-Sha256')}")
-        logger.error(f"  Canonical URI: {canonical_uri}")
-        logger.error(f"  Signed headers: {signed_headers_str}")
-        # Log each signed header's value
-        for h in signed_headers_list:
-            logger.error(f"  Header '{h}': {repr(req.headers.get(h))}")
-        logger.error(f"  Expected sig: {signature[:16]}...")
-        logger.error(f"  Calculated sig: {calculated_signature[:16]}...")
-        # Log first part of canonical request to compare
-        logger.error(f"  Canonical request hash: {hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()[:16]}...")
-        # Log the full canonical request for debugging
-        logger.error(f"  Canonical request:\n{canonical_request[:500]}...")
+        # Only log detailed signature debug info if DEBUG_SIGV4 is enabled
+        if current_app.config.get("DEBUG_SIGV4"):
+            logger.warning(
+                "SigV4 signature mismatch",
+                extra={
+                    "path": req.path,
+                    "method": method,
+                    "signed_headers": signed_headers_str,
+                    "content_type": req.headers.get("Content-Type"),
+                    "content_length": req.headers.get("Content-Length"),
+                }
+            )
         raise IamError("SignatureDoesNotMatch")
 
     return _iam().get_principal(access_key)
@@ -236,6 +228,8 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     canonical_headers_parts = []
     for header in signed_headers_list:
         val = req.headers.get(header, "").strip()
+        if header.lower() == 'expect' and val == "":
+            val = "100-continue"
         val = " ".join(val.split())
         canonical_headers_parts.append(f"{header}:{val}\n")
     canonical_headers = "".join(canonical_headers_parts)
@@ -569,6 +563,28 @@ def _strip_ns(tag: str | None) -> str:
     return tag.split("}")[-1]
 
 
+def _find_element(parent: Element, name: str) -> Optional[Element]:
+    """Find a child element by name, trying both namespaced and non-namespaced variants.
+
+    This handles XML documents that may or may not include namespace prefixes.
+    """
+    el = parent.find(f"{{*}}{name}")
+    if el is None:
+        el = parent.find(name)
+    return el
+
+
+def _find_element_text(parent: Element, name: str, default: str = "") -> str:
+    """Find a child element and return its text content.
+
+    Returns the default value if element not found or has no text.
+    """
+    el = _find_element(parent, name)
+    if el is None or el.text is None:
+        return default
+    return el.text.strip()
+
+
 def _parse_tagging_document(payload: bytes) -> list[dict[str, str]]:
     try:
         root = fromstring(payload)
@@ -585,17 +601,11 @@ def _parse_tagging_document(payload: bytes) -> list[dict[str, str]]:
     for tag_el in list(tagset):
         if _strip_ns(tag_el.tag) != "Tag":
             continue
-        key_el = tag_el.find("{*}Key")
-        if key_el is None:
-            key_el = tag_el.find("Key")
-        value_el = tag_el.find("{*}Value")
-        if value_el is None:
-            value_el = tag_el.find("Value")
-        key = (key_el.text or "").strip() if key_el is not None else ""
+        key = _find_element_text(tag_el, "Key")
         if not key:
             continue
-        value = value_el.text if value_el is not None else ""
-        tags.append({"Key": key, "Value": value or ""})
+        value = _find_element_text(tag_el, "Value")
+        tags.append({"Key": key, "Value": value})
     return tags
 
 
@@ -1439,7 +1449,7 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
     
     if request.method == "DELETE":
         try:
-            storage.set_bucket_quota(bucket_name, max_size_bytes=None, max_objects=None)
+            storage.set_bucket_quota(bucket_name, max_bytes=None, max_objects=None)
         except StorageError as exc:
             return _error_response("NoSuchBucket", str(exc), 404)
         current_app.logger.info("Bucket quota deleted", extra={"bucket": bucket_name})
@@ -1473,7 +1483,7 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
             return _error_response("InvalidArgument", f"max_objects {exc}", 400)
     
     try:
-        storage.set_bucket_quota(bucket_name, max_size_bytes=max_size_bytes, max_objects=max_objects)
+        storage.set_bucket_quota(bucket_name, max_bytes=max_size_bytes, max_objects=max_objects)
     except StorageError as exc:
         return _error_response("NoSuchBucket", str(exc), 404)
     
@@ -1665,7 +1675,6 @@ def bucket_handler(bucket_name: str) -> Response:
     effective_start = ""
     if list_type == "2":
         if continuation_token:
-            import base64
             try:
                 effective_start = base64.urlsafe_b64decode(continuation_token.encode()).decode("utf-8")
             except Exception:
@@ -1722,7 +1731,6 @@ def bucket_handler(bucket_name: str) -> Response:
             next_marker = common_prefixes[-1].rstrip(delimiter) if delimiter else common_prefixes[-1]
         
         if list_type == "2" and next_marker:
-            import base64
             next_continuation_token = base64.urlsafe_b64encode(next_marker.encode()).decode("utf-8")
 
     if list_type == "2":
