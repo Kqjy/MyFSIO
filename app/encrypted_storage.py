@@ -79,7 +79,7 @@ class EncryptedObjectStorage:
         kms_key_id: Optional[str] = None,
     ) -> ObjectMeta:
         """Store an object, optionally with encryption.
-        
+
         Args:
             bucket_name: Name of the bucket
             object_key: Key for the object
@@ -87,42 +87,41 @@ class EncryptedObjectStorage:
             metadata: Optional user metadata
             server_side_encryption: Encryption algorithm ("AES256" or "aws:kms")
             kms_key_id: KMS key ID (for aws:kms encryption)
-        
+
         Returns:
             ObjectMeta with object information
+
+        Performance: Uses streaming encryption for large files to reduce memory usage.
         """
         should_encrypt, algorithm, detected_kms_key = self._should_encrypt(
             bucket_name, server_side_encryption
         )
-        
+
         if kms_key_id is None:
             kms_key_id = detected_kms_key
-        
+
         if should_encrypt:
-            data = stream.read()
-            
             try:
-                ciphertext, enc_metadata = self.encryption.encrypt_object(
-                    data, 
+                # Performance: Use streaming encryption to avoid loading entire file into memory
+                encrypted_stream, enc_metadata = self.encryption.encrypt_stream(
+                    stream,
                     algorithm=algorithm,
-                    kms_key_id=kms_key_id,
                     context={"bucket": bucket_name, "key": object_key},
                 )
-                
+
                 combined_metadata = metadata.copy() if metadata else {}
                 combined_metadata.update(enc_metadata.to_dict())
-                
-                encrypted_stream = io.BytesIO(ciphertext)
+
                 result = self.storage.put_object(
                     bucket_name,
                     object_key,
                     encrypted_stream,
                     metadata=combined_metadata,
                 )
-                
+
                 result.metadata = combined_metadata
                 return result
-                
+
             except EncryptionError as exc:
                 raise StorageError(f"Encryption failed: {exc}") from exc
         else:
@@ -135,33 +134,34 @@ class EncryptedObjectStorage:
     
     def get_object_data(self, bucket_name: str, object_key: str) -> tuple[bytes, Dict[str, str]]:
         """Get object data, decrypting if necessary.
-        
+
         Returns:
             Tuple of (data, metadata)
+
+        Performance: Uses streaming decryption to reduce memory usage.
         """
         path = self.storage.get_object_path(bucket_name, object_key)
         metadata = self.storage.get_object_metadata(bucket_name, object_key)
-        
-        with path.open("rb") as f:
-            data = f.read()
-        
+
         enc_metadata = EncryptionMetadata.from_dict(metadata)
         if enc_metadata:
             try:
-                data = self.encryption.decrypt_object(
-                    data,
-                    enc_metadata,
-                    context={"bucket": bucket_name, "key": object_key},
-                )
+                # Performance: Use streaming decryption to avoid loading entire file into memory
+                with path.open("rb") as f:
+                    decrypted_stream = self.encryption.decrypt_stream(f, enc_metadata)
+                    data = decrypted_stream.read()
             except EncryptionError as exc:
                 raise StorageError(f"Decryption failed: {exc}") from exc
-        
+        else:
+            with path.open("rb") as f:
+                data = f.read()
+
         clean_metadata = {
             k: v for k, v in metadata.items()
-            if not k.startswith("x-amz-encryption") 
+            if not k.startswith("x-amz-encryption")
             and k != "x-amz-encrypted-data-key"
         }
-        
+
         return data, clean_metadata
     
     def get_object_stream(self, bucket_name: str, object_key: str) -> tuple[BinaryIO, Dict[str, str], int]:

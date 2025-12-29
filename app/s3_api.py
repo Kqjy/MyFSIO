@@ -2171,48 +2171,89 @@ def _copy_object(dest_bucket: str, dest_key: str, copy_source: str) -> Response:
 
 
 class AwsChunkedDecoder:
-    """Decodes aws-chunked encoded streams."""
+    """Decodes aws-chunked encoded streams.
+
+    Performance optimized with buffered line reading instead of byte-by-byte.
+    """
+
     def __init__(self, stream):
         self.stream = stream
-        self.buffer = b""
+        self._read_buffer = bytearray()  # Performance: Pre-allocated buffer
         self.chunk_remaining = 0
         self.finished = False
+
+    def _read_line(self) -> bytes:
+        """Read until CRLF using buffered reads instead of byte-by-byte.
+
+        Performance: Reads in batches of 64-256 bytes instead of 1 byte at a time.
+        """
+        line = bytearray()
+        while True:
+            # Check if we have data in buffer
+            if self._read_buffer:
+                # Look for CRLF in buffer
+                idx = self._read_buffer.find(b"\r\n")
+                if idx != -1:
+                    # Found CRLF - extract line and update buffer
+                    line.extend(self._read_buffer[: idx + 2])
+                    del self._read_buffer[: idx + 2]
+                    return bytes(line)
+                # No CRLF yet - consume entire buffer
+                line.extend(self._read_buffer)
+                self._read_buffer.clear()
+
+            # Read more data in larger chunks (64 bytes is enough for chunk headers)
+            chunk = self.stream.read(64)
+            if not chunk:
+                return bytes(line) if line else b""
+            self._read_buffer.extend(chunk)
+
+    def _read_exact(self, n: int) -> bytes:
+        """Read exactly n bytes, using buffer first."""
+        result = bytearray()
+        # Use buffered data first
+        if self._read_buffer:
+            take = min(len(self._read_buffer), n)
+            result.extend(self._read_buffer[:take])
+            del self._read_buffer[:take]
+            n -= take
+
+        # Read remaining directly from stream
+        if n > 0:
+            data = self.stream.read(n)
+            if data:
+                result.extend(data)
+
+        return bytes(result)
 
     def read(self, size=-1):
         if self.finished:
             return b""
 
-        result = b""
+        result = bytearray()  # Performance: Use bytearray for building result
         while size == -1 or len(result) < size:
             if self.chunk_remaining > 0:
                 to_read = self.chunk_remaining
                 if size != -1:
                     to_read = min(to_read, size - len(result))
-                
-                chunk = self.stream.read(to_read)
+
+                chunk = self._read_exact(to_read)
                 if not chunk:
                     raise IOError("Unexpected EOF in chunk data")
-                
-                result += chunk
+
+                result.extend(chunk)
                 self.chunk_remaining -= len(chunk)
-                
+
                 if self.chunk_remaining == 0:
-                    crlf = self.stream.read(2)
+                    crlf = self._read_exact(2)
                     if crlf != b"\r\n":
                         raise IOError("Malformed chunk: missing CRLF")
             else:
-                line = b""
-                while True:
-                    char = self.stream.read(1)
-                    if not char:
-                        if not line:
-                            self.finished = True
-                            return result
-                        raise IOError("Unexpected EOF in chunk size")
-                    line += char
-                    if line.endswith(b"\r\n"):
-                        break
-                
+                line = self._read_line()
+                if not line:
+                    self.finished = True
+                    return bytes(result)
+
                 try:
                     line_str = line.decode("ascii").strip()
                     if ";" in line_str:
@@ -2223,22 +2264,16 @@ class AwsChunkedDecoder:
 
                 if chunk_size == 0:
                     self.finished = True
+                    # Skip trailing headers
                     while True:
-                        line = b""
-                        while True:
-                            char = self.stream.read(1)
-                            if not char:
-                                break
-                            line += char
-                            if line.endswith(b"\r\n"):
-                                break
-                        if line == b"\r\n" or not line:
+                        trailer = self._read_line()
+                        if trailer == b"\r\n" or not trailer:
                             break
-                    return result
-                
+                    return bytes(result)
+
                 self.chunk_remaining = chunk_size
-        
-        return result
+
+        return bytes(result)
 
 
 def _initiate_multipart_upload(bucket_name: str, object_key: str) -> Response:

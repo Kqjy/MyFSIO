@@ -4,11 +4,12 @@ from __future__ import annotations
 import json
 import math
 import secrets
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 class IamError(RuntimeError):
@@ -115,13 +116,24 @@ class IamService:
         self._raw_config: Dict[str, Any] = {}
         self._failed_attempts: Dict[str, Deque[datetime]] = {}
         self._last_load_time = 0.0
+        # Performance: credential cache with TTL
+        self._credential_cache: Dict[str, Tuple[str, Principal, float]] = {}
+        self._cache_ttl = 60.0  # Cache credentials for 60 seconds
+        self._last_stat_check = 0.0
+        self._stat_check_interval = 1.0  # Only stat() file every 1 second
         self._load()
 
     def _maybe_reload(self) -> None:
         """Reload configuration if the file has changed on disk."""
+        # Performance: Skip stat check if we checked recently
+        now = time.time()
+        if now - self._last_stat_check < self._stat_check_interval:
+            return
+        self._last_stat_check = now
         try:
             if self.config_path.stat().st_mtime > self._last_load_time:
                 self._load()
+                self._credential_cache.clear()  # Invalidate cache on reload
         except OSError:
             pass
 
@@ -181,17 +193,37 @@ class IamService:
         return int(max(0, self.auth_lockout_window.total_seconds() - elapsed))
 
     def principal_for_key(self, access_key: str) -> Principal:
+        # Performance: Check cache first
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return principal
+
         self._maybe_reload()
         record = self._users.get(access_key)
         if not record:
             raise IamError("Unknown access key")
-        return self._build_principal(access_key, record)
+        principal = self._build_principal(access_key, record)
+        self._credential_cache[access_key] = (record["secret_key"], principal, now)
+        return principal
 
     def secret_for_key(self, access_key: str) -> str:
+        # Performance: Check cache first
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return secret
+
         self._maybe_reload()
         record = self._users.get(access_key)
         if not record:
             raise IamError("Unknown access key")
+        principal = self._build_principal(access_key, record)
+        self._credential_cache[access_key] = (record["secret_key"], principal, now)
         return record["secret_key"]
 
     def authorize(self, principal: Principal, bucket_name: str | None, action: str) -> None:
@@ -442,11 +474,36 @@ class IamService:
         raise IamError("User not found")
 
     def get_secret_key(self, access_key: str) -> str | None:
+        # Performance: Check cache first
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return secret
+
         self._maybe_reload()
         record = self._users.get(access_key)
-        return record["secret_key"] if record else None
+        if record:
+            # Cache the result
+            principal = self._build_principal(access_key, record)
+            self._credential_cache[access_key] = (record["secret_key"], principal, now)
+            return record["secret_key"]
+        return None
 
     def get_principal(self, access_key: str) -> Principal | None:
+        # Performance: Check cache first
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return principal
+
         self._maybe_reload()
         record = self._users.get(access_key)
-        return self._build_principal(access_key, record) if record else None
+        if record:
+            principal = self._build_principal(access_key, record)
+            self._credential_cache[access_key] = (record["secret_key"], principal, now)
+            return principal
+        return None

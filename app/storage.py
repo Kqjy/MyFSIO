@@ -139,9 +139,21 @@ class ObjectStorage:
         self._ensure_system_roots()
         # LRU cache for object metadata with thread-safe access
         self._object_cache: OrderedDict[str, tuple[Dict[str, ObjectMeta], float]] = OrderedDict()
-        self._cache_lock = threading.Lock()
+        self._cache_lock = threading.Lock()  # Global lock for cache structure
+        # Performance: Per-bucket locks to reduce contention
+        self._bucket_locks: Dict[str, threading.Lock] = {}
         # Cache version counter for detecting stale reads
         self._cache_version: Dict[str, int] = {}
+        # Performance: Bucket config cache with TTL
+        self._bucket_config_cache: Dict[str, tuple[dict[str, Any], float]] = {}
+        self._bucket_config_cache_ttl = 30.0  # 30 second TTL
+
+    def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
+        """Get or create a lock for a specific bucket. Reduces global lock contention."""
+        with self._cache_lock:
+            if bucket_id not in self._bucket_locks:
+                self._bucket_locks[bucket_id] = threading.Lock()
+            return self._bucket_locks[bucket_id]
 
     def list_buckets(self) -> List[BucketMeta]:
         buckets: List[BucketMeta] = []
@@ -247,11 +259,13 @@ class ObjectStorage:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise StorageError("Bucket does not exist")
-        if self._has_visible_objects(bucket_path):
+        # Performance: Single check instead of three separate traversals
+        has_objects, has_versions, has_multipart = self._check_bucket_contents(bucket_path)
+        if has_objects:
             raise StorageError("Bucket not empty")
-        if self._has_archived_versions(bucket_path):
+        if has_versions:
             raise StorageError("Bucket contains archived object versions")
-        if self._has_active_multipart_uploads(bucket_path):
+        if has_multipart:
             raise StorageError("Bucket has active multipart uploads")
         self._remove_tree(bucket_path)
         self._remove_tree(self._system_bucket_root(bucket_path.name))
@@ -393,17 +407,20 @@ class ObjectStorage:
         internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
         combined_meta = {**internal_meta, **(metadata or {})}
         self._write_metadata(bucket_id, safe_key, combined_meta)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
-        
-        return ObjectMeta(
+
+        # Performance: Lazy update - only update the affected key instead of invalidating whole cache
+        obj_meta = ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
             last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
             etag=etag,
             metadata=metadata,
         )
+        self._update_object_cache_entry(bucket_id, safe_key.as_posix(), obj_meta)
+
+        return obj_meta
 
     def get_object_path(self, bucket_name: str, object_key: str) -> Path:
         path = self._object_path(bucket_name, object_key)
@@ -449,9 +466,10 @@ class ObjectStorage:
         rel = path.relative_to(bucket_path)
         self._safe_unlink(path)
         self._delete_metadata(bucket_id, rel)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
+        # Performance: Lazy update - only remove the affected key instead of invalidating whole cache
+        self._update_object_cache_entry(bucket_id, safe_key.as_posix(), None)
         self._cleanup_empty_parents(path, bucket_path)
 
     def purge_object(self, bucket_name: str, object_key: str) -> None:
@@ -471,9 +489,10 @@ class ObjectStorage:
         legacy_version_dir = self._legacy_version_dir(bucket_id, rel)
         if legacy_version_dir.exists():
             shutil.rmtree(legacy_version_dir, ignore_errors=True)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
+        # Performance: Lazy update - only remove the affected key instead of invalidating whole cache
+        self._update_object_cache_entry(bucket_id, rel.as_posix(), None)
         self._cleanup_empty_parents(target, bucket_path)
 
     def is_versioning_enabled(self, bucket_name: str) -> bool:
@@ -1054,16 +1073,19 @@ class ObjectStorage:
         shutil.rmtree(upload_root, ignore_errors=True)
 
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
 
         stat = destination.stat()
-        return ObjectMeta(
+        # Performance: Lazy update - only update the affected key instead of invalidating whole cache
+        obj_meta = ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
             last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
             etag=checksum.hexdigest(),
             metadata=metadata,
         )
+        self._update_object_cache_entry(bucket_id, safe_key.as_posix(), obj_meta)
+
+        return obj_meta
 
     def abort_multipart_upload(self, bucket_name: str, upload_id: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
@@ -1305,37 +1327,47 @@ class ObjectStorage:
         """Get cached object metadata for a bucket, refreshing if stale.
 
         Uses LRU eviction to prevent unbounded cache growth.
-        Thread-safe with version tracking to detect concurrent invalidations.
+        Thread-safe with per-bucket locks to reduce contention.
         """
         now = time.time()
 
+        # Quick check with global lock (brief)
         with self._cache_lock:
             cached = self._object_cache.get(bucket_id)
-            cache_version = self._cache_version.get(bucket_id, 0)
-
             if cached:
                 objects, timestamp = cached
                 if now - timestamp < self.KEY_INDEX_CACHE_TTL:
-                    # Move to end (most recently used)
                     self._object_cache.move_to_end(bucket_id)
                     return objects
+            cache_version = self._cache_version.get(bucket_id, 0)
 
-        # Build cache outside lock to avoid holding lock during I/O
-        objects = self._build_object_cache(bucket_path)
+        # Use per-bucket lock for cache building (allows parallel builds for different buckets)
+        bucket_lock = self._get_bucket_lock(bucket_id)
+        with bucket_lock:
+            # Double-check cache after acquiring per-bucket lock
+            with self._cache_lock:
+                cached = self._object_cache.get(bucket_id)
+                if cached:
+                    objects, timestamp = cached
+                    if now - timestamp < self.KEY_INDEX_CACHE_TTL:
+                        self._object_cache.move_to_end(bucket_id)
+                        return objects
 
-        with self._cache_lock:
-            # Check if cache was invalidated while we were building
-            current_version = self._cache_version.get(bucket_id, 0)
-            if current_version != cache_version:
-                # Cache was invalidated, rebuild
-                objects = self._build_object_cache(bucket_path)
+            # Build cache with per-bucket lock held (prevents duplicate work)
+            objects = self._build_object_cache(bucket_path)
 
-            # Evict oldest entries if cache is full
-            while len(self._object_cache) >= self.OBJECT_CACHE_MAX_SIZE:
-                self._object_cache.popitem(last=False)
+            with self._cache_lock:
+                # Check if cache was invalidated while we were building
+                current_version = self._cache_version.get(bucket_id, 0)
+                if current_version != cache_version:
+                    objects = self._build_object_cache(bucket_path)
 
-            self._object_cache[bucket_id] = (objects, time.time())
-            self._object_cache.move_to_end(bucket_id)
+                # Evict oldest entries if cache is full
+                while len(self._object_cache) >= self.OBJECT_CACHE_MAX_SIZE:
+                    self._object_cache.popitem(last=False)
+
+                self._object_cache[bucket_id] = (objects, time.time())
+                self._object_cache.move_to_end(bucket_id)
 
         return objects
 
@@ -1353,6 +1385,23 @@ class ObjectStorage:
             etag_index_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+    def _update_object_cache_entry(self, bucket_id: str, key: str, meta: Optional[ObjectMeta]) -> None:
+        """Update a single entry in the object cache instead of invalidating the whole cache.
+
+        This is a performance optimization - lazy update instead of full invalidation.
+        """
+        with self._cache_lock:
+            cached = self._object_cache.get(bucket_id)
+            if cached:
+                objects, timestamp = cached
+                if meta is None:
+                    # Delete operation - remove key from cache
+                    objects.pop(key, None)
+                else:
+                    # Put operation - update/add key in cache
+                    objects[key] = meta
+                # Keep same timestamp - don't reset TTL for single key updates
 
     def _ensure_system_roots(self) -> None:
         for path in (
@@ -1373,19 +1422,33 @@ class ObjectStorage:
         return self._system_bucket_root(bucket_name) / self.BUCKET_CONFIG_FILE
 
     def _read_bucket_config(self, bucket_name: str) -> dict[str, Any]:
+        # Performance: Check cache first
+        now = time.time()
+        cached = self._bucket_config_cache.get(bucket_name)
+        if cached:
+            config, cached_time = cached
+            if now - cached_time < self._bucket_config_cache_ttl:
+                return config.copy()  # Return copy to prevent mutation
+
         config_path = self._bucket_config_path(bucket_name)
         if not config_path.exists():
+            self._bucket_config_cache[bucket_name] = ({}, now)
             return {}
         try:
             data = json.loads(config_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            config = data if isinstance(data, dict) else {}
+            self._bucket_config_cache[bucket_name] = (config, now)
+            return config.copy()
         except (OSError, json.JSONDecodeError):
+            self._bucket_config_cache[bucket_name] = ({}, now)
             return {}
 
     def _write_bucket_config(self, bucket_name: str, payload: dict[str, Any]) -> None:
         config_path = self._bucket_config_path(bucket_name)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(payload), encoding="utf-8")
+        # Performance: Update cache immediately after write
+        self._bucket_config_cache[bucket_name] = (payload.copy(), time.time())
 
     def _set_bucket_config_entry(self, bucket_name: str, key: str, value: Any | None) -> None:
         config = self._read_bucket_config(bucket_name)
@@ -1507,33 +1570,68 @@ class ObjectStorage:
             except OSError:
                 continue
 
-    def _has_visible_objects(self, bucket_path: Path) -> bool:
+    def _check_bucket_contents(self, bucket_path: Path) -> tuple[bool, bool, bool]:
+        """Check bucket for objects, versions, and multipart uploads in a single pass.
+
+        Performance optimization: Combines three separate rglob traversals into one.
+        Returns (has_visible_objects, has_archived_versions, has_active_multipart_uploads).
+        Uses early exit when all three are found.
+        """
+        has_objects = False
+        has_versions = False
+        has_multipart = False
+        bucket_name = bucket_path.name
+
+        # Check visible objects in bucket
         for path in bucket_path.rglob("*"):
+            if has_objects:
+                break
             if not path.is_file():
                 continue
             rel = path.relative_to(bucket_path)
             if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
                 continue
-            return True
-        return False
+            has_objects = True
+
+        # Check archived versions (only if needed)
+        for version_root in (
+            self._bucket_versions_root(bucket_name),
+            self._legacy_versions_root(bucket_name),
+        ):
+            if has_versions:
+                break
+            if version_root.exists():
+                for path in version_root.rglob("*"):
+                    if path.is_file():
+                        has_versions = True
+                        break
+
+        # Check multipart uploads (only if needed)
+        for uploads_root in (
+            self._multipart_bucket_root(bucket_name),
+            self._legacy_multipart_bucket_root(bucket_name),
+        ):
+            if has_multipart:
+                break
+            if uploads_root.exists():
+                for path in uploads_root.rglob("*"):
+                    if path.is_file():
+                        has_multipart = True
+                        break
+
+        return has_objects, has_versions, has_multipart
+
+    def _has_visible_objects(self, bucket_path: Path) -> bool:
+        has_objects, _, _ = self._check_bucket_contents(bucket_path)
+        return has_objects
 
     def _has_archived_versions(self, bucket_path: Path) -> bool:
-        for version_root in (
-            self._bucket_versions_root(bucket_path.name),
-            self._legacy_versions_root(bucket_path.name),
-        ):
-            if version_root.exists() and any(path.is_file() for path in version_root.rglob("*")):
-                return True
-        return False
+        _, has_versions, _ = self._check_bucket_contents(bucket_path)
+        return has_versions
 
     def _has_active_multipart_uploads(self, bucket_path: Path) -> bool:
-        for uploads_root in (
-            self._multipart_bucket_root(bucket_path.name),
-            self._legacy_multipart_bucket_root(bucket_path.name),
-        ):
-            if uploads_root.exists() and any(path.is_file() for path in uploads_root.rglob("*")):
-                return True
-        return False
+        _, _, has_multipart = self._check_bucket_contents(bucket_path)
+        return has_multipart
 
     def _remove_tree(self, path: Path) -> None:
         if not path.exists():

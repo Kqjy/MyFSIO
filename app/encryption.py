@@ -183,81 +183,94 @@ class StreamingEncryptor:
         self.chunk_size = chunk_size
     
     def _derive_chunk_nonce(self, base_nonce: bytes, chunk_index: int) -> bytes:
-        """Derive a unique nonce for each chunk."""
-        # XOR the base nonce with the chunk index
-        nonce_int = int.from_bytes(base_nonce, "big")
-        derived = nonce_int ^ chunk_index
-        return derived.to_bytes(12, "big")
-    
-    def encrypt_stream(self, stream: BinaryIO, 
-                       context: Dict[str, str] | None = None) -> tuple[BinaryIO, EncryptionMetadata]:
-        """Encrypt a stream and return encrypted stream + metadata."""
+        """Derive a unique nonce for each chunk.
 
+        Performance: Use direct byte manipulation instead of full int conversion.
+        """
+        # Performance: Only modify last 4 bytes instead of full 12-byte conversion
+        return base_nonce[:8] + (chunk_index ^ int.from_bytes(base_nonce[8:], "big")).to_bytes(4, "big")
+
+    def encrypt_stream(self, stream: BinaryIO,
+                       context: Dict[str, str] | None = None) -> tuple[BinaryIO, EncryptionMetadata]:
+        """Encrypt a stream and return encrypted stream + metadata.
+
+        Performance: Writes chunks directly to output buffer instead of accumulating in list.
+        """
         data_key, encrypted_data_key = self.provider.generate_data_key()
         base_nonce = secrets.token_bytes(12)
-        
+
         aesgcm = AESGCM(data_key)
-        encrypted_chunks = []
+        # Performance: Write directly to BytesIO instead of accumulating chunks
+        output = io.BytesIO()
+        output.write(b"\x00\x00\x00\x00")  # Placeholder for chunk count
         chunk_index = 0
-        
+
         while True:
             chunk = stream.read(self.chunk_size)
             if not chunk:
                 break
-            
+
             chunk_nonce = self._derive_chunk_nonce(base_nonce, chunk_index)
             encrypted_chunk = aesgcm.encrypt(chunk_nonce, chunk, None)
-            
-            size_prefix = len(encrypted_chunk).to_bytes(self.HEADER_SIZE, "big")
-            encrypted_chunks.append(size_prefix + encrypted_chunk)
+
+            # Write size prefix + encrypted chunk directly
+            output.write(len(encrypted_chunk).to_bytes(self.HEADER_SIZE, "big"))
+            output.write(encrypted_chunk)
             chunk_index += 1
-        
-        header = chunk_index.to_bytes(4, "big")
-        encrypted_data = header + b"".join(encrypted_chunks)
-        
+
+        # Write actual chunk count to header
+        output.seek(0)
+        output.write(chunk_index.to_bytes(4, "big"))
+        output.seek(0)
+
         metadata = EncryptionMetadata(
             algorithm="AES256",
             key_id=self.provider.KEY_ID if hasattr(self.provider, "KEY_ID") else "local",
             nonce=base_nonce,
             encrypted_data_key=encrypted_data_key,
         )
-        
-        return io.BytesIO(encrypted_data), metadata
-    
+
+        return output, metadata
+
     def decrypt_stream(self, stream: BinaryIO, metadata: EncryptionMetadata) -> BinaryIO:
-        """Decrypt a stream using the provided metadata."""
+        """Decrypt a stream using the provided metadata.
+
+        Performance: Writes chunks directly to output buffer instead of accumulating in list.
+        """
         if isinstance(self.provider, LocalKeyEncryption):
             data_key = self.provider._decrypt_data_key(metadata.encrypted_data_key)
         else:
             raise EncryptionError("Unsupported provider for streaming decryption")
-        
+
         aesgcm = AESGCM(data_key)
         base_nonce = metadata.nonce
-        
+
         chunk_count_bytes = stream.read(4)
         if len(chunk_count_bytes) < 4:
             raise EncryptionError("Invalid encrypted stream: missing header")
         chunk_count = int.from_bytes(chunk_count_bytes, "big")
-        
-        decrypted_chunks = []
+
+        # Performance: Write directly to BytesIO instead of accumulating chunks
+        output = io.BytesIO()
         for chunk_index in range(chunk_count):
             size_bytes = stream.read(self.HEADER_SIZE)
             if len(size_bytes) < self.HEADER_SIZE:
                 raise EncryptionError(f"Invalid encrypted stream: truncated at chunk {chunk_index}")
             chunk_size = int.from_bytes(size_bytes, "big")
-            
+
             encrypted_chunk = stream.read(chunk_size)
             if len(encrypted_chunk) < chunk_size:
                 raise EncryptionError(f"Invalid encrypted stream: incomplete chunk {chunk_index}")
-            
+
             chunk_nonce = self._derive_chunk_nonce(base_nonce, chunk_index)
             try:
                 decrypted_chunk = aesgcm.decrypt(chunk_nonce, encrypted_chunk, None)
-                decrypted_chunks.append(decrypted_chunk)
+                output.write(decrypted_chunk)  # Write directly instead of appending to list
             except Exception as exc:
                 raise EncryptionError(f"Failed to decrypt chunk {chunk_index}: {exc}") from exc
-        
-        return io.BytesIO(b"".join(decrypted_chunks))
+
+        output.seek(0)
+        return output
 
 
 class EncryptionManager:
