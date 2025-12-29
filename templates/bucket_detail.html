@@ -3801,41 +3801,40 @@
 
   selectAllCheckbox?.addEventListener('change', (event) => {
     const shouldSelect = Boolean(event.target?.checked);
-    
-    if (hasFolders()) {
 
-      const objectsInCurrentView = allObjects.filter(obj => obj.key.startsWith(currentPrefix));
-      objectsInCurrentView.forEach(obj => {
-        const checkbox = obj.element.querySelector('[data-object-select]');
-        if (checkbox && !checkbox.disabled) {
-          checkbox.checked = shouldSelect;
-        }
-        toggleRowSelection(obj.element, shouldSelect);
-      });
+    // Get all file items in the current view (works with virtual scrolling)
+    const filesInView = visibleItems.filter(item => item.type === 'file');
 
-      document.querySelectorAll('[data-folder-select]').forEach(cb => {
-        cb.checked = shouldSelect;
-      });
-    } else {
+    // Update selectedRows directly using object keys (not DOM elements)
+    filesInView.forEach(item => {
+      if (shouldSelect) {
+        selectedRows.set(item.data.key, item.data);
+      } else {
+        selectedRows.delete(item.data.key);
+      }
+    });
 
-      document.querySelectorAll('[data-object-row]').forEach((row) => {
-        if (row.style.display === 'none') return;
-        const checkbox = row.querySelector('[data-object-select]');
-        if (!checkbox || checkbox.disabled) {
-          return;
-        }
+    // Update folder checkboxes in DOM (folders are always rendered)
+    document.querySelectorAll('[data-folder-select]').forEach(cb => {
+      cb.checked = shouldSelect;
+    });
+
+    // Update any currently rendered object checkboxes
+    document.querySelectorAll('[data-object-row]').forEach((row) => {
+      const checkbox = row.querySelector('[data-object-select]');
+      if (checkbox) {
         checkbox.checked = shouldSelect;
-        toggleRowSelection(row, shouldSelect);
-      });
-    }
+      }
+    });
+
+    updateBulkDeleteState();
     setTimeout(updateBulkDownloadState, 0);
   });
 
   bulkDownloadButton?.addEventListener('click', async () => {
     if (!bulkDownloadEndpoint) return;
-    const selected = Array.from(document.querySelectorAll('[data-object-select]:checked')).map(
-      (cb) => cb.closest('tr').dataset.key
-    );
+    // Use selectedRows which tracks all selected objects (not just rendered ones)
+    const selected = Array.from(selectedRows.keys());
     if (selected.length === 0) return;
 
     bulkDownloadButton.disabled = true;

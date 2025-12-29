@@ -1052,9 +1052,10 @@ class ObjectStorage:
                 pass
 
         shutil.rmtree(upload_root, ignore_errors=True)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        
+        self._invalidate_object_cache(bucket_id)
+
         stat = destination.stat()
         return ObjectMeta(
             key=safe_key.as_posix(),

@@ -306,6 +306,12 @@ class ReplicationManager:
         if self._shutdown:
             return
 
+        # Re-check if rule is still enabled (may have been paused after task was submitted)
+        current_rule = self.get_rule(bucket_name)
+        if not current_rule or not current_rule.enabled:
+            logger.debug(f"Replication skipped for {bucket_name}/{object_key}: rule disabled or removed")
+            return
+
         if ".." in object_key or object_key.startswith("/") or object_key.startswith("\\"):
             logger.error(f"Invalid object key in replication (path traversal attempt): {object_key}")
             return
