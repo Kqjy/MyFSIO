@@ -157,10 +157,7 @@ class LocalKeyEncryption(EncryptionProvider):
     def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
                 key_id: str, context: Dict[str, str] | None = None) -> bytes:
         """Decrypt data using envelope encryption."""
-        # Decrypt the data key
         data_key = self._decrypt_data_key(encrypted_data_key)
-        
-        # Decrypt the data
         aesgcm = AESGCM(data_key)
         try:
             return aesgcm.decrypt(nonce, ciphertext, None)

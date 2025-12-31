@@ -456,7 +456,6 @@
 {{ super() }}
 <script>
   (function () {
-    // Auto-indent for JSON textareas
     function setupJsonAutoIndent(textarea) {
       if (!textarea) return;
 
@@ -468,61 +467,49 @@
           const end = this.selectionEnd;
           const value = this.value;
 
-          // Get the current line
           const lineStart = value.lastIndexOf('\n', start - 1) + 1;
           const currentLine = value.substring(lineStart, start);
 
-          // Calculate base indentation (leading whitespace of current line)
           const indentMatch = currentLine.match(/^(\s*)/);
           let indent = indentMatch ? indentMatch[1] : '';
 
-          // Check if the line ends with { or [ (should increase indent)
           const trimmedLine = currentLine.trim();
           const lastChar = trimmedLine.slice(-1);
 
-          // Check the character before cursor
           const charBeforeCursor = value.substring(start - 1, start).trim();
 
           let newIndent = indent;
           let insertAfter = '';
 
           if (lastChar === '{' || lastChar === '[') {
-            // Add extra indentation
             newIndent = indent + '  ';
 
-            // Check if we need to add closing bracket on new line
             const charAfterCursor = value.substring(start, start + 1).trim();
             if ((lastChar === '{' && charAfterCursor === '}') ||
                 (lastChar === '[' && charAfterCursor === ']')) {
               insertAfter = '\n' + indent;
             }
           } else if (lastChar === ',' || lastChar === ':') {
-            // Keep same indentation for continuation
             newIndent = indent;
           }
 
-          // Insert newline with proper indentation
           const insertion = '\n' + newIndent + insertAfter;
           const newValue = value.substring(0, start) + insertion + value.substring(end);
 
           this.value = newValue;
 
-          // Set cursor position after the indentation
           const newCursorPos = start + 1 + newIndent.length;
           this.selectionStart = this.selectionEnd = newCursorPos;
 
-          // Trigger input event for any listeners
           this.dispatchEvent(new Event('input', { bubbles: true }));
         }
 
-        // Handle Tab key for indentation
         if (e.key === 'Tab') {
           e.preventDefault();
           const start = this.selectionStart;
           const end = this.selectionEnd;
 
           if (e.shiftKey) {
-            // Outdent: remove 2 spaces from start of line
             const lineStart = this.value.lastIndexOf('\n', start - 1) + 1;
             const lineContent = this.value.substring(lineStart, start);
             if (lineContent.startsWith('  ')) {
@@ -531,7 +518,6 @@
               this.selectionStart = this.selectionEnd = Math.max(lineStart, start - 2);
             }
           } else {
-            // Indent: insert 2 spaces
             this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
             this.selectionStart = this.selectionEnd = start + 2;
           }
@@ -541,7 +527,6 @@
       });
     }
 
-    // Apply auto-indent to policy editor textareas
     setupJsonAutoIndent(document.getElementById('policyEditorDocument'));
     setupJsonAutoIndent(document.getElementById('createUserPolicies'));
 

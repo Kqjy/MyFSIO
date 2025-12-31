@@ -968,8 +968,7 @@
                   {% endif %}
                 </div>
               </div>
-              
-              <!-- Warning alert for unreachable endpoint (shown by JS if endpoint is down) -->
+
               <div id="replication-endpoint-warning" class="alert alert-danger d-none mb-4" role="alert">
                 <div class="d-flex align-items-start">
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
@@ -1783,7 +1782,6 @@
 
 {% block extra_scripts %}
 <script>
-  // Auto-indent for JSON textareas
   function setupJsonAutoIndent(textarea) {
     if (!textarea) return;
 
@@ -1795,15 +1793,12 @@
         const end = this.selectionEnd;
         const value = this.value;
 
-        // Get the current line
         const lineStart = value.lastIndexOf('\n', start - 1) + 1;
         const currentLine = value.substring(lineStart, start);
 
-        // Calculate base indentation (leading whitespace of current line)
         const indentMatch = currentLine.match(/^(\s*)/);
         let indent = indentMatch ? indentMatch[1] : '';
 
-        // Check if the line ends with { or [ (should increase indent)
         const trimmedLine = currentLine.trim();
         const lastChar = trimmedLine.slice(-1);
 
@@ -1811,42 +1806,34 @@
         let insertAfter = '';
 
         if (lastChar === '{' || lastChar === '[') {
-          // Add extra indentation
           newIndent = indent + '  ';
 
-          // Check if we need to add closing bracket on new line
           const charAfterCursor = value.substring(start, start + 1).trim();
           if ((lastChar === '{' && charAfterCursor === '}') ||
               (lastChar === '[' && charAfterCursor === ']')) {
             insertAfter = '\n' + indent;
           }
         } else if (lastChar === ',' || lastChar === ':') {
-          // Keep same indentation for continuation
           newIndent = indent;
         }
 
-        // Insert newline with proper indentation
         const insertion = '\n' + newIndent + insertAfter;
         const newValue = value.substring(0, start) + insertion + value.substring(end);
 
         this.value = newValue;
 
-        // Set cursor position after the indentation
         const newCursorPos = start + 1 + newIndent.length;
         this.selectionStart = this.selectionEnd = newCursorPos;
 
-        // Trigger input event for any listeners
         this.dispatchEvent(new Event('input', { bubbles: true }));
       }
 
-      // Handle Tab key for indentation
       if (e.key === 'Tab') {
         e.preventDefault();
         const start = this.selectionStart;
         const end = this.selectionEnd;
 
         if (e.shiftKey) {
-          // Outdent: remove 2 spaces from start of line
           const lineStart = this.value.lastIndexOf('\n', start - 1) + 1;
           const lineContent = this.value.substring(lineStart, start);
           if (lineContent.startsWith('  ')) {
@@ -1855,7 +1842,6 @@
             this.selectionStart = this.selectionEnd = Math.max(lineStart, start - 2);
           }
         } else {
-          // Indent: insert 2 spaces
           this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
           this.selectionStart = this.selectionEnd = start + 2;
         }
@@ -1865,7 +1851,6 @@
     });
   }
 
-  // Apply auto-indent to policy editor textarea
   setupJsonAutoIndent(document.getElementById('policyDocument'));
 
   const formatBytes = (bytes) => {
@@ -1970,24 +1955,21 @@
   let isLoadingObjects = false;
   let hasMoreObjects = false;
   let currentFilterTerm = '';
-  let pageSize = 5000;  // Load large batches for virtual scrolling
-  let currentPrefix = '';  // Current folder prefix for navigation
-  let allObjects = [];  // All loaded object metadata (lightweight)
-  let urlTemplates = null;  // URL templates from API for constructing object URLs
+  let pageSize = 5000;
+  let currentPrefix = '';
+  let allObjects = [];
+  let urlTemplates = null;
 
-  // Helper to build URL from template by replacing KEY_PLACEHOLDER with encoded key
   const buildUrlFromTemplate = (template, key) => {
     if (!template) return '';
     return template.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/'));
   };
 
-  // Virtual scrolling state
-  const ROW_HEIGHT = 53;  // Height of each table row in pixels
-  const BUFFER_ROWS = 10;  // Extra rows to render above/below viewport
-  let visibleItems = [];  // Current items to display (filtered by folder/search)
-  let renderedRange = { start: 0, end: 0 };  // Currently rendered row indices
+  const ROW_HEIGHT = 53;
+  const BUFFER_ROWS = 10;
+  let visibleItems = [];
+  let renderedRange = { start: 0, end: 0 };
 
-  // Create a row element from object data (for virtual scrolling)
   const createObjectRow = (obj, displayKey = null) => {
     const tr = document.createElement('tr');
     tr.dataset.objectRow = '';
@@ -2110,16 +2092,12 @@
     }
   };
 
-  // ============== VIRTUAL SCROLLING SYSTEM ==============
-  
-  // Spacer elements for virtual scroll height
   let topSpacer = null;
   let bottomSpacer = null;
-  
+
   const initVirtualScrollElements = () => {
     if (!objectsTableBody) return;
-    
-    // Create spacer rows if they don't exist
+
     if (!topSpacer) {
       topSpacer = document.createElement('tr');
       topSpacer.id = 'virtual-top-spacer';
@@ -2131,38 +2109,33 @@
       bottomSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
     }
   };
-  
-  // Compute which items should be visible based on current view
+
   const computeVisibleItems = () => {
     const items = [];
     const folders = new Set();
-    
+
     allObjects.forEach(obj => {
       if (!obj.key.startsWith(currentPrefix)) return;
-      
+
       const remainder = obj.key.slice(currentPrefix.length);
       const slashIndex = remainder.indexOf('/');
-      
+
       if (slashIndex === -1) {
-        // File in current folder - filter on the displayed filename (remainder)
         if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
           items.push({ type: 'file', data: obj, displayKey: remainder });
         }
       } else {
-        // Folder
         const folderName = remainder.slice(0, slashIndex);
         const folderPath = currentPrefix + folderName + '/';
         if (!folders.has(folderPath)) {
           folders.add(folderPath);
-          // Filter on the displayed folder name only
           if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
             items.push({ type: 'folder', path: folderPath, displayKey: folderName });
           }
         }
       }
     });
-    
-    // Sort: folders first, then files
+
     items.sort((a, b) => {
       if (a.type === 'folder' && b.type === 'file') return -1;
       if (a.type === 'file' && b.type === 'folder') return 1;
@@ -2173,36 +2146,30 @@
     
     return items;
   };
-  
-  // Render only the visible rows based on scroll position
+
   const renderVirtualRows = () => {
     if (!objectsTableBody || !scrollContainer) return;
-    
+
     const containerHeight = scrollContainer.clientHeight;
     const scrollTop = scrollContainer.scrollTop;
-    
-    // Calculate visible range
+
     const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
     const endIndex = Math.min(visibleItems.length, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT) + BUFFER_ROWS);
-    
-    // Skip if range hasn't changed significantly
+
     if (startIndex === renderedRange.start && endIndex === renderedRange.end) return;
-    
+
     renderedRange = { start: startIndex, end: endIndex };
-    
-    // Clear and rebuild
+
     objectsTableBody.innerHTML = '';
-    
-    // Add top spacer
+
     initVirtualScrollElements();
     topSpacer.querySelector('td').style.height = `${startIndex * ROW_HEIGHT}px`;
     objectsTableBody.appendChild(topSpacer);
-    
-    // Render visible rows
+
     for (let i = startIndex; i < endIndex; i++) {
       const item = visibleItems[i];
       if (!item) continue;
-      
+
       let row;
       if (item.type === 'folder') {
         row = createFolderRow(item.path, item.displayKey);
@@ -2212,33 +2179,28 @@
       row.dataset.virtualIndex = i;
       objectsTableBody.appendChild(row);
     }
-    
-    // Add bottom spacer
+
     const remainingRows = visibleItems.length - endIndex;
     bottomSpacer.querySelector('td').style.height = `${remainingRows * ROW_HEIGHT}px`;
     objectsTableBody.appendChild(bottomSpacer);
-    
-    // Re-attach handlers to new rows
+
     attachRowHandlers();
   };
-  
-  // Debounced scroll handler for virtual scrolling
+
   let scrollTimeout = null;
   const handleVirtualScroll = () => {
     if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
     scrollTimeout = requestAnimationFrame(renderVirtualRows);
   };
-  
-  // Refresh the virtual list (after data changes or navigation)
+
   const refreshVirtualList = () => {
     visibleItems = computeVisibleItems();
-    renderedRange = { start: -1, end: -1 };  // Force re-render
-    
+    renderedRange = { start: -1, end: -1 };
+
     if (visibleItems.length === 0) {
       if (allObjects.length === 0 && !hasMoreObjects) {
         showEmptyState();
       } else {
-        // Empty folder
         objectsTableBody.innerHTML = `
           <tr>
             <td colspan="4" class="py-5">
@@ -2262,7 +2224,6 @@
     updateFolderViewStatus();
   };
   
-  // Update status bar
   const updateFolderViewStatus = () => {
     const folderViewStatusEl = document.getElementById('folder-view-status');
     if (!folderViewStatusEl) return;
@@ -2277,8 +2238,6 @@
     }
   };
 
-  // ============== DATA LOADING ==============
-
   const loadObjects = async (append = false) => {
     if (isLoadingObjects) return;
     isLoadingObjects = true;
@@ -2290,7 +2249,6 @@
       allObjects = [];
     }
 
-    // Show loading spinner when loading more
     if (append && loadMoreSpinner) {
       loadMoreSpinner.classList.remove('d-none');
     }
@@ -2359,7 +2317,6 @@
         updateLoadMoreButton();
       }
 
-      // Refresh virtual scroll view
       refreshVirtualList();
       renderBreadcrumb(currentPrefix);
 
@@ -2379,7 +2336,6 @@
   };
 
   const attachRowHandlers = () => {
-    // Attach handlers to object rows
     const objectRows = document.querySelectorAll('[data-object-row]');
     objectRows.forEach(row => {
       if (row.dataset.handlersAttached) return;
@@ -2405,14 +2361,12 @@
         toggleRowSelection(row, selectCheckbox.checked);
       });
       
-      // Restore selection state
       if (selectedRows.has(row.dataset.key)) {
         selectCheckbox.checked = true;
         row.classList.add('table-active');
       }
     });
     
-    // Attach handlers to folder rows
     const folderRows = document.querySelectorAll('.folder-row');
     folderRows.forEach(row => {
       if (row.dataset.handlersAttached) return;
@@ -2423,7 +2377,6 @@
       const checkbox = row.querySelector('[data-folder-select]');
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
-        // Select all objects in this folder
         const folderObjects = allObjects.filter(obj => obj.key.startsWith(folderPath));
         folderObjects.forEach(obj => {
           if (checkbox.checked) {
@@ -2450,31 +2403,26 @@
     updateBulkDeleteState();
   };
 
-  // Scroll container reference (needed for virtual scrolling)
   const scrollSentinel = document.getElementById('scroll-sentinel');
   const scrollContainer = document.querySelector('.objects-table-container');
   const loadMoreBtn = document.getElementById('load-more-btn');
-  
-  // Virtual scroll: listen to scroll events
+
   if (scrollContainer) {
     scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
   }
-  
-  // Load More button click handler (fallback)
+
   loadMoreBtn?.addEventListener('click', () => {
     if (hasMoreObjects && !isLoadingObjects) {
       loadObjects(true);
     }
   });
-  
-  // Show/hide Load More button based on hasMoreObjects
+
   function updateLoadMoreButton() {
     if (loadMoreBtn) {
       loadMoreBtn.classList.toggle('d-none', !hasMoreObjects);
     }
   }
-  
-  // Auto-load more when near bottom (for loading all data)
+
   if (scrollSentinel && scrollContainer) {
     const containerObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
@@ -2484,7 +2432,7 @@
       });
     }, {
       root: scrollContainer,
-      rootMargin: '500px',  // Load more earlier for smoother experience
+      rootMargin: '500px',
       threshold: 0
     });
     containerObserver.observe(scrollSentinel);
@@ -2503,7 +2451,6 @@
     viewportObserver.observe(scrollSentinel);
   }
 
-  // Page size selector (now controls batch size)
   const pageSizeSelect = document.getElementById('page-size-select');
   pageSizeSelect?.addEventListener('change', (e) => {
     pageSize = parseInt(e.target.value, 10);
@@ -2669,14 +2616,11 @@
     return tr;
   };
 
-  // Instant client-side folder navigation (no server round-trip!)
   const navigateToFolder = (prefix) => {
     currentPrefix = prefix;
-    
-    // Scroll to top when navigating
+
     if (scrollContainer) scrollContainer.scrollTop = 0;
-    
-    // Instant re-render from already-loaded data
+
     refreshVirtualList();
     renderBreadcrumb(prefix);
 
@@ -2710,9 +2654,9 @@
       if (keyCell && currentPrefix) {
         const displayName = obj.key.slice(currentPrefix.length);
         keyCell.textContent = displayName;
-        keyCell.closest('.object-key').title = obj.key; // Full path in tooltip
+        keyCell.closest('.object-key').title = obj.key;
       } else if (keyCell) {
-        keyCell.textContent = obj.key; // Reset to full key at root
+        keyCell.textContent = obj.key;
       }
     });
 
@@ -2887,7 +2831,6 @@
       bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
     }
     if (selectAllCheckbox) {
-      // With virtual scrolling, count files in current folder from visibleItems
       const filesInView = visibleItems.filter(item => item.type === 'file');
       const total = filesInView.length;
       const visibleSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
@@ -3524,9 +3467,6 @@
   document.getElementById('object-search')?.addEventListener('input', (event) => {
     currentFilterTerm = event.target.value.toLowerCase();
     updateFilterWarning();
-    
-    // Use the virtual scrolling system for filtering - it properly handles
-    // both folder view and flat view, and works with large object counts
     refreshVirtualList();
   });
 
@@ -3886,10 +3826,8 @@
   selectAllCheckbox?.addEventListener('change', (event) => {
     const shouldSelect = Boolean(event.target?.checked);
 
-    // Get all file items in the current view (works with virtual scrolling)
     const filesInView = visibleItems.filter(item => item.type === 'file');
 
-    // Update selectedRows directly using object keys (not DOM elements)
     filesInView.forEach(item => {
       if (shouldSelect) {
         selectedRows.set(item.data.key, item.data);
@@ -3898,12 +3836,10 @@
       }
     });
 
-    // Update folder checkboxes in DOM (folders are always rendered)
     document.querySelectorAll('[data-folder-select]').forEach(cb => {
       cb.checked = shouldSelect;
     });
 
-    // Update any currently rendered object checkboxes
     document.querySelectorAll('[data-object-row]').forEach((row) => {
       const checkbox = row.querySelector('[data-object-select]');
       if (checkbox) {
@@ -3917,7 +3853,6 @@
 
   bulkDownloadButton?.addEventListener('click', async () => {
     if (!bulkDownloadEndpoint) return;
-    // Use selectedRows which tracks all selected objects (not just rendered ones)
     const selected = Array.from(selectedRows.keys());
     if (selected.length === 0) return;
 
@@ -4085,7 +4020,6 @@
     }
   });
 
-  // Bucket name validation for replication setup
   const targetBucketInput = document.getElementById('target_bucket');
   const targetBucketFeedback = document.getElementById('target_bucket_feedback');
   
@@ -4120,7 +4054,6 @@
   targetBucketInput?.addEventListener('input', updateBucketNameValidation);
   targetBucketInput?.addEventListener('blur', updateBucketNameValidation);
 
-  // Prevent form submission if bucket name is invalid
   const replicationForm = targetBucketInput?.closest('form');
   replicationForm?.addEventListener('submit', (e) => {
     const name = targetBucketInput.value.trim();
@@ -4133,7 +4066,6 @@
     }
   });
 
-  // Policy JSON validation and formatting
   const formatPolicyBtn = document.getElementById('formatPolicyBtn');
   const policyValidationStatus = document.getElementById('policyValidationStatus');
   const policyValidBadge = document.getElementById('policyValidBadge');
@@ -4176,12 +4108,10 @@
       policyTextarea.value = JSON.stringify(parsed, null, 2);
       validatePolicyJson();
     } catch (err) {
-      // Show error in validation
       validatePolicyJson();
     }
   });
 
-  // Initialize policy validation on page load
   if (policyTextarea && policyPreset?.value === 'custom') {
     validatePolicyJson();
   }

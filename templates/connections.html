@@ -306,8 +306,7 @@
         const data = Object.fromEntries(formData.entries());
         
         resultDiv.innerHTML = '<div class="text-info"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Testing connection...</div>';
-        
-        // Use AbortController to timeout client-side after 20 seconds
+
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000);
         
@@ -394,8 +393,6 @@
         form.action = "{{ url_for('ui.delete_connection', connection_id='CONN_ID') }}".replace('CONN_ID', id);
     });
 
-    // Check connection health for each connection in the table
-    // Uses staggered requests to avoid overwhelming the server
     async function checkConnectionHealth(connectionId, statusEl) {
         try {
             const controller = new AbortController();
@@ -432,13 +429,11 @@
         }
     }
 
-    // Stagger health checks to avoid all requests at once
     const connectionRows = document.querySelectorAll('tr[data-connection-id]');
     connectionRows.forEach((row, index) => {
         const connectionId = row.getAttribute('data-connection-id');
         const statusEl = row.querySelector('.connection-status');
         if (statusEl) {
-            // Stagger requests by 200ms each
             setTimeout(() => checkConnectionHealth(connectionId, statusEl), index * 200);
         }
     });

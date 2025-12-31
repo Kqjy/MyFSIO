@@ -975,8 +975,7 @@ def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
             return _error_response("NoSuchKey", message, 404)
         current_app.logger.info("Object tags deleted", extra={"bucket": bucket_name, "key": object_key})
         return Response(status=204)
-    
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     try:
         tags = _parse_tagging_document(payload)
@@ -1044,7 +1043,7 @@ def _bucket_cors_handler(bucket_name: str) -> Response:
             return _error_response("NoSuchBucket", str(exc), 404)
         current_app.logger.info("Bucket CORS deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     if not payload.strip():
         try:
@@ -1290,8 +1289,7 @@ def _bucket_lifecycle_handler(bucket_name: str) -> Response:
         storage.set_bucket_lifecycle(bucket_name, None)
         current_app.logger.info("Bucket lifecycle deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     if not payload.strip():
         return _error_response("MalformedXML", "Request body is required", 400)
@@ -1454,8 +1452,7 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
             return _error_response("NoSuchBucket", str(exc), 404)
         current_app.logger.info("Bucket quota deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    
-    # PUT
+
     payload = request.get_json(silent=True)
     if not payload:
         return _error_response("MalformedRequest", "Request body must be JSON with quota limits", 400)
