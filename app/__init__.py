@@ -16,6 +16,7 @@ from flask_cors import CORS
 from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from .acl import AclService
 from .bucket_policies import BucketPolicyStore
 from .config import AppConfig
 from .connections import ConnectionStore
@@ -23,6 +24,7 @@ from .encryption import EncryptionManager
 from .extensions import limiter, csrf
 from .iam import IamService
 from .kms import KMSManager
+from .lifecycle import LifecycleManager
 from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage
@@ -140,6 +142,17 @@ def create_app(
         from .encrypted_storage import EncryptedObjectStorage
         storage = EncryptedObjectStorage(storage, encryption_manager)
 
+    acl_service = AclService(storage_root)
+
+    lifecycle_manager = None
+    if app.config.get("LIFECYCLE_ENABLED", False):
+        base_storage = storage.storage if hasattr(storage, 'storage') else storage
+        lifecycle_manager = LifecycleManager(
+            base_storage,
+            interval_seconds=app.config.get("LIFECYCLE_INTERVAL_SECONDS", 3600),
+        )
+        lifecycle_manager.start()
+
     app.extensions["object_storage"] = storage
     app.extensions["iam"] = iam
     app.extensions["bucket_policies"] = bucket_policies
@@ -149,6 +162,8 @@ def create_app(
     app.extensions["replication"] = replication
     app.extensions["encryption"] = encryption_manager
     app.extensions["kms"] = kms_manager
+    app.extensions["acl"] = acl_service
+    app.extensions["lifecycle"] = lifecycle_manager
 
     @app.errorhandler(500)
     def internal_error(error):

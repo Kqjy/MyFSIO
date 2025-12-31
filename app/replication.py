@@ -182,8 +182,14 @@ class ReplicationManager:
         return self._rules.get(bucket_name)
 
     def set_rule(self, rule: ReplicationRule) -> None:
+        old_rule = self._rules.get(rule.bucket_name)
+        was_all_mode = old_rule and old_rule.mode == REPLICATION_MODE_ALL if old_rule else False
         self._rules[rule.bucket_name] = rule
         self.save_rules()
+
+        if rule.mode == REPLICATION_MODE_ALL and rule.enabled and not was_all_mode:
+            logger.info(f"Replication mode ALL enabled for {rule.bucket_name}, triggering sync of existing objects")
+            self._executor.submit(self.replicate_existing_objects, rule.bucket_name)
 
     def delete_rule(self, bucket_name: str) -> None:
         if bucket_name in self._rules:

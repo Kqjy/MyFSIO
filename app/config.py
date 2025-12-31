@@ -74,6 +74,8 @@ class AppConfig:
     kms_keys_path: Path
     default_encryption_algorithm: str
     display_timezone: str
+    lifecycle_enabled: bool
+    lifecycle_interval_seconds: int
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -91,6 +93,8 @@ class AppConfig:
         secret_ttl_seconds = int(_get("SECRET_TTL_SECONDS", 300))
         stream_chunk_size = int(_get("STREAM_CHUNK_SIZE", 64 * 1024))
         multipart_min_part_size = int(_get("MULTIPART_MIN_PART_SIZE", 5 * 1024 * 1024))
+        lifecycle_enabled = _get("LIFECYCLE_ENABLED", "false").lower() in ("true", "1", "yes")
+        lifecycle_interval_seconds = int(_get("LIFECYCLE_INTERVAL_SECONDS", 3600))
         default_secret = "dev-secret-key"
         secret_key = str(_get("SECRET_KEY", default_secret))
         
@@ -198,7 +202,9 @@ class AppConfig:
                    kms_enabled=kms_enabled,
                    kms_keys_path=kms_keys_path,
                    default_encryption_algorithm=default_encryption_algorithm,
-                   display_timezone=display_timezone)
+                   display_timezone=display_timezone,
+                   lifecycle_enabled=lifecycle_enabled,
+                   lifecycle_interval_seconds=lifecycle_interval_seconds)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.

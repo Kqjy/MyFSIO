@@ -121,6 +121,7 @@ class IamService:
         self._cache_ttl = 60.0  # Cache credentials for 60 seconds
         self._last_stat_check = 0.0
         self._stat_check_interval = 1.0  # Only stat() file every 1 second
+        self._sessions: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     def _maybe_reload(self) -> None:
@@ -191,6 +192,40 @@ class IamService:
         oldest = attempts[0]
         elapsed = (datetime.now(timezone.utc) - oldest).total_seconds()
         return int(max(0, self.auth_lockout_window.total_seconds() - elapsed))
+
+    def create_session_token(self, access_key: str, duration_seconds: int = 3600) -> str:
+        """Create a temporary session token for an access key."""
+        self._maybe_reload()
+        record = self._users.get(access_key)
+        if not record:
+            raise IamError("Unknown access key")
+        self._cleanup_expired_sessions()
+        token = secrets.token_urlsafe(32)
+        expires_at = time.time() + duration_seconds
+        self._sessions[token] = {
+            "access_key": access_key,
+            "expires_at": expires_at,
+        }
+        return token
+
+    def validate_session_token(self, access_key: str, session_token: str) -> bool:
+        """Validate a session token for an access key."""
+        session = self._sessions.get(session_token)
+        if not session:
+            return False
+        if session["access_key"] != access_key:
+            return False
+        if time.time() > session["expires_at"]:
+            del self._sessions[session_token]
+            return False
+        return True
+
+    def _cleanup_expired_sessions(self) -> None:
+        """Remove expired session tokens."""
+        now = time.time()
+        expired = [token for token, data in self._sessions.items() if now > data["expires_at"]]
+        for token in expired:
+            del self._sessions[token]
 
     def principal_for_key(self, access_key: str) -> Principal:
         # Performance: Check cache first

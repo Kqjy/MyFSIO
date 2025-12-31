@@ -809,6 +809,29 @@ class ObjectStorage:
             metadata=metadata or None,
         )
 
+    def delete_object_version(self, bucket_name: str, object_key: str, version_id: str) -> None:
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise StorageError("Bucket does not exist")
+        bucket_id = bucket_path.name
+        safe_key = self._sanitize_object_key(object_key)
+        version_dir = self._version_dir(bucket_id, safe_key)
+        data_path = version_dir / f"{version_id}.bin"
+        meta_path = version_dir / f"{version_id}.json"
+        if not data_path.exists() and not meta_path.exists():
+            legacy_version_dir = self._legacy_version_dir(bucket_id, safe_key)
+            data_path = legacy_version_dir / f"{version_id}.bin"
+            meta_path = legacy_version_dir / f"{version_id}.json"
+        if not data_path.exists() and not meta_path.exists():
+            raise StorageError(f"Version {version_id} not found")
+        if data_path.exists():
+            data_path.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+        parent = data_path.parent
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+
     def list_orphaned_objects(self, bucket_name: str) -> List[Dict[str, Any]]:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
@@ -1123,6 +1146,49 @@ class ObjectStorage:
         
         parts.sort(key=lambda x: x["PartNumber"])
         return parts
+
+    def list_multipart_uploads(self, bucket_name: str) -> List[Dict[str, Any]]:
+        """List all active multipart uploads for a bucket."""
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise StorageError("Bucket does not exist")
+        bucket_id = bucket_path.name
+        uploads = []
+        multipart_root = self._bucket_multipart_root(bucket_id)
+        if multipart_root.exists():
+            for upload_dir in multipart_root.iterdir():
+                if not upload_dir.is_dir():
+                    continue
+                manifest_path = upload_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    uploads.append({
+                        "upload_id": manifest.get("upload_id", upload_dir.name),
+                        "object_key": manifest.get("object_key", ""),
+                        "created_at": manifest.get("created_at", ""),
+                    })
+                except (OSError, json.JSONDecodeError):
+                    continue
+        legacy_root = self._legacy_multipart_root(bucket_id)
+        if legacy_root.exists():
+            for upload_dir in legacy_root.iterdir():
+                if not upload_dir.is_dir():
+                    continue
+                manifest_path = upload_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    uploads.append({
+                        "upload_id": manifest.get("upload_id", upload_dir.name),
+                        "object_key": manifest.get("object_key", ""),
+                        "created_at": manifest.get("created_at", ""),
+                    })
+                except (OSError, json.JSONDecodeError):
+                    continue
+        return uploads
 
     def _bucket_path(self, bucket_name: str) -> Path:
         safe_name = self._sanitize_bucket_name(bucket_name)
