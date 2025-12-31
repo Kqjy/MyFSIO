@@ -57,7 +57,7 @@ A lightweight, S3-compatible object storage system built with Flask. MyFSIO impl
 
 ```bash
 # Clone and setup
-git clone <repository-url>
+git clone https://gitea.jzwsite.com/kqjy/MyFSIO
 cd s3
 python -m venv .venv
 
@@ -249,7 +249,3 @@ pytest tests/ --cov=app --cov-report=html
 - [Amazon S3 Documentation](https://docs.aws.amazon.com/s3/)
 - [AWS Signature Version 4](https://docs.aws.amazon.com/general/latest/gr/signature-version-4.html)
 - [S3 Bucket Policy Examples](https://docs.aws.amazon.com/AmazonS3/latest/userguide/example-bucket-policies.html)
-
-## License
-
-MIT
