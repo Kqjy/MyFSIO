@@ -1,4 +1,3 @@
-"""Manage remote S3 connections."""
 from __future__ import annotations
 
 import json

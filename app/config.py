@@ -1,4 +1,3 @@
-"""Configuration helpers for the S3 clone application."""
 from __future__ import annotations
 
 import os

@@ -353,13 +353,113 @@ class EncryptionManager:
         return encryptor.decrypt_stream(stream, metadata)
 
 
+class SSECEncryption(EncryptionProvider):
+    """SSE-C: Server-Side Encryption with Customer-Provided Keys.
+
+    The client provides the encryption key with each request.
+    Server encrypts/decrypts but never stores the key.
+
+    Required headers for PUT:
+    - x-amz-server-side-encryption-customer-algorithm: AES256
+    - x-amz-server-side-encryption-customer-key: Base64-encoded 256-bit key
+    - x-amz-server-side-encryption-customer-key-MD5: Base64-encoded MD5 of key
+    """
+
+    KEY_ID = "customer-provided"
+
+    def __init__(self, customer_key: bytes):
+        if len(customer_key) != 32:
+            raise EncryptionError("Customer key must be exactly 256 bits (32 bytes)")
+        self.customer_key = customer_key
+
+    @classmethod
+    def from_headers(cls, headers: Dict[str, str]) -> "SSECEncryption":
+        algorithm = headers.get("x-amz-server-side-encryption-customer-algorithm", "")
+        if algorithm.upper() != "AES256":
+            raise EncryptionError(f"Unsupported SSE-C algorithm: {algorithm}. Only AES256 is supported.")
+
+        key_b64 = headers.get("x-amz-server-side-encryption-customer-key", "")
+        if not key_b64:
+            raise EncryptionError("Missing x-amz-server-side-encryption-customer-key header")
+
+        key_md5_b64 = headers.get("x-amz-server-side-encryption-customer-key-md5", "")
+
+        try:
+            customer_key = base64.b64decode(key_b64)
+        except Exception as e:
+            raise EncryptionError(f"Invalid base64 in customer key: {e}") from e
+
+        if len(customer_key) != 32:
+            raise EncryptionError(f"Customer key must be 256 bits, got {len(customer_key) * 8} bits")
+
+        if key_md5_b64:
+            import hashlib
+            expected_md5 = base64.b64encode(hashlib.md5(customer_key).digest()).decode()
+            if key_md5_b64 != expected_md5:
+                raise EncryptionError("Customer key MD5 mismatch")
+
+        return cls(customer_key)
+
+    def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
+        aesgcm = AESGCM(self.customer_key)
+        nonce = secrets.token_bytes(12)
+        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+
+        return EncryptionResult(
+            ciphertext=ciphertext,
+            nonce=nonce,
+            key_id=self.KEY_ID,
+            encrypted_data_key=b"",
+        )
+
+    def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
+                key_id: str, context: Dict[str, str] | None = None) -> bytes:
+        aesgcm = AESGCM(self.customer_key)
+        try:
+            return aesgcm.decrypt(nonce, ciphertext, None)
+        except Exception as exc:
+            raise EncryptionError(f"SSE-C decryption failed: {exc}") from exc
+
+    def generate_data_key(self) -> tuple[bytes, bytes]:
+        return self.customer_key, b""
+
+
+@dataclass
+class SSECMetadata:
+    algorithm: str = "AES256"
+    nonce: bytes = b""
+    key_md5: str = ""
+
+    def to_dict(self) -> Dict[str, str]:
+        return {
+            "x-amz-server-side-encryption-customer-algorithm": self.algorithm,
+            "x-amz-encryption-nonce": base64.b64encode(self.nonce).decode(),
+            "x-amz-server-side-encryption-customer-key-MD5": self.key_md5,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, str]) -> Optional["SSECMetadata"]:
+        algorithm = data.get("x-amz-server-side-encryption-customer-algorithm")
+        if not algorithm:
+            return None
+        try:
+            nonce = base64.b64decode(data.get("x-amz-encryption-nonce", ""))
+            return cls(
+                algorithm=algorithm,
+                nonce=nonce,
+                key_md5=data.get("x-amz-server-side-encryption-customer-key-MD5", ""),
+            )
+        except Exception:
+            return None
+
+
 class ClientEncryptionHelper:
     """Helpers for client-side encryption.
-    
+
     Client-side encryption is performed by the client, but this helper
     provides key generation and materials for clients that need them.
     """
-    
+
     @staticmethod
     def generate_client_key() -> Dict[str, str]:
         """Generate a new client encryption key."""

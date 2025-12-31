@@ -1,4 +1,3 @@
-"""Encrypted storage layer that wraps ObjectStorage with encryption support."""
 from __future__ import annotations
 
 import io

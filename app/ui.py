@@ -1,4 +1,3 @@
-"""Authenticated HTML UI for browsing buckets and objects."""
 from __future__ import annotations
 
 import json

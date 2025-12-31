@@ -16,10 +16,14 @@ from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, Par
 from flask import Blueprint, Response, current_app, jsonify, request, g
 from werkzeug.http import http_date
 
+from .access_logging import AccessLoggingService, LoggingConfiguration
 from .acl import AclService
 from .bucket_policies import BucketPolicyStore
+from .encryption import SSECEncryption, SSECMetadata, EncryptionError
 from .extensions import limiter
 from .iam import IamError, Principal
+from .notifications import NotificationService, NotificationConfiguration, WebhookDestination
+from .object_lock import ObjectLockService, ObjectLockRetention, ObjectLockConfig, ObjectLockError, RetentionMode
 from .replication import ReplicationManager
 from .storage import ObjectStorage, StorageError, QuotaExceededError
 
@@ -47,6 +51,18 @@ def _bucket_policies() -> BucketPolicyStore:
     store: BucketPolicyStore = current_app.extensions["bucket_policies"]
     store.maybe_reload()
     return store
+
+
+def _object_lock() -> ObjectLockService:
+    return current_app.extensions["object_lock"]
+
+
+def _notifications() -> NotificationService:
+    return current_app.extensions["notifications"]
+
+
+def _access_logging() -> AccessLoggingService:
+    return current_app.extensions["access_logging"]
 
 
 def _xml_response(element: Element, status: int = 200) -> Response:
@@ -897,6 +913,9 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "versions": _bucket_list_versions_handler,
         "lifecycle": _bucket_lifecycle_handler,
         "quota": _bucket_quota_handler,
+        "object-lock": _bucket_object_lock_handler,
+        "notification": _bucket_notification_handler,
+        "logging": _bucket_logging_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -1567,6 +1586,336 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
     return Response(status=204)
 
 
+def _bucket_object_lock_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    lock_service = _object_lock()
+
+    if request.method == "GET":
+        config = lock_service.get_bucket_lock_config(bucket_name)
+        root = Element("ObjectLockConfiguration", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        SubElement(root, "ObjectLockEnabled").text = "Enabled" if config.enabled else "Disabled"
+        return _xml_response(root)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    enabled_el = root.find("{*}ObjectLockEnabled") or root.find("ObjectLockEnabled")
+    enabled = (enabled_el.text or "").strip() == "Enabled" if enabled_el is not None else False
+
+    config = ObjectLockConfig(enabled=enabled)
+    lock_service.set_bucket_lock_config(bucket_name, config)
+
+    current_app.logger.info("Bucket object lock updated", extra={"bucket": bucket_name, "enabled": enabled})
+    return Response(status=200)
+
+
+def _bucket_notification_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    notification_service = _notifications()
+
+    if request.method == "GET":
+        configs = notification_service.get_bucket_notifications(bucket_name)
+        root = Element("NotificationConfiguration", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        for config in configs:
+            webhook_el = SubElement(root, "WebhookConfiguration")
+            SubElement(webhook_el, "Id").text = config.id
+            for event in config.events:
+                SubElement(webhook_el, "Event").text = event
+            dest_el = SubElement(webhook_el, "Destination")
+            SubElement(dest_el, "Url").text = config.destination.url
+            if config.prefix_filter or config.suffix_filter:
+                filter_el = SubElement(webhook_el, "Filter")
+                key_el = SubElement(filter_el, "S3Key")
+                if config.prefix_filter:
+                    rule_el = SubElement(key_el, "FilterRule")
+                    SubElement(rule_el, "Name").text = "prefix"
+                    SubElement(rule_el, "Value").text = config.prefix_filter
+                if config.suffix_filter:
+                    rule_el = SubElement(key_el, "FilterRule")
+                    SubElement(rule_el, "Name").text = "suffix"
+                    SubElement(rule_el, "Value").text = config.suffix_filter
+        return _xml_response(root)
+
+    if request.method == "DELETE":
+        notification_service.delete_bucket_notifications(bucket_name)
+        current_app.logger.info("Bucket notifications deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        notification_service.delete_bucket_notifications(bucket_name)
+        return Response(status=200)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    configs: list[NotificationConfiguration] = []
+    for webhook_el in root.findall("{*}WebhookConfiguration") or root.findall("WebhookConfiguration"):
+        config_id = _find_element_text(webhook_el, "Id") or uuid.uuid4().hex
+        events = [el.text for el in webhook_el.findall("{*}Event") or webhook_el.findall("Event") if el.text]
+
+        dest_el = _find_element(webhook_el, "Destination")
+        url = _find_element_text(dest_el, "Url") if dest_el else ""
+        if not url:
+            return _error_response("InvalidArgument", "Destination URL is required", 400)
+
+        prefix = ""
+        suffix = ""
+        filter_el = _find_element(webhook_el, "Filter")
+        if filter_el:
+            key_el = _find_element(filter_el, "S3Key")
+            if key_el:
+                for rule_el in key_el.findall("{*}FilterRule") or key_el.findall("FilterRule"):
+                    name = _find_element_text(rule_el, "Name")
+                    value = _find_element_text(rule_el, "Value")
+                    if name == "prefix":
+                        prefix = value
+                    elif name == "suffix":
+                        suffix = value
+
+        configs.append(NotificationConfiguration(
+            id=config_id,
+            events=events,
+            destination=WebhookDestination(url=url),
+            prefix_filter=prefix,
+            suffix_filter=suffix,
+        ))
+
+    notification_service.set_bucket_notifications(bucket_name, configs)
+    current_app.logger.info("Bucket notifications updated", extra={"bucket": bucket_name, "configs": len(configs)})
+    return Response(status=200)
+
+
+def _bucket_logging_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    logging_service = _access_logging()
+
+    if request.method == "GET":
+        config = logging_service.get_bucket_logging(bucket_name)
+        root = Element("BucketLoggingStatus", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        if config and config.enabled:
+            logging_enabled = SubElement(root, "LoggingEnabled")
+            SubElement(logging_enabled, "TargetBucket").text = config.target_bucket
+            SubElement(logging_enabled, "TargetPrefix").text = config.target_prefix
+        return _xml_response(root)
+
+    if request.method == "DELETE":
+        logging_service.delete_bucket_logging(bucket_name)
+        current_app.logger.info("Bucket logging deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        logging_service.delete_bucket_logging(bucket_name)
+        return Response(status=200)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    logging_enabled = _find_element(root, "LoggingEnabled")
+    if logging_enabled is None:
+        logging_service.delete_bucket_logging(bucket_name)
+        return Response(status=200)
+
+    target_bucket = _find_element_text(logging_enabled, "TargetBucket")
+    if not target_bucket:
+        return _error_response("InvalidArgument", "TargetBucket is required", 400)
+
+    if not storage.bucket_exists(target_bucket):
+        return _error_response("InvalidTargetBucketForLogging", "Target bucket does not exist", 400)
+
+    target_prefix = _find_element_text(logging_enabled, "TargetPrefix")
+
+    config = LoggingConfiguration(
+        target_bucket=target_bucket,
+        target_prefix=target_prefix,
+        enabled=True,
+    )
+    logging_service.set_bucket_logging(bucket_name, config)
+
+    current_app.logger.info(
+        "Bucket logging updated",
+        extra={"bucket": bucket_name, "target_bucket": target_bucket, "target_prefix": target_prefix}
+    )
+    return Response(status=200)
+
+
+def _object_retention_handler(bucket_name: str, object_key: str) -> Response:
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "write" if request.method == "PUT" else "read", object_key=object_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    try:
+        storage.get_object_path(bucket_name, object_key)
+    except StorageError:
+        return _error_response("NoSuchKey", "Object does not exist", 404)
+
+    lock_service = _object_lock()
+
+    if request.method == "GET":
+        retention = lock_service.get_object_retention(bucket_name, object_key)
+        if not retention:
+            return _error_response("NoSuchObjectLockConfiguration", "No retention policy", 404)
+
+        root = Element("Retention", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        SubElement(root, "Mode").text = retention.mode.value
+        SubElement(root, "RetainUntilDate").text = retention.retain_until_date.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return _xml_response(root)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    mode_str = _find_element_text(root, "Mode")
+    retain_until_str = _find_element_text(root, "RetainUntilDate")
+
+    if not mode_str or not retain_until_str:
+        return _error_response("InvalidArgument", "Mode and RetainUntilDate are required", 400)
+
+    try:
+        mode = RetentionMode(mode_str)
+    except ValueError:
+        return _error_response("InvalidArgument", f"Invalid retention mode: {mode_str}", 400)
+
+    try:
+        retain_until = datetime.fromisoformat(retain_until_str.replace("Z", "+00:00"))
+    except ValueError:
+        return _error_response("InvalidArgument", f"Invalid date format: {retain_until_str}", 400)
+
+    bypass = request.headers.get("x-amz-bypass-governance-retention", "").lower() == "true"
+
+    retention = ObjectLockRetention(mode=mode, retain_until_date=retain_until)
+    try:
+        lock_service.set_object_retention(bucket_name, object_key, retention, bypass_governance=bypass)
+    except ObjectLockError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    current_app.logger.info(
+        "Object retention set",
+        extra={"bucket": bucket_name, "key": object_key, "mode": mode_str, "until": retain_until_str}
+    )
+    return Response(status=200)
+
+
+def _object_legal_hold_handler(bucket_name: str, object_key: str) -> Response:
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "write" if request.method == "PUT" else "read", object_key=object_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    try:
+        storage.get_object_path(bucket_name, object_key)
+    except StorageError:
+        return _error_response("NoSuchKey", "Object does not exist", 404)
+
+    lock_service = _object_lock()
+
+    if request.method == "GET":
+        enabled = lock_service.get_legal_hold(bucket_name, object_key)
+        root = Element("LegalHold", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        SubElement(root, "Status").text = "ON" if enabled else "OFF"
+        return _xml_response(root)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    status = _find_element_text(root, "Status")
+    if status not in {"ON", "OFF"}:
+        return _error_response("InvalidArgument", "Status must be ON or OFF", 400)
+
+    lock_service.set_legal_hold(bucket_name, object_key, status == "ON")
+
+    current_app.logger.info(
+        "Object legal hold set",
+        extra={"bucket": bucket_name, "key": object_key, "status": status}
+    )
+    return Response(status=200)
+
+
 def _bulk_delete_handler(bucket_name: str) -> Response:
     principal, error = _require_principal()
     if error:
@@ -1871,6 +2220,12 @@ def object_handler(bucket_name: str, object_key: str):
     if "tagging" in request.args:
         return _object_tagging_handler(bucket_name, object_key)
 
+    if "retention" in request.args:
+        return _object_retention_handler(bucket_name, object_key)
+
+    if "legal-hold" in request.args:
+        return _object_legal_hold_handler(bucket_name, object_key)
+
     if request.method == "POST":
         if "uploads" in request.args:
             return _initiate_multipart_upload(bucket_name, object_key)
@@ -1886,22 +2241,28 @@ def object_handler(bucket_name: str, object_key: str):
         if copy_source:
             return _copy_object(bucket_name, object_key, copy_source)
 
-        _, error = _object_principal("write", bucket_name, object_key)
+        principal, error = _object_principal("write", bucket_name, object_key)
         if error:
             return error
-        
+
+        bypass_governance = request.headers.get("x-amz-bypass-governance-retention", "").lower() == "true"
+        lock_service = _object_lock()
+        can_overwrite, lock_reason = lock_service.can_overwrite_object(bucket_name, object_key, bypass_governance=bypass_governance)
+        if not can_overwrite:
+            return _error_response("AccessDenied", lock_reason, 403)
+
         stream = request.stream
         content_encoding = request.headers.get("Content-Encoding", "").lower()
         if "aws-chunked" in content_encoding:
             stream = AwsChunkedDecoder(stream)
 
         metadata = _extract_request_metadata()
-        
+
         content_type = request.headers.get("Content-Type")
         validation_error = _validate_content_type(object_key, content_type)
         if validation_error:
             return _error_response("InvalidArgument", validation_error, 400)
-        
+
         try:
             meta = storage.put_object(
                 bucket_name,
@@ -1922,10 +2283,21 @@ def object_handler(bucket_name: str, object_key: str):
         )
         response = Response(status=200)
         response.headers["ETag"] = f'"{meta.etag}"'
-        
+
+        _notifications().emit_object_created(
+            bucket_name,
+            object_key,
+            size=meta.size,
+            etag=meta.etag,
+            request_id=getattr(g, "request_id", ""),
+            source_ip=request.remote_addr or "",
+            user_identity=principal.access_key if principal else "",
+            operation="Put",
+        )
+
         if "S3ReplicationAgent" not in request.headers.get("User-Agent", ""):
             _replication_manager().trigger_replication(bucket_name, object_key, action="write")
-            
+
         return response
 
     if request.method in {"GET", "HEAD"}:
@@ -2048,13 +2420,30 @@ def object_handler(bucket_name: str, object_key: str):
     _, error = _object_principal("delete", bucket_name, object_key)
     if error:
         return error
+
+    bypass_governance = request.headers.get("x-amz-bypass-governance-retention", "").lower() == "true"
+    lock_service = _object_lock()
+    can_delete, lock_reason = lock_service.can_delete_object(bucket_name, object_key, bypass_governance=bypass_governance)
+    if not can_delete:
+        return _error_response("AccessDenied", lock_reason, 403)
+
     storage.delete_object(bucket_name, object_key)
+    lock_service.delete_object_lock_metadata(bucket_name, object_key)
     current_app.logger.info("Object deleted", extra={"bucket": bucket_name, "key": object_key})
-    
+
+    principal, _ = _require_principal()
+    _notifications().emit_object_removed(
+        bucket_name,
+        object_key,
+        request_id=getattr(g, "request_id", ""),
+        source_ip=request.remote_addr or "",
+        user_identity=principal.access_key if principal else "",
+    )
+
     user_agent = request.headers.get("User-Agent", "")
     if "S3ReplicationAgent" not in user_agent:
         _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
-        
+
     return Response(status=204)
 
 

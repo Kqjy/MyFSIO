@@ -1,4 +1,3 @@
-"""Key Management Service (KMS) for encryption key management."""
 from __future__ import annotations
 
 import base64

@@ -1,4 +1,3 @@
-"""Bucket policy loader/enforcer with a subset of AWS semantics."""
 from __future__ import annotations
 
 import json

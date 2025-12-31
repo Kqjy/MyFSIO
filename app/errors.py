@@ -1,4 +1,3 @@
-"""Standardized error handling for API and UI responses."""
 from __future__ import annotations
 
 import logging

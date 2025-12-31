@@ -1,4 +1,3 @@
-"""Background replication worker."""
 from __future__ import annotations
 
 import json
@@ -32,13 +31,9 @@ REPLICATION_MODE_ALL = "all"
 
 def _create_s3_client(connection: RemoteConnection, *, health_check: bool = False) -> Any:
     """Create a boto3 S3 client for the given connection.
-
     Args:
         connection: Remote S3 connection configuration
         health_check: If True, use minimal retries for quick health checks
-
-    Returns:
-        Configured boto3 S3 client
     """
     config = Config(
         user_agent_extra=REPLICATION_USER_AGENT,

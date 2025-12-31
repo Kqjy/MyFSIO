@@ -1,4 +1,3 @@
-"""Filesystem-backed object storage helpers."""
 from __future__ import annotations
 
 import hashlib

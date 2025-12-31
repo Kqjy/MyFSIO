@@ -1,4 +1,3 @@
-"""Lifecycle rule enforcement for S3-compatible storage."""
 from __future__ import annotations
 
 import logging

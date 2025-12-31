@@ -1,4 +1,3 @@
-"""Application factory for the mini S3-compatible object store."""
 from __future__ import annotations
 
 import logging
@@ -16,6 +15,7 @@ from flask_cors import CORS
 from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from .access_logging import AccessLoggingService
 from .acl import AclService
 from .bucket_policies import BucketPolicyStore
 from .config import AppConfig
@@ -25,6 +25,8 @@ from .extensions import limiter, csrf
 from .iam import IamService
 from .kms import KMSManager
 from .lifecycle import LifecycleManager
+from .notifications import NotificationService
+from .object_lock import ObjectLockService
 from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage
@@ -143,6 +145,10 @@ def create_app(
         storage = EncryptedObjectStorage(storage, encryption_manager)
 
     acl_service = AclService(storage_root)
+    object_lock_service = ObjectLockService(storage_root)
+    notification_service = NotificationService(storage_root)
+    access_logging_service = AccessLoggingService(storage_root)
+    access_logging_service.set_storage(storage)
 
     lifecycle_manager = None
     if app.config.get("LIFECYCLE_ENABLED", False):
@@ -164,6 +170,9 @@ def create_app(
     app.extensions["kms"] = kms_manager
     app.extensions["acl"] = acl_service
     app.extensions["lifecycle"] = lifecycle_manager
+    app.extensions["object_lock"] = object_lock_service
+    app.extensions["notifications"] = notification_service
+    app.extensions["access_logging"] = access_logging_service
 
     @app.errorhandler(500)
     def internal_error(error):

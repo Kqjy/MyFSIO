@@ -1,4 +1,3 @@
-"""S3-compatible Access Control List (ACL) management."""
 from __future__ import annotations
 
 import json
