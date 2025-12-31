@@ -1,117 +1,255 @@
-# MyFSIO (Flask S3 + IAM)
+# MyFSIO
 
-MyFSIO is a batteries-included, Flask-based recreation of Amazon S3 and IAM workflows built for local development. The design mirrors the [AWS S3 documentation](https://docs.aws.amazon.com/s3/) wherever practical: bucket naming, Signature Version 4 presigning, Version 2012-10-17 bucket policies, IAM-style users, and familiar REST endpoints.
+A lightweight, S3-compatible object storage system built with Flask. MyFSIO implements core AWS S3 REST API operations with filesystem-backed storage, making it ideal for local development, testing, and self-hosted storage scenarios.
 
-## Why MyFSIO?
+## Features
 
-- **Dual servers:** Run both the API (port 5000) and UI (port 5100) with a single command: `python run.py`.
-- **IAM + access keys:** Users, access keys, key rotation, and bucket-scoped actions (`list/read/write/delete/policy`) now live in `data/.myfsio.sys/config/iam.json` and are editable from the IAM dashboard.
-- **Bucket policies + hot reload:** `data/.myfsio.sys/config/bucket_policies.json` uses AWS' policy grammar (Version `2012-10-17`) with a built-in watcher, so editing the JSON file applies immediately. The UI also ships Public/Private/Custom presets for faster edits.
-- **Presigned URLs everywhere:** Signature Version 4 presigned URLs respect IAM + bucket policies and replace the now-removed "share link" feature for public access scenarios.
-- **Modern UI:** Responsive tables, quick filters, preview sidebar, object-level delete buttons, a presign modal, and an inline JSON policy editor that respects dark mode keep bucket management friendly. The object browser supports folder navigation, infinite scroll pagination, bulk operations, and automatic retry on load failures.
-- **Tests & health:** `/healthz` for smoke checks and `pytest` coverage for IAM, CRUD, presign, and policy flows.
+**Core Storage**
+- S3-compatible REST API with AWS Signature Version 4 authentication
+- Bucket and object CRUD operations
+- Object versioning with version history
+- Multipart uploads for large files
+- Presigned URLs (1 second to 7 days validity)
 
-## Architecture at a Glance
+**Security & Access Control**
+- IAM users with access key management and rotation
+- Bucket policies (AWS Policy Version 2012-10-17)
+- Server-side encryption (SSE-S3 and SSE-KMS)
+- Built-in Key Management Service (KMS)
+- Rate limiting per endpoint
+
+**Advanced Features**
+- Cross-bucket replication to remote S3-compatible endpoints
+- Hot-reload for bucket policies (no restart required)
+- CORS configuration per bucket
+
+**Management UI**
+- Web console for bucket and object management
+- IAM dashboard for user administration
+- Inline JSON policy editor with presets
+- Object browser with folder navigation and bulk operations
+- Dark mode support
+
+## Architecture
 
 ```
-+-----------------+        +----------------+
-| API Server      |<----->| Object storage |
-| (port 5000)     |        | (filesystem)   |
-|  - S3 routes    |        +----------------+
-|  - Presigned URLs |
-|  - Bucket policy  |
-+-----------------+
-        ^
-        |
-+-----------------+
-| UI Server       |
-| (port 5100)     |
-|  - Auth console |
-|  - IAM dashboard|
-|  - Bucket editor|
-+-----------------+
++------------------+         +------------------+
+|   API Server     |         |   UI Server      |
+|   (port 5000)    |         |   (port 5100)    |
+|                  |         |                  |
+|  - S3 REST API   |<------->|  - Web Console   |
+|  - SigV4 Auth    |         |  - IAM Dashboard |
+|  - Presign URLs  |         |  - Bucket Editor |
++--------+---------+         +------------------+
+         |
+         v
++------------------+         +------------------+
+| Object Storage   |         | System Metadata  |
+| (filesystem)     |         | (.myfsio.sys/)   |
+|                  |         |                  |
+| data/<bucket>/   |         | - IAM config     |
+|   <objects>      |         | - Bucket policies|
+|                  |         | - Encryption keys|
++------------------+         +------------------+
 ```
 
-Both apps load the same configuration via `AppConfig` so IAM data and bucket policies stay consistent no matter which process you run.
-Bucket policies are automatically reloaded whenever `bucket_policies.json` changes—no restarts required.
-
-## Getting Started
+## Quick Start
 
 ```bash
+# Clone and setup
+git clone <repository-url>
+cd s3
 python -m venv .venv
-. .venv/Scripts/activate  # PowerShell: .\.venv\Scripts\Activate.ps1
+
+# Activate virtual environment
+# Windows PowerShell:
+.\.venv\Scripts\Activate.ps1
+# Windows CMD:
+.venv\Scripts\activate.bat
+# Linux/macOS:
+source .venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
 
-# Run both API and UI (default)
+# Start both servers
 python run.py
 
-# Or run individually:
-# python run.py --mode api
-# python run.py --mode ui
+# Or start individually
+python run.py --mode api   # API only (port 5000)
+python run.py --mode ui    # UI only (port 5100)
 ```
 
-Visit `http://127.0.0.1:5100/ui` for the console and `http://127.0.0.1:5000/` for the raw API. Override ports/hosts with the environment variables listed below.
+**Default Credentials:** `localadmin` / `localadmin`
 
-## IAM, Access Keys, and Bucket Policies
-
-- First run creates `data/.myfsio.sys/config/iam.json` with `localadmin / localadmin` (full control). Sign in via the UI, then use the **IAM** tab to create users, rotate secrets, or edit inline policies without touching JSON by hand.
-- Bucket policies live in `data/.myfsio.sys/config/bucket_policies.json` and follow the AWS `arn:aws:s3:::bucket/key` resource syntax with Version `2012-10-17`. Attach/replace/remove policies from the bucket detail page or edit the JSON by hand—changes hot reload automatically.
-- IAM actions include extended verbs (`iam:list_users`, `iam:create_user`, `iam:update_policy`, etc.) so you can control who is allowed to manage other users and policies.
-
-### Bucket Policy Presets & Hot Reload
-
-- **Presets:** Every bucket detail view includes Public (read-only), Private (detach policy), and Custom presets. Public auto-populates a policy that grants anonymous `s3:ListBucket` + `s3:GetObject` access to the entire bucket.
-- **Custom drafts:** Switching back to Custom restores your last manual edit so you can toggle between presets without losing work.
-- **Hot reload:** The server watches `bucket_policies.json` and reloads statements on-the-fly—ideal for editing policies in your favorite editor while testing Via curl or the UI.
-
-## Presigned URLs
-
-Presigned URLs follow the AWS CLI playbook:
-
-- Call `POST /presign/<bucket>/<key>` (or use the "Presign" button in the UI) to request a Signature Version 4 URL valid for 1 second to 7 days.
-- The generated URL honors IAM permissions and bucket-policy decisions at generation-time and again when somebody fetches it.
-- Because presigned URLs cover both authenticated and public sharing scenarios, the legacy "share link" feature has been removed.
+- **Web Console:** http://127.0.0.1:5100/ui
+- **API Endpoint:** http://127.0.0.1:5000
 
 ## Configuration
 
 | Variable | Default | Description |
-| --- | --- | --- |
-| `STORAGE_ROOT` | `<project>/data` | Filesystem root for bucket directories |
-| `MAX_UPLOAD_SIZE` | `1073741824` | Maximum upload size (bytes) |
-| `UI_PAGE_SIZE` | `100` | `MaxKeys` hint for listings |
-| `SECRET_KEY` | `dev-secret-key` | Flask session secret for the UI |
-| `IAM_CONFIG` | `<project>/data/.myfsio.sys/config/iam.json` | IAM user + policy store |
-| `BUCKET_POLICY_PATH` | `<project>/data/.myfsio.sys/config/bucket_policies.json` | Bucket policy store |
-| `API_BASE_URL` | `http://127.0.0.1:5000` | Used by the UI when calling API endpoints (presign, bucket policy) |
-| `AWS_REGION` | `us-east-1` | Region used in Signature V4 scope |
-| `AWS_SERVICE` | `s3` | Service used in Signature V4 scope |
+|----------|---------|-------------|
+| `STORAGE_ROOT` | `./data` | Filesystem root for bucket storage |
+| `IAM_CONFIG` | `.myfsio.sys/config/iam.json` | IAM user and policy store |
+| `BUCKET_POLICY_PATH` | `.myfsio.sys/config/bucket_policies.json` | Bucket policy store |
+| `API_BASE_URL` | `http://127.0.0.1:5000` | API endpoint for UI calls |
+| `MAX_UPLOAD_SIZE` | `1073741824` | Maximum upload size in bytes (1 GB) |
+| `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum multipart part size (5 MB) |
+| `UI_PAGE_SIZE` | `100` | Default page size for listings |
+| `SECRET_KEY` | `dev-secret-key` | Flask session secret |
+| `AWS_REGION` | `us-east-1` | Region for SigV4 signing |
+| `AWS_SERVICE` | `s3` | Service name for SigV4 signing |
+| `ENCRYPTION_ENABLED` | `false` | Enable server-side encryption |
+| `KMS_ENABLED` | `false` | Enable Key Management Service |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
 
-> Buckets now live directly under `data/` while system metadata (versions, IAM, bucket policies, multipart uploads, etc.) lives in `data/.myfsio.sys`.
-
-## API Cheatsheet (IAM headers required)
+## Data Layout
 
 ```
-GET    /                               -> List buckets (XML)
-PUT    /<bucket>                       -> Create bucket
-DELETE /<bucket>                       -> Delete bucket (must be empty)
-GET    /<bucket>                       -> List objects (XML)
-PUT    /<bucket>/<key>                 -> Upload object (binary stream)
-GET    /<bucket>/<key>                 -> Download object
-DELETE /<bucket>/<key>                 -> Delete object
-POST   /presign/<bucket>/<key>         -> Generate AWS SigV4 presigned URL (JSON)
-GET    /bucket-policy/<bucket>         -> Fetch bucket policy (JSON)
-PUT    /bucket-policy/<bucket>         -> Attach/replace bucket policy (JSON)
-DELETE /bucket-policy/<bucket>         -> Remove bucket policy
+data/
+├── <bucket>/                    # User buckets with objects
+└── .myfsio.sys/                 # System metadata
+    ├── config/
+    │   ├── iam.json             # IAM users and policies
+    │   ├── bucket_policies.json # Bucket policies
+    │   ├── replication_rules.json
+    │   └── connections.json     # Remote S3 connections
+    ├── buckets/<bucket>/
+    │   ├── meta/                # Object metadata (.meta.json)
+    │   ├── versions/            # Archived object versions
+    │   └── .bucket.json         # Bucket config (versioning, CORS)
+    ├── multipart/               # Active multipart uploads
+    └── keys/                    # Encryption keys (SSE-S3/KMS)
+```
+
+## API Reference
+
+All endpoints require AWS Signature Version 4 authentication unless using presigned URLs or public bucket policies.
+
+### Bucket Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | List all buckets |
+| `PUT` | `/<bucket>` | Create bucket |
+| `DELETE` | `/<bucket>` | Delete bucket (must be empty) |
+| `HEAD` | `/<bucket>` | Check bucket exists |
+
+### Object Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/<bucket>` | List objects (supports `list-type=2`) |
+| `PUT` | `/<bucket>/<key>` | Upload object |
+| `GET` | `/<bucket>/<key>` | Download object |
+| `DELETE` | `/<bucket>/<key>` | Delete object |
+| `HEAD` | `/<bucket>/<key>` | Get object metadata |
+| `POST` | `/<bucket>/<key>?uploads` | Initiate multipart upload |
+| `PUT` | `/<bucket>/<key>?partNumber=N&uploadId=X` | Upload part |
+| `POST` | `/<bucket>/<key>?uploadId=X` | Complete multipart upload |
+| `DELETE` | `/<bucket>/<key>?uploadId=X` | Abort multipart upload |
+
+### Presigned URLs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/presign/<bucket>/<key>` | Generate presigned URL |
+
+### Bucket Policies
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/bucket-policy/<bucket>` | Get bucket policy |
+| `PUT` | `/bucket-policy/<bucket>` | Set bucket policy |
+| `DELETE` | `/bucket-policy/<bucket>` | Delete bucket policy |
+
+### Versioning
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/<bucket>/<key>?versionId=X` | Get specific version |
+| `DELETE` | `/<bucket>/<key>?versionId=X` | Delete specific version |
+| `GET` | `/<bucket>?versions` | List object versions |
+
+### Health Check
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/healthz` | Health check endpoint |
+
+## IAM & Access Control
+
+### Users and Access Keys
+
+On first run, MyFSIO creates a default admin user (`localadmin`/`localadmin`). Use the IAM dashboard to:
+
+- Create and delete users
+- Generate and rotate access keys
+- Attach inline policies to users
+- Control IAM management permissions
+
+### Bucket Policies
+
+Bucket policies follow AWS policy grammar (Version `2012-10-17`) with support for:
+
+- Principal-based access (`*` for anonymous, specific users)
+- Action-based permissions (`s3:GetObject`, `s3:PutObject`, etc.)
+- Resource patterns (`arn:aws:s3:::bucket/*`)
+- Condition keys
+
+**Policy Presets:**
+- **Public:** Grants anonymous read access (`s3:GetObject`, `s3:ListBucket`)
+- **Private:** Removes bucket policy (IAM-only access)
+- **Custom:** Manual policy editing with draft preservation
+
+Policies hot-reload when the JSON file changes.
+
+## Server-Side Encryption
+
+MyFSIO supports two encryption modes:
+
+- **SSE-S3:** Server-managed keys with automatic key rotation
+- **SSE-KMS:** Customer-managed keys via built-in KMS
+
+Enable encryption with:
+```bash
+ENCRYPTION_ENABLED=true python run.py
+```
+
+## Cross-Bucket Replication
+
+Replicate objects to remote S3-compatible endpoints:
+
+1. Configure remote connections in the UI
+2. Create replication rules specifying source/destination
+3. Objects are automatically replicated on upload
+
+## Docker
+
+```bash
+docker build -t myfsio .
+docker run -p 5000:5000 -p 5100:5100 -v ./data:/app/data myfsio
 ```
 
 ## Testing
 
 ```bash
-pytest -q
+# Run all tests
+pytest tests/ -v
+
+# Run specific test file
+pytest tests/test_api.py -v
+
+# Run with coverage
+pytest tests/ --cov=app --cov-report=html
 ```
 
 ## References
 
-- [Amazon Simple Storage Service Documentation](https://docs.aws.amazon.com/s3/)
-- [Signature Version 4 Signing Process](https://docs.aws.amazon.com/general/latest/gr/signature-version-4.html)
-- [Amazon S3 Bucket Policy Examples](https://docs.aws.amazon.com/AmazonS3/latest/userguide/example-bucket-policies.html)
+- [Amazon S3 Documentation](https://docs.aws.amazon.com/s3/)
+- [AWS Signature Version 4](https://docs.aws.amazon.com/general/latest/gr/signature-version-4.html)
+- [S3 Bucket Policy Examples](https://docs.aws.amazon.com/AmazonS3/latest/userguide/example-bucket-policies.html)
+
+## License
+
+MIT
