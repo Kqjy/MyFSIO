@@ -25,6 +25,7 @@ from flask import (
 )
 from flask_wtf.csrf import generate_csrf
 
+from .acl import AclService, create_canned_acl, CANNED_ACLS
 from .bucket_policies import BucketPolicyStore
 from .connections import ConnectionStore, RemoteConnection
 from .extensions import limiter
@@ -72,6 +73,10 @@ def _secret_store() -> EphemeralSecretStore:
     store: EphemeralSecretStore = current_app.extensions["secret_store"]
     store.purge_expired()
     return store
+
+
+def _acl() -> AclService:
+    return current_app.extensions["acl"]
 
 
 def _format_bytes(num: int) -> str:
@@ -378,10 +383,21 @@ def bucket_detail(bucket_name: str):
 
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
 
+    lifecycle_url = url_for("ui.bucket_lifecycle", bucket_name=bucket_name)
+    cors_url = url_for("ui.bucket_cors", bucket_name=bucket_name)
+    acl_url = url_for("ui.bucket_acl", bucket_name=bucket_name)
+    folders_url = url_for("ui.create_folder", bucket_name=bucket_name)
+    buckets_for_copy_url = url_for("ui.list_buckets_for_copy", bucket_name=bucket_name)
+
     return render_template(
         "bucket_detail.html",
         bucket_name=bucket_name,
         objects_api_url=objects_api_url,
+        lifecycle_url=lifecycle_url,
+        cors_url=cors_url,
+        acl_url=acl_url,
+        folders_url=folders_url,
+        buckets_for_copy_url=buckets_for_copy_url,
         principal=principal,
         bucket_policy_text=policy_text,
         bucket_policy=bucket_policy,
@@ -440,6 +456,9 @@ def list_bucket_objects(bucket_name: str):
     presign_template = url_for("ui.object_presign", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     versions_template = url_for("ui.object_versions", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     restore_template = url_for("ui.restore_object_version", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER", version_id="VERSION_ID_PLACEHOLDER")
+    tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
 
     objects_data = []
     for obj in result.objects:
@@ -464,6 +483,9 @@ def list_bucket_objects(bucket_name: str):
             "delete": delete_template,
             "versions": versions_template,
             "restore": restore_template,
+            "tags": tags_template,
+            "copy": copy_template,
+            "move": move_template,
         },
     })
 
@@ -1663,6 +1685,327 @@ def metrics_dashboard():
             "uptime_days": uptime_days,
         }
     )
+
+
+@ui_bp.route("/buckets/<bucket_name>/lifecycle", methods=["GET", "POST", "DELETE"])
+def bucket_lifecycle(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "policy")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+
+    if request.method == "GET":
+        rules = storage.get_bucket_lifecycle(bucket_name) or []
+        return jsonify({"rules": rules})
+
+    if request.method == "DELETE":
+        storage.set_bucket_lifecycle(bucket_name, None)
+        return jsonify({"status": "ok", "message": "Lifecycle configuration deleted"})
+
+    payload = request.get_json(silent=True) or {}
+    rules = payload.get("rules", [])
+    if not isinstance(rules, list):
+        return jsonify({"error": "rules must be a list"}), 400
+
+    validated_rules = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return jsonify({"error": f"Rule {i} must be an object"}), 400
+        validated = {
+            "ID": str(rule.get("ID", f"rule-{i+1}")),
+            "Status": "Enabled" if rule.get("Status", "Enabled") == "Enabled" else "Disabled",
+        }
+        if rule.get("Prefix"):
+            validated["Prefix"] = str(rule["Prefix"])
+        if rule.get("Expiration"):
+            exp = rule["Expiration"]
+            if isinstance(exp, dict) and exp.get("Days"):
+                validated["Expiration"] = {"Days": int(exp["Days"])}
+        if rule.get("NoncurrentVersionExpiration"):
+            nve = rule["NoncurrentVersionExpiration"]
+            if isinstance(nve, dict) and nve.get("NoncurrentDays"):
+                validated["NoncurrentVersionExpiration"] = {"NoncurrentDays": int(nve["NoncurrentDays"])}
+        if rule.get("AbortIncompleteMultipartUpload"):
+            aimu = rule["AbortIncompleteMultipartUpload"]
+            if isinstance(aimu, dict) and aimu.get("DaysAfterInitiation"):
+                validated["AbortIncompleteMultipartUpload"] = {"DaysAfterInitiation": int(aimu["DaysAfterInitiation"])}
+        validated_rules.append(validated)
+
+    storage.set_bucket_lifecycle(bucket_name, validated_rules if validated_rules else None)
+    return jsonify({"status": "ok", "message": "Lifecycle configuration saved", "rules": validated_rules})
+
+
+@ui_bp.route("/buckets/<bucket_name>/cors", methods=["GET", "POST", "DELETE"])
+def bucket_cors(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "policy")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+
+    if request.method == "GET":
+        rules = storage.get_bucket_cors(bucket_name) or []
+        return jsonify({"rules": rules})
+
+    if request.method == "DELETE":
+        storage.set_bucket_cors(bucket_name, None)
+        return jsonify({"status": "ok", "message": "CORS configuration deleted"})
+
+    payload = request.get_json(silent=True) or {}
+    rules = payload.get("rules", [])
+    if not isinstance(rules, list):
+        return jsonify({"error": "rules must be a list"}), 400
+
+    validated_rules = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return jsonify({"error": f"Rule {i} must be an object"}), 400
+        origins = rule.get("AllowedOrigins", [])
+        methods = rule.get("AllowedMethods", [])
+        if not origins or not methods:
+            return jsonify({"error": f"Rule {i} must have AllowedOrigins and AllowedMethods"}), 400
+        validated = {
+            "AllowedOrigins": [str(o) for o in origins if o],
+            "AllowedMethods": [str(m).upper() for m in methods if m],
+        }
+        if rule.get("AllowedHeaders"):
+            validated["AllowedHeaders"] = [str(h) for h in rule["AllowedHeaders"] if h]
+        if rule.get("ExposeHeaders"):
+            validated["ExposeHeaders"] = [str(h) for h in rule["ExposeHeaders"] if h]
+        if rule.get("MaxAgeSeconds") is not None:
+            try:
+                validated["MaxAgeSeconds"] = int(rule["MaxAgeSeconds"])
+            except (ValueError, TypeError):
+                pass
+        validated_rules.append(validated)
+
+    storage.set_bucket_cors(bucket_name, validated_rules if validated_rules else None)
+    return jsonify({"status": "ok", "message": "CORS configuration saved", "rules": validated_rules})
+
+
+@ui_bp.route("/buckets/<bucket_name>/acl", methods=["GET", "POST"])
+def bucket_acl(bucket_name: str):
+    principal = _current_principal()
+    action = "read" if request.method == "GET" else "write"
+    try:
+        _authorize_ui(principal, bucket_name, action)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+
+    acl_service = _acl()
+    owner_id = principal.access_key if principal else "anonymous"
+
+    if request.method == "GET":
+        try:
+            acl = acl_service.get_bucket_acl(bucket_name)
+            if not acl:
+                acl = create_canned_acl("private", owner_id)
+            return jsonify({
+                "owner": acl.owner,
+                "grants": [g.to_dict() for g in acl.grants],
+                "canned_acls": list(CANNED_ACLS.keys()),
+            })
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    payload = request.get_json(silent=True) or {}
+    canned_acl = payload.get("canned_acl")
+    if canned_acl:
+        if canned_acl not in CANNED_ACLS:
+            return jsonify({"error": f"Invalid canned ACL: {canned_acl}"}), 400
+        acl_service.set_bucket_canned_acl(bucket_name, canned_acl, owner_id)
+        return jsonify({"status": "ok", "message": f"ACL set to {canned_acl}"})
+
+    return jsonify({"error": "canned_acl is required"}), 400
+
+
+@ui_bp.route("/buckets/<bucket_name>/objects/<path:object_key>/tags", methods=["GET", "POST"])
+def object_tags(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+
+    if request.method == "GET":
+        try:
+            tags = storage.get_object_tags(bucket_name, object_key)
+            return jsonify({"tags": tags})
+        except StorageError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+    try:
+        _authorize_ui(principal, bucket_name, "write", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    tags = payload.get("tags", [])
+    if not isinstance(tags, list):
+        return jsonify({"error": "tags must be a list"}), 400
+    if len(tags) > 10:
+        return jsonify({"error": "Maximum 10 tags allowed"}), 400
+
+    validated_tags = []
+    for tag in tags:
+        if isinstance(tag, dict) and tag.get("Key"):
+            validated_tags.append({
+                "Key": str(tag["Key"]),
+                "Value": str(tag.get("Value", ""))
+            })
+
+    try:
+        storage.set_object_tags(bucket_name, object_key, validated_tags if validated_tags else None)
+        return jsonify({"status": "ok", "message": "Tags saved", "tags": validated_tags})
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/folders")
+def create_folder(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "write")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    folder_name = str(payload.get("folder_name", "")).strip()
+    prefix = str(payload.get("prefix", "")).strip()
+
+    if not folder_name:
+        return jsonify({"error": "folder_name is required"}), 400
+
+    folder_name = folder_name.rstrip("/")
+    if "/" in folder_name:
+        return jsonify({"error": "Folder name cannot contain /"}), 400
+
+    folder_key = f"{prefix}{folder_name}/" if prefix else f"{folder_name}/"
+
+    import io
+    try:
+        _storage().put_object(bucket_name, folder_key, io.BytesIO(b""))
+        return jsonify({"status": "ok", "message": f"Folder '{folder_name}' created", "key": folder_key})
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/objects/<path:object_key>/copy")
+def copy_object(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    dest_bucket = str(payload.get("dest_bucket", bucket_name)).strip()
+    dest_key = str(payload.get("dest_key", "")).strip()
+
+    if not dest_key:
+        return jsonify({"error": "dest_key is required"}), 400
+
+    try:
+        _authorize_ui(principal, dest_bucket, "write", object_key=dest_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+
+    try:
+        source_path = storage.get_object_path(bucket_name, object_key)
+        source_metadata = storage.get_object_metadata(bucket_name, object_key)
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+    try:
+        with source_path.open("rb") as stream:
+            storage.put_object(dest_bucket, dest_key, stream, metadata=source_metadata or None)
+        return jsonify({
+            "status": "ok",
+            "message": f"Copied to {dest_bucket}/{dest_key}",
+            "dest_bucket": dest_bucket,
+            "dest_key": dest_key,
+        })
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/objects/<path:object_key>/move")
+def move_object(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+        _authorize_ui(principal, bucket_name, "delete", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    dest_bucket = str(payload.get("dest_bucket", bucket_name)).strip()
+    dest_key = str(payload.get("dest_key", "")).strip()
+
+    if not dest_key:
+        return jsonify({"error": "dest_key is required"}), 400
+
+    if dest_bucket == bucket_name and dest_key == object_key:
+        return jsonify({"error": "Cannot move object to the same location"}), 400
+
+    try:
+        _authorize_ui(principal, dest_bucket, "write", object_key=dest_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+
+    try:
+        source_path = storage.get_object_path(bucket_name, object_key)
+        source_metadata = storage.get_object_metadata(bucket_name, object_key)
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+    try:
+        import io
+        with source_path.open("rb") as f:
+            data = f.read()
+        storage.put_object(dest_bucket, dest_key, io.BytesIO(data), metadata=source_metadata or None)
+        storage.delete_object(bucket_name, object_key)
+        return jsonify({
+            "status": "ok",
+            "message": f"Moved to {dest_bucket}/{dest_key}",
+            "dest_bucket": dest_bucket,
+            "dest_key": dest_key,
+        })
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.get("/buckets/<bucket_name>/list-for-copy")
+def list_buckets_for_copy(bucket_name: str):
+    principal = _current_principal()
+    buckets = _storage().list_buckets()
+    allowed = []
+    for bucket in buckets:
+        try:
+            _authorize_ui(principal, bucket.name, "write")
+            allowed.append(bucket.name)
+        except IamError:
+            pass
+    return jsonify({"buckets": allowed})
 
 
 @ui_bp.app_errorhandler(404)

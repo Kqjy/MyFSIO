@@ -67,6 +67,18 @@
       </button>
     </li>
     {% endif %}
+    {% if can_edit_policy %}
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button" role="tab" aria-controls="lifecycle-pane" aria-selected="{{ 'true' if active_tab == 'lifecycle' else 'false' }}">
+        Lifecycle
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'cors' else '' }}" id="cors-tab" data-bs-toggle="tab" data-bs-target="#cors-pane" type="button" role="tab" aria-controls="cors-pane" aria-selected="{{ 'true' if active_tab == 'cors' else 'false' }}">
+        CORS
+      </button>
+    </li>
+    {% endif %}
   </ul>
 
   <div class="tab-content" id="bucketTabsContent">
@@ -76,32 +88,36 @@
   <div class="col-lg-7">
     <div class="card shadow-sm">
       <div class="card-header bg-body">
-        <div class="d-flex flex-wrap gap-2 align-items-center">
-          <span class="fw-semibold me-auto">Objects</span>
-          <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
-              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-              <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
-            </svg>
-            Upload
-          </button>
-          <div class="position-relative">
-            <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
+        <div class="objects-header-responsive">
+          <span class="fw-semibold header-title">Objects</span>
+          <div class="header-actions">
+            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
+                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+              </svg>
+              Upload
+            </button>
+            <div class="position-relative search-wrapper">
+              <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
+            </div>
+            <div class="bulk-actions d-none" id="bulk-actions-wrapper">
+              <button class="btn btn-outline-danger btn-sm" type="button" data-bulk-delete-trigger disabled>
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
+                  <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
+                  <path d="m4.646 8.646-.708.708L7 12.414l5.354-5.354-.708-.708L7 10.293z" />
+                </svg>
+                <span data-bulk-delete-label>Delete</span>
+              </button>
+              <button class="btn btn-outline-secondary btn-sm" type="button" data-bulk-download-trigger disabled>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
+                  <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                  <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+                </svg>
+                Download
+              </button>
+            </div>
           </div>
-          <button class="btn btn-outline-danger btn-sm d-none" type="button" data-bulk-delete-trigger disabled>
-            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
-              <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
-              <path d="m4.646 8.646-.708.708L7 12.414l5.354-5.354-.708-.708L7 10.293z" />
-            </svg>
-            <span data-bulk-delete-label>Delete selected</span>
-          </button>
-          <button class="btn btn-outline-secondary btn-sm d-none" type="button" data-bulk-download-trigger disabled>
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
-              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-              <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
-            </svg>
-            Download
-          </button>
         </div>
         <nav id="folder-breadcrumb" class="mt-2 d-none" aria-label="Folder navigation">
           <ol class="breadcrumb mb-0 small">
@@ -132,6 +148,8 @@
         data-objects-api="{{ objects_api_url }}"
         data-bulk-delete-endpoint="{{ url_for('ui.bulk_delete_objects', bucket_name=bucket_name) }}"
         data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
+        data-folders-url="{{ folders_url }}"
+        data-buckets-for-copy-url="{{ buckets_for_copy_url }}"
       >
         <table class="table table-hover align-middle mb-0" id="objects-table" style="table-layout: fixed;">
           <thead class="table-light">
@@ -248,6 +266,40 @@
               <span class="fw-semibold small text-uppercase">Metadata</span>
             </div>
             <div id="preview-metadata-list" class="metadata-stack small p-3 rounded" style="background: var(--myfsio-preview-bg);"></div>
+          </div>
+          <div id="preview-tags" class="mb-3 d-none">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="d-flex align-items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                  <path d="M3 2v4.586l7 7L14.586 9l-7-7H3zM2 2a1 1 0 0 1 1-1h4.586a1 1 0 0 1 .707.293l7 7a1 1 0 0 1 0 1.414l-4.586 4.586a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 2 6.586V2z"/>
+                  <path d="M5.5 5a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm0 1a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM1 7.086a1 1 0 0 0 .293.707L8.75 15.25l-.043.043a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 0 7.586V3a1 1 0 0 1 1-1v5.086z"/>
+                </svg>
+                <span class="fw-semibold small text-uppercase">Tags</span>
+                <span class="badge bg-secondary" id="preview-tags-count">0</span>
+              </div>
+              <button class="btn btn-outline-primary btn-sm" type="button" id="editTagsButton" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
+                </svg>
+                Edit
+              </button>
+            </div>
+            <div id="preview-tags-list" class="d-flex flex-wrap gap-1"></div>
+            <div id="preview-tags-empty" class="text-muted small p-2 bg-body-tertiary rounded">No tags</div>
+            <div id="preview-tags-editor" class="d-none mt-2">
+              <div id="preview-tags-inputs" class="mb-2"></div>
+              <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary flex-grow-1" type="button" id="addTagRow">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+                  </svg>
+                  Add Tag
+                </button>
+                <button class="btn btn-sm btn-primary" type="button" id="saveTagsButton">Save</button>
+                <button class="btn btn-sm btn-outline-secondary" type="button" id="cancelTagsButton">Cancel</button>
+              </div>
+              <div class="form-text mt-1">Maximum 10 tags. Keys and values up to 256 characters.</div>
+            </div>
           </div>
           <div id="version-panel" class="mb-3 d-none">
             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -465,6 +517,68 @@
                 <li><strong>Principal</strong> — Who the policy applies to</li>
                 <li><strong>Action</strong> — Which S3 operations</li>
                 <li><strong>Resource</strong> — Bucket/object ARN</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-4 mt-2">
+        <div class="col-lg-8">
+          <div class="card shadow-sm" id="bucket-acl-card" data-acl-url="{{ acl_url }}">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7Zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-5.784 6A2.238 2.238 0 0 1 5 13c0-1.355.68-2.75 1.936-3.72A6.325 6.325 0 0 0 5 9c-4 0-5 3-5 4s1 1 1 1h4.216ZM4.5 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/>
+              </svg>
+              <span class="fw-semibold">Access Control List (ACL)</span>
+            </div>
+            <div class="card-body">
+              <div id="acl-loading" class="text-center py-3">
+                <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                Loading ACL...
+              </div>
+              <div id="acl-content" class="d-none">
+                <div class="mb-3">
+                  <label class="form-label small fw-semibold">Owner</label>
+                  <div class="border rounded p-2 bg-body-secondary">
+                    <code id="acl-owner" class="small"></code>
+                  </div>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label small fw-semibold">Current Grants</label>
+                  <div id="acl-grants-list" class="list-group list-group-flush small"></div>
+                </div>
+                {% if can_edit_policy %}
+                <div class="mb-3">
+                  <label class="form-label small fw-semibold">Set Canned ACL</label>
+                  <div class="d-flex flex-wrap gap-2">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="private">Private</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="public-read">Public Read</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="public-read-write">Public Read/Write</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="authenticated-read">Authenticated Read</button>
+                  </div>
+                </div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                About ACLs
+              </h6>
+              <p class="small text-muted mb-3">Access Control Lists define who can access your bucket and what they can do.</p>
+              <h6 class="small fw-semibold mb-2">Canned ACLs</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li><strong>private</strong> — Owner only</li>
+                <li><strong>public-read</strong> — Anyone can read</li>
+                <li><strong>authenticated-read</strong> — Authenticated users can read</li>
               </ul>
             </div>
           </div>
@@ -1361,6 +1475,243 @@
       </div>
     </div>
     {% endif %}
+
+    {% if can_edit_policy %}
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-pane" role="tabpanel" aria-labelledby="lifecycle-tab" tabindex="0">
+      <div class="row g-4">
+        <div class="col-lg-8">
+          <div class="card shadow-sm" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+                </svg>
+                <span class="fw-semibold">Lifecycle Rules</span>
+              </div>
+              <button class="btn btn-primary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#addLifecycleRuleModal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+                </svg>
+                Add Rule
+              </button>
+            </div>
+            <div class="card-body">
+              <p class="text-muted small mb-3">Lifecycle rules automatically delete objects or abort multipart uploads after a specified number of days.</p>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>ID</th>
+                      <th>Prefix</th>
+                      <th>Status</th>
+                      <th>Expiration</th>
+                      <th>Noncurrent</th>
+                      <th class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="lifecycle-rules-body">
+                    <tr>
+                      <td colspan="6" class="text-center text-muted py-4">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        Loading...
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0 mb-3">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                What are Lifecycle Rules?
+              </h6>
+              <p class="small text-muted mb-3">Lifecycle rules automate object management by scheduling actions based on object age. This helps reduce storage costs and manage data retention automatically.</p>
+              <div class="alert alert-info small py-2 px-3 mb-3">
+                <strong>Tip:</strong> Use lifecycle rules to automatically clean up temporary files, logs, or expired content.
+              </div>
+            </div>
+          </div>
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="small fw-semibold mb-3">Available Actions</h6>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-danger bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Expiration</div>
+                  <div class="text-muted small">Delete current version objects after N days from creation</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-warning bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+                    <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
+                    <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
+                    <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Noncurrent Expiration</div>
+                  <div class="text-muted small">Delete old versions N days after becoming noncurrent (requires versioning)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start">
+                <div class="bg-secondary bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
+                    <path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Abort Multipart</div>
+                  <div class="text-muted small">Clean up incomplete multipart uploads after N days</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'cors' else '' }}" id="cors-pane" role="tabpanel" aria-labelledby="cors-tab" tabindex="0">
+      <div class="row g-4">
+        <div class="col-lg-8">
+          <div class="card shadow-sm" id="cors-rules-card" data-cors-url="{{ cors_url }}">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
+                </svg>
+                <span class="fw-semibold">CORS Configuration</span>
+              </div>
+              <button class="btn btn-primary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#addCorsRuleModal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+                </svg>
+                Add Rule
+              </button>
+            </div>
+            <div class="card-body">
+              <p class="text-muted small mb-3">CORS rules define which external websites can access your bucket. Required for web apps making direct browser requests.</p>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Origins</th>
+                      <th>Methods</th>
+                      <th>Headers</th>
+                      <th>Max Age</th>
+                      <th class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cors-rules-body">
+                    <tr>
+                      <td colspan="5" class="text-center text-muted py-4">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        Loading...
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0 mb-3">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                What is CORS?
+              </h6>
+              <p class="small text-muted mb-3">CORS (Cross-Origin Resource Sharing) is a browser security feature that controls which websites can access your bucket data via JavaScript. Without CORS rules, browsers block cross-origin requests.</p>
+              <div class="alert alert-warning small py-2 px-3 mb-0">
+                <strong>When needed:</strong> Configure CORS if your web app fetches files directly from this bucket (e.g., loading images, JSON, or downloading files via JavaScript).
+              </div>
+            </div>
+          </div>
+          <div class="card bg-body-tertiary border-0 mb-3">
+            <div class="card-body">
+              <h6 class="small fw-semibold mb-3">Configuration Fields</h6>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-primary bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                    <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Allowed Origins</div>
+                  <div class="text-muted small">Domains that can make requests (e.g., <code>https://myapp.com</code> or <code>*</code> for all)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-success bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success" viewBox="0 0 16 16">
+                    <path d="M14.5 3a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h13zm-13-1A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 14.5 2h-13z"/>
+                    <path d="M3 5.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zM3 8a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9A.5.5 0 0 1 3 8zm0 2.5a.5.5 0 0 1 .5-.5h6a.5.5 0 0 1 0 1h-6a.5.5 0 0 1-.5-.5z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Allowed Methods</div>
+                  <div class="text-muted small">HTTP methods permitted (GET, PUT, POST, DELETE, HEAD)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-info bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-info" viewBox="0 0 16 16">
+                    <path d="M4 11a1 1 0 1 1 2 0v1a1 1 0 1 1-2 0v-1zm6-4a1 1 0 1 1 2 0v5a1 1 0 1 1-2 0V7zM7 9a1 1 0 0 1 2 0v3a1 1 0 1 1-2 0V9z"/>
+                    <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+                    <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Allowed Headers</div>
+                  <div class="text-muted small">Request headers the browser may send (e.g., <code>Content-Type</code>, <code>Authorization</code>)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start">
+                <div class="bg-secondary bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
+                    <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+                    <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Max Age (seconds)</div>
+                  <div class="text-muted small">How long browsers cache preflight responses (default: 0)</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="small fw-semibold mb-2">Quick Examples</h6>
+              <div class="small text-muted">
+                <p class="mb-2"><strong>Allow all origins:</strong></p>
+                <code class="d-block bg-body rounded p-2 mb-2">Origins: *<br>Methods: GET, HEAD</code>
+                <p class="mb-2"><strong>Specific domain:</strong></p>
+                <code class="d-block bg-body rounded p-2">Origins: https://myapp.com<br>Methods: GET, PUT, DELETE</code>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 
@@ -1778,6 +2129,186 @@
     </div>
   </div>
 </div>
+
+<div class="modal fade" id="addLifecycleRuleModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+          </svg>
+          Add Lifecycle Rule
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Rule ID</label>
+            <input type="text" class="form-control" id="lifecycleRuleId" placeholder="cleanup-old-files" required />
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Status</label>
+            <select class="form-select" id="lifecycleRuleStatus">
+              <option value="Enabled">Enabled</option>
+              <option value="Disabled">Disabled</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label fw-medium">Prefix Filter <span class="text-muted fw-normal">(optional)</span></label>
+            <input type="text" class="form-control font-monospace" id="lifecycleRulePrefix" placeholder="logs/" />
+            <div class="form-text">Only apply this rule to objects with keys starting with this prefix.</div>
+          </div>
+          <div class="col-12">
+            <hr class="my-2">
+            <h6 class="fw-semibold mb-3">Actions</h6>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label fw-medium">Expiration (days)</label>
+            <input type="number" class="form-control" id="lifecycleExpirationDays" min="1" placeholder="30" />
+            <div class="form-text">Delete objects after N days.</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label fw-medium">Noncurrent Expiration</label>
+            <input type="number" class="form-control" id="lifecycleNoncurrentDays" min="1" placeholder="90" />
+            <div class="form-text">Delete old versions after N days.</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label fw-medium">Abort Incomplete MPU</label>
+            <input type="number" class="form-control" id="lifecycleAbortMpuDays" min="1" placeholder="7" />
+            <div class="form-text">Abort uploads after N days.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="addLifecycleRuleConfirm">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+          </svg>
+          Add Rule
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="addCorsRuleModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
+          </svg>
+          Add CORS Rule
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label fw-medium">Allowed Origins</label>
+            <textarea class="form-control font-monospace" id="corsAllowedOrigins" rows="3" placeholder="*&#10;https://example.com&#10;http://localhost:3000"></textarea>
+            <div class="form-text">One origin per line. Use <code>*</code> for all origins.</div>
+          </div>
+          <div class="col-12">
+            <label class="form-label fw-medium">Allowed Methods</label>
+            <div class="d-flex flex-wrap gap-3">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodGet" value="GET" checked>
+                <label class="form-check-label" for="corsMethodGet">GET</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodPut" value="PUT">
+                <label class="form-check-label" for="corsMethodPut">PUT</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodPost" value="POST">
+                <label class="form-check-label" for="corsMethodPost">POST</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodDelete" value="DELETE">
+                <label class="form-check-label" for="corsMethodDelete">DELETE</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodHead" value="HEAD" checked>
+                <label class="form-check-label" for="corsMethodHead">HEAD</label>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Allowed Headers <span class="text-muted fw-normal">(optional)</span></label>
+            <textarea class="form-control font-monospace" id="corsAllowedHeaders" rows="2" placeholder="*&#10;Content-Type"></textarea>
+            <div class="form-text">One header per line.</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Expose Headers <span class="text-muted fw-normal">(optional)</span></label>
+            <textarea class="form-control font-monospace" id="corsExposeHeaders" rows="2" placeholder="ETag&#10;x-amz-meta-*"></textarea>
+            <div class="form-text">One header per line.</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Max Age (seconds) <span class="text-muted fw-normal">(optional)</span></label>
+            <input type="number" class="form-control" id="corsMaxAge" min="0" placeholder="3600" />
+            <div class="form-text">How long browsers cache preflight responses.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="addCorsRuleConfirm">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+          </svg>
+          Add Rule
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="copyMoveModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold" id="copyMoveModalTitle">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16" id="copyMoveModalIcon">
+            <path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/>
+          </svg>
+          <span id="copyMoveActionLabel">Copy</span> Object
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label fw-medium">Source</label>
+          <div class="p-2 bg-body-tertiary rounded font-monospace small" id="copyMoveSource"></div>
+        </div>
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label fw-medium">Destination Bucket</label>
+            <select class="form-select" id="copyMoveDestBucket">
+              <option value="">Loading buckets...</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label fw-medium">Destination Key</label>
+            <input type="text" class="form-control font-monospace" id="copyMoveDestKey" placeholder="path/to/object.txt" required />
+            <div class="form-text">The full path for the object in the destination bucket.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="copyMoveConfirm">
+          <span id="copyMoveConfirmLabel">Copy</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_scripts %}
@@ -1984,7 +2515,10 @@
     tr.dataset.metadata = typeof obj.metadata === 'string' ? obj.metadata : JSON.stringify(obj.metadata || {});
     tr.dataset.versionsEndpoint = obj.versionsEndpoint || obj.versions_endpoint;
     tr.dataset.restoreTemplate = obj.restoreTemplate || obj.restore_template;
-    
+    tr.dataset.tagsUrl = obj.tagsUrl || obj.tags_url;
+    tr.dataset.copyUrl = obj.copyUrl || obj.copy_url;
+    tr.dataset.moveUrl = obj.moveUrl || obj.move_url;
+
     const keyToShow = displayKey || obj.key;
     const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleDateString();
 
@@ -2013,18 +2547,28 @@
               <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z" />
             </svg>
           </a>
-          <button
-            type="button"
-            class="btn btn-outline-danger btn-icon"
-            data-delete-object
-            title="Delete"
-            aria-label="Delete"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="#dc3545" class="bi bi-trash" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z" />
-              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z" />
-            </svg>
-          </button>
+          <div class="dropdown d-inline-block">
+            <button class="btn btn-outline-secondary btn-icon dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="true" aria-expanded="false" title="More actions">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+              </svg>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end" style="position: fixed;">
+              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('copy', '${escapeHtml(obj.key)}')">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/></svg>
+                Copy
+              </button></li>
+              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('move', '${escapeHtml(obj.key)}')">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/></svg>
+                Move
+              </button></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><button class="dropdown-item text-danger" type="button" data-delete-object>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                Delete
+              </button></li>
+            </ul>
+          </div>
         </div>
       </td>
     `;
@@ -2118,14 +2662,21 @@
       if (!obj.key.startsWith(currentPrefix)) return;
 
       const remainder = obj.key.slice(currentPrefix.length);
+
+      if (!remainder) return;
+
+      const isFolderMarker = obj.key.endsWith('/') && obj.size === 0;
       const slashIndex = remainder.indexOf('/');
 
-      if (slashIndex === -1) {
+      if (slashIndex === -1 && !isFolderMarker) {
         if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
           items.push({ type: 'file', data: obj, displayKey: remainder });
         }
       } else {
-        const folderName = remainder.slice(0, slashIndex);
+        const effectiveSlashIndex = isFolderMarker && slashIndex === remainder.length - 1
+          ? slashIndex
+          : (slashIndex === -1 ? remainder.length - 1 : slashIndex);
+        const folderName = remainder.slice(0, effectiveSlashIndex);
         const folderPath = currentPrefix + folderName + '/';
         if (!folders.has(folderPath)) {
           folders.add(folderPath);
@@ -2298,7 +2849,10 @@
           deleteEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.delete, key) : '',
           metadata: '{}',
           versionsEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.versions, key) : '',
-          restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : ''
+          restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : '',
+          tagsUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.tags, key) : '',
+          copyUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.copy, key) : '',
+          moveUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.move, key) : ''
         });
       });
 
@@ -2694,6 +3248,12 @@
       window.alert(body || title);
       return;
     }
+    document.querySelectorAll('.modal.show').forEach(modal => {
+      const instance = bootstrap.Modal.getInstance(modal);
+      if (instance && modal.id !== 'messageModal') {
+        instance.hide();
+      }
+    });
     messageModalTitle.textContent = title;
     if (bodyHtml) {
       messageModalBody.innerHTML = bodyHtml;
@@ -2716,7 +3276,7 @@
     } else {
       messageModalAction.classList.add('d-none');
     }
-    messageModal.show();
+    setTimeout(() => messageModal.show(), 150);
   };
 
   messageModalAction?.addEventListener('click', () => {
@@ -2817,14 +3377,17 @@
     }
   });
 
+  const bulkActionsWrapper = document.getElementById('bulk-actions-wrapper');
   const updateBulkDeleteState = () => {
     const selectedCount = selectedRows.size;
     if (bulkDeleteButton) {
       const shouldShow = Boolean(bulkDeleteEndpoint) && (selectedCount > 0 || bulkDeleting);
-      bulkDeleteButton.classList.toggle('d-none', !shouldShow);
       bulkDeleteButton.disabled = !bulkDeleteEndpoint || selectedCount === 0 || bulkDeleting;
       if (bulkDeleteLabel) {
-        bulkDeleteLabel.textContent = selectedCount ? `Delete selected (${selectedCount})` : 'Delete selected';
+        bulkDeleteLabel.textContent = selectedCount ? `Delete (${selectedCount})` : 'Delete';
+      }
+      if (bulkActionsWrapper) {
+        bulkActionsWrapper.classList.toggle('d-none', !shouldShow);
       }
     }
     if (bulkDeleteConfirm) {
@@ -3814,13 +4377,7 @@
   const updateBulkDownloadState = () => {
     if (!bulkDownloadButton) return;
     const selectedCount = document.querySelectorAll('[data-object-select]:checked').length;
-    if (selectedCount > 0) {
-      bulkDownloadButton.classList.remove('d-none');
-      bulkDownloadButton.disabled = false;
-    } else {
-      bulkDownloadButton.classList.add('d-none');
-      bulkDownloadButton.disabled = true;
-    }
+    bulkDownloadButton.disabled = selectedCount === 0;
   };
 
   selectAllCheckbox?.addEventListener('change', (event) => {
@@ -4115,5 +4672,464 @@
   if (policyTextarea && policyPreset?.value === 'custom') {
     validatePolicyJson();
   }
+
+  const lifecycleCard = document.getElementById('lifecycle-rules-card');
+  const lifecycleUrl = lifecycleCard?.dataset.lifecycleUrl;
+  const lifecycleRulesBody = document.getElementById('lifecycle-rules-body');
+  const addLifecycleRuleModalEl = document.getElementById('addLifecycleRuleModal');
+  const addLifecycleRuleModal = addLifecycleRuleModalEl ? new bootstrap.Modal(addLifecycleRuleModalEl) : null;
+  let lifecycleRules = [];
+
+  const loadLifecycleRules = async () => {
+    if (!lifecycleUrl || !lifecycleRulesBody) return;
+    lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    try {
+      const resp = await fetch(lifecycleUrl);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load lifecycle rules');
+      lifecycleRules = data.rules || [];
+      renderLifecycleRules();
+    } catch (err) {
+      lifecycleRulesBody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+    }
+  };
+
+  const renderLifecycleRules = () => {
+    if (!lifecycleRulesBody) return;
+    if (lifecycleRules.length === 0) {
+      lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No lifecycle rules configured</td></tr>';
+      return;
+    }
+    lifecycleRulesBody.innerHTML = lifecycleRules.map((rule, idx) => {
+      const expiration = rule.Expiration?.Days ? `${rule.Expiration.Days}d` : '-';
+      const noncurrent = rule.NoncurrentVersionExpiration?.NoncurrentDays ? `${rule.NoncurrentVersionExpiration.NoncurrentDays}d` : '-';
+      const statusClass = rule.Status === 'Enabled' ? 'bg-success' : 'bg-secondary';
+      return `<tr>
+        <td><code class="small">${escapeHtml(rule.ID || '')}</code></td>
+        <td><code class="small">${escapeHtml(rule.Filter?.Prefix || '*')}</code></td>
+        <td><span class="badge ${statusClass}">${escapeHtml(rule.Status)}</span></td>
+        <td class="small">${expiration}</td>
+        <td class="small">${noncurrent}</td>
+        <td class="text-end">
+          <button class="btn btn-outline-danger btn-sm" onclick="deleteLifecycleRule(${idx})" title="Delete rule">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+          </button>
+        </td>
+      </tr>`;
+    }).join('');
+  };
+
+  window.deleteLifecycleRule = async (idx) => {
+    lifecycleRules.splice(idx, 1);
+    await saveLifecycleRules();
+  };
+
+  const saveLifecycleRules = async () => {
+    if (!lifecycleUrl) return;
+    try {
+      const resp = await fetch(lifecycleUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ rules: lifecycleRules })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to save');
+      showMessage({ title: 'Lifecycle rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      renderLifecycleRules();
+    } catch (err) {
+      showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
+    }
+  };
+
+  document.getElementById('addLifecycleRuleConfirm')?.addEventListener('click', async () => {
+    const ruleId = document.getElementById('lifecycleRuleId')?.value?.trim();
+    const status = document.getElementById('lifecycleRuleStatus')?.value || 'Enabled';
+    const prefix = document.getElementById('lifecycleRulePrefix')?.value?.trim() || '';
+    const expDays = parseInt(document.getElementById('lifecycleExpirationDays')?.value) || 0;
+    const ncDays = parseInt(document.getElementById('lifecycleNoncurrentDays')?.value) || 0;
+    const abortDays = parseInt(document.getElementById('lifecycleAbortMpuDays')?.value) || 0;
+    if (!ruleId) { showMessage({ title: 'Validation error', body: 'Rule ID is required', variant: 'warning' }); return; }
+    if (expDays === 0 && ncDays === 0 && abortDays === 0) { showMessage({ title: 'Validation error', body: 'At least one action is required', variant: 'warning' }); return; }
+    const rule = { ID: ruleId, Status: status, Filter: { Prefix: prefix } };
+    if (expDays > 0) rule.Expiration = { Days: expDays };
+    if (ncDays > 0) rule.NoncurrentVersionExpiration = { NoncurrentDays: ncDays };
+    if (abortDays > 0) rule.AbortIncompleteMultipartUpload = { DaysAfterInitiation: abortDays };
+    lifecycleRules.push(rule);
+    await saveLifecycleRules();
+    addLifecycleRuleModal?.hide();
+    document.getElementById('lifecycleRuleId').value = '';
+    document.getElementById('lifecycleRulePrefix').value = '';
+    document.getElementById('lifecycleExpirationDays').value = '';
+    document.getElementById('lifecycleNoncurrentDays').value = '';
+    document.getElementById('lifecycleAbortMpuDays').value = '';
+  });
+
+  const corsCard = document.getElementById('cors-rules-card');
+  const corsUrl = corsCard?.dataset.corsUrl;
+  const corsRulesBody = document.getElementById('cors-rules-body');
+  const addCorsRuleModalEl = document.getElementById('addCorsRuleModal');
+  const addCorsRuleModal = addCorsRuleModalEl ? new bootstrap.Modal(addCorsRuleModalEl) : null;
+  let corsRules = [];
+
+  const loadCorsRules = async () => {
+    if (!corsUrl || !corsRulesBody) return;
+    corsRulesBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    try {
+      const resp = await fetch(corsUrl);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load CORS rules');
+      corsRules = data.rules || [];
+      renderCorsRules();
+    } catch (err) {
+      corsRulesBody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+    }
+  };
+
+  const renderCorsRules = () => {
+    if (!corsRulesBody) return;
+    if (corsRules.length === 0) {
+      corsRulesBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No CORS rules configured</td></tr>';
+      return;
+    }
+    corsRulesBody.innerHTML = corsRules.map((rule, idx) => {
+      const origins = (rule.AllowedOrigins || []).map(o => `<code class="small">${escapeHtml(o)}</code>`).join(', ');
+      const methods = (rule.AllowedMethods || []).map(m => `<span class="badge bg-primary-subtle text-primary">${escapeHtml(m)}</span>`).join(' ');
+      const headers = (rule.AllowedHeaders || []).slice(0, 3).map(h => `<code class="small">${escapeHtml(h)}</code>`).join(', ');
+      return `<tr>
+        <td>${origins || '<span class="text-muted">None</span>'}</td>
+        <td>${methods || '<span class="text-muted">None</span>'}</td>
+        <td>${headers || '<span class="text-muted">*</span>'}</td>
+        <td>${rule.MaxAgeSeconds || '<span class="text-muted">-</span>'}</td>
+        <td class="text-end">
+          <button class="btn btn-outline-danger btn-sm" onclick="deleteCorsRule(${idx})">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+          </button>
+        </td>
+      </tr>`;
+    }).join('');
+  };
+
+  window.deleteCorsRule = async (idx) => {
+    corsRules.splice(idx, 1);
+    await saveCorsRules();
+  };
+
+  const saveCorsRules = async () => {
+    if (!corsUrl) return;
+    try {
+      const resp = await fetch(corsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ rules: corsRules })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to save');
+      showMessage({ title: 'CORS rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      renderCorsRules();
+    } catch (err) {
+      showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
+    }
+  };
+
+  document.getElementById('addCorsRuleConfirm')?.addEventListener('click', async () => {
+    const originsRaw = document.getElementById('corsAllowedOrigins')?.value?.trim() || '';
+    const origins = originsRaw.split('\n').map(s => s.trim()).filter(Boolean);
+    const methods = [];
+    if (document.getElementById('corsMethodGet')?.checked) methods.push('GET');
+    if (document.getElementById('corsMethodPut')?.checked) methods.push('PUT');
+    if (document.getElementById('corsMethodPost')?.checked) methods.push('POST');
+    if (document.getElementById('corsMethodDelete')?.checked) methods.push('DELETE');
+    if (document.getElementById('corsMethodHead')?.checked) methods.push('HEAD');
+    const headersRaw = document.getElementById('corsAllowedHeaders')?.value?.trim() || '';
+    const headers = headersRaw.split('\n').map(s => s.trim()).filter(Boolean);
+    const exposeRaw = document.getElementById('corsExposeHeaders')?.value?.trim() || '';
+    const expose = exposeRaw.split('\n').map(s => s.trim()).filter(Boolean);
+    const maxAge = parseInt(document.getElementById('corsMaxAge')?.value) || 0;
+    if (origins.length === 0) { showMessage({ title: 'Validation error', body: 'At least one origin is required', variant: 'warning' }); return; }
+    if (methods.length === 0) { showMessage({ title: 'Validation error', body: 'At least one method is required', variant: 'warning' }); return; }
+    const rule = { AllowedOrigins: origins, AllowedMethods: methods };
+    if (headers.length > 0) rule.AllowedHeaders = headers;
+    if (expose.length > 0) rule.ExposeHeaders = expose;
+    if (maxAge > 0) rule.MaxAgeSeconds = maxAge;
+    corsRules.push(rule);
+    await saveCorsRules();
+    addCorsRuleModal?.hide();
+    document.getElementById('corsAllowedOrigins').value = '';
+    document.getElementById('corsAllowedHeaders').value = '';
+    document.getElementById('corsExposeHeaders').value = '';
+    document.getElementById('corsMaxAge').value = '';
+  });
+
+  const aclCard = document.getElementById('bucket-acl-card');
+  const aclUrl = aclCard?.dataset.aclUrl;
+  const aclOwnerEl = document.getElementById('acl-owner');
+  const aclGrantsList = document.getElementById('acl-grants-list');
+  const aclLoading = document.getElementById('acl-loading');
+  const aclContent = document.getElementById('acl-content');
+  const cannedAclSelect = document.getElementById('cannedAclSelect');
+
+  const loadAcl = async () => {
+    if (!aclUrl) return;
+    try {
+      const resp = await fetch(aclUrl);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load ACL');
+      if (aclOwnerEl) aclOwnerEl.textContent = data.owner || '-';
+      if (aclGrantsList) {
+        const grants = data.grants || [];
+        if (grants.length === 0) {
+          aclGrantsList.innerHTML = '<div class="list-group-item text-muted text-center py-2">No grants</div>';
+        } else {
+          aclGrantsList.innerHTML = grants.map(g => `<div class="list-group-item d-flex justify-content-between align-items-center"><code class="small">${escapeHtml(g.grantee)}</code><span class="badge bg-secondary">${escapeHtml(g.permission)}</span></div>`).join('');
+        }
+      }
+      if (aclLoading) aclLoading.classList.add('d-none');
+      if (aclContent) aclContent.classList.remove('d-none');
+    } catch (err) {
+      if (aclLoading) aclLoading.classList.add('d-none');
+      if (aclContent) aclContent.classList.remove('d-none');
+      if (aclGrantsList) aclGrantsList.innerHTML = `<div class="list-group-item text-danger text-center py-2">${escapeHtml(err.message)}</div>`;
+    }
+  };
+
+  cannedAclSelect?.addEventListener('change', async () => {
+    const canned = cannedAclSelect.value;
+    if (!canned || !aclUrl) return;
+    try {
+      const resp = await fetch(aclUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ canned_acl: canned })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to set ACL');
+      showMessage({ title: 'ACL updated', body: `Bucket ACL set to "${canned}"`, variant: 'success' });
+      await loadAcl();
+    } catch (err) {
+      showMessage({ title: 'ACL update failed', body: err.message, variant: 'danger' });
+    }
+  });
+
+  document.querySelectorAll('[data-set-acl]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const canned = btn.dataset.setAcl;
+      if (!canned || !aclUrl) return;
+      btn.disabled = true;
+      const originalText = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      try {
+        const resp = await fetch(aclUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+          body: JSON.stringify({ canned_acl: canned })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to set ACL');
+        showMessage({ title: 'ACL updated', body: `Bucket ACL set to "${canned}"`, variant: 'success' });
+        await loadAcl();
+      } catch (err) {
+        showMessage({ title: 'ACL update failed', body: err.message, variant: 'danger' });
+      } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+      }
+    });
+  });
+
+  document.getElementById('objects-table')?.addEventListener('show.bs.dropdown', function(e) {
+    const dropdown = e.target.closest('.dropdown');
+    const menu = dropdown?.querySelector('.dropdown-menu');
+    const btn = e.target;
+    if (!menu || !btn) return;
+    const btnRect = btn.getBoundingClientRect();
+    menu.style.position = 'fixed';
+    menu.style.top = (btnRect.bottom + 4) + 'px';
+    menu.style.left = 'auto';
+    menu.style.right = (window.innerWidth - btnRect.right) + 'px';
+    menu.style.transform = 'none';
+  });
+
+  const previewTagsPanel = document.getElementById('preview-tags');
+  const previewTagsList = document.getElementById('preview-tags-list');
+  const previewTagsEmpty = document.getElementById('preview-tags-empty');
+  const previewTagsCount = document.getElementById('preview-tags-count');
+  const previewTagsEditor = document.getElementById('preview-tags-editor');
+  const previewTagsInputs = document.getElementById('preview-tags-inputs');
+  const editTagsButton = document.getElementById('editTagsButton');
+  const addTagRow = document.getElementById('addTagRow');
+  const saveTagsButton = document.getElementById('saveTagsButton');
+  const cancelTagsButton = document.getElementById('cancelTagsButton');
+  let currentObjectTags = [];
+  let isEditingTags = false;
+
+  const loadObjectTags = async (row) => {
+    if (!row || !previewTagsPanel) return;
+    const tagsUrl = row.dataset.tagsUrl;
+    if (!tagsUrl) {
+      previewTagsPanel.classList.add('d-none');
+      return;
+    }
+    previewTagsPanel.classList.remove('d-none');
+    try {
+      const resp = await fetch(tagsUrl);
+      const data = await resp.json();
+      currentObjectTags = data.tags || [];
+      renderObjectTags();
+    } catch (err) {
+      currentObjectTags = [];
+      renderObjectTags();
+    }
+  };
+
+  const renderObjectTags = () => {
+    if (!previewTagsList || !previewTagsEmpty || !previewTagsCount) return;
+    previewTagsCount.textContent = currentObjectTags.length;
+    if (currentObjectTags.length === 0) {
+      previewTagsList.innerHTML = '';
+      previewTagsEmpty.classList.remove('d-none');
+    } else {
+      previewTagsEmpty.classList.add('d-none');
+      previewTagsList.innerHTML = currentObjectTags.map(t => `<span class="badge bg-info-subtle text-info">${escapeHtml(t.Key)}=${escapeHtml(t.Value)}</span>`).join('');
+    }
+  };
+
+  const renderTagEditor = () => {
+    if (!previewTagsInputs) return;
+    previewTagsInputs.innerHTML = currentObjectTags.map((t, idx) => `
+      <div class="input-group input-group-sm mb-1">
+        <input type="text" class="form-control" placeholder="Key" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
+        <input type="text" class="form-control" placeholder="Value" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
+        <button class="btn btn-outline-danger" type="button" onclick="removeTagRow(${idx})">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
+        </button>
+      </div>
+    `).join('');
+  };
+
+  window.removeTagRow = (idx) => {
+    currentObjectTags.splice(idx, 1);
+    renderTagEditor();
+  };
+
+  editTagsButton?.addEventListener('click', () => {
+    isEditingTags = true;
+    previewTagsList.classList.add('d-none');
+    previewTagsEmpty.classList.add('d-none');
+    previewTagsEditor?.classList.remove('d-none');
+    renderTagEditor();
+  });
+
+  cancelTagsButton?.addEventListener('click', () => {
+    isEditingTags = false;
+    previewTagsEditor?.classList.add('d-none');
+    previewTagsList.classList.remove('d-none');
+    renderObjectTags();
+  });
+
+  addTagRow?.addEventListener('click', () => {
+    if (currentObjectTags.length >= 10) {
+      showMessage({ title: 'Limit reached', body: 'Maximum 10 tags allowed per object.', variant: 'warning' });
+      return;
+    }
+    currentObjectTags.push({ Key: '', Value: '' });
+    renderTagEditor();
+  });
+
+  saveTagsButton?.addEventListener('click', async () => {
+    if (!activeRow) return;
+    const tagsUrl = activeRow.dataset.tagsUrl;
+    if (!tagsUrl) return;
+    const inputs = previewTagsInputs?.querySelectorAll('.input-group');
+    const newTags = [];
+    inputs?.forEach((group, idx) => {
+      const key = group.querySelector(`[data-tag-key="${idx}"]`)?.value?.trim() || '';
+      const value = group.querySelector(`[data-tag-value="${idx}"]`)?.value?.trim() || '';
+      if (key) newTags.push({ Key: key, Value: value });
+    });
+    try {
+      const resp = await fetch(tagsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ tags: newTags })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to save tags');
+      currentObjectTags = newTags;
+      isEditingTags = false;
+      previewTagsEditor?.classList.add('d-none');
+      previewTagsList.classList.remove('d-none');
+      renderObjectTags();
+      showMessage({ title: 'Tags saved', body: 'Object tags updated successfully.', variant: 'success' });
+    } catch (err) {
+      showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
+    }
+  });
+
+  const copyMoveModalEl = document.getElementById('copyMoveModal');
+  const copyMoveModal = copyMoveModalEl ? new bootstrap.Modal(copyMoveModalEl) : null;
+  const copyMoveActionLabel = document.getElementById('copyMoveActionLabel');
+  const copyMoveConfirmLabel = document.getElementById('copyMoveConfirmLabel');
+  const copyMoveSource = document.getElementById('copyMoveSource');
+  const copyMoveDestBucket = document.getElementById('copyMoveDestBucket');
+  const copyMoveDestKey = document.getElementById('copyMoveDestKey');
+  const copyMoveConfirm = document.getElementById('copyMoveConfirm');
+  const bucketsForCopyUrl = objectsContainer?.dataset.bucketsForCopyUrl;
+  let copyMoveAction = 'copy';
+  let copyMoveSourceKey = '';
+
+  window.openCopyMoveModal = async (action, key) => {
+    copyMoveAction = action;
+    copyMoveSourceKey = key;
+    if (copyMoveActionLabel) copyMoveActionLabel.textContent = action === 'move' ? 'Move' : 'Copy';
+    if (copyMoveConfirmLabel) copyMoveConfirmLabel.textContent = action === 'move' ? 'Move' : 'Copy';
+    if (copyMoveSource) copyMoveSource.textContent = key;
+    if (copyMoveDestKey) copyMoveDestKey.value = key;
+    if (copyMoveDestBucket) {
+      copyMoveDestBucket.innerHTML = '<option value="">Loading buckets...</option>';
+      try {
+        const resp = await fetch(bucketsForCopyUrl);
+        const data = await resp.json();
+        const buckets = data.buckets || [];
+        copyMoveDestBucket.innerHTML = buckets.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('');
+      } catch {
+        copyMoveDestBucket.innerHTML = '<option value="">Failed to load buckets</option>';
+      }
+    }
+    copyMoveModal?.show();
+  };
+
+  copyMoveConfirm?.addEventListener('click', async () => {
+    const destBucket = copyMoveDestBucket?.value;
+    const destKey = copyMoveDestKey?.value?.trim();
+    if (!destBucket || !destKey) { showMessage({ title: 'Validation error', body: 'Destination bucket and key are required', variant: 'warning' }); return; }
+    const actionUrl = copyMoveAction === 'move'
+      ? urlTemplates?.move?.replace('KEY_PLACEHOLDER', encodeURIComponent(copyMoveSourceKey).replace(/%2F/g, '/'))
+      : urlTemplates?.copy?.replace('KEY_PLACEHOLDER', encodeURIComponent(copyMoveSourceKey).replace(/%2F/g, '/'));
+    if (!actionUrl) { showMessage({ title: 'Error', body: 'Copy/move URL not configured', variant: 'danger' }); return; }
+    try {
+      const resp = await fetch(actionUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ dest_bucket: destBucket, dest_key: destKey })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `Failed to ${copyMoveAction} object`);
+      showMessage({ title: `Object ${copyMoveAction === 'move' ? 'moved' : 'copied'}`, body: `Successfully ${copyMoveAction === 'move' ? 'moved' : 'copied'} to ${destBucket}/${destKey}`, variant: 'success' });
+      copyMoveModal?.hide();
+      if (copyMoveAction === 'move') window.setTimeout(() => window.location.reload(), 500);
+    } catch (err) {
+      showMessage({ title: `${copyMoveAction === 'move' ? 'Move' : 'Copy'} failed`, body: err.message, variant: 'danger' });
+    }
+  });
+
+  const originalSelectRow = selectRow;
+  selectRow = (row) => {
+    originalSelectRow(row);
+    loadObjectTags(row);
+  };
+
+  if (lifecycleCard) loadLifecycleRules();
+  if (corsCard) loadCorsRules();
+  if (aclCard) loadAcl();
 </script>
 {% endblock %}

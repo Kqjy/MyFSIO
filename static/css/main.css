@@ -1097,6 +1097,9 @@ pre code {
 
 .modal-body {
 	padding: 1.5rem;
+	overflow-wrap: break-word;
+	word-wrap: break-word;
+	word-break: break-word;
 }
 
 .modal-footer {
@@ -1749,4 +1752,68 @@ body.theme-transitioning * {
 .border-gradient {
 	border: 2px solid transparent;
 	background: linear-gradient(var(--myfsio-card-bg), var(--myfsio-card-bg)) padding-box, linear-gradient(135deg, #3b82f6, #8b5cf6) border-box;
+}
+
+#objects-table .dropdown-menu {
+	position: fixed !important;
+	z-index: 1050;
+}
+
+.objects-header-responsive {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	align-items: center;
+}
+
+.objects-header-responsive > .header-title {
+	flex: 0 0 auto;
+}
+
+.objects-header-responsive > .header-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	align-items: center;
+	flex: 1;
+}
+
+@media (max-width: 640px) {
+	.objects-header-responsive {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.objects-header-responsive > .header-title {
+		margin-bottom: 0.5rem;
+	}
+
+	.objects-header-responsive > .header-actions {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 0.5rem;
+	}
+
+	.objects-header-responsive > .header-actions .btn {
+		justify-content: center;
+	}
+
+	.objects-header-responsive > .header-actions .search-wrapper {
+		grid-column: span 2;
+	}
+
+	.objects-header-responsive > .header-actions .search-wrapper input {
+		max-width: 100% !important;
+		width: 100%;
+	}
+
+	.objects-header-responsive > .header-actions .bulk-actions {
+		grid-column: span 2;
+		display: flex;
+		gap: 0.5rem;
+	}
+
+	.objects-header-responsive > .header-actions .bulk-actions .btn {
+		flex: 1;
+	}
 }
