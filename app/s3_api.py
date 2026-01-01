@@ -1314,7 +1314,8 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
         SubElement(version, "VersionId").text = "null"
         SubElement(version, "IsLatest").text = "true"
         SubElement(version, "LastModified").text = obj.last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        SubElement(version, "ETag").text = f'"{obj.etag}"'
+        if obj.etag:
+            SubElement(version, "ETag").text = f'"{obj.etag}"'
         SubElement(version, "Size").text = str(obj.size)
         SubElement(version, "StorageClass").text = "STANDARD"
         
@@ -2178,10 +2179,11 @@ def bucket_handler(bucket_name: str) -> Response:
             obj_el = SubElement(root, "Contents")
             SubElement(obj_el, "Key").text = meta.key
             SubElement(obj_el, "LastModified").text = meta.last_modified.isoformat()
-            SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
+            if meta.etag:
+                SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
             SubElement(obj_el, "Size").text = str(meta.size)
             SubElement(obj_el, "StorageClass").text = "STANDARD"
-        
+
         for cp in common_prefixes:
             cp_el = SubElement(root, "CommonPrefixes")
             SubElement(cp_el, "Prefix").text = cp
@@ -2194,15 +2196,16 @@ def bucket_handler(bucket_name: str) -> Response:
         SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
         if delimiter:
             SubElement(root, "Delimiter").text = delimiter
-        
+
         if is_truncated and delimiter and next_marker:
             SubElement(root, "NextMarker").text = next_marker
-        
+
         for meta in objects:
             obj_el = SubElement(root, "Contents")
             SubElement(obj_el, "Key").text = meta.key
             SubElement(obj_el, "LastModified").text = meta.last_modified.isoformat()
-            SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
+            if meta.etag:
+                SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
             SubElement(obj_el, "Size").text = str(meta.size)
         
         for cp in common_prefixes:
@@ -2282,7 +2285,8 @@ def object_handler(bucket_name: str, object_key: str):
             extra={"bucket": bucket_name, "key": object_key, "size": meta.size},
         )
         response = Response(status=200)
-        response.headers["ETag"] = f'"{meta.etag}"'
+        if meta.etag:
+            response.headers["ETag"] = f'"{meta.etag}"'
 
         _notifications().emit_object_created(
             bucket_name,
@@ -2725,7 +2729,8 @@ def _copy_object(dest_bucket: str, dest_key: str, copy_source: str) -> Response:
     
     root = Element("CopyObjectResult")
     SubElement(root, "LastModified").text = meta.last_modified.isoformat()
-    SubElement(root, "ETag").text = f'"{meta.etag}"'
+    if meta.etag:
+        SubElement(root, "ETag").text = f'"{meta.etag}"'
     return _xml_response(root)
 
 
@@ -2947,8 +2952,9 @@ def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
     SubElement(root, "Location").text = location
     SubElement(root, "Bucket").text = bucket_name
     SubElement(root, "Key").text = object_key
-    SubElement(root, "ETag").text = f'"{meta.etag}"'
-    
+    if meta.etag:
+        SubElement(root, "ETag").text = f'"{meta.etag}"'
+
     return _xml_response(root)
 
 

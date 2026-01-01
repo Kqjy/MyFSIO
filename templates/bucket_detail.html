@@ -451,6 +451,12 @@
                     </div>
                   </div>
                   <div id="policyErrorDetail" class="text-danger small mt-1 d-none"></div>
+                  <div id="policyReadonlyHint" class="alert alert-secondary small py-2 px-3 mt-2 mb-0 d-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                    </svg>
+                    This preset is read-only. Select <strong>Custom JSON</strong> to edit the policy manually.
+                  </div>
                   <div class="form-text d-flex align-items-start gap-2 mt-2">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="flex-shrink-0 mt-1 text-muted" viewBox="0 0 16 16">
                       <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -3320,8 +3326,14 @@
     }
   };
 
+  const policyReadonlyHint = document.getElementById('policyReadonlyHint');
+
   const applyPolicyPreset = (preset) => {
     if (!policyTextarea || !policyMode) return;
+    const isPresetMode = preset === 'private' || preset === 'public';
+    if (policyReadonlyHint) {
+      policyReadonlyHint.classList.toggle('d-none', !isPresetMode);
+    }
     switch (preset) {
       case 'private':
         setPolicyTextareaState(true);
@@ -3329,7 +3341,7 @@
         policyMode.value = 'delete';
         break;
       case 'public':
-        setPolicyTextareaState(false);
+        setPolicyTextareaState(true);
         policyTextarea.value = publicPolicyTemplate || '';
         policyMode.value = 'upsert';
         break;
@@ -4160,42 +4172,245 @@
       if (bulkUploadErrorList) bulkUploadErrorList.innerHTML = '';
       if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
       if (uploadFileInput) uploadFileInput.disabled = false;
+      const progressStack = document.querySelector('[data-upload-progress]');
+      if (progressStack) progressStack.innerHTML = '';
+      if (uploadDropZone) {
+        uploadDropZone.classList.remove('upload-locked');
+        uploadDropZone.style.pointerEvents = '';
+      }
       isUploading = false;
     };
 
-    const uploadSingleFile = async (file, keyPrefix = '', metadata = null) => {
-      const formData = new FormData();
-      formData.append('object', file);
+    const MULTIPART_THRESHOLD = 8 * 1024 * 1024;
+    const CHUNK_SIZE = 8 * 1024 * 1024;
+    const uploadProgressStack = document.querySelector('[data-upload-progress]');
+    const multipartInitUrl = uploadForm.dataset.multipartInitUrl;
+    const multipartPartTemplate = uploadForm.dataset.multipartPartTemplate;
+    const multipartCompleteTemplate = uploadForm.dataset.multipartCompleteTemplate;
+    const multipartAbortTemplate = uploadForm.dataset.multipartAbortTemplate;
+
+    const createProgressItem = (file) => {
+      const item = document.createElement('div');
+      item.className = 'upload-progress-item';
+      item.dataset.state = 'uploading';
+      item.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+          <div class="min-width-0 flex-grow-1">
+            <div class="file-name">${escapeHtml(file.name)}</div>
+            <div class="file-size">${formatBytes(file.size)}</div>
+          </div>
+          <div class="upload-status text-end ms-2">Preparing...</div>
+        </div>
+        <div class="progress-container">
+          <div class="progress">
+            <div class="progress-bar bg-primary" role="progressbar" style="width: 0%"></div>
+          </div>
+          <div class="progress-text">
+            <span class="progress-loaded">0 B</span>
+            <span class="progress-percent">0%</span>
+          </div>
+        </div>
+      `;
+      return item;
+    };
+
+    const updateProgressItem = (item, { loaded, total, status, state, error }) => {
+      if (state) item.dataset.state = state;
+      const statusEl = item.querySelector('.upload-status');
+      const progressBar = item.querySelector('.progress-bar');
+      const progressLoaded = item.querySelector('.progress-loaded');
+      const progressPercent = item.querySelector('.progress-percent');
+
+      if (status) {
+        statusEl.textContent = status;
+        statusEl.className = 'upload-status text-end ms-2';
+        if (state === 'success') statusEl.classList.add('success');
+        if (state === 'error') statusEl.classList.add('error');
+      }
+      if (typeof loaded === 'number' && typeof total === 'number' && total > 0) {
+        const percent = Math.round((loaded / total) * 100);
+        progressBar.style.width = `${percent}%`;
+        progressLoaded.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}`;
+        progressPercent.textContent = `${percent}%`;
+      }
+      if (error) {
+        const progressContainer = item.querySelector('.progress-container');
+        if (progressContainer) {
+          progressContainer.innerHTML = `<div class="text-danger small mt-1">${escapeHtml(error)}</div>`;
+        }
+      }
+    };
+
+    const uploadMultipart = async (file, objectKey, metadata, progressItem) => {
+      const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
+
+      updateProgressItem(progressItem, { status: 'Initiating...', loaded: 0, total: file.size });
+      const initResp = await fetch(multipartInitUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken || '' },
+        body: JSON.stringify({ object_key: objectKey, metadata })
+      });
+      if (!initResp.ok) {
+        const err = await initResp.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to initiate upload');
+      }
+      const { upload_id } = await initResp.json();
+
+      const partUrl = multipartPartTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
+      const completeUrl = multipartCompleteTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
+      const abortUrl = multipartAbortTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
+
+      const parts = [];
+      const totalParts = Math.ceil(file.size / CHUNK_SIZE);
+      let uploadedBytes = 0;
+
+      try {
+        for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+          const start = (partNumber - 1) * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
+
+          updateProgressItem(progressItem, {
+            status: `Part ${partNumber}/${totalParts}`,
+            loaded: uploadedBytes,
+            total: file.size
+          });
+
+          const partResp = await fetch(`${partUrl}?partNumber=${partNumber}`, {
+            method: 'PUT',
+            headers: { 'X-CSRFToken': csrfToken || '' },
+            body: chunk
+          });
+
+          if (!partResp.ok) {
+            const err = await partResp.json().catch(() => ({}));
+            throw new Error(err.error || `Part ${partNumber} failed`);
+          }
+
+          const partData = await partResp.json();
+          parts.push({ part_number: partNumber, etag: partData.etag });
+          uploadedBytes += chunk.size;
+
+          updateProgressItem(progressItem, {
+            loaded: uploadedBytes,
+            total: file.size
+          });
+        }
+
+        updateProgressItem(progressItem, { status: 'Completing...', loaded: file.size, total: file.size });
+        const completeResp = await fetch(completeUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken || '' },
+          body: JSON.stringify({ parts })
+        });
+
+        if (!completeResp.ok) {
+          const err = await completeResp.json().catch(() => ({}));
+          throw new Error(err.error || 'Failed to complete upload');
+        }
+
+        return await completeResp.json();
+      } catch (err) {
+        try {
+          await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
+        } catch {}
+        throw err;
+      }
+    };
+
+    const uploadRegular = async (file, objectKey, metadata, progressItem) => {
+      return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        formData.append('object', file);
+        formData.append('object_key', objectKey);
+        if (metadata) formData.append('metadata', JSON.stringify(metadata));
+        const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
+        if (csrfToken) formData.append('csrf_token', csrfToken);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', uploadForm.action, true);
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            updateProgressItem(progressItem, {
+              status: 'Uploading...',
+              loaded: e.loaded,
+              total: e.total
+            });
+          }
+        });
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              if (data.status === 'error') {
+                reject(new Error(data.message || 'Upload failed'));
+              } else {
+                resolve(data);
+              }
+            } catch {
+              resolve({});
+            }
+          } else {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              reject(new Error(data.message || `Upload failed (${xhr.status})`));
+            } catch {
+              reject(new Error(`Upload failed (${xhr.status})`));
+            }
+          }
+        });
+
+        xhr.addEventListener('error', () => reject(new Error('Network error')));
+        xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+
+        xhr.send(formData);
+      });
+    };
+
+    const uploadSingleFile = async (file, keyPrefix = '', metadata = null, progressItem = null) => {
       const objectKey = keyPrefix ? `${keyPrefix}${file.name}` : file.name;
-      formData.append('object_key', objectKey);
-      if (metadata) {
-        formData.append('metadata', JSON.stringify(metadata));
+      const shouldUseMultipart = file.size >= MULTIPART_THRESHOLD && multipartInitUrl;
+
+      if (!progressItem && uploadProgressStack) {
+        progressItem = createProgressItem(file);
+        uploadProgressStack.appendChild(progressItem);
       }
 
-      const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
-      if (csrfToken) {
-        formData.append('csrf_token', csrfToken);
-      }
-      
-      const response = await fetch(uploadForm.action, {
-        method: 'POST',
-        body: formData,
-        headers: {
-          'X-Requested-With': 'XMLHttpRequest'
+      try {
+        let result;
+        if (shouldUseMultipart) {
+          updateProgressItem(progressItem, { status: 'Multipart upload...', loaded: 0, total: file.size });
+          result = await uploadMultipart(file, objectKey, metadata, progressItem);
+        } else {
+          updateProgressItem(progressItem, { status: 'Uploading...', loaded: 0, total: file.size });
+          result = await uploadRegular(file, objectKey, metadata, progressItem);
         }
-      });
-      
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.status === 'error') {
-        throw new Error(data.message || 'Upload failed');
+        updateProgressItem(progressItem, { state: 'success', status: 'Complete', loaded: file.size, total: file.size });
+        return result;
+      } catch (err) {
+        updateProgressItem(progressItem, { state: 'error', status: 'Failed', error: err.message });
+        throw err;
       }
-      return data;
+    };
+
+    const setUploadLockState = (locked) => {
+      if (uploadDropZone) {
+        uploadDropZone.classList.toggle('upload-locked', locked);
+        uploadDropZone.style.pointerEvents = locked ? 'none' : '';
+      }
+      if (uploadFileInput) {
+        uploadFileInput.disabled = locked;
+      }
     };
 
     const performBulkUpload = async (files) => {
       if (isUploading || !files || files.length === 0) return;
-      
+
       isUploading = true;
+      setUploadLockState(true);
       const keyPrefix = (uploadKeyPrefix?.value || '').trim();
       const metadataRaw = uploadForm.querySelector('textarea[name="metadata"]')?.value?.trim();
       let metadata = null;
@@ -4256,14 +4471,12 @@
       }
 
       isUploading = false;
+      setUploadLockState(false);
 
       if (successFiles.length > 0) {
-
         if (uploadBtnText) uploadBtnText.textContent = 'Refreshing...';
-
         window.setTimeout(() => window.location.reload(), 800);
       } else {
-
         if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
         if (uploadFileInput) uploadFileInput.disabled = false;
       }
@@ -4271,11 +4484,15 @@
 
     refreshUploadDropLabel();
     uploadFileInput.addEventListener('change', () => {
+      if (isUploading) return;
       refreshUploadDropLabel();
       updateUploadBtnText();
       resetUploadUI();
     });
-    uploadDropZone?.addEventListener('click', () => uploadFileInput?.click());
+    uploadDropZone?.addEventListener('click', () => {
+      if (isUploading) return;
+      uploadFileInput?.click();
+    });
 
     uploadForm.addEventListener('submit', async (event) => {
       const files = uploadFileInput.files;
@@ -4337,6 +4554,7 @@
       ['dragenter', 'dragover'].forEach((eventName) => {
         target.addEventListener(eventName, (event) => {
           preventDefaults(event);
+          if (isUploading) return;
           if (highlightClass) {
             target.classList.add(highlightClass);
           }
@@ -4351,6 +4569,7 @@
         });
       });
       target.addEventListener('drop', (event) => {
+        if (isUploading) return;
         if (!event.dataTransfer?.files?.length || !uploadFileInput) {
           return;
         }

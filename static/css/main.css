@@ -515,22 +515,77 @@ code {
 	display: flex;
 	flex-direction: column;
 	gap: 0.75rem;
+	max-height: 300px;
+	overflow-y: auto;
 }
 
 .upload-progress-item {
 	border: 1px solid var(--myfsio-card-border);
-	border-radius: 0.5rem;
+	border-radius: 0.75rem;
 	background-color: var(--myfsio-card-bg);
-	padding: 0.75rem 0.9rem;
-	transition: border-color 0.2s ease, background-color 0.2s ease;
+	padding: 0.875rem 1rem;
+	transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.upload-progress-item[data-state='uploading'] {
+	border-color: rgba(59, 130, 246, 0.4);
+	box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.08);
 }
 
 .upload-progress-item[data-state='success'] {
 	border-color: rgba(34, 197, 94, 0.6);
+	background-color: rgba(34, 197, 94, 0.04);
 }
 
 .upload-progress-item[data-state='error'] {
 	border-color: rgba(239, 68, 68, 0.7);
+	background-color: rgba(239, 68, 68, 0.04);
+}
+
+.upload-progress-item .file-name {
+	font-weight: 500;
+	word-break: break-all;
+	margin-bottom: 0.25rem;
+}
+
+.upload-progress-item .file-size {
+	font-size: 0.75rem;
+	color: var(--myfsio-muted);
+}
+
+.upload-progress-item .upload-status {
+	font-size: 0.8rem;
+	color: var(--myfsio-muted);
+}
+
+.upload-progress-item .upload-status.success {
+	color: #16a34a;
+}
+
+.upload-progress-item .upload-status.error {
+	color: #dc2626;
+}
+
+.upload-progress-item .progress-container {
+	margin-top: 0.5rem;
+}
+
+.upload-progress-item .progress {
+	height: 6px;
+	border-radius: 999px;
+	overflow: hidden;
+}
+
+.upload-progress-item .progress-bar {
+	transition: width 0.2s ease;
+}
+
+.upload-progress-item .progress-text {
+	font-size: 0.7rem;
+	color: var(--myfsio-muted);
+	margin-top: 0.25rem;
+	display: flex;
+	justify-content: space-between;
 }
 
 .progress-thin {
@@ -540,6 +595,14 @@ code {
 
 [data-theme='dark'] .progress-thin {
 	background-color: rgba(248, 250, 252, 0.15);
+}
+
+[data-theme='dark'] .upload-progress-item .upload-status.success {
+	color: #4ade80;
+}
+
+[data-theme='dark'] .upload-progress-item .upload-status.error {
+	color: #f87171;
 }
 
 #deleteObjectKey {
@@ -583,6 +646,20 @@ code {
 	border-color: #3b82f6;
 }
 
+.upload-dropzone.upload-locked {
+	opacity: 0.5;
+	cursor: not-allowed;
+	background-color: var(--myfsio-preview-bg);
+}
+
+.upload-dropzone.upload-locked::after {
+	content: 'Upload in progress...';
+	display: block;
+	margin-top: 0.5rem;
+	font-size: 0.8rem;
+	color: var(--myfsio-muted);
+}
+
 .metadata-stack .metadata-entry + .metadata-entry {
 	margin-top: 0.75rem;
 }
@@ -620,13 +697,14 @@ code {
 }
 
 .objects-table-container thead th {
-	background-color: #f8f9fa;
-	border-bottom: 1px solid var(--myfsio-card-border);
-	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+	background-color: var(--myfsio-preview-bg);
+	border-bottom: 2px solid var(--myfsio-card-border);
+	box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
 }
 
 [data-theme='dark'] .objects-table-container thead th {
-	background-color: #1e293b;
+	background-color: #1a2234;
+	box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
 }
 
 .btn-group form { display: inline; }
@@ -636,36 +714,77 @@ code {
 .table {
 	color: var(--myfsio-text);
 	background-color: var(--myfsio-card-bg);
+	border-collapse: separate;
+	border-spacing: 0;
+	font-size: 0.9rem;
 }
 
 .table th,
 .table td {
 	border-color: var(--myfsio-card-border);
+	padding: 0.875rem 1rem;
+	vertical-align: middle;
+}
+
+.table th {
+	font-weight: 600;
+	font-size: 0.75rem;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--myfsio-muted);
+	border-bottom: 2px solid var(--myfsio-card-border);
+}
+
+.table td {
+	border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+[data-theme='dark'] .table td {
+	border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.table tbody tr:last-child td {
+	border-bottom: none;
 }
 
 .table-light th {
-	background-color: rgba(15, 23, 42, 0.04);
+	background-color: var(--myfsio-preview-bg);
 }
 
 [data-theme='dark'] .table-light th {
-	background-color: rgba(248, 250, 252, 0.05);
-	color: var(--myfsio-text);
+	background-color: rgba(248, 250, 252, 0.03);
+	color: var(--myfsio-muted);
+}
+
+.table-hover tbody tr {
+	transition: all 0.15s ease;
 }
 
 .table-hover tbody tr:hover {
 	background-color: var(--myfsio-hover-bg);
 	cursor: pointer;
-	transition: background-color 0.15s ease;
+}
+
+.table-hover tbody tr:hover td {
+	border-bottom-color: transparent;
 }
 
 .table thead {
-	background-color: rgba(15, 23, 42, 0.04);
-	color: var(--myfsio-text);
+	background-color: var(--myfsio-preview-bg);
+	color: var(--myfsio-muted);
 }
 
 [data-theme='dark'] .table thead {
-	background-color: rgba(248, 250, 252, 0.05);
-	color: var(--myfsio-text);
+	background-color: rgba(248, 250, 252, 0.03);
+	color: var(--myfsio-muted);
+}
+
+.table-striped tbody tr:nth-of-type(odd) {
+	background-color: rgba(0, 0, 0, 0.015);
+}
+
+[data-theme='dark'] .table-striped tbody tr:nth-of-type(odd) {
+	background-color: rgba(255, 255, 255, 0.02);
 }
 
 .form-control,
@@ -1776,6 +1895,7 @@ body.theme-transitioning * {
 	gap: 0.5rem;
 	align-items: center;
 	flex: 1;
+	justify-content: flex-end;
 }
 
 @media (max-width: 640px) {

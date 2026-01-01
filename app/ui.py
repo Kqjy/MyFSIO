@@ -563,6 +563,7 @@ def initiate_multipart_upload(bucket_name: str):
 
 
 @ui_bp.put("/buckets/<bucket_name>/multipart/<upload_id>/parts")
+@limiter.exempt
 def upload_multipart_part(bucket_name: str, upload_id: str):
     principal = _current_principal()
     try:
@@ -606,9 +607,14 @@ def complete_multipart_upload(bucket_name: str, upload_id: str):
         normalized.append({"part_number": number, "etag": etag})
     try:
         result = _storage().complete_multipart_upload(bucket_name, upload_id, normalized)
-        _replication().trigger_replication(bucket_name, result["key"])
-        
-        return jsonify(result)
+        _replication().trigger_replication(bucket_name, result.key)
+
+        return jsonify({
+            "key": result.key,
+            "size": result.size,
+            "etag": result.etag,
+            "last_modified": result.last_modified.isoformat() if result.last_modified else None,
+        })
     except StorageError as exc:
         return jsonify({"error": str(exc)}), 400
 

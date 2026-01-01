@@ -90,7 +90,7 @@ class ObjectMeta:
     key: str
     size: int
     last_modified: datetime
-    etag: str
+    etag: Optional[str] = None
     metadata: Optional[Dict[str, str]] = None
 
 
@@ -1079,11 +1079,6 @@ class ObjectStorage:
                                     checksum.update(data)
                                     target.write(data)
 
-                    metadata = manifest.get("metadata")
-                    if metadata:
-                        self._write_metadata(bucket_id, safe_key, metadata)
-                    else:
-                        self._delete_metadata(bucket_id, safe_key)
         except BlockingIOError:
             raise StorageError("Another upload to this key is in progress")
         finally:
@@ -1097,12 +1092,18 @@ class ObjectStorage:
         self._invalidate_bucket_stats_cache(bucket_id)
 
         stat = destination.stat()
-        # Performance: Lazy update - only update the affected key instead of invalidating whole cache
+        etag = checksum.hexdigest()
+        metadata = manifest.get("metadata")
+
+        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
+        combined_meta = {**internal_meta, **(metadata or {})}
+        self._write_metadata(bucket_id, safe_key, combined_meta)
+
         obj_meta = ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
             last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
-            etag=checksum.hexdigest(),
+            etag=etag,
             metadata=metadata,
         )
         self._update_object_cache_entry(bucket_id, safe_key.as_posix(), obj_meta)
@@ -1369,10 +1370,7 @@ class ObjectStorage:
                                 stat = entry.stat()
                                 
                                 etag = meta_cache.get(key)
-                                
-                                if not etag:
-                                    etag = f'"{stat.st_size}-{int(stat.st_mtime)}"'
-                                
+
                                 objects[key] = ObjectMeta(
                                     key=key,
                                     size=stat.st_size,
