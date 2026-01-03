@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import uuid
 import psutil
@@ -28,7 +29,7 @@ from flask_wtf.csrf import generate_csrf
 from .acl import AclService, create_canned_acl, CANNED_ACLS
 from .bucket_policies import BucketPolicyStore
 from .connections import ConnectionStore, RemoteConnection
-from .extensions import limiter
+from .extensions import limiter, csrf
 from .iam import IamError
 from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
@@ -564,6 +565,7 @@ def initiate_multipart_upload(bucket_name: str):
 
 @ui_bp.put("/buckets/<bucket_name>/multipart/<upload_id>/parts")
 @limiter.exempt
+@csrf.exempt
 def upload_multipart_part(bucket_name: str, upload_id: str):
     principal = _current_principal()
     try:
@@ -577,7 +579,11 @@ def upload_multipart_part(bucket_name: str, upload_id: str):
     if part_number < 1:
         return jsonify({"error": "partNumber must be >= 1"}), 400
     try:
-        etag = _storage().upload_multipart_part(bucket_name, upload_id, part_number, request.stream)
+        data = request.get_data()
+        if not data:
+            return jsonify({"error": "Empty request body"}), 400
+        stream = io.BytesIO(data)
+        etag = _storage().upload_multipart_part(bucket_name, upload_id, part_number, stream)
     except StorageError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"etag": etag, "part_number": part_number})

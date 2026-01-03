@@ -647,17 +647,18 @@ code {
 }
 
 .upload-dropzone.upload-locked {
-	opacity: 0.5;
-	cursor: not-allowed;
-	background-color: var(--myfsio-preview-bg);
+	background-color: rgba(59, 130, 246, 0.05);
+	border-color: #3b82f6;
+	border-style: dashed;
 }
 
 .upload-dropzone.upload-locked::after {
-	content: 'Upload in progress...';
+	content: 'Drop more files to add to queue';
 	display: block;
 	margin-top: 0.5rem;
 	font-size: 0.8rem;
-	color: var(--myfsio-muted);
+	color: #3b82f6;
+	font-weight: 500;
 }
 
 .metadata-stack .metadata-entry + .metadata-entry {
@@ -1876,6 +1877,37 @@ body.theme-transitioning * {
 #objects-table .dropdown-menu {
 	position: fixed !important;
 	z-index: 1050;
+}
+
+.btn-icon.dropdown-toggle::after {
+	display: none;
+}
+
+.floating-upload-progress {
+	position: fixed;
+	bottom: 1.5rem;
+	right: 1.5rem;
+	z-index: 1055;
+	min-width: 320px;
+	max-width: 400px;
+	animation: slideInUp 0.3s ease-out;
+}
+
+@keyframes slideInUp {
+	from { opacity: 0; transform: translateY(20px); }
+	to { opacity: 1; transform: translateY(0); }
+}
+
+.floating-upload-content {
+	background: var(--myfsio-card-bg);
+	border: 1px solid var(--myfsio-card-border);
+	border-radius: 0.75rem;
+	padding: 1rem;
+	box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] .floating-upload-content {
+	box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
 }
 
 .objects-header-responsive {
