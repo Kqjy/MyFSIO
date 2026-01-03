@@ -196,18 +196,21 @@ class AccessLoggingService:
         )
 
         target_key = f"{config.target_bucket}:{config.target_prefix}"
+        should_flush = False
         with self._buffer_lock:
             if target_key not in self._buffer:
                 self._buffer[target_key] = []
             self._buffer[target_key].append(entry)
+            should_flush = len(self._buffer[target_key]) >= self.max_buffer_size
 
-            if len(self._buffer[target_key]) >= self.max_buffer_size:
-                self._flush_buffer(target_key)
+        if should_flush:
+            self._flush_buffer(target_key)
 
     def _flush_loop(self) -> None:
         while not self._shutdown.is_set():
-            time.sleep(self.flush_interval)
-            self._flush_all()
+            self._shutdown.wait(timeout=self.flush_interval)
+            if not self._shutdown.is_set():
+                self._flush_all()
 
     def _flush_all(self) -> None:
         with self._buffer_lock:

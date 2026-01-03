@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 REPLICATION_USER_AGENT = "S3ReplicationAgent/1.0"
 REPLICATION_CONNECT_TIMEOUT = 5
 REPLICATION_READ_TIMEOUT = 30
-STREAMING_THRESHOLD_BYTES = 10 * 1024 * 1024  # 10 MiB - use streaming for larger files
+STREAMING_THRESHOLD_BYTES = 10 * 1024 * 1024 
 
 REPLICATION_MODE_NEW_ONLY = "new_only"
 REPLICATION_MODE_ALL = "all"
@@ -307,7 +307,6 @@ class ReplicationManager:
         if self._shutdown:
             return
 
-        # Re-check if rule is still enabled (may have been paused after task was submitted)
         current_rule = self.get_rule(bucket_name)
         if not current_rule or not current_rule.enabled:
             logger.debug(f"Replication skipped for {bucket_name}/{object_key}: rule disabled or removed")
@@ -358,7 +357,6 @@ class ReplicationManager:
                     extra_args["ContentType"] = content_type
 
                 if file_size >= STREAMING_THRESHOLD_BYTES:
-                    # Use multipart upload for large files
                     s3.upload_file(
                         str(path),
                         rule.target_bucket,
@@ -366,7 +364,6 @@ class ReplicationManager:
                         ExtraArgs=extra_args if extra_args else None,
                     )
                 else:
-                    # Read small files into memory
                     file_content = path.read_bytes()
                     put_kwargs = {
                         "Bucket": rule.target_bucket,

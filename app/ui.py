@@ -371,7 +371,7 @@ def bucket_detail(bucket_name: str):
     kms_keys = kms_manager.list_keys() if kms_manager else []
     kms_enabled = current_app.config.get("KMS_ENABLED", False)
     encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
-    can_manage_encryption = can_manage_versioning  # Same as other bucket properties
+    can_manage_encryption = can_manage_versioning
 
     bucket_quota = storage.get_bucket_quota(bucket_name)
     bucket_stats = storage.bucket_stats(bucket_name)
@@ -450,8 +450,6 @@ def list_bucket_objects(bucket_name: str):
     except StorageError:
         versioning_enabled = False
 
-    # Pre-compute URL templates once (not per-object) for performance
-    # Frontend will construct actual URLs by replacing KEY_PLACEHOLDER
     preview_template = url_for("ui.object_preview", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     delete_template = url_for("ui.delete_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     presign_template = url_for("ui.object_presign", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
@@ -527,8 +525,6 @@ def upload_object(bucket_name: str):
     try:
         _authorize_ui(principal, bucket_name, "write")
         _storage().put_object(bucket_name, object_key, file.stream, metadata=metadata)
-        
-        # Trigger replication
         _replication().trigger_replication(bucket_name, object_key)
         
         message = f"Uploaded '{object_key}'"
@@ -765,20 +761,18 @@ def bulk_download_objects(bucket_name: str):
     if not cleaned:
         return jsonify({"error": "Select at least one object to download"}), 400
 
-    MAX_KEYS = current_app.config.get("BULK_DELETE_MAX_KEYS", 500)  # Reuse same limit for now
+    MAX_KEYS = current_app.config.get("BULK_DELETE_MAX_KEYS", 500)
     if len(cleaned) > MAX_KEYS:
         return jsonify({"error": f"A maximum of {MAX_KEYS} objects can be downloaded per request"}), 400
 
     unique_keys = list(dict.fromkeys(cleaned))
     storage = _storage()
     
-    # Verify permission to read bucket contents
     try:
         _authorize_ui(principal, bucket_name, "read")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
-    # Create ZIP archive of selected objects
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for key in unique_keys:
@@ -795,7 +789,6 @@ def bulk_download_objects(bucket_name: str):
                     path = storage.get_object_path(bucket_name, key)
                     zf.write(path, arcname=key)
             except (StorageError, IamError):
-                # Skip objects that can't be accessed
                 continue
     
     buffer.seek(0)
@@ -846,7 +839,6 @@ def object_preview(bucket_name: str, object_key: str) -> Response:
     
     download = request.args.get("download") == "1"
     
-    # Check if object is encrypted and needs decryption
     is_encrypted = "x-amz-server-side-encryption" in metadata
     if is_encrypted and hasattr(storage, 'get_object_data'):
         try:
@@ -882,7 +874,6 @@ def object_presign(bucket_name: str, object_key: str):
     encoded_key = quote(object_key, safe="/")
     url = f"{api_base}/presign/{bucket_name}/{encoded_key}"
     
-    # Use API base URL for forwarded headers so presigned URLs point to API, not UI
     parsed_api = urlparse(api_base)
     headers = _api_headers()
     headers["X-Forwarded-Host"] = parsed_api.netloc or "127.0.0.1:5000"
@@ -1027,7 +1018,6 @@ def update_bucket_quota(bucket_name: str):
     """Update bucket quota configuration (admin only)."""
     principal = _current_principal()
     
-    # Quota management is admin-only
     is_admin = False
     try:
         _iam().authorize(principal, None, "iam:list_users")
@@ -1049,7 +1039,6 @@ def update_bucket_quota(bucket_name: str):
             flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     
-    # Parse quota values
     max_mb_str = request.form.get("max_mb", "").strip()
     max_objects_str = request.form.get("max_objects", "").strip()
     
@@ -1061,7 +1050,7 @@ def update_bucket_quota(bucket_name: str):
             max_mb = int(max_mb_str)
             if max_mb < 1:
                 raise ValueError("Size must be at least 1 MB")
-            max_bytes = max_mb * 1024 * 1024  # Convert MB to bytes
+            max_bytes = max_mb * 1024 * 1024 
         except ValueError as exc:
             flash(f"Invalid size value: {exc}", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
@@ -1114,7 +1103,6 @@ def update_bucket_encryption(bucket_name: str):
         flash("Invalid encryption algorithm", "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     
-    # Build encryption configuration in AWS S3 format
     encryption_config: dict[str, Any] = {
         "Rules": [
             {
@@ -1505,7 +1493,6 @@ def update_bucket_replication(bucket_name: str):
         if rule:
             rule.enabled = True
             _replication().set_rule(rule)
-            # When resuming, sync any pending objects that accumulated while paused
             if rule.mode == REPLICATION_MODE_ALL:
                 _replication().replicate_existing_objects(bucket_name)
                 flash("Replication resumed. Syncing pending objects in background.", "success")

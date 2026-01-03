@@ -84,7 +84,7 @@ class AppConfig:
             return overrides.get(name, os.getenv(name, default))
 
         storage_root = Path(_get("STORAGE_ROOT", PROJECT_ROOT / "data")).resolve()
-        max_upload_size = int(_get("MAX_UPLOAD_SIZE", 1024 * 1024 * 1024))  # 1 GiB default
+        max_upload_size = int(_get("MAX_UPLOAD_SIZE", 1024 * 1024 * 1024)) 
         ui_page_size = int(_get("UI_PAGE_SIZE", 100))
         auth_max_attempts = int(_get("AUTH_MAX_ATTEMPTS", 5))
         auth_lockout_minutes = int(_get("AUTH_LOCKOUT_MINUTES", 15))
@@ -108,6 +108,10 @@ class AppConfig:
                 try:
                     secret_file.parent.mkdir(parents=True, exist_ok=True)
                     secret_file.write_text(generated)
+                    try:
+                        os.chmod(secret_file, 0o600)
+                    except OSError:
+                        pass
                     secret_key = generated
                 except OSError:
                     secret_key = generated

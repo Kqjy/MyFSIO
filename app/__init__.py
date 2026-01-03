@@ -289,17 +289,17 @@ def _configure_logging(app: Flask) -> None:
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(request_id)s | %(method)s %(path)s | %(message)s"
     )
-    
-    # Stream Handler (stdout) - Primary for Docker
+
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(_RequestContextFilter())
 
     logger = app.logger
+    for handler in logger.handlers[:]:
+        handler.close()
     logger.handlers.clear()
     logger.addHandler(stream_handler)
 
-    # File Handler (optional, if configured)
     if app.config.get("LOG_TO_FILE"):
         log_file = Path(app.config["LOG_FILE"])
         log_file.parent.mkdir(parents=True, exist_ok=True)
