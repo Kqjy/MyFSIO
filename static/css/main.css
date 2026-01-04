@@ -1204,6 +1204,23 @@ html.sidebar-will-collapse .sidebar-user {
 	transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
+[data-bs-theme="light"] #themeToggleSun,
+[data-bs-theme="light"] #themeToggleSunMobile {
+	display: none !important;
+}
+[data-bs-theme="light"] #themeToggleMoon,
+[data-bs-theme="light"] #themeToggleMoonMobile {
+	display: inline-block !important;
+}
+[data-bs-theme="dark"] #themeToggleSun,
+[data-bs-theme="dark"] #themeToggleSunMobile {
+	display: inline-block !important;
+}
+[data-bs-theme="dark"] #themeToggleMoon,
+[data-bs-theme="dark"] #themeToggleMoonMobile {
+	display: none !important;
+}
+
 .config-copy {
 	position: absolute;
 	top: 0.5rem;
