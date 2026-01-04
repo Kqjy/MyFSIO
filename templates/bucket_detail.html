@@ -3276,6 +3276,19 @@
         instance.hide();
       }
     });
+    const iconEl = document.getElementById('messageModalIcon');
+    if (iconEl) {
+      const iconPaths = {
+        success: '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>',
+        danger: '<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>',
+        warning: '<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>',
+        info: '<path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>'
+      };
+      const iconColors = { success: 'text-success', danger: 'text-danger', warning: 'text-warning', info: 'text-primary' };
+      iconEl.innerHTML = iconPaths[variant] || iconPaths.info;
+      iconEl.classList.remove('text-success', 'text-danger', 'text-warning', 'text-primary');
+      iconEl.classList.add(iconColors[variant] || 'text-primary');
+    }
     messageModalTitle.textContent = title;
     if (bodyHtml) {
       messageModalBody.innerHTML = bodyHtml;
@@ -5167,13 +5180,33 @@
         <td class="small">${expiration}</td>
         <td class="small">${noncurrent}</td>
         <td class="text-end">
-          <button class="btn btn-outline-danger btn-sm" onclick="deleteLifecycleRule(${idx})" title="Delete rule">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
-          </button>
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" onclick="editLifecycleRule(${idx})" title="Edit rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg>
+            </button>
+            <button class="btn btn-outline-danger" onclick="deleteLifecycleRule(${idx})" title="Delete rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+            </button>
+          </div>
         </td>
       </tr>`;
     }).join('');
   };
+
+  window.editLifecycleRule = (idx) => {
+    const rule = lifecycleRules[idx];
+    if (!rule) return;
+    document.getElementById('lifecycleRuleId').value = rule.ID || '';
+    document.getElementById('lifecycleRuleStatus').value = rule.Status || 'Enabled';
+    document.getElementById('lifecycleRulePrefix').value = rule.Filter?.Prefix || '';
+    document.getElementById('lifecycleExpirationDays').value = rule.Expiration?.Days || '';
+    document.getElementById('lifecycleNoncurrentDays').value = rule.NoncurrentVersionExpiration?.NoncurrentDays || '';
+    document.getElementById('lifecycleAbortMpuDays').value = rule.AbortIncompleteMultipartUpload?.DaysAfterInitiation || '';
+    window.editingLifecycleIdx = idx;
+    addLifecycleRuleModal?.show();
+  };
+
+  window.editingLifecycleIdx = null;
 
   window.deleteLifecycleRule = async (idx) => {
     lifecycleRules.splice(idx, 1);
@@ -5210,7 +5243,12 @@
     if (expDays > 0) rule.Expiration = { Days: expDays };
     if (ncDays > 0) rule.NoncurrentVersionExpiration = { NoncurrentDays: ncDays };
     if (abortDays > 0) rule.AbortIncompleteMultipartUpload = { DaysAfterInitiation: abortDays };
-    lifecycleRules.push(rule);
+    if (typeof window.editingLifecycleIdx === 'number' && window.editingLifecycleIdx !== null) {
+      lifecycleRules[window.editingLifecycleIdx] = rule;
+      window.editingLifecycleIdx = null;
+    } else {
+      lifecycleRules.push(rule);
+    }
     await saveLifecycleRules();
     addLifecycleRuleModal?.hide();
     document.getElementById('lifecycleRuleId').value = '';
@@ -5218,6 +5256,7 @@
     document.getElementById('lifecycleExpirationDays').value = '';
     document.getElementById('lifecycleNoncurrentDays').value = '';
     document.getElementById('lifecycleAbortMpuDays').value = '';
+    document.getElementById('lifecycleRuleStatus').value = 'Enabled';
   });
 
   const corsCard = document.getElementById('cors-rules-card');
@@ -5257,13 +5296,36 @@
         <td>${headers || '<span class="text-muted">*</span>'}</td>
         <td>${rule.MaxAgeSeconds || '<span class="text-muted">-</span>'}</td>
         <td class="text-end">
-          <button class="btn btn-outline-danger btn-sm" onclick="deleteCorsRule(${idx})">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
-          </button>
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" onclick="editCorsRule(${idx})" title="Edit rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg>
+            </button>
+            <button class="btn btn-outline-danger" onclick="deleteCorsRule(${idx})" title="Delete rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+            </button>
+          </div>
         </td>
       </tr>`;
     }).join('');
   };
+
+  window.editCorsRule = (idx) => {
+    const rule = corsRules[idx];
+    if (!rule) return;
+    document.getElementById('corsAllowedOrigins').value = (rule.AllowedOrigins || []).join('\n');
+    document.getElementById('corsAllowedHeaders').value = (rule.AllowedHeaders || []).join('\n');
+    document.getElementById('corsExposeHeaders').value = (rule.ExposeHeaders || []).join('\n');
+    document.getElementById('corsMaxAge').value = rule.MaxAgeSeconds || '';
+    document.getElementById('corsMethodGet').checked = (rule.AllowedMethods || []).includes('GET');
+    document.getElementById('corsMethodPut').checked = (rule.AllowedMethods || []).includes('PUT');
+    document.getElementById('corsMethodPost').checked = (rule.AllowedMethods || []).includes('POST');
+    document.getElementById('corsMethodDelete').checked = (rule.AllowedMethods || []).includes('DELETE');
+    document.getElementById('corsMethodHead').checked = (rule.AllowedMethods || []).includes('HEAD');
+    window.editingCorsIdx = idx;
+    addCorsRuleModal?.show();
+  };
+
+  window.editingCorsIdx = null;
 
   window.deleteCorsRule = async (idx) => {
     corsRules.splice(idx, 1);
@@ -5307,13 +5369,23 @@
     if (headers.length > 0) rule.AllowedHeaders = headers;
     if (expose.length > 0) rule.ExposeHeaders = expose;
     if (maxAge > 0) rule.MaxAgeSeconds = maxAge;
-    corsRules.push(rule);
+    if (typeof window.editingCorsIdx === 'number' && window.editingCorsIdx !== null) {
+      corsRules[window.editingCorsIdx] = rule;
+      window.editingCorsIdx = null;
+    } else {
+      corsRules.push(rule);
+    }
     await saveCorsRules();
     addCorsRuleModal?.hide();
     document.getElementById('corsAllowedOrigins').value = '';
     document.getElementById('corsAllowedHeaders').value = '';
     document.getElementById('corsExposeHeaders').value = '';
     document.getElementById('corsMaxAge').value = '';
+    document.getElementById('corsMethodGet').checked = false;
+    document.getElementById('corsMethodPut').checked = false;
+    document.getElementById('corsMethodPost').checked = false;
+    document.getElementById('corsMethodDelete').checked = false;
+    document.getElementById('corsMethodHead').checked = false;
   });
 
   const aclCard = document.getElementById('bucket-acl-card');
