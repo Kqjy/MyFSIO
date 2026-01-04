@@ -124,7 +124,7 @@ def create_app(
     )
     
     connections = ConnectionStore(connections_path)
-    replication = ReplicationManager(storage, connections, replication_rules_path)
+    replication = ReplicationManager(storage, connections, replication_rules_path, storage_root)
     
     encryption_config = {
         "encryption_enabled": app.config.get("ENCRYPTION_ENABLED", False),
@@ -156,6 +156,7 @@ def create_app(
         lifecycle_manager = LifecycleManager(
             base_storage,
             interval_seconds=app.config.get("LIFECYCLE_INTERVAL_SECONDS", 3600),
+            storage_root=storage_root,
         )
         lifecycle_manager.start()
 

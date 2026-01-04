@@ -43,7 +43,9 @@ def connections(tmp_path: Path):
 @pytest.fixture
 def replication_manager(storage, connections, tmp_path):
     rules_path = tmp_path / "replication_rules.json"
-    manager = ReplicationManager(storage, connections, rules_path)
+    storage_root = tmp_path / "data"
+    storage_root.mkdir(exist_ok=True)
+    manager = ReplicationManager(storage, connections, rules_path, storage_root)
     yield manager
     manager.shutdown(wait=False)
 

@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.config import Config
@@ -88,6 +88,40 @@ class ReplicationStats:
 
 
 @dataclass
+class ReplicationFailure:
+    object_key: str
+    error_message: str
+    timestamp: float
+    failure_count: int
+    bucket_name: str
+    action: str
+    last_error_code: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "object_key": self.object_key,
+            "error_message": self.error_message,
+            "timestamp": self.timestamp,
+            "failure_count": self.failure_count,
+            "bucket_name": self.bucket_name,
+            "action": self.action,
+            "last_error_code": self.last_error_code,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ReplicationFailure":
+        return cls(
+            object_key=data["object_key"],
+            error_message=data["error_message"],
+            timestamp=data["timestamp"],
+            failure_count=data["failure_count"],
+            bucket_name=data["bucket_name"],
+            action=data["action"],
+            last_error_code=data.get("last_error_code"),
+        )
+
+
+@dataclass
 class ReplicationRule:
     bucket_name: str
     target_connection_id: str
@@ -120,15 +154,86 @@ class ReplicationRule:
         return rule
 
 
+class ReplicationFailureStore:
+    MAX_FAILURES_PER_BUCKET = 50
+
+    def __init__(self, storage_root: Path) -> None:
+        self.storage_root = storage_root
+        self._lock = threading.Lock()
+
+    def _get_failures_path(self, bucket_name: str) -> Path:
+        return self.storage_root / ".myfsio.sys" / "buckets" / bucket_name / "replication_failures.json"
+
+    def load_failures(self, bucket_name: str) -> List[ReplicationFailure]:
+        path = self._get_failures_path(bucket_name)
+        if not path.exists():
+            return []
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+                return [ReplicationFailure.from_dict(d) for d in data.get("failures", [])]
+        except (OSError, ValueError, KeyError) as e:
+            logger.error(f"Failed to load replication failures for {bucket_name}: {e}")
+            return []
+
+    def save_failures(self, bucket_name: str, failures: List[ReplicationFailure]) -> None:
+        path = self._get_failures_path(bucket_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {"failures": [f.to_dict() for f in failures[:self.MAX_FAILURES_PER_BUCKET]]}
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError as e:
+            logger.error(f"Failed to save replication failures for {bucket_name}: {e}")
+
+    def add_failure(self, bucket_name: str, failure: ReplicationFailure) -> None:
+        with self._lock:
+            failures = self.load_failures(bucket_name)
+            existing = next((f for f in failures if f.object_key == failure.object_key), None)
+            if existing:
+                existing.failure_count += 1
+                existing.timestamp = failure.timestamp
+                existing.error_message = failure.error_message
+                existing.last_error_code = failure.last_error_code
+            else:
+                failures.insert(0, failure)
+            self.save_failures(bucket_name, failures)
+
+    def remove_failure(self, bucket_name: str, object_key: str) -> bool:
+        with self._lock:
+            failures = self.load_failures(bucket_name)
+            original_len = len(failures)
+            failures = [f for f in failures if f.object_key != object_key]
+            if len(failures) < original_len:
+                self.save_failures(bucket_name, failures)
+                return True
+            return False
+
+    def clear_failures(self, bucket_name: str) -> None:
+        with self._lock:
+            path = self._get_failures_path(bucket_name)
+            if path.exists():
+                path.unlink()
+
+    def get_failure(self, bucket_name: str, object_key: str) -> Optional[ReplicationFailure]:
+        failures = self.load_failures(bucket_name)
+        return next((f for f in failures if f.object_key == object_key), None)
+
+    def get_failure_count(self, bucket_name: str) -> int:
+        return len(self.load_failures(bucket_name))
+
+
 class ReplicationManager:
-    def __init__(self, storage: ObjectStorage, connections: ConnectionStore, rules_path: Path) -> None:
+    def __init__(self, storage: ObjectStorage, connections: ConnectionStore, rules_path: Path, storage_root: Path) -> None:
         self.storage = storage
         self.connections = connections
         self.rules_path = rules_path
+        self.storage_root = storage_root
         self._rules: Dict[str, ReplicationRule] = {}
         self._stats_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ReplicationWorker")
         self._shutdown = False
+        self.failure_store = ReplicationFailureStore(storage_root)
         self.reload_rules()
 
     def shutdown(self, wait: bool = True) -> None:
@@ -331,8 +436,19 @@ class ReplicationManager:
                     s3.delete_object(Bucket=rule.target_bucket, Key=object_key)
                     logger.info(f"Replicated DELETE {bucket_name}/{object_key} to {conn.name} ({rule.target_bucket})")
                     self._update_last_sync(bucket_name, object_key)
+                    self.failure_store.remove_failure(bucket_name, object_key)
                 except ClientError as e:
+                    error_code = e.response.get('Error', {}).get('Code')
                     logger.error(f"Replication DELETE failed for {bucket_name}/{object_key}: {e}")
+                    self.failure_store.add_failure(bucket_name, ReplicationFailure(
+                        object_key=object_key,
+                        error_message=str(e),
+                        timestamp=time.time(),
+                        failure_count=1,
+                        bucket_name=bucket_name,
+                        action="delete",
+                        last_error_code=error_code,
+                    ))
                 return
 
             try:
@@ -405,9 +521,89 @@ class ReplicationManager:
 
             logger.info(f"Replicated {bucket_name}/{object_key} to {conn.name} ({rule.target_bucket})")
             self._update_last_sync(bucket_name, object_key)
+            self.failure_store.remove_failure(bucket_name, object_key)
 
         except (ClientError, OSError, ValueError) as e:
+            error_code = None
+            if isinstance(e, ClientError):
+                error_code = e.response.get('Error', {}).get('Code')
             logger.error(f"Replication failed for {bucket_name}/{object_key}: {e}")
-        except Exception:
+            self.failure_store.add_failure(bucket_name, ReplicationFailure(
+                object_key=object_key,
+                error_message=str(e),
+                timestamp=time.time(),
+                failure_count=1,
+                bucket_name=bucket_name,
+                action=action,
+                last_error_code=error_code,
+            ))
+        except Exception as e:
             logger.exception(f"Unexpected error during replication for {bucket_name}/{object_key}")
+            self.failure_store.add_failure(bucket_name, ReplicationFailure(
+                object_key=object_key,
+                error_message=str(e),
+                timestamp=time.time(),
+                failure_count=1,
+                bucket_name=bucket_name,
+                action=action,
+                last_error_code=None,
+            ))
 
+    def get_failed_items(self, bucket_name: str, limit: int = 50, offset: int = 0) -> List[ReplicationFailure]:
+        failures = self.failure_store.load_failures(bucket_name)
+        return failures[offset:offset + limit]
+
+    def get_failure_count(self, bucket_name: str) -> int:
+        return self.failure_store.get_failure_count(bucket_name)
+
+    def retry_failed_item(self, bucket_name: str, object_key: str) -> bool:
+        failure = self.failure_store.get_failure(bucket_name, object_key)
+        if not failure:
+            return False
+
+        rule = self.get_rule(bucket_name)
+        if not rule or not rule.enabled:
+            return False
+
+        connection = self.connections.get(rule.target_connection_id)
+        if not connection:
+            logger.warning(f"Cannot retry: Connection {rule.target_connection_id} not found")
+            return False
+
+        if not self.check_endpoint_health(connection):
+            logger.warning(f"Cannot retry: Endpoint {connection.name} is not reachable")
+            return False
+
+        self._executor.submit(self._replicate_task, bucket_name, object_key, rule, connection, failure.action)
+        return True
+
+    def retry_all_failed(self, bucket_name: str) -> Dict[str, int]:
+        failures = self.failure_store.load_failures(bucket_name)
+        if not failures:
+            return {"submitted": 0, "skipped": 0}
+
+        rule = self.get_rule(bucket_name)
+        if not rule or not rule.enabled:
+            return {"submitted": 0, "skipped": len(failures)}
+
+        connection = self.connections.get(rule.target_connection_id)
+        if not connection:
+            logger.warning(f"Cannot retry: Connection {rule.target_connection_id} not found")
+            return {"submitted": 0, "skipped": len(failures)}
+
+        if not self.check_endpoint_health(connection):
+            logger.warning(f"Cannot retry: Endpoint {connection.name} is not reachable")
+            return {"submitted": 0, "skipped": len(failures)}
+
+        submitted = 0
+        for failure in failures:
+            self._executor.submit(self._replicate_task, bucket_name, failure.object_key, rule, connection, failure.action)
+            submitted += 1
+
+        return {"submitted": submitted, "skipped": 0}
+
+    def dismiss_failure(self, bucket_name: str, object_key: str) -> bool:
+        return self.failure_store.remove_failure(bucket_name, object_key)
+
+    def clear_failures(self, bucket_name: str) -> None:
+        self.failure_store.clear_failures(bucket_name)

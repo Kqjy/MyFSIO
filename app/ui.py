@@ -1590,6 +1590,84 @@ def get_replication_status(bucket_name: str):
     })
 
 
+@ui_bp.get("/buckets/<bucket_name>/replication/failures")
+def get_replication_failures(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    failures = _replication().get_failed_items(bucket_name, limit, offset)
+    total = _replication().get_failure_count(bucket_name)
+
+    return jsonify({
+        "failures": [f.to_dict() for f in failures],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+@ui_bp.post("/buckets/<bucket_name>/replication/failures/<path:object_key>/retry")
+def retry_replication_failure(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    success = _replication().retry_failed_item(bucket_name, object_key)
+    if success:
+        return jsonify({"status": "submitted", "object_key": object_key})
+    return jsonify({"error": "Failed to submit retry"}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/replication/failures/retry-all")
+def retry_all_replication_failures(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    result = _replication().retry_all_failed(bucket_name)
+    return jsonify({
+        "status": "submitted",
+        "submitted": result["submitted"],
+        "skipped": result["skipped"],
+    })
+
+
+@ui_bp.delete("/buckets/<bucket_name>/replication/failures/<path:object_key>")
+def dismiss_replication_failure(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    success = _replication().dismiss_failure(bucket_name, object_key)
+    if success:
+        return jsonify({"status": "dismissed", "object_key": object_key})
+    return jsonify({"error": "Failure not found"}), 404
+
+
+@ui_bp.delete("/buckets/<bucket_name>/replication/failures")
+def clear_replication_failures(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    _replication().clear_failures(bucket_name)
+    return jsonify({"status": "cleared"})
+
+
 @ui_bp.get("/connections/<connection_id>/health")
 def check_connection_health(connection_id: str):
     """Check if a connection endpoint is reachable."""
@@ -1740,6 +1818,37 @@ def bucket_lifecycle(bucket_name: str):
 
     storage.set_bucket_lifecycle(bucket_name, validated_rules if validated_rules else None)
     return jsonify({"status": "ok", "message": "Lifecycle configuration saved", "rules": validated_rules})
+
+
+@ui_bp.get("/buckets/<bucket_name>/lifecycle/history")
+def get_lifecycle_history(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "policy")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    lifecycle_manager = current_app.extensions.get("lifecycle")
+    if not lifecycle_manager:
+        return jsonify({
+            "executions": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "enabled": False,
+        })
+
+    records = lifecycle_manager.get_execution_history(bucket_name, limit, offset)
+    return jsonify({
+        "executions": [r.to_dict() for r in records],
+        "total": len(lifecycle_manager.get_execution_history(bucket_name, 1000, 0)),
+        "limit": limit,
+        "offset": offset,
+        "enabled": True,
+    })
 
 
 @ui_bp.route("/buckets/<bucket_name>/cors", methods=["GET", "POST", "DELETE"])
