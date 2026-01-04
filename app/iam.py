@@ -26,14 +26,12 @@ IAM_ACTIONS = {
 ALLOWED_ACTIONS = (S3_ACTIONS | IAM_ACTIONS) | {"iam:*"}
 
 ACTION_ALIASES = {
-    # List actions
     "list": "list",
     "s3:listbucket": "list",
     "s3:listallmybuckets": "list",
     "s3:listbucketversions": "list",
     "s3:listmultipartuploads": "list",
     "s3:listparts": "list",
-    # Read actions
     "read": "read",
     "s3:getobject": "read",
     "s3:getobjectversion": "read",
@@ -43,7 +41,6 @@ ACTION_ALIASES = {
     "s3:getbucketversioning": "read",
     "s3:headobject": "read",
     "s3:headbucket": "read",
-    # Write actions
     "write": "write",
     "s3:putobject": "write",
     "s3:createbucket": "write",
@@ -54,23 +51,19 @@ ACTION_ALIASES = {
     "s3:completemultipartupload": "write",
     "s3:abortmultipartupload": "write",
     "s3:copyobject": "write",
-    # Delete actions
     "delete": "delete",
     "s3:deleteobject": "delete",
     "s3:deleteobjectversion": "delete",
     "s3:deletebucket": "delete",
     "s3:deleteobjecttagging": "delete",
-    # Share actions (ACL)
     "share": "share",
     "s3:putobjectacl": "share",
     "s3:putbucketacl": "share",
     "s3:getbucketacl": "share",
-    # Policy actions
     "policy": "policy",
     "s3:putbucketpolicy": "policy",
     "s3:getbucketpolicy": "policy",
     "s3:deletebucketpolicy": "policy",
-    # Replication actions
     "replication": "replication",
     "s3:getreplicationconfiguration": "replication",
     "s3:putreplicationconfiguration": "replication",
@@ -78,7 +71,6 @@ ACTION_ALIASES = {
     "s3:replicateobject": "replication",
     "s3:replicatetags": "replication",
     "s3:replicatedelete": "replication",
-    # IAM actions
     "iam:listusers": "iam:list_users",
     "iam:createuser": "iam:create_user",
     "iam:deleteuser": "iam:delete_user",
@@ -115,17 +107,15 @@ class IamService:
         self._raw_config: Dict[str, Any] = {}
         self._failed_attempts: Dict[str, Deque[datetime]] = {}
         self._last_load_time = 0.0
-        # Performance: credential cache with TTL
         self._credential_cache: Dict[str, Tuple[str, Principal, float]] = {}
-        self._cache_ttl = 60.0  # Cache credentials for 60 seconds
+        self._cache_ttl = 60.0 
         self._last_stat_check = 0.0
-        self._stat_check_interval = 1.0  # Only stat() file every 1 second
+        self._stat_check_interval = 1.0
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     def _maybe_reload(self) -> None:
         """Reload configuration if the file has changed on disk."""
-        # Performance: Skip stat check if we checked recently
         now = time.time()
         if now - self._last_stat_check < self._stat_check_interval:
             return
@@ -133,7 +123,7 @@ class IamService:
         try:
             if self.config_path.stat().st_mtime > self._last_load_time:
                 self._load()
-                self._credential_cache.clear()  # Invalidate cache on reload
+                self._credential_cache.clear() 
         except OSError:
             pass
 
@@ -227,7 +217,6 @@ class IamService:
             del self._sessions[token]
 
     def principal_for_key(self, access_key: str) -> Principal:
-        # Performance: Check cache first
         now = time.time()
         cached = self._credential_cache.get(access_key)
         if cached:
@@ -244,7 +233,6 @@ class IamService:
         return principal
 
     def secret_for_key(self, access_key: str) -> str:
-        # Performance: Check cache first
         now = time.time()
         cached = self._credential_cache.get(access_key)
         if cached:
@@ -508,7 +496,6 @@ class IamService:
         raise IamError("User not found")
 
     def get_secret_key(self, access_key: str) -> str | None:
-        # Performance: Check cache first
         now = time.time()
         cached = self._credential_cache.get(access_key)
         if cached:
@@ -519,14 +506,12 @@ class IamService:
         self._maybe_reload()
         record = self._users.get(access_key)
         if record:
-            # Cache the result
             principal = self._build_principal(access_key, record)
             self._credential_cache[access_key] = (record["secret_key"], principal, now)
             return record["secret_key"]
         return None
 
     def get_principal(self, access_key: str) -> Principal | None:
-        # Performance: Check cache first
         now = time.time()
         cached = self._credential_cache.get(access_key)
         if cached:

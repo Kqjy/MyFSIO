@@ -276,6 +276,9 @@ def buckets_overview():
         })
     return render_template("buckets.html", buckets=visible_buckets, principal=principal)
 
+@ui_bp.get("/buckets")
+def buckets_redirect():
+    return redirect(url_for("ui.buckets_overview"))
 
 @ui_bp.post("/buckets")
 def create_bucket():
