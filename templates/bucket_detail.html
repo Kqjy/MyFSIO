@@ -1222,14 +1222,14 @@
                 </div>
                 <div class="card-body p-0">
                   <div class="table-responsive">
-                    <table class="table table-sm table-hover mb-0">
+                    <table class="table table-sm table-hover mb-0" style="table-layout: fixed;">
                       <thead class="table-light">
                         <tr>
-                          <th class="ps-3">Object Key</th>
-                          <th>Error</th>
-                          <th>Last Attempt</th>
-                          <th class="text-center">Attempts</th>
-                          <th class="text-end pe-3">Actions</th>
+                          <th class="ps-3" style="width: 25%;">Object Key</th>
+                          <th style="width: 35%;">Error</th>
+                          <th style="width: 18%;">Last Attempt</th>
+                          <th class="text-center" style="width: 10%;">Attempts</th>
+                          <th class="text-end pe-3" style="width: 12%;">Actions</th>
                         </tr>
                       </thead>
                       <tbody id="replication-failures-body">
@@ -5164,11 +5164,11 @@
       if (!failuresBody) return;
       failuresBody.innerHTML = failures.map(f => `
         <tr>
-          <td class="ps-3" style="max-width: 200px; word-break: break-all; overflow-wrap: anywhere;">
-            <code class="small" style="word-break: break-all;">${escapeHtml(f.object_key)}</code>
+          <td class="ps-3" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.object_key)}">
+            <code class="small">${escapeHtml(f.object_key)}</code>
           </td>
-          <td class="small text-muted" style="max-width: 250px; word-break: break-all; overflow-wrap: anywhere;" title="${escapeHtml(f.error_message)}">
-            ${escapeHtml(f.error_message.length > 60 ? f.error_message.substring(0, 60) + '...' : f.error_message)}
+          <td class="small text-muted" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.error_message)}">
+            ${escapeHtml(f.error_message)}
           </td>
           <td class="small text-muted">${new Date(f.timestamp * 1000).toLocaleString()}</td>
           <td class="text-center"><span class="badge bg-secondary">${f.failure_count}</span></td>
