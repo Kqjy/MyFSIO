@@ -13,8 +13,7 @@
       <div class="d-flex align-items-center gap-3">
         <div class="bucket-icon" style="width: 48px; height: 48px; border-radius: 12px;">
           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
-            <path d="M4.5 5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1zM3 4.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"/>
-            <path d="M0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H8.5v3a1.5 1.5 0 0 1 1.5 1.5H11a.5.5 0 0 1 0 1h-1v1h1a.5.5 0 0 1 0 1h-1v1a.5.5 0 0 1-1 0v-1H6v1a.5.5 0 0 1-1 0v-1H4a.5.5 0 0 1 0-1h1v-1H4a.5.5 0 0 1 0-1h1.5A1.5 1.5 0 0 1 7 10.5V7H2a2 2 0 0 1-2-2V4zm1 0v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1zm5 7.5v1h3v-1a.5.5 0 0 0-.5-.5h-2a.5.5 0 0 0-.5.5z"/>
+            <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
           </svg>
         </div>
         <div>
@@ -68,6 +67,18 @@
       </button>
     </li>
     {% endif %}
+    {% if can_edit_policy %}
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button" role="tab" aria-controls="lifecycle-pane" aria-selected="{{ 'true' if active_tab == 'lifecycle' else 'false' }}">
+        Lifecycle
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link {{ 'active' if active_tab == 'cors' else '' }}" id="cors-tab" data-bs-toggle="tab" data-bs-target="#cors-pane" type="button" role="tab" aria-controls="cors-pane" aria-selected="{{ 'true' if active_tab == 'cors' else 'false' }}">
+        CORS
+      </button>
+    </li>
+    {% endif %}
   </ul>
 
   <div class="tab-content" id="bucketTabsContent">
@@ -77,32 +88,36 @@
   <div class="col-lg-7">
     <div class="card shadow-sm">
       <div class="card-header bg-body">
-        <div class="d-flex flex-wrap gap-2 align-items-center">
-          <span class="fw-semibold me-auto">Objects</span>
-          <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
-              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-              <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
-            </svg>
-            Upload
-          </button>
-          <div class="position-relative">
-            <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
+        <div class="objects-header-responsive">
+          <span class="fw-semibold header-title">Objects</span>
+          <div class="header-actions">
+            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-upload me-1" viewBox="0 0 16 16">
+                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+              </svg>
+              Upload
+            </button>
+            <div class="position-relative search-wrapper">
+              <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
+            </div>
+            <div class="bulk-actions d-none" id="bulk-actions-wrapper">
+              <button class="btn btn-outline-danger btn-sm" type="button" data-bulk-delete-trigger disabled>
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
+                  <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
+                  <path d="m4.646 8.646-.708.708L7 12.414l5.354-5.354-.708-.708L7 10.293z" />
+                </svg>
+                <span data-bulk-delete-label>Delete</span>
+              </button>
+              <button class="btn btn-outline-secondary btn-sm" type="button" data-bulk-download-trigger disabled>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
+                  <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                  <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+                </svg>
+                Download
+              </button>
+            </div>
           </div>
-          <button class="btn btn-outline-danger btn-sm d-none" type="button" data-bulk-delete-trigger disabled>
-            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" class="bi bi-check2-square me-1" viewBox="0 0 16 16">
-              <path d="M14 1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zM2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z" />
-              <path d="m4.646 8.646-.708.708L7 12.414l5.354-5.354-.708-.708L7 10.293z" />
-            </svg>
-            <span data-bulk-delete-label>Delete selected</span>
-          </button>
-          <button class="btn btn-outline-secondary btn-sm d-none" type="button" data-bulk-download-trigger disabled>
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-download me-1" viewBox="0 0 16 16">
-              <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-              <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
-            </svg>
-            Download
-          </button>
         </div>
         <nav id="folder-breadcrumb" class="mt-2 d-none" aria-label="Folder navigation">
           <ol class="breadcrumb mb-0 small">
@@ -133,6 +148,8 @@
         data-objects-api="{{ objects_api_url }}"
         data-bulk-delete-endpoint="{{ url_for('ui.bulk_delete_objects', bucket_name=bucket_name) }}"
         data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
+        data-folders-url="{{ folders_url }}"
+        data-buckets-for-copy-url="{{ buckets_for_copy_url }}"
       >
         <table class="table table-hover align-middle mb-0" id="objects-table" style="table-layout: fixed;">
           <thead class="table-light">
@@ -250,6 +267,40 @@
             </div>
             <div id="preview-metadata-list" class="metadata-stack small p-3 rounded" style="background: var(--myfsio-preview-bg);"></div>
           </div>
+          <div id="preview-tags" class="mb-3 d-none">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <div class="d-flex align-items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                  <path d="M3 2v4.586l7 7L14.586 9l-7-7H3zM2 2a1 1 0 0 1 1-1h4.586a1 1 0 0 1 .707.293l7 7a1 1 0 0 1 0 1.414l-4.586 4.586a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 2 6.586V2z"/>
+                  <path d="M5.5 5a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm0 1a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM1 7.086a1 1 0 0 0 .293.707L8.75 15.25l-.043.043a1 1 0 0 1-1.414 0l-7-7A1 1 0 0 1 0 7.586V3a1 1 0 0 1 1-1v5.086z"/>
+                </svg>
+                <span class="fw-semibold small text-uppercase">Tags</span>
+                <span class="badge bg-secondary" id="preview-tags-count">0</span>
+              </div>
+              <button class="btn btn-outline-primary btn-sm" type="button" id="editTagsButton" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
+                </svg>
+                Edit
+              </button>
+            </div>
+            <div id="preview-tags-list" class="d-flex flex-wrap gap-1"></div>
+            <div id="preview-tags-empty" class="text-muted small p-2 bg-body-tertiary rounded">No tags</div>
+            <div id="preview-tags-editor" class="d-none mt-2">
+              <div id="preview-tags-inputs" class="mb-2"></div>
+              <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-secondary flex-grow-1" type="button" id="addTagRow">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+                  </svg>
+                  Add Tag
+                </button>
+                <button class="btn btn-sm btn-primary" type="button" id="saveTagsButton">Save</button>
+                <button class="btn btn-sm btn-outline-secondary" type="button" id="cancelTagsButton">Cancel</button>
+              </div>
+              <div class="form-text mt-1">Maximum 10 tags. Keys and values up to 256 characters.</div>
+            </div>
+          </div>
           <div id="version-panel" class="mb-3 d-none">
             <div class="d-flex justify-content-between align-items-center mb-2">
               <div class="d-flex align-items-center gap-2">
@@ -352,7 +403,7 @@
                     </button>
                     <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == 'public' %}active{% endif %}" data-preset="public">
                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                        <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
+                        <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8Zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022ZM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-1.01.377-2.042 1.09-2.904.243-.294.526-.569.846-.816ZM4.92 10A5.493 5.493 0 0 0 4 13H1c0-.26.164-1.03.76-1.724.545-.636 1.492-1.256 3.16-1.275ZM1.5 5.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0Zm3-2a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z"/>
                       </svg>
                       Public Read
                     </button>
@@ -400,6 +451,12 @@
                     </div>
                   </div>
                   <div id="policyErrorDetail" class="text-danger small mt-1 d-none"></div>
+                  <div id="policyReadonlyHint" class="alert alert-secondary small py-2 px-3 mt-2 mb-0 d-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                    </svg>
+                    This preset is read-only. Select <strong>Custom JSON</strong> to edit the policy manually.
+                  </div>
                   <div class="form-text d-flex align-items-start gap-2 mt-2">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="flex-shrink-0 mt-1 text-muted" viewBox="0 0 16 16">
                       <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
@@ -471,6 +528,68 @@
           </div>
         </div>
       </div>
+
+      <div class="row g-4 mt-2">
+        <div class="col-lg-8">
+          <div class="card shadow-sm" id="bucket-acl-card" data-acl-url="{{ acl_url }}">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7Zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-5.784 6A2.238 2.238 0 0 1 5 13c0-1.355.68-2.75 1.936-3.72A6.325 6.325 0 0 0 5 9c-4 0-5 3-5 4s1 1 1 1h4.216ZM4.5 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/>
+              </svg>
+              <span class="fw-semibold">Access Control List (ACL)</span>
+            </div>
+            <div class="card-body">
+              <div id="acl-loading" class="text-center py-3">
+                <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                Loading ACL...
+              </div>
+              <div id="acl-content" class="d-none">
+                <div class="mb-3">
+                  <label class="form-label small fw-semibold">Owner</label>
+                  <div class="border rounded p-2 bg-body-secondary">
+                    <code id="acl-owner" class="small"></code>
+                  </div>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label small fw-semibold">Current Grants</label>
+                  <div id="acl-grants-list" class="list-group list-group-flush small"></div>
+                </div>
+                {% if can_edit_policy %}
+                <div class="mb-3">
+                  <label class="form-label small fw-semibold">Set Canned ACL</label>
+                  <div class="d-flex flex-wrap gap-2">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="private">Private</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="public-read">Public Read</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="public-read-write">Public Read/Write</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-set-acl="authenticated-read">Authenticated Read</button>
+                  </div>
+                </div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                About ACLs
+              </h6>
+              <p class="small text-muted mb-3">Access Control Lists define who can access your bucket and what they can do.</p>
+              <h6 class="small fw-semibold mb-2">Canned ACLs</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li><strong>private</strong> — Owner only</li>
+                <li><strong>public-read</strong> — Anyone can read</li>
+                <li><strong>authenticated-read</strong> — Authenticated users can read</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="tab-pane fade {{ 'show active' if active_tab == 'properties' else '' }}" id="properties-pane" role="tabpanel" aria-labelledby="properties-tab" tabindex="0">
@@ -509,27 +628,25 @@
               {% endif %}
 
               {% if can_manage_versioning %}
-              <form method="post" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 {% if versioning_enabled %}
-                <input type="hidden" name="state" value="suspend" />
-                <button class="btn btn-outline-danger" type="submit" data-confirm-suspend>
+                <button class="btn btn-outline-danger" type="button" data-bs-toggle="modal" data-bs-target="#suspendVersioningModal">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                     <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
                   </svg>
                   Suspend Versioning
                 </button>
                 {% else %}
+              <form method="post" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 <input type="hidden" name="state" value="enable" />
                 <button class="btn btn-success" type="submit">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path fill-rule="evenodd" d="M10.854 8.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 0 1 .708-.708L7.5 10.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
-                    <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8z"/>
+                    <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
                   </svg>
                   Enable Versioning
                 </button>
-                {% endif %}
               </form>
+                {% endif %}
               {% else %}
               <div class="text-center py-3">
                 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="text-muted mb-2" viewBox="0 0 16 16">
@@ -969,8 +1086,7 @@
                   {% endif %}
                 </div>
               </div>
-              
-              <!-- Warning alert for unreachable endpoint (shown by JS if endpoint is down) -->
+
               <div id="replication-endpoint-warning" class="alert alert-danger d-none mb-4" role="alert">
                 <div class="d-flex align-items-start">
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
@@ -1068,11 +1184,65 @@
                   <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
                   <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
                 </svg>
-                <strong>Last sync:</strong> 
+                <strong>Last sync:</strong>
                 <span data-stat="last-sync-time"></span>
                 <span data-stat="last-sync-key"></span>
               </div>
-              
+
+              <div class="card border mb-4" id="replication-failures-card" style="display: none;"
+                   data-failures-endpoint="{{ url_for('ui.get_replication_failures', bucket_name=bucket_name) }}"
+                   data-retry-endpoint="{{ url_for('ui.retry_replication_failure', bucket_name=bucket_name, object_key='__KEY__') }}"
+                   data-retry-all-endpoint="{{ url_for('ui.retry_all_replication_failures', bucket_name=bucket_name) }}"
+                   data-dismiss-endpoint="{{ url_for('ui.dismiss_replication_failure', bucket_name=bucket_name, object_key='__KEY__') }}"
+                   data-clear-endpoint="{{ url_for('ui.clear_replication_failures', bucket_name=bucket_name) }}">
+                <div class="card-header d-flex justify-content-between align-items-center py-2">
+                  <div class="d-flex align-items-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger me-2" viewBox="0 0 16 16">
+                      <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                    </svg>
+                    <span class="fw-semibold small">Failed Replications</span>
+                    <span class="badge bg-danger ms-2" id="replication-failure-count">0</span>
+                  </div>
+                  <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-primary btn-sm" id="retry-all-failures-btn" title="Retry All">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                        <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
+                        <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
+                      </svg>
+                      Retry All
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" id="clear-failures-btn" title="Clear All">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                      </svg>
+                      Clear
+                    </button>
+                  </div>
+                </div>
+                <div class="card-body p-0">
+                  <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0" style="table-layout: fixed;">
+                      <thead class="table-light">
+                        <tr>
+                          <th class="ps-3" style="width: 25%;">Object Key</th>
+                          <th style="width: 35%;">Error</th>
+                          <th style="width: 18%;">Last Attempt</th>
+                          <th class="text-center" style="width: 10%;">Attempts</th>
+                          <th class="text-end pe-3" style="width: 12%;">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody id="replication-failures-body">
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="px-3 py-2 border-top" id="replication-failures-pagination" style="display: none;">
+                    <button class="btn btn-link btn-sm p-0" id="show-more-failures">Show more...</button>
+                    <span class="text-muted small ms-2" id="failures-shown-count"></span>
+                  </div>
+                </div>
+              </div>
+
               <h6 class="text-muted text-uppercase small mb-3">Replication Target</h6>
               <div class="card border mb-4">
                 <div class="card-body">
@@ -1363,6 +1533,283 @@
       </div>
     </div>
     {% endif %}
+
+    {% if can_edit_policy %}
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-pane" role="tabpanel" aria-labelledby="lifecycle-tab" tabindex="0">
+      <div class="row g-4">
+        <div class="col-lg-8">
+          <div class="card shadow-sm" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+                  <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+                </svg>
+                <span class="fw-semibold">Lifecycle Rules</span>
+              </div>
+              <button class="btn btn-primary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#addLifecycleRuleModal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+                </svg>
+                Add Rule
+              </button>
+            </div>
+            <div class="card-body">
+              <p class="text-muted small mb-3">Lifecycle rules automatically delete objects or abort multipart uploads after a specified number of days.</p>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>ID</th>
+                      <th>Prefix</th>
+                      <th>Status</th>
+                      <th>Expiration</th>
+                      <th>Noncurrent</th>
+                      <th class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="lifecycle-rules-body">
+                    <tr>
+                      <td colspan="6" class="text-center text-muted py-4">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        Loading...
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="card shadow-sm mt-4" id="lifecycle-history-card"
+               data-history-endpoint="{{ url_for('ui.get_lifecycle_history', bucket_name=bucket_name) }}">
+            <div class="card-header d-flex align-items-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
+                <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
+                <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
+              </svg>
+              <span class="fw-semibold">Execution History</span>
+            </div>
+            <div class="card-body">
+              <p class="text-muted small mb-3">Lifecycle rules are evaluated automatically (default: every hour). Recent executions are shown below.</p>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Executed</th>
+                      <th class="text-center">Deleted</th>
+                      <th class="text-center">Versions</th>
+                      <th class="text-center">Aborted</th>
+                      <th class="text-center">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="lifecycle-history-body">
+                    <tr>
+                      <td colspan="5" class="text-center text-muted py-4">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        Loading...
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="mt-2" id="lifecycle-history-pagination" style="display: none;">
+                <button class="btn btn-link btn-sm p-0" id="show-more-history">Show more...</button>
+                <span class="text-muted small ms-2" id="history-shown-count"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0 mb-3">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                What are Lifecycle Rules?
+              </h6>
+              <p class="small text-muted mb-3">Lifecycle rules automate object management by scheduling actions based on object age. This helps reduce storage costs and manage data retention automatically.</p>
+              <div class="alert alert-info small py-2 px-3 mb-3">
+                <strong>Tip:</strong> Use lifecycle rules to automatically clean up temporary files, logs, or expired content.
+              </div>
+            </div>
+          </div>
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="small fw-semibold mb-3">Available Actions</h6>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-danger bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                    <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Expiration</div>
+                  <div class="text-muted small">Delete current version objects after N days from creation</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-warning bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+                    <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
+                    <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
+                    <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 9V3.5a.5.5 0 0 1 .5-.5z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Noncurrent Expiration</div>
+                  <div class="text-muted small">Delete old versions N days after becoming noncurrent (requires versioning)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start">
+                <div class="bg-secondary bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
+                    <path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Abort Multipart</div>
+                  <div class="text-muted small">Clean up incomplete multipart uploads after N days</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-pane fade {{ 'show active' if active_tab == 'cors' else '' }}" id="cors-pane" role="tabpanel" aria-labelledby="cors-tab" tabindex="0">
+      <div class="row g-4">
+        <div class="col-lg-8">
+          <div class="card shadow-sm" id="cors-rules-card" data-cors-url="{{ cors_url }}">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
+                </svg>
+                <span class="fw-semibold">CORS Configuration</span>
+              </div>
+              <button class="btn btn-primary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#addCorsRuleModal">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+                </svg>
+                Add Rule
+              </button>
+            </div>
+            <div class="card-body">
+              <p class="text-muted small mb-3">CORS rules define which external websites can access your bucket. Required for web apps making direct browser requests.</p>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Origins</th>
+                      <th>Methods</th>
+                      <th>Headers</th>
+                      <th>Max Age</th>
+                      <th class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cors-rules-body">
+                    <tr>
+                      <td colspan="5" class="text-center text-muted py-4">
+                        <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+                        Loading...
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card bg-body-tertiary border-0 mb-3">
+            <div class="card-body">
+              <h6 class="card-title d-flex align-items-center mb-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                What is CORS?
+              </h6>
+              <p class="small text-muted mb-3">CORS (Cross-Origin Resource Sharing) is a browser security feature that controls which websites can access your bucket data via JavaScript. Without CORS rules, browsers block cross-origin requests.</p>
+              <div class="alert alert-warning small py-2 px-3 mb-0">
+                <strong>When needed:</strong> Configure CORS if your web app fetches files directly from this bucket (e.g., loading images, JSON, or downloading files via JavaScript).
+              </div>
+            </div>
+          </div>
+          <div class="card bg-body-tertiary border-0 mb-3">
+            <div class="card-body">
+              <h6 class="small fw-semibold mb-3">Configuration Fields</h6>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-primary bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                    <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Allowed Origins</div>
+                  <div class="text-muted small">Domains that can make requests (e.g., <code>https://myapp.com</code> or <code>*</code> for all)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-success bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success" viewBox="0 0 16 16">
+                    <path d="M14.5 3a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h13zm-13-1A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 14.5 2h-13z"/>
+                    <path d="M3 5.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zM3 8a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9A.5.5 0 0 1 3 8zm0 2.5a.5.5 0 0 1 .5-.5h6a.5.5 0 0 1 0 1h-6a.5.5 0 0 1-.5-.5z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Allowed Methods</div>
+                  <div class="text-muted small">HTTP methods permitted (GET, PUT, POST, DELETE, HEAD)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start mb-3">
+                <div class="bg-info bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-info" viewBox="0 0 16 16">
+                    <path d="M4 11a1 1 0 1 1 2 0v1a1 1 0 1 1-2 0v-1zm6-4a1 1 0 1 1 2 0v5a1 1 0 1 1-2 0V7zM7 9a1 1 0 0 1 2 0v3a1 1 0 1 1-2 0V9z"/>
+                    <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+                    <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Allowed Headers</div>
+                  <div class="text-muted small">Request headers the browser may send (e.g., <code>Content-Type</code>, <code>Authorization</code>)</div>
+                </div>
+              </div>
+              <div class="d-flex align-items-start">
+                <div class="bg-secondary bg-opacity-10 rounded p-2 me-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-secondary" viewBox="0 0 16 16">
+                    <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+                    <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="fw-semibold small">Max Age (seconds)</div>
+                  <div class="text-muted small">How long browsers cache preflight responses (default: 0)</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card bg-body-tertiary border-0">
+            <div class="card-body">
+              <h6 class="small fw-semibold mb-2">Quick Examples</h6>
+              <div class="small text-muted">
+                <p class="mb-2"><strong>Allow all origins:</strong></p>
+                <code class="d-block bg-body rounded p-2 mb-2">Origins: *<br>Methods: GET, HEAD</code>
+                <p class="mb-2"><strong>Specific domain:</strong></p>
+                <code class="d-block bg-body rounded p-2">Origins: https://myapp.com<br>Methods: GET, PUT, DELETE</code>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 
@@ -1474,6 +1921,27 @@
             <div class="col-12">
               <div class="upload-progress-stack" data-upload-progress></div>
             </div>
+            <div class="col-12 d-none" id="uploadQueueContainer">
+              <div class="border rounded p-2" style="max-height: 150px; overflow-y: auto;">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <span class="small fw-medium text-muted">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v13.5a.5.5 0 0 1-.777.416L8 13.101l-5.223 2.815A.5.5 0 0 1 2 15.5V2zm2-1a1 1 0 0 0-1 1v12.566l4.723-2.482a.5.5 0 0 1 .554 0L13 14.566V2a1 1 0 0 0-1-1H4z"/>
+                    </svg>
+                    Queued files
+                  </span>
+                  <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-secondary-subtle text-secondary" id="uploadQueueCount">0</span>
+                    <button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" id="clearUploadQueueBtn" title="Clear queue">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <ul class="list-unstyled mb-0 small" id="uploadQueueList"></ul>
+              </div>
+            </div>
             <div class="col-12 d-none" id="bulkUploadProgress">
               <div class="alert alert-info small mb-0">
                 <div class="d-flex justify-content-between align-items-center mb-2">
@@ -1516,6 +1984,26 @@
         </div>
       </form>
     </div>
+  </div>
+</div>
+
+<div id="floatingUploadProgress" class="floating-upload-progress d-none">
+  <div class="floating-upload-content">
+    <div class="d-flex align-items-center justify-content-between mb-2">
+      <div class="d-flex align-items-center">
+        <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
+        <span class="fw-semibold" id="floatingUploadTitle">Uploading files...</span>
+      </div>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="floatingUploadExpand" title="Show upload modal">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+          <path fill-rule="evenodd" d="M5.828 10.172a.5.5 0 0 0-.707 0l-4.096 4.096V11.5a.5.5 0 0 0-1 0v3.975a.5.5 0 0 0 .5.5H4.5a.5.5 0 0 0 0-1H1.732l4.096-4.096a.5.5 0 0 0 0-.707zm4.344 0a.5.5 0 0 1 .707 0l4.096 4.096V11.5a.5.5 0 1 1 1 0v3.975a.5.5 0 0 1-.5.5H11.5a.5.5 0 0 1 0-1h2.768l-4.096-4.096a.5.5 0 0 1 0-.707zm0-4.344a.5.5 0 0 0 .707 0l4.096-4.096V4.5a.5.5 0 1 0 1 0V.525a.5.5 0 0 0-.5-.5H11.5a.5.5 0 0 0 0 1h2.768l-4.096 4.096a.5.5 0 0 0 0 .707zm-4.344 0a.5.5 0 0 1-.707 0L1.025 1.732V4.5a.5.5 0 0 1-1 0V.525a.5.5 0 0 1 .5-.5H4.5a.5.5 0 0 1 0 1H1.732l4.096 4.096a.5.5 0 0 1 0 .707z"/>
+        </svg>
+      </button>
+    </div>
+    <div class="progress mb-1" style="height: 6px;">
+      <div class="progress-bar bg-primary" id="floatingUploadProgressBar" role="progressbar" style="width: 0%;"></div>
+    </div>
+    <div class="text-muted small" id="floatingUploadStatus">Preparing...</div>
   </div>
 </div>
 
@@ -1737,6 +2225,46 @@
   </div>
 </div>
 
+<div class="modal fade" id="suspendVersioningModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+          </svg>
+          Suspend Versioning
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+          </svg>
+          <div>
+            <strong>Important:</strong> Suspending versioning will stop creating new versions for uploaded objects, but <strong>existing versioned objects will remain stored</strong> and continue to consume storage space.
+          </div>
+        </div>
+        <p class="text-muted small mb-0">To permanently remove old versions, you must re-enable versioning and manually delete them, or configure a lifecycle rule to expire noncurrent versions.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <form method="POST" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}" class="d-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="state" value="suspend" />
+          <button type="submit" class="btn btn-warning">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+              <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+            </svg>
+            Suspend Versioning
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="disableReplicationModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
@@ -1780,31 +2308,259 @@
     </div>
   </div>
 </div>
+
+<div class="modal fade" id="clearFailuresModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+          </svg>
+          Clear All Failures
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+          </svg>
+          <div>
+            <strong>Are you sure?</strong><br>
+            <span class="small">This will remove all failure records from the list.</span>
+          </div>
+        </div>
+        <p class="text-muted small mb-0">Failed objects will not be retried unless they fail again during replication.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning" id="confirmClearFailuresBtn">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+          </svg>
+          Clear All
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="addLifecycleRuleModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+          </svg>
+          Add Lifecycle Rule
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Rule ID</label>
+            <input type="text" class="form-control" id="lifecycleRuleId" placeholder="cleanup-old-files" required />
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Status</label>
+            <select class="form-select" id="lifecycleRuleStatus">
+              <option value="Enabled">Enabled</option>
+              <option value="Disabled">Disabled</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label fw-medium">Prefix Filter <span class="text-muted fw-normal">(optional)</span></label>
+            <input type="text" class="form-control font-monospace" id="lifecycleRulePrefix" placeholder="logs/" />
+            <div class="form-text">Only apply this rule to objects with keys starting with this prefix.</div>
+          </div>
+          <div class="col-12">
+            <hr class="my-2">
+            <h6 class="fw-semibold mb-3">Actions</h6>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label fw-medium">Expiration (days)</label>
+            <input type="number" class="form-control" id="lifecycleExpirationDays" min="1" placeholder="30" />
+            <div class="form-text">Delete objects after N days.</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label fw-medium">Noncurrent Expiration</label>
+            <input type="number" class="form-control" id="lifecycleNoncurrentDays" min="1" placeholder="90" />
+            <div class="form-text">Delete old versions after N days.</div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label fw-medium">Abort Incomplete MPU</label>
+            <input type="number" class="form-control" id="lifecycleAbortMpuDays" min="1" placeholder="7" />
+            <div class="form-text">Abort uploads after N days.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="addLifecycleRuleConfirm">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+          </svg>
+          Add Rule
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="addCorsRuleModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
+          </svg>
+          Add CORS Rule
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label fw-medium">Allowed Origins</label>
+            <textarea class="form-control font-monospace" id="corsAllowedOrigins" rows="3" placeholder="*&#10;https://example.com&#10;http://localhost:3000"></textarea>
+            <div class="form-text">One origin per line. Use <code>*</code> for all origins.</div>
+          </div>
+          <div class="col-12">
+            <label class="form-label fw-medium">Allowed Methods</label>
+            <div class="d-flex flex-wrap gap-3">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodGet" value="GET" checked>
+                <label class="form-check-label" for="corsMethodGet">GET</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodPut" value="PUT">
+                <label class="form-check-label" for="corsMethodPut">PUT</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodPost" value="POST">
+                <label class="form-check-label" for="corsMethodPost">POST</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodDelete" value="DELETE">
+                <label class="form-check-label" for="corsMethodDelete">DELETE</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="corsMethodHead" value="HEAD" checked>
+                <label class="form-check-label" for="corsMethodHead">HEAD</label>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Allowed Headers <span class="text-muted fw-normal">(optional)</span></label>
+            <textarea class="form-control font-monospace" id="corsAllowedHeaders" rows="2" placeholder="*&#10;Content-Type"></textarea>
+            <div class="form-text">One header per line.</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Expose Headers <span class="text-muted fw-normal">(optional)</span></label>
+            <textarea class="form-control font-monospace" id="corsExposeHeaders" rows="2" placeholder="ETag&#10;x-amz-meta-*"></textarea>
+            <div class="form-text">One header per line.</div>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-medium">Max Age (seconds) <span class="text-muted fw-normal">(optional)</span></label>
+            <input type="number" class="form-control" id="corsMaxAge" min="0" placeholder="3600" />
+            <div class="form-text">How long browsers cache preflight responses.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="addCorsRuleConfirm">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+          </svg>
+          Add Rule
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="copyMoveModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold" id="copyMoveModalTitle">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16" id="copyMoveModalIcon">
+            <path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/>
+          </svg>
+          <span id="copyMoveActionLabel">Copy</span> Object
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label fw-medium">Source</label>
+          <div class="p-2 bg-body-tertiary rounded font-monospace small" id="copyMoveSource"></div>
+        </div>
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label fw-medium">Destination Bucket</label>
+            <select class="form-select" id="copyMoveDestBucket">
+              <option value="">Loading buckets...</option>
+            </select>
+          </div>
+          <div class="col-12">
+            <label class="form-label fw-medium">Destination Key</label>
+            <input type="text" class="form-control font-monospace" id="copyMoveDestKey" placeholder="path/to/object.txt" required />
+            <div class="form-text">The full path for the object in the destination bucket.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="copyMoveConfirm">
+          <span id="copyMoveConfirmLabel">Copy</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/bucket-detail-utils.js') }}"></script>
+<script src="{{ url_for('static', filename='js/bucket-detail-upload.js') }}"></script>
+<script src="{{ url_for('static', filename='js/bucket-detail-operations.js') }}"></script>
 <script>
-  const formatBytes = (bytes) => {
-    if (!Number.isFinite(bytes)) return `${bytes} bytes`;
-    const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
-    let i = 0;
-    let size = bytes;
-    while (size >= 1024 && i < units.length - 1) {
-      size /= 1024;
-      i++;
-    }
-    return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  const { formatBytes, escapeHtml, fallbackCopy, setupJsonAutoIndent } = window.BucketDetailUtils || {
+    formatBytes: (bytes) => {
+      if (!Number.isFinite(bytes)) return `${bytes} bytes`;
+      const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+      let i = 0;
+      let size = bytes;
+      while (size >= 1024 && i < units.length - 1) {
+        size /= 1024;
+        i++;
+      }
+      return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+    },
+    escapeHtml: (value) => {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    },
+    fallbackCopy: () => false,
+    setupJsonAutoIndent: () => {}
   };
 
-  const escapeHtml = (value) => {
-    if (value === null || value === undefined) return '';
-    return String(value)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  };
+  setupJsonAutoIndent(document.getElementById('policyDocument'));
 
   const selectAllCheckbox = document.querySelector('[data-select-all]');
   const bulkDeleteButton = document.querySelector('[data-bulk-delete-trigger]');
@@ -1886,24 +2642,21 @@
   let isLoadingObjects = false;
   let hasMoreObjects = false;
   let currentFilterTerm = '';
-  let pageSize = 5000;  // Load large batches for virtual scrolling
-  let currentPrefix = '';  // Current folder prefix for navigation
-  let allObjects = [];  // All loaded object metadata (lightweight)
-  let urlTemplates = null;  // URL templates from API for constructing object URLs
+  let pageSize = 5000;
+  let currentPrefix = '';
+  let allObjects = [];
+  let urlTemplates = null;
 
-  // Helper to build URL from template by replacing KEY_PLACEHOLDER with encoded key
   const buildUrlFromTemplate = (template, key) => {
     if (!template) return '';
     return template.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/'));
   };
 
-  // Virtual scrolling state
-  const ROW_HEIGHT = 53;  // Height of each table row in pixels
-  const BUFFER_ROWS = 10;  // Extra rows to render above/below viewport
-  let visibleItems = [];  // Current items to display (filtered by folder/search)
-  let renderedRange = { start: 0, end: 0 };  // Currently rendered row indices
+  const ROW_HEIGHT = 53;
+  const BUFFER_ROWS = 10;
+  let visibleItems = [];
+  let renderedRange = { start: 0, end: 0 };
 
-  // Create a row element from object data (for virtual scrolling)
   const createObjectRow = (obj, displayKey = null) => {
     const tr = document.createElement('tr');
     tr.dataset.objectRow = '';
@@ -1918,7 +2671,10 @@
     tr.dataset.metadata = typeof obj.metadata === 'string' ? obj.metadata : JSON.stringify(obj.metadata || {});
     tr.dataset.versionsEndpoint = obj.versionsEndpoint || obj.versions_endpoint;
     tr.dataset.restoreTemplate = obj.restoreTemplate || obj.restore_template;
-    
+    tr.dataset.tagsUrl = obj.tagsUrl || obj.tags_url;
+    tr.dataset.copyUrl = obj.copyUrl || obj.copy_url;
+    tr.dataset.moveUrl = obj.moveUrl || obj.move_url;
+
     const keyToShow = displayKey || obj.key;
     const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleDateString();
 
@@ -1942,23 +2698,33 @@
             title="Download"
             aria-label="Download"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-download" viewBox="0 0 16 16" aria-hidden="true">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="#0d6efd" class="bi bi-download" viewBox="0 0 16 16" aria-hidden="true">
               <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z" />
               <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z" />
             </svg>
           </a>
-          <button
-            type="button"
-            class="btn btn-outline-danger btn-icon"
-            data-delete-object
-            title="Delete"
-            aria-label="Delete"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16" aria-hidden="true">
-              <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z" />
-              <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z" />
-            </svg>
-          </button>
+          <div class="dropdown d-inline-block">
+            <button class="btn btn-outline-secondary btn-icon dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="true" aria-expanded="false" title="More actions">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+              </svg>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end" style="position: fixed;">
+              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('copy', '${escapeHtml(obj.key)}')">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/></svg>
+                Copy
+              </button></li>
+              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('move', '${escapeHtml(obj.key)}')">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/></svg>
+                Move
+              </button></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><button class="dropdown-item text-danger" type="button" data-delete-object>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                Delete
+              </button></li>
+            </ul>
+          </div>
         </div>
       </td>
     `;
@@ -2026,16 +2792,12 @@
     }
   };
 
-  // ============== VIRTUAL SCROLLING SYSTEM ==============
-  
-  // Spacer elements for virtual scroll height
   let topSpacer = null;
   let bottomSpacer = null;
-  
+
   const initVirtualScrollElements = () => {
     if (!objectsTableBody) return;
-    
-    // Create spacer rows if they don't exist
+
     if (!topSpacer) {
       topSpacer = document.createElement('tr');
       topSpacer.id = 'virtual-top-spacer';
@@ -2047,38 +2809,40 @@
       bottomSpacer.innerHTML = '<td colspan="4" style="padding: 0; border: none;"></td>';
     }
   };
-  
-  // Compute which items should be visible based on current view
+
   const computeVisibleItems = () => {
     const items = [];
     const folders = new Set();
-    
+
     allObjects.forEach(obj => {
       if (!obj.key.startsWith(currentPrefix)) return;
-      
+
       const remainder = obj.key.slice(currentPrefix.length);
+
+      if (!remainder) return;
+
+      const isFolderMarker = obj.key.endsWith('/') && obj.size === 0;
       const slashIndex = remainder.indexOf('/');
-      
-      if (slashIndex === -1) {
-        // File in current folder - filter on the displayed filename (remainder)
+
+      if (slashIndex === -1 && !isFolderMarker) {
         if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
           items.push({ type: 'file', data: obj, displayKey: remainder });
         }
       } else {
-        // Folder
-        const folderName = remainder.slice(0, slashIndex);
+        const effectiveSlashIndex = isFolderMarker && slashIndex === remainder.length - 1
+          ? slashIndex
+          : (slashIndex === -1 ? remainder.length - 1 : slashIndex);
+        const folderName = remainder.slice(0, effectiveSlashIndex);
         const folderPath = currentPrefix + folderName + '/';
         if (!folders.has(folderPath)) {
           folders.add(folderPath);
-          // Filter on the displayed folder name only
           if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
             items.push({ type: 'folder', path: folderPath, displayKey: folderName });
           }
         }
       }
     });
-    
-    // Sort: folders first, then files
+
     items.sort((a, b) => {
       if (a.type === 'folder' && b.type === 'file') return -1;
       if (a.type === 'file' && b.type === 'folder') return 1;
@@ -2089,36 +2853,30 @@
     
     return items;
   };
-  
-  // Render only the visible rows based on scroll position
+
   const renderVirtualRows = () => {
     if (!objectsTableBody || !scrollContainer) return;
-    
+
     const containerHeight = scrollContainer.clientHeight;
     const scrollTop = scrollContainer.scrollTop;
-    
-    // Calculate visible range
+
     const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
     const endIndex = Math.min(visibleItems.length, Math.ceil((scrollTop + containerHeight) / ROW_HEIGHT) + BUFFER_ROWS);
-    
-    // Skip if range hasn't changed significantly
+
     if (startIndex === renderedRange.start && endIndex === renderedRange.end) return;
-    
+
     renderedRange = { start: startIndex, end: endIndex };
-    
-    // Clear and rebuild
+
     objectsTableBody.innerHTML = '';
-    
-    // Add top spacer
+
     initVirtualScrollElements();
     topSpacer.querySelector('td').style.height = `${startIndex * ROW_HEIGHT}px`;
     objectsTableBody.appendChild(topSpacer);
-    
-    // Render visible rows
+
     for (let i = startIndex; i < endIndex; i++) {
       const item = visibleItems[i];
       if (!item) continue;
-      
+
       let row;
       if (item.type === 'folder') {
         row = createFolderRow(item.path, item.displayKey);
@@ -2128,33 +2886,28 @@
       row.dataset.virtualIndex = i;
       objectsTableBody.appendChild(row);
     }
-    
-    // Add bottom spacer
+
     const remainingRows = visibleItems.length - endIndex;
     bottomSpacer.querySelector('td').style.height = `${remainingRows * ROW_HEIGHT}px`;
     objectsTableBody.appendChild(bottomSpacer);
-    
-    // Re-attach handlers to new rows
+
     attachRowHandlers();
   };
-  
-  // Debounced scroll handler for virtual scrolling
+
   let scrollTimeout = null;
   const handleVirtualScroll = () => {
     if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
     scrollTimeout = requestAnimationFrame(renderVirtualRows);
   };
-  
-  // Refresh the virtual list (after data changes or navigation)
+
   const refreshVirtualList = () => {
     visibleItems = computeVisibleItems();
-    renderedRange = { start: -1, end: -1 };  // Force re-render
-    
+    renderedRange = { start: -1, end: -1 };
+
     if (visibleItems.length === 0) {
       if (allObjects.length === 0 && !hasMoreObjects) {
         showEmptyState();
       } else {
-        // Empty folder
         objectsTableBody.innerHTML = `
           <tr>
             <td colspan="4" class="py-5">
@@ -2178,7 +2931,6 @@
     updateFolderViewStatus();
   };
   
-  // Update status bar
   const updateFolderViewStatus = () => {
     const folderViewStatusEl = document.getElementById('folder-view-status');
     if (!folderViewStatusEl) return;
@@ -2193,8 +2945,6 @@
     }
   };
 
-  // ============== DATA LOADING ==============
-
   const loadObjects = async (append = false) => {
     if (isLoadingObjects) return;
     isLoadingObjects = true;
@@ -2206,7 +2956,6 @@
       allObjects = [];
     }
 
-    // Show loading spinner when loading more
     if (append && loadMoreSpinner) {
       loadMoreSpinner.classList.remove('d-none');
     }
@@ -2256,7 +3005,10 @@
           deleteEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.delete, key) : '',
           metadata: '{}',
           versionsEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.versions, key) : '',
-          restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : ''
+          restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : '',
+          tagsUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.tags, key) : '',
+          copyUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.copy, key) : '',
+          moveUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.move, key) : ''
         });
       });
 
@@ -2275,7 +3027,6 @@
         updateLoadMoreButton();
       }
 
-      // Refresh virtual scroll view
       refreshVirtualList();
       renderBreadcrumb(currentPrefix);
 
@@ -2295,7 +3046,6 @@
   };
 
   const attachRowHandlers = () => {
-    // Attach handlers to object rows
     const objectRows = document.querySelectorAll('[data-object-row]');
     objectRows.forEach(row => {
       if (row.dataset.handlersAttached) return;
@@ -2321,14 +3071,12 @@
         toggleRowSelection(row, selectCheckbox.checked);
       });
       
-      // Restore selection state
       if (selectedRows.has(row.dataset.key)) {
         selectCheckbox.checked = true;
         row.classList.add('table-active');
       }
     });
     
-    // Attach handlers to folder rows
     const folderRows = document.querySelectorAll('.folder-row');
     folderRows.forEach(row => {
       if (row.dataset.handlersAttached) return;
@@ -2339,7 +3087,6 @@
       const checkbox = row.querySelector('[data-folder-select]');
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
-        // Select all objects in this folder
         const folderObjects = allObjects.filter(obj => obj.key.startsWith(folderPath));
         folderObjects.forEach(obj => {
           if (checkbox.checked) {
@@ -2366,31 +3113,26 @@
     updateBulkDeleteState();
   };
 
-  // Scroll container reference (needed for virtual scrolling)
   const scrollSentinel = document.getElementById('scroll-sentinel');
   const scrollContainer = document.querySelector('.objects-table-container');
   const loadMoreBtn = document.getElementById('load-more-btn');
-  
-  // Virtual scroll: listen to scroll events
+
   if (scrollContainer) {
     scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
   }
-  
-  // Load More button click handler (fallback)
+
   loadMoreBtn?.addEventListener('click', () => {
     if (hasMoreObjects && !isLoadingObjects) {
       loadObjects(true);
     }
   });
-  
-  // Show/hide Load More button based on hasMoreObjects
+
   function updateLoadMoreButton() {
     if (loadMoreBtn) {
       loadMoreBtn.classList.toggle('d-none', !hasMoreObjects);
     }
   }
-  
-  // Auto-load more when near bottom (for loading all data)
+
   if (scrollSentinel && scrollContainer) {
     const containerObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
@@ -2400,7 +3142,7 @@
       });
     }, {
       root: scrollContainer,
-      rootMargin: '500px',  // Load more earlier for smoother experience
+      rootMargin: '500px',
       threshold: 0
     });
     containerObserver.observe(scrollSentinel);
@@ -2419,7 +3161,6 @@
     viewportObserver.observe(scrollSentinel);
   }
 
-  // Page size selector (now controls batch size)
   const pageSizeSelect = document.getElementById('page-size-select');
   pageSizeSelect?.addEventListener('change', (e) => {
     pageSize = parseInt(e.target.value, 10);
@@ -2585,14 +3326,11 @@
     return tr;
   };
 
-  // Instant client-side folder navigation (no server round-trip!)
   const navigateToFolder = (prefix) => {
     currentPrefix = prefix;
-    
-    // Scroll to top when navigating
+
     if (scrollContainer) scrollContainer.scrollTop = 0;
-    
-    // Instant re-render from already-loaded data
+
     refreshVirtualList();
     renderBreadcrumb(prefix);
 
@@ -2626,9 +3364,9 @@
       if (keyCell && currentPrefix) {
         const displayName = obj.key.slice(currentPrefix.length);
         keyCell.textContent = displayName;
-        keyCell.closest('.object-key').title = obj.key; // Full path in tooltip
+        keyCell.closest('.object-key').title = obj.key;
       } else if (keyCell) {
-        keyCell.textContent = obj.key; // Reset to full key at root
+        keyCell.textContent = obj.key;
       }
     });
 
@@ -2666,6 +3404,25 @@
       window.alert(body || title);
       return;
     }
+    document.querySelectorAll('.modal.show').forEach(modal => {
+      const instance = bootstrap.Modal.getInstance(modal);
+      if (instance && modal.id !== 'messageModal') {
+        instance.hide();
+      }
+    });
+    const iconEl = document.getElementById('messageModalIcon');
+    if (iconEl) {
+      const iconPaths = {
+        success: '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>',
+        danger: '<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>',
+        warning: '<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>',
+        info: '<path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>'
+      };
+      const iconColors = { success: 'text-success', danger: 'text-danger', warning: 'text-warning', info: 'text-primary' };
+      iconEl.innerHTML = iconPaths[variant] || iconPaths.info;
+      iconEl.classList.remove('text-success', 'text-danger', 'text-warning', 'text-primary');
+      iconEl.classList.add(iconColors[variant] || 'text-primary');
+    }
     messageModalTitle.textContent = title;
     if (bodyHtml) {
       messageModalBody.innerHTML = bodyHtml;
@@ -2688,7 +3445,7 @@
     } else {
       messageModalAction.classList.add('d-none');
     }
-    messageModal.show();
+    setTimeout(() => messageModal.show(), 150);
   };
 
   messageModalAction?.addEventListener('click', () => {
@@ -2732,8 +3489,14 @@
     }
   };
 
+  const policyReadonlyHint = document.getElementById('policyReadonlyHint');
+
   const applyPolicyPreset = (preset) => {
     if (!policyTextarea || !policyMode) return;
+    const isPresetMode = preset === 'private' || preset === 'public';
+    if (policyReadonlyHint) {
+      policyReadonlyHint.classList.toggle('d-none', !isPresetMode);
+    }
     switch (preset) {
       case 'private':
         setPolicyTextareaState(true);
@@ -2741,7 +3504,7 @@
         policyMode.value = 'delete';
         break;
       case 'public':
-        setPolicyTextareaState(false);
+        setPolicyTextareaState(true);
         policyTextarea.value = publicPolicyTemplate || '';
         policyMode.value = 'upsert';
         break;
@@ -2789,21 +3552,23 @@
     }
   });
 
+  const bulkActionsWrapper = document.getElementById('bulk-actions-wrapper');
   const updateBulkDeleteState = () => {
     const selectedCount = selectedRows.size;
     if (bulkDeleteButton) {
       const shouldShow = Boolean(bulkDeleteEndpoint) && (selectedCount > 0 || bulkDeleting);
-      bulkDeleteButton.classList.toggle('d-none', !shouldShow);
       bulkDeleteButton.disabled = !bulkDeleteEndpoint || selectedCount === 0 || bulkDeleting;
       if (bulkDeleteLabel) {
-        bulkDeleteLabel.textContent = selectedCount ? `Delete selected (${selectedCount})` : 'Delete selected';
+        bulkDeleteLabel.textContent = selectedCount ? `Delete (${selectedCount})` : 'Delete';
+      }
+      if (bulkActionsWrapper) {
+        bulkActionsWrapper.classList.toggle('d-none', !shouldShow);
       }
     }
     if (bulkDeleteConfirm) {
       bulkDeleteConfirm.disabled = selectedCount === 0 || bulkDeleting;
     }
     if (selectAllCheckbox) {
-      // With virtual scrolling, count files in current folder from visibleItems
       const filesInView = visibleItems.filter(item => item.type === 'file');
       const total = filesInView.length;
       const visibleSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
@@ -3440,9 +4205,6 @@
   document.getElementById('object-search')?.addEventListener('input', (event) => {
     currentFilterTerm = event.target.value.toLowerCase();
     updateFilterWarning();
-    
-    // Use the virtual scrolling system for filtering - it properly handles
-    // both folder view and flat view, and works with large object counts
     refreshVirtualList();
   });
 
@@ -3538,10 +4300,89 @@
     const bulkUploadErrorList = document.getElementById('bulkUploadErrorList');
     const uploadKeyPrefix = document.getElementById('uploadKeyPrefix');
     const singleFileOptions = document.getElementById('singleFileOptions');
+    const floatingProgress = document.getElementById('floatingUploadProgress');
+    const floatingProgressBar = document.getElementById('floatingUploadProgressBar');
+    const floatingProgressStatus = document.getElementById('floatingUploadStatus');
+    const floatingProgressTitle = document.getElementById('floatingUploadTitle');
+    const floatingProgressExpand = document.getElementById('floatingUploadExpand');
+    const uploadQueueContainer = document.getElementById('uploadQueueContainer');
+    const uploadQueueList = document.getElementById('uploadQueueList');
+    const uploadQueueCount = document.getElementById('uploadQueueCount');
+    const clearUploadQueueBtn = document.getElementById('clearUploadQueueBtn');
     let isUploading = false;
+    let uploadQueue = [];
+    let uploadStats = {
+      totalFiles: 0,
+      completedFiles: 0,
+      totalBytes: 0,
+      uploadedBytes: 0,
+      currentFileBytes: 0,
+      currentFileLoaded: 0,
+      currentFileName: ''
+    };
+
+    window.addEventListener('beforeunload', (e) => {
+      if (isUploading) {
+        e.preventDefault();
+        e.returnValue = 'Upload in progress. Are you sure you want to leave?';
+        return e.returnValue;
+      }
+    });
+
+    const showFloatingProgress = () => {
+      if (floatingProgress) {
+        floatingProgress.classList.remove('d-none');
+      }
+    };
+
+    const hideFloatingProgress = () => {
+      if (floatingProgress) {
+        floatingProgress.classList.add('d-none');
+      }
+    };
+
+    const updateFloatingProgress = () => {
+      const { totalFiles, completedFiles, totalBytes, uploadedBytes, currentFileLoaded, currentFileName } = uploadStats;
+      const effectiveUploaded = uploadedBytes + currentFileLoaded;
+
+      if (floatingProgressBar && totalBytes > 0) {
+        const percent = Math.round((effectiveUploaded / totalBytes) * 100);
+        floatingProgressBar.style.width = `${percent}%`;
+      }
+      if (floatingProgressStatus) {
+        const bytesText = `${formatBytes(effectiveUploaded)} / ${formatBytes(totalBytes)}`;
+        const queuedCount = uploadQueue.length;
+        let statusText = `${completedFiles}/${totalFiles} files`;
+        if (queuedCount > 0) {
+          statusText += ` (+${queuedCount} queued)`;
+        }
+        statusText += ` • ${bytesText}`;
+        floatingProgressStatus.textContent = statusText;
+      }
+      if (floatingProgressTitle) {
+        const remaining = totalFiles - completedFiles;
+        const queuedCount = uploadQueue.length;
+        let title = `Uploading ${remaining} file${remaining !== 1 ? 's' : ''}`;
+        if (queuedCount > 0) {
+          title += ` (+${queuedCount} queued)`;
+        }
+        floatingProgressTitle.textContent = title + '...';
+      }
+    };
+
+    floatingProgressExpand?.addEventListener('click', () => {
+      if (uploadModal) {
+        uploadModal.show();
+      }
+    });
 
     const refreshUploadDropLabel = () => {
       if (!uploadDropZoneLabel) return;
+      if (isUploading) {
+        uploadDropZoneLabel.textContent = 'Drop files here to add to queue';
+        if (singleFileOptions) singleFileOptions.classList.add('d-none');
+        return;
+      }
       const files = uploadFileInput.files;
       if (!files || files.length === 0) {
         uploadDropZoneLabel.textContent = 'No file selected';
@@ -3557,6 +4398,16 @@
 
     const updateUploadBtnText = () => {
       if (!uploadBtnText) return;
+      if (isUploading) {
+        const files = uploadFileInput.files;
+        if (files && files.length > 0) {
+          uploadBtnText.textContent = `Add ${files.length} to queue`;
+          if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
+        } else {
+          uploadBtnText.textContent = 'Uploading...';
+        }
+        return;
+      }
       const files = uploadFileInput.files;
       if (!files || files.length <= 1) {
         uploadBtnText.textContent = 'Upload';
@@ -3573,42 +4424,385 @@
       if (bulkUploadErrorList) bulkUploadErrorList.innerHTML = '';
       if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
       if (uploadFileInput) uploadFileInput.disabled = false;
+      const progressStack = document.querySelector('[data-upload-progress]');
+      if (progressStack) progressStack.innerHTML = '';
+      if (uploadDropZone) {
+        uploadDropZone.classList.remove('upload-locked');
+        uploadDropZone.style.pointerEvents = '';
+      }
       isUploading = false;
+      hideFloatingProgress();
     };
 
-    const uploadSingleFile = async (file, keyPrefix = '', metadata = null) => {
-      const formData = new FormData();
-      formData.append('object', file);
+    const MULTIPART_THRESHOLD = 8 * 1024 * 1024;
+    const CHUNK_SIZE = 8 * 1024 * 1024;
+    const uploadProgressStack = document.querySelector('[data-upload-progress]');
+    const multipartInitUrl = uploadForm.dataset.multipartInitUrl;
+    const multipartPartTemplate = uploadForm.dataset.multipartPartTemplate;
+    const multipartCompleteTemplate = uploadForm.dataset.multipartCompleteTemplate;
+    const multipartAbortTemplate = uploadForm.dataset.multipartAbortTemplate;
+
+    const createProgressItem = (file) => {
+      const item = document.createElement('div');
+      item.className = 'upload-progress-item';
+      item.dataset.state = 'uploading';
+      item.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+          <div class="min-width-0 flex-grow-1">
+            <div class="file-name">${escapeHtml(file.name)}</div>
+            <div class="file-size">${formatBytes(file.size)}</div>
+          </div>
+          <div class="upload-status text-end ms-2">Preparing...</div>
+        </div>
+        <div class="progress-container">
+          <div class="progress">
+            <div class="progress-bar bg-primary" role="progressbar" style="width: 0%"></div>
+          </div>
+          <div class="progress-text">
+            <span class="progress-loaded">0 B</span>
+            <span class="progress-percent">0%</span>
+          </div>
+        </div>
+      `;
+      return item;
+    };
+
+    const updateProgressItem = (item, { loaded, total, status, state, error }) => {
+      if (state) item.dataset.state = state;
+      const statusEl = item.querySelector('.upload-status');
+      const progressBar = item.querySelector('.progress-bar');
+      const progressLoaded = item.querySelector('.progress-loaded');
+      const progressPercent = item.querySelector('.progress-percent');
+
+      if (status) {
+        statusEl.textContent = status;
+        statusEl.className = 'upload-status text-end ms-2';
+        if (state === 'success') statusEl.classList.add('success');
+        if (state === 'error') statusEl.classList.add('error');
+      }
+      if (typeof loaded === 'number' && typeof total === 'number' && total > 0) {
+        const percent = Math.round((loaded / total) * 100);
+        progressBar.style.width = `${percent}%`;
+        progressLoaded.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}`;
+        progressPercent.textContent = `${percent}%`;
+      }
+      if (error) {
+        const progressContainer = item.querySelector('.progress-container');
+        if (progressContainer) {
+          progressContainer.innerHTML = `<div class="text-danger small mt-1">${escapeHtml(error)}</div>`;
+        }
+      }
+    };
+
+    const uploadMultipart = async (file, objectKey, metadata, progressItem) => {
+      const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
+
+      updateProgressItem(progressItem, { status: 'Initiating...', loaded: 0, total: file.size });
+      const initResp = await fetch(multipartInitUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken || '' },
+        body: JSON.stringify({ object_key: objectKey, metadata })
+      });
+      if (!initResp.ok) {
+        const err = await initResp.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to initiate upload');
+      }
+      const { upload_id } = await initResp.json();
+
+      const partUrl = multipartPartTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
+      const completeUrl = multipartCompleteTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
+      const abortUrl = multipartAbortTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
+
+      const parts = [];
+      const totalParts = Math.ceil(file.size / CHUNK_SIZE);
+      let uploadedBytes = 0;
+
+      try {
+        for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+          const start = (partNumber - 1) * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
+
+          updateProgressItem(progressItem, {
+            status: `Part ${partNumber}/${totalParts}`,
+            loaded: uploadedBytes,
+            total: file.size
+          });
+          uploadStats.currentFileLoaded = uploadedBytes;
+          updateFloatingProgress();
+
+          const partResp = await fetch(`${partUrl}?partNumber=${partNumber}`, {
+            method: 'PUT',
+            headers: {
+              'X-CSRFToken': csrfToken || '',
+              'Content-Type': 'application/octet-stream'
+            },
+            body: chunk
+          });
+
+          if (!partResp.ok) {
+            const err = await partResp.json().catch(() => ({}));
+            throw new Error(err.error || `Part ${partNumber} failed`);
+          }
+
+          const partData = await partResp.json();
+          parts.push({ part_number: partNumber, etag: partData.etag });
+          uploadedBytes += chunk.size;
+
+          updateProgressItem(progressItem, {
+            loaded: uploadedBytes,
+            total: file.size
+          });
+          uploadStats.currentFileLoaded = uploadedBytes;
+          updateFloatingProgress();
+        }
+
+        updateProgressItem(progressItem, { status: 'Completing...', loaded: file.size, total: file.size });
+        const completeResp = await fetch(completeUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken || '' },
+          body: JSON.stringify({ parts })
+        });
+
+        if (!completeResp.ok) {
+          const err = await completeResp.json().catch(() => ({}));
+          throw new Error(err.error || 'Failed to complete upload');
+        }
+
+        return await completeResp.json();
+      } catch (err) {
+        try {
+          await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
+        } catch {}
+        throw err;
+      }
+    };
+
+    const uploadRegular = async (file, objectKey, metadata, progressItem) => {
+      return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        formData.append('object', file);
+        formData.append('object_key', objectKey);
+        if (metadata) formData.append('metadata', JSON.stringify(metadata));
+        const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
+        if (csrfToken) formData.append('csrf_token', csrfToken);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', uploadForm.action, true);
+        xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            updateProgressItem(progressItem, {
+              status: 'Uploading...',
+              loaded: e.loaded,
+              total: e.total
+            });
+            uploadStats.currentFileLoaded = e.loaded;
+            updateFloatingProgress();
+          }
+        });
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              if (data.status === 'error') {
+                reject(new Error(data.message || 'Upload failed'));
+              } else {
+                resolve(data);
+              }
+            } catch {
+              resolve({});
+            }
+          } else {
+            try {
+              const data = JSON.parse(xhr.responseText);
+              reject(new Error(data.message || `Upload failed (${xhr.status})`));
+            } catch {
+              reject(new Error(`Upload failed (${xhr.status})`));
+            }
+          }
+        });
+
+        xhr.addEventListener('error', () => reject(new Error('Network error')));
+        xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+
+        xhr.send(formData);
+      });
+    };
+
+    const uploadSingleFile = async (file, keyPrefix = '', metadata = null, progressItem = null) => {
       const objectKey = keyPrefix ? `${keyPrefix}${file.name}` : file.name;
-      formData.append('object_key', objectKey);
-      if (metadata) {
-        formData.append('metadata', JSON.stringify(metadata));
+      const shouldUseMultipart = file.size >= MULTIPART_THRESHOLD && multipartInitUrl;
+
+      if (!progressItem && uploadProgressStack) {
+        progressItem = createProgressItem(file);
+        uploadProgressStack.appendChild(progressItem);
       }
 
-      const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
-      if (csrfToken) {
-        formData.append('csrf_token', csrfToken);
-      }
-      
-      const response = await fetch(uploadForm.action, {
-        method: 'POST',
-        body: formData,
-        headers: {
-          'X-Requested-With': 'XMLHttpRequest'
+      try {
+        let result;
+        if (shouldUseMultipart) {
+          updateProgressItem(progressItem, { status: 'Multipart upload...', loaded: 0, total: file.size });
+          result = await uploadMultipart(file, objectKey, metadata, progressItem);
+        } else {
+          updateProgressItem(progressItem, { status: 'Uploading...', loaded: 0, total: file.size });
+          result = await uploadRegular(file, objectKey, metadata, progressItem);
         }
-      });
-      
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.status === 'error') {
-        throw new Error(data.message || 'Upload failed');
+        updateProgressItem(progressItem, { state: 'success', status: 'Complete', loaded: file.size, total: file.size });
+        return result;
+      } catch (err) {
+        updateProgressItem(progressItem, { state: 'error', status: 'Failed', error: err.message });
+        throw err;
       }
-      return data;
+    };
+
+    const setUploadLockState = (locked) => {
+      if (uploadDropZone) {
+        uploadDropZone.classList.toggle('upload-locked', locked);
+      }
+    };
+
+    let uploadSuccessFiles = [];
+    let uploadErrorFiles = [];
+    let isProcessingQueue = false;
+
+    const updateQueueListDisplay = () => {
+      if (!uploadQueueList || !uploadQueueContainer || !uploadQueueCount) return;
+      if (uploadQueue.length === 0) {
+        uploadQueueContainer.classList.add('d-none');
+        return;
+      }
+      uploadQueueContainer.classList.remove('d-none');
+      uploadQueueCount.textContent = uploadQueue.length;
+      uploadQueueList.innerHTML = uploadQueue.map((item, idx) => `
+        <li class="d-flex align-items-center justify-content-between py-1 ${idx > 0 ? 'border-top' : ''}">
+          <span class="text-truncate me-2" style="max-width: 300px;" title="${escapeHtml(item.file.name)}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-muted me-1" viewBox="0 0 16 16">
+              <path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>
+            </svg>
+            ${escapeHtml(item.file.name)}
+          </span>
+          <span class="text-muted">${formatBytes(item.file.size)}</span>
+        </li>
+      `).join('');
+    };
+
+    const addFilesToQueue = (files, keyPrefix, metadata) => {
+      for (const file of files) {
+        uploadQueue.push({ file, keyPrefix, metadata });
+        uploadStats.totalFiles++;
+        uploadStats.totalBytes += file.size;
+      }
+      updateFloatingProgress();
+      updateQueueListDisplay();
+    };
+
+    const clearUploadQueue = () => {
+      const clearedCount = uploadQueue.length;
+      if (clearedCount === 0) return;
+      for (const item of uploadQueue) {
+        uploadStats.totalFiles--;
+        uploadStats.totalBytes -= item.file.size;
+      }
+      uploadQueue.length = 0;
+      updateFloatingProgress();
+      updateQueueListDisplay();
+    };
+
+    if (clearUploadQueueBtn) {
+      clearUploadQueueBtn.addEventListener('click', clearUploadQueue);
+    }
+
+    const processUploadQueue = async () => {
+      if (isProcessingQueue) return;
+      isProcessingQueue = true;
+
+      while (uploadQueue.length > 0) {
+        const item = uploadQueue.shift();
+        const { file, keyPrefix, metadata } = item;
+        updateQueueListDisplay();
+
+        uploadStats.currentFileName = file.name;
+        uploadStats.currentFileBytes = file.size;
+        uploadStats.currentFileLoaded = 0;
+
+        if (bulkUploadCounter) {
+          const queuedCount = uploadQueue.length;
+          let counterText = `${uploadStats.completedFiles + 1}/${uploadStats.totalFiles}`;
+          if (queuedCount > 0) {
+            counterText += ` (+${queuedCount} queued)`;
+          }
+          bulkUploadCounter.textContent = counterText;
+        }
+        if (bulkUploadCurrentFile) {
+          bulkUploadCurrentFile.textContent = `Uploading: ${file.name}`;
+        }
+        if (bulkUploadProgressBar) {
+          const percent = Math.round(((uploadStats.completedFiles + 1) / uploadStats.totalFiles) * 100);
+          bulkUploadProgressBar.style.width = `${percent}%`;
+        }
+        updateFloatingProgress();
+
+        try {
+          await uploadSingleFile(file, keyPrefix, metadata);
+          uploadSuccessFiles.push(file.name);
+        } catch (error) {
+          uploadErrorFiles.push({ name: file.name, error: error.message || 'Unknown error' });
+        }
+
+        uploadStats.uploadedBytes += file.size;
+        uploadStats.completedFiles++;
+        uploadStats.currentFileLoaded = 0;
+        updateFloatingProgress();
+      }
+
+      isProcessingQueue = false;
+
+      if (uploadQueue.length === 0) {
+        finishUploadSession();
+      }
+    };
+
+    const finishUploadSession = () => {
+      if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
+      if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
+
+      if (bulkUploadSuccessCount) bulkUploadSuccessCount.textContent = uploadSuccessFiles.length;
+      if (uploadSuccessFiles.length === 0 && bulkUploadSuccessAlert) {
+        bulkUploadSuccessAlert.classList.add('d-none');
+      }
+
+      if (uploadErrorFiles.length > 0) {
+        if (bulkUploadErrorCount) bulkUploadErrorCount.textContent = uploadErrorFiles.length;
+        if (bulkUploadErrorAlert) bulkUploadErrorAlert.classList.remove('d-none');
+        if (bulkUploadErrorList) {
+          bulkUploadErrorList.innerHTML = uploadErrorFiles
+            .map(f => `<li><strong>${escapeHtml(f.name)}</strong>: ${escapeHtml(f.error)}</li>`)
+            .join('');
+        }
+      }
+
+      isUploading = false;
+      setUploadLockState(false);
+      refreshUploadDropLabel();
+      updateUploadBtnText();
+      updateQueueListDisplay();
+
+      if (uploadSuccessFiles.length > 0) {
+        if (uploadBtnText) uploadBtnText.textContent = 'Refreshing...';
+        const objectsTabUrl = window.location.pathname + '?tab=objects';
+        window.setTimeout(() => window.location.href = objectsTabUrl, 800);
+      } else {
+        if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
+        if (uploadFileInput) uploadFileInput.disabled = false;
+      }
     };
 
     const performBulkUpload = async (files) => {
-      if (isUploading || !files || files.length === 0) return;
-      
-      isUploading = true;
+      if (!files || files.length === 0) return;
+
       const keyPrefix = (uploadKeyPrefix?.value || '').trim();
       const metadataRaw = uploadForm.querySelector('textarea[name="metadata"]')?.value?.trim();
       let metadata = null;
@@ -3617,78 +4811,54 @@
           metadata = JSON.parse(metadataRaw);
         } catch {
           showMessage({ title: 'Invalid metadata', body: 'Metadata must be valid JSON.', variant: 'danger' });
-          resetUploadUI();
           return;
         }
       }
 
-      if (bulkUploadProgress) bulkUploadProgress.classList.remove('d-none');
-      if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
-      if (uploadSubmitBtn) uploadSubmitBtn.disabled = true;
-      if (uploadFileInput) uploadFileInput.disabled = true;
+      if (!isUploading) {
+        isUploading = true;
+        uploadSuccessFiles = [];
+        uploadErrorFiles = [];
+        uploadStats = {
+          totalFiles: 0,
+          completedFiles: 0,
+          totalBytes: 0,
+          uploadedBytes: 0,
+          currentFileBytes: 0,
+          currentFileLoaded: 0,
+          currentFileName: ''
+        };
 
-      const successFiles = [];
-      const errorFiles = [];
-      const total = files.length;
-
-      for (let i = 0; i < total; i++) {
-        const file = files[i];
-        const current = i + 1;
-
-        if (bulkUploadCounter) bulkUploadCounter.textContent = `${current}/${total}`;
-        if (bulkUploadCurrentFile) bulkUploadCurrentFile.textContent = `Uploading: ${file.name}`;
-        if (bulkUploadProgressBar) {
-          const percent = Math.round((current / total) * 100);
-          bulkUploadProgressBar.style.width = `${percent}%`;
-        }
-
-        try {
-          await uploadSingleFile(file, keyPrefix, metadata);
-          successFiles.push(file.name);
-        } catch (error) {
-          errorFiles.push({ name: file.name, error: error.message || 'Unknown error' });
-        }
+        if (bulkUploadProgress) bulkUploadProgress.classList.remove('d-none');
+        if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
+        if (uploadSubmitBtn) uploadSubmitBtn.disabled = true;
+        refreshUploadDropLabel();
+        updateUploadBtnText();
       }
 
-      if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
-      if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
-      
-      if (bulkUploadSuccessCount) bulkUploadSuccessCount.textContent = successFiles.length;
-      if (successFiles.length === 0 && bulkUploadSuccessAlert) {
-        bulkUploadSuccessAlert.classList.add('d-none');
+      const fileCount = files.length;
+      addFilesToQueue(Array.from(files), keyPrefix, metadata);
+
+      if (uploadFileInput) {
+        uploadFileInput.value = '';
       }
-      
-      if (errorFiles.length > 0) {
-        if (bulkUploadErrorCount) bulkUploadErrorCount.textContent = errorFiles.length;
-        if (bulkUploadErrorAlert) bulkUploadErrorAlert.classList.remove('d-none');
-        if (bulkUploadErrorList) {
-          bulkUploadErrorList.innerHTML = errorFiles
-            .map(f => `<li><strong>${escapeHtml(f.name)}</strong>: ${escapeHtml(f.error)}</li>`)
-            .join('');
-        }
-      }
+      refreshUploadDropLabel();
+      updateUploadBtnText();
 
-      isUploading = false;
-
-      if (successFiles.length > 0) {
-
-        if (uploadBtnText) uploadBtnText.textContent = 'Refreshing...';
-
-        window.setTimeout(() => window.location.reload(), 800);
-      } else {
-
-        if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
-        if (uploadFileInput) uploadFileInput.disabled = false;
-      }
+      processUploadQueue();
     };
 
     refreshUploadDropLabel();
     uploadFileInput.addEventListener('change', () => {
       refreshUploadDropLabel();
       updateUploadBtnText();
-      resetUploadUI();
+      if (!isUploading) {
+        resetUploadUI();
+      }
     });
-    uploadDropZone?.addEventListener('click', () => uploadFileInput?.click());
+    uploadDropZone?.addEventListener('click', () => {
+      uploadFileInput?.click();
+    });
 
     uploadForm.addEventListener('submit', async (event) => {
       const files = uploadFileInput.files;
@@ -3733,11 +4903,25 @@
       }
     });
 
+    uploadModalEl?.addEventListener('hide.bs.modal', (event) => {
+      if (isUploading) {
+        showFloatingProgress();
+      }
+    });
+
     uploadModalEl?.addEventListener('hidden.bs.modal', () => {
-      resetUploadUI();
-      uploadFileInput.value = '';
-      refreshUploadDropLabel();
-      updateUploadBtnText();
+      if (!isUploading) {
+        resetUploadUI();
+        uploadFileInput.value = '';
+        refreshUploadDropLabel();
+        updateUploadBtnText();
+      }
+    });
+
+    uploadModalEl?.addEventListener('show.bs.modal', () => {
+      if (isUploading) {
+        hideFloatingProgress();
+      }
     });
 
     const preventDefaults = (event) => {
@@ -3764,13 +4948,19 @@
         });
       });
       target.addEventListener('drop', (event) => {
-        if (!event.dataTransfer?.files?.length || !uploadFileInput) {
+        if (!event.dataTransfer?.files?.length) {
           return;
         }
-        uploadFileInput.files = event.dataTransfer.files;
-        uploadFileInput.dispatchEvent(new Event('change', { bubbles: true }));
-        if (autoOpenModal && uploadModal) {
-          uploadModal.show();
+        if (isUploading) {
+          performBulkUpload(event.dataTransfer.files);
+        } else {
+          if (uploadFileInput) {
+            uploadFileInput.files = event.dataTransfer.files;
+            uploadFileInput.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          if (autoOpenModal && uploadModal) {
+            uploadModal.show();
+          }
         }
       });
     };
@@ -3790,22 +4980,14 @@
   const updateBulkDownloadState = () => {
     if (!bulkDownloadButton) return;
     const selectedCount = document.querySelectorAll('[data-object-select]:checked').length;
-    if (selectedCount > 0) {
-      bulkDownloadButton.classList.remove('d-none');
-      bulkDownloadButton.disabled = false;
-    } else {
-      bulkDownloadButton.classList.add('d-none');
-      bulkDownloadButton.disabled = true;
-    }
+    bulkDownloadButton.disabled = selectedCount === 0;
   };
 
   selectAllCheckbox?.addEventListener('change', (event) => {
     const shouldSelect = Boolean(event.target?.checked);
 
-    // Get all file items in the current view (works with virtual scrolling)
     const filesInView = visibleItems.filter(item => item.type === 'file');
 
-    // Update selectedRows directly using object keys (not DOM elements)
     filesInView.forEach(item => {
       if (shouldSelect) {
         selectedRows.set(item.data.key, item.data);
@@ -3814,12 +4996,10 @@
       }
     });
 
-    // Update folder checkboxes in DOM (folders are always rendered)
     document.querySelectorAll('[data-folder-select]').forEach(cb => {
       cb.checked = shouldSelect;
     });
 
-    // Update any currently rendered object checkboxes
     document.querySelectorAll('[data-object-row]').forEach((row) => {
       const checkbox = row.querySelector('[data-object-select]');
       if (checkbox) {
@@ -3833,7 +5013,6 @@
 
   bulkDownloadButton?.addEventListener('click', async () => {
     if (!bulkDownloadEndpoint) return;
-    // Use selectedRows which tracks all selected objects (not just rendered ones)
     const selected = Array.from(selectedRows.keys());
     if (selected.length === 0) return;
 
@@ -3973,7 +5152,170 @@
       if (orphanedEl) orphanedEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
       if (bytesEl) bytesEl.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
       loadReplicationStats();
+      loadReplicationFailures();
     });
+
+    const failuresCard = document.getElementById('replication-failures-card');
+    const failuresBody = document.getElementById('replication-failures-body');
+    const failureCountBadge = document.getElementById('replication-failure-count');
+    const retryAllBtn = document.getElementById('retry-all-failures-btn');
+    const clearFailuresBtn = document.getElementById('clear-failures-btn');
+    const showMoreFailuresBtn = document.getElementById('show-more-failures');
+    const failuresPagination = document.getElementById('replication-failures-pagination');
+    const failuresShownCount = document.getElementById('failures-shown-count');
+    const clearFailuresModal = document.getElementById('clearFailuresModal');
+    const confirmClearFailuresBtn = document.getElementById('confirmClearFailuresBtn');
+    const clearFailuresModalInstance = clearFailuresModal ? new bootstrap.Modal(clearFailuresModal) : null;
+
+    let failuresExpanded = false;
+    let currentFailures = [];
+
+    const loadReplicationFailures = async () => {
+      if (!failuresCard) return;
+
+      const endpoint = failuresCard.dataset.failuresEndpoint;
+      const limit = failuresExpanded ? 50 : 5;
+
+      try {
+        const resp = await fetch(`${endpoint}?limit=${limit}`);
+        if (!resp.ok) throw new Error('Failed to fetch failures');
+        const data = await resp.json();
+
+        currentFailures = data.failures;
+        const total = data.total;
+
+        if (total > 0) {
+          failuresCard.style.display = '';
+          failureCountBadge.textContent = total;
+          renderFailures(currentFailures);
+
+          if (total > 5 && !failuresExpanded) {
+            failuresPagination.style.display = '';
+            failuresShownCount.textContent = `Showing ${Math.min(5, total)} of ${total}`;
+          } else {
+            failuresPagination.style.display = 'none';
+          }
+        } else {
+          failuresCard.style.display = 'none';
+        }
+      } catch (err) {
+        console.error('Failed to load replication failures:', err);
+      }
+    };
+
+    const renderFailures = (failures) => {
+      if (!failuresBody) return;
+      failuresBody.innerHTML = failures.map(f => `
+        <tr>
+          <td class="ps-3" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.object_key)}">
+            <code class="small">${escapeHtml(f.object_key)}</code>
+          </td>
+          <td class="small text-muted" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.error_message)}">
+            ${escapeHtml(f.error_message)}
+          </td>
+          <td class="small text-muted">${new Date(f.timestamp * 1000).toLocaleString()}</td>
+          <td class="text-center"><span class="badge bg-secondary">${f.failure_count}</span></td>
+          <td class="text-end pe-3">
+            <button class="btn btn-sm btn-outline-primary py-0 px-2" onclick="retryFailure(this, '${escapeHtml(f.object_key)}')" title="Retry">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
+                <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
+              </svg>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="dismissFailure(this, '${escapeHtml(f.object_key)}')" title="Dismiss">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+              </svg>
+            </button>
+          </td>
+        </tr>
+      `).join('');
+    };
+
+    window.retryFailure = async (btn, objectKey) => {
+      const originalHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" style="width: 12px; height: 12px;"></span>';
+      const endpoint = failuresCard.dataset.retryEndpoint.replace('__KEY__', encodeURIComponent(objectKey));
+      try {
+        const resp = await fetch(endpoint, { method: 'POST' });
+        if (resp.ok) {
+          loadReplicationFailures();
+        }
+      } catch (err) {
+        console.error('Failed to retry:', err);
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+      }
+    };
+
+    window.dismissFailure = async (btn, objectKey) => {
+      const originalHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" style="width: 12px; height: 12px;"></span>';
+      const endpoint = failuresCard.dataset.dismissEndpoint.replace('__KEY__', encodeURIComponent(objectKey));
+      try {
+        const resp = await fetch(endpoint, { method: 'DELETE' });
+        if (resp.ok) {
+          loadReplicationFailures();
+        }
+      } catch (err) {
+        console.error('Failed to dismiss:', err);
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+      }
+    };
+
+    retryAllBtn?.addEventListener('click', async () => {
+      const btn = retryAllBtn;
+      const originalHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Retrying...';
+      const endpoint = failuresCard.dataset.retryAllEndpoint;
+      try {
+        const resp = await fetch(endpoint, { method: 'POST' });
+        if (resp.ok) {
+          loadReplicationFailures();
+        }
+      } catch (err) {
+        console.error('Failed to retry all:', err);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+      }
+    });
+
+    clearFailuresBtn?.addEventListener('click', () => {
+      clearFailuresModalInstance?.show();
+    });
+
+    confirmClearFailuresBtn?.addEventListener('click', async () => {
+      const btn = confirmClearFailuresBtn;
+      const originalHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Clearing...';
+      const endpoint = failuresCard.dataset.clearEndpoint;
+      try {
+        const resp = await fetch(endpoint, { method: 'DELETE' });
+        if (resp.ok) {
+          clearFailuresModalInstance?.hide();
+          loadReplicationFailures();
+        }
+      } catch (err) {
+        console.error('Failed to clear failures:', err);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+      }
+    });
+
+    showMoreFailuresBtn?.addEventListener('click', () => {
+      failuresExpanded = !failuresExpanded;
+      showMoreFailuresBtn.textContent = failuresExpanded ? 'Show less' : 'Show more...';
+      loadReplicationFailures();
+    });
+
+    loadReplicationFailures();
   }
 
   const algoAes256Radio = document.getElementById('algo_aes256');
@@ -4001,7 +5343,6 @@
     }
   });
 
-  // Bucket name validation for replication setup
   const targetBucketInput = document.getElementById('target_bucket');
   const targetBucketFeedback = document.getElementById('target_bucket_feedback');
   
@@ -4036,7 +5377,6 @@
   targetBucketInput?.addEventListener('input', updateBucketNameValidation);
   targetBucketInput?.addEventListener('blur', updateBucketNameValidation);
 
-  // Prevent form submission if bucket name is invalid
   const replicationForm = targetBucketInput?.closest('form');
   replicationForm?.addEventListener('submit', (e) => {
     const name = targetBucketInput.value.trim();
@@ -4049,7 +5389,6 @@
     }
   });
 
-  // Policy JSON validation and formatting
   const formatPolicyBtn = document.getElementById('formatPolicyBtn');
   const policyValidationStatus = document.getElementById('policyValidationStatus');
   const policyValidBadge = document.getElementById('policyValidBadge');
@@ -4092,14 +5431,607 @@
       policyTextarea.value = JSON.stringify(parsed, null, 2);
       validatePolicyJson();
     } catch (err) {
-      // Show error in validation
       validatePolicyJson();
     }
   });
 
-  // Initialize policy validation on page load
   if (policyTextarea && policyPreset?.value === 'custom') {
     validatePolicyJson();
   }
+
+  const lifecycleCard = document.getElementById('lifecycle-rules-card');
+  const lifecycleUrl = lifecycleCard?.dataset.lifecycleUrl;
+  const lifecycleRulesBody = document.getElementById('lifecycle-rules-body');
+  const addLifecycleRuleModalEl = document.getElementById('addLifecycleRuleModal');
+  const addLifecycleRuleModal = addLifecycleRuleModalEl ? new bootstrap.Modal(addLifecycleRuleModalEl) : null;
+  let lifecycleRules = [];
+
+  const loadLifecycleRules = async () => {
+    if (!lifecycleUrl || !lifecycleRulesBody) return;
+    lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    try {
+      const resp = await fetch(lifecycleUrl);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load lifecycle rules');
+      lifecycleRules = data.rules || [];
+      renderLifecycleRules();
+    } catch (err) {
+      lifecycleRulesBody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+    }
+  };
+
+  const renderLifecycleRules = () => {
+    if (!lifecycleRulesBody) return;
+    if (lifecycleRules.length === 0) {
+      lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No lifecycle rules configured</td></tr>';
+      return;
+    }
+    lifecycleRulesBody.innerHTML = lifecycleRules.map((rule, idx) => {
+      const expiration = rule.Expiration?.Days ? `${rule.Expiration.Days}d` : '-';
+      const noncurrent = rule.NoncurrentVersionExpiration?.NoncurrentDays ? `${rule.NoncurrentVersionExpiration.NoncurrentDays}d` : '-';
+      const statusClass = rule.Status === 'Enabled' ? 'bg-success' : 'bg-secondary';
+      return `<tr>
+        <td><code class="small">${escapeHtml(rule.ID || '')}</code></td>
+        <td><code class="small">${escapeHtml(rule.Filter?.Prefix || '*')}</code></td>
+        <td><span class="badge ${statusClass}">${escapeHtml(rule.Status)}</span></td>
+        <td class="small">${expiration}</td>
+        <td class="small">${noncurrent}</td>
+        <td class="text-end">
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" onclick="editLifecycleRule(${idx})" title="Edit rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg>
+            </button>
+            <button class="btn btn-outline-danger" onclick="deleteLifecycleRule(${idx})" title="Delete rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+            </button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  };
+
+  window.editLifecycleRule = (idx) => {
+    const rule = lifecycleRules[idx];
+    if (!rule) return;
+    document.getElementById('lifecycleRuleId').value = rule.ID || '';
+    document.getElementById('lifecycleRuleStatus').value = rule.Status || 'Enabled';
+    document.getElementById('lifecycleRulePrefix').value = rule.Filter?.Prefix || '';
+    document.getElementById('lifecycleExpirationDays').value = rule.Expiration?.Days || '';
+    document.getElementById('lifecycleNoncurrentDays').value = rule.NoncurrentVersionExpiration?.NoncurrentDays || '';
+    document.getElementById('lifecycleAbortMpuDays').value = rule.AbortIncompleteMultipartUpload?.DaysAfterInitiation || '';
+    window.editingLifecycleIdx = idx;
+    addLifecycleRuleModal?.show();
+  };
+
+  window.editingLifecycleIdx = null;
+
+  window.deleteLifecycleRule = async (idx) => {
+    lifecycleRules.splice(idx, 1);
+    await saveLifecycleRules();
+  };
+
+  const saveLifecycleRules = async () => {
+    if (!lifecycleUrl) return;
+    try {
+      const resp = await fetch(lifecycleUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ rules: lifecycleRules })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to save');
+      showMessage({ title: 'Lifecycle rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      renderLifecycleRules();
+    } catch (err) {
+      showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
+    }
+  };
+
+  document.getElementById('addLifecycleRuleConfirm')?.addEventListener('click', async () => {
+    const ruleId = document.getElementById('lifecycleRuleId')?.value?.trim();
+    const status = document.getElementById('lifecycleRuleStatus')?.value || 'Enabled';
+    const prefix = document.getElementById('lifecycleRulePrefix')?.value?.trim() || '';
+    const expDays = parseInt(document.getElementById('lifecycleExpirationDays')?.value) || 0;
+    const ncDays = parseInt(document.getElementById('lifecycleNoncurrentDays')?.value) || 0;
+    const abortDays = parseInt(document.getElementById('lifecycleAbortMpuDays')?.value) || 0;
+    if (!ruleId) { showMessage({ title: 'Validation error', body: 'Rule ID is required', variant: 'warning' }); return; }
+    if (expDays === 0 && ncDays === 0 && abortDays === 0) { showMessage({ title: 'Validation error', body: 'At least one action is required', variant: 'warning' }); return; }
+    const rule = { ID: ruleId, Status: status, Filter: { Prefix: prefix } };
+    if (expDays > 0) rule.Expiration = { Days: expDays };
+    if (ncDays > 0) rule.NoncurrentVersionExpiration = { NoncurrentDays: ncDays };
+    if (abortDays > 0) rule.AbortIncompleteMultipartUpload = { DaysAfterInitiation: abortDays };
+    if (typeof window.editingLifecycleIdx === 'number' && window.editingLifecycleIdx !== null) {
+      lifecycleRules[window.editingLifecycleIdx] = rule;
+      window.editingLifecycleIdx = null;
+    } else {
+      lifecycleRules.push(rule);
+    }
+    await saveLifecycleRules();
+    addLifecycleRuleModal?.hide();
+    document.getElementById('lifecycleRuleId').value = '';
+    document.getElementById('lifecycleRulePrefix').value = '';
+    document.getElementById('lifecycleExpirationDays').value = '';
+    document.getElementById('lifecycleNoncurrentDays').value = '';
+    document.getElementById('lifecycleAbortMpuDays').value = '';
+    document.getElementById('lifecycleRuleStatus').value = 'Enabled';
+  });
+
+  const corsCard = document.getElementById('cors-rules-card');
+  const corsUrl = corsCard?.dataset.corsUrl;
+  const corsRulesBody = document.getElementById('cors-rules-body');
+  const addCorsRuleModalEl = document.getElementById('addCorsRuleModal');
+  const addCorsRuleModal = addCorsRuleModalEl ? new bootstrap.Modal(addCorsRuleModalEl) : null;
+  let corsRules = [];
+
+  const loadCorsRules = async () => {
+    if (!corsUrl || !corsRulesBody) return;
+    corsRulesBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    try {
+      const resp = await fetch(corsUrl);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load CORS rules');
+      corsRules = data.rules || [];
+      renderCorsRules();
+    } catch (err) {
+      corsRulesBody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+    }
+  };
+
+  const renderCorsRules = () => {
+    if (!corsRulesBody) return;
+    if (corsRules.length === 0) {
+      corsRulesBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No CORS rules configured</td></tr>';
+      return;
+    }
+    corsRulesBody.innerHTML = corsRules.map((rule, idx) => {
+      const origins = (rule.AllowedOrigins || []).map(o => `<code class="small">${escapeHtml(o)}</code>`).join(', ');
+      const methods = (rule.AllowedMethods || []).map(m => `<span class="badge bg-primary-subtle text-primary">${escapeHtml(m)}</span>`).join(' ');
+      const headers = (rule.AllowedHeaders || []).slice(0, 3).map(h => `<code class="small">${escapeHtml(h)}</code>`).join(', ');
+      return `<tr>
+        <td>${origins || '<span class="text-muted">None</span>'}</td>
+        <td>${methods || '<span class="text-muted">None</span>'}</td>
+        <td>${headers || '<span class="text-muted">*</span>'}</td>
+        <td>${rule.MaxAgeSeconds || '<span class="text-muted">-</span>'}</td>
+        <td class="text-end">
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" onclick="editCorsRule(${idx})" title="Edit rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/></svg>
+            </button>
+            <button class="btn btn-outline-danger" onclick="deleteCorsRule(${idx})" title="Delete rule">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+            </button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  };
+
+  window.editCorsRule = (idx) => {
+    const rule = corsRules[idx];
+    if (!rule) return;
+    document.getElementById('corsAllowedOrigins').value = (rule.AllowedOrigins || []).join('\n');
+    document.getElementById('corsAllowedHeaders').value = (rule.AllowedHeaders || []).join('\n');
+    document.getElementById('corsExposeHeaders').value = (rule.ExposeHeaders || []).join('\n');
+    document.getElementById('corsMaxAge').value = rule.MaxAgeSeconds || '';
+    document.getElementById('corsMethodGet').checked = (rule.AllowedMethods || []).includes('GET');
+    document.getElementById('corsMethodPut').checked = (rule.AllowedMethods || []).includes('PUT');
+    document.getElementById('corsMethodPost').checked = (rule.AllowedMethods || []).includes('POST');
+    document.getElementById('corsMethodDelete').checked = (rule.AllowedMethods || []).includes('DELETE');
+    document.getElementById('corsMethodHead').checked = (rule.AllowedMethods || []).includes('HEAD');
+    window.editingCorsIdx = idx;
+    addCorsRuleModal?.show();
+  };
+
+  window.editingCorsIdx = null;
+
+  window.deleteCorsRule = async (idx) => {
+    corsRules.splice(idx, 1);
+    await saveCorsRules();
+  };
+
+  const saveCorsRules = async () => {
+    if (!corsUrl) return;
+    try {
+      const resp = await fetch(corsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ rules: corsRules })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to save');
+      showMessage({ title: 'CORS rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      renderCorsRules();
+    } catch (err) {
+      showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
+    }
+  };
+
+  document.getElementById('addCorsRuleConfirm')?.addEventListener('click', async () => {
+    const originsRaw = document.getElementById('corsAllowedOrigins')?.value?.trim() || '';
+    const origins = originsRaw.split('\n').map(s => s.trim()).filter(Boolean);
+    const methods = [];
+    if (document.getElementById('corsMethodGet')?.checked) methods.push('GET');
+    if (document.getElementById('corsMethodPut')?.checked) methods.push('PUT');
+    if (document.getElementById('corsMethodPost')?.checked) methods.push('POST');
+    if (document.getElementById('corsMethodDelete')?.checked) methods.push('DELETE');
+    if (document.getElementById('corsMethodHead')?.checked) methods.push('HEAD');
+    const headersRaw = document.getElementById('corsAllowedHeaders')?.value?.trim() || '';
+    const headers = headersRaw.split('\n').map(s => s.trim()).filter(Boolean);
+    const exposeRaw = document.getElementById('corsExposeHeaders')?.value?.trim() || '';
+    const expose = exposeRaw.split('\n').map(s => s.trim()).filter(Boolean);
+    const maxAge = parseInt(document.getElementById('corsMaxAge')?.value) || 0;
+    if (origins.length === 0) { showMessage({ title: 'Validation error', body: 'At least one origin is required', variant: 'warning' }); return; }
+    if (methods.length === 0) { showMessage({ title: 'Validation error', body: 'At least one method is required', variant: 'warning' }); return; }
+    const rule = { AllowedOrigins: origins, AllowedMethods: methods };
+    if (headers.length > 0) rule.AllowedHeaders = headers;
+    if (expose.length > 0) rule.ExposeHeaders = expose;
+    if (maxAge > 0) rule.MaxAgeSeconds = maxAge;
+    if (typeof window.editingCorsIdx === 'number' && window.editingCorsIdx !== null) {
+      corsRules[window.editingCorsIdx] = rule;
+      window.editingCorsIdx = null;
+    } else {
+      corsRules.push(rule);
+    }
+    await saveCorsRules();
+    addCorsRuleModal?.hide();
+    document.getElementById('corsAllowedOrigins').value = '';
+    document.getElementById('corsAllowedHeaders').value = '';
+    document.getElementById('corsExposeHeaders').value = '';
+    document.getElementById('corsMaxAge').value = '';
+    document.getElementById('corsMethodGet').checked = false;
+    document.getElementById('corsMethodPut').checked = false;
+    document.getElementById('corsMethodPost').checked = false;
+    document.getElementById('corsMethodDelete').checked = false;
+    document.getElementById('corsMethodHead').checked = false;
+  });
+
+  const aclCard = document.getElementById('bucket-acl-card');
+  const aclUrl = aclCard?.dataset.aclUrl;
+  const aclOwnerEl = document.getElementById('acl-owner');
+  const aclGrantsList = document.getElementById('acl-grants-list');
+  const aclLoading = document.getElementById('acl-loading');
+  const aclContent = document.getElementById('acl-content');
+  const cannedAclSelect = document.getElementById('cannedAclSelect');
+
+  const loadAcl = async () => {
+    if (!aclUrl) return;
+    try {
+      const resp = await fetch(aclUrl);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to load ACL');
+      if (aclOwnerEl) aclOwnerEl.textContent = data.owner || '-';
+      if (aclGrantsList) {
+        const grants = data.grants || [];
+        if (grants.length === 0) {
+          aclGrantsList.innerHTML = '<div class="list-group-item text-muted text-center py-2">No grants</div>';
+        } else {
+          aclGrantsList.innerHTML = grants.map(g => `<div class="list-group-item d-flex justify-content-between align-items-center"><code class="small">${escapeHtml(g.grantee)}</code><span class="badge bg-secondary">${escapeHtml(g.permission)}</span></div>`).join('');
+        }
+      }
+      if (aclLoading) aclLoading.classList.add('d-none');
+      if (aclContent) aclContent.classList.remove('d-none');
+    } catch (err) {
+      if (aclLoading) aclLoading.classList.add('d-none');
+      if (aclContent) aclContent.classList.remove('d-none');
+      if (aclGrantsList) aclGrantsList.innerHTML = `<div class="list-group-item text-danger text-center py-2">${escapeHtml(err.message)}</div>`;
+    }
+  };
+
+  cannedAclSelect?.addEventListener('change', async () => {
+    const canned = cannedAclSelect.value;
+    if (!canned || !aclUrl) return;
+    try {
+      const resp = await fetch(aclUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ canned_acl: canned })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to set ACL');
+      showMessage({ title: 'ACL updated', body: `Bucket ACL set to "${canned}"`, variant: 'success' });
+      await loadAcl();
+    } catch (err) {
+      showMessage({ title: 'ACL update failed', body: err.message, variant: 'danger' });
+    }
+  });
+
+  document.querySelectorAll('[data-set-acl]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const canned = btn.dataset.setAcl;
+      if (!canned || !aclUrl) return;
+      btn.disabled = true;
+      const originalText = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+      try {
+        const resp = await fetch(aclUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+          body: JSON.stringify({ canned_acl: canned })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to set ACL');
+        showMessage({ title: 'ACL updated', body: `Bucket ACL set to "${canned}"`, variant: 'success' });
+        await loadAcl();
+      } catch (err) {
+        showMessage({ title: 'ACL update failed', body: err.message, variant: 'danger' });
+      } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+      }
+    });
+  });
+
+  document.getElementById('objects-table')?.addEventListener('show.bs.dropdown', function(e) {
+    const dropdown = e.target.closest('.dropdown');
+    const menu = dropdown?.querySelector('.dropdown-menu');
+    const btn = e.target;
+    if (!menu || !btn) return;
+    const btnRect = btn.getBoundingClientRect();
+    menu.style.position = 'fixed';
+    menu.style.top = (btnRect.bottom + 4) + 'px';
+    menu.style.left = 'auto';
+    menu.style.right = (window.innerWidth - btnRect.right) + 'px';
+    menu.style.transform = 'none';
+  });
+
+  const previewTagsPanel = document.getElementById('preview-tags');
+  const previewTagsList = document.getElementById('preview-tags-list');
+  const previewTagsEmpty = document.getElementById('preview-tags-empty');
+  const previewTagsCount = document.getElementById('preview-tags-count');
+  const previewTagsEditor = document.getElementById('preview-tags-editor');
+  const previewTagsInputs = document.getElementById('preview-tags-inputs');
+  const editTagsButton = document.getElementById('editTagsButton');
+  const addTagRow = document.getElementById('addTagRow');
+  const saveTagsButton = document.getElementById('saveTagsButton');
+  const cancelTagsButton = document.getElementById('cancelTagsButton');
+  let currentObjectTags = [];
+  let isEditingTags = false;
+
+  const loadObjectTags = async (row) => {
+    if (!row || !previewTagsPanel) return;
+    const tagsUrl = row.dataset.tagsUrl;
+    if (!tagsUrl) {
+      previewTagsPanel.classList.add('d-none');
+      return;
+    }
+    previewTagsPanel.classList.remove('d-none');
+    try {
+      const resp = await fetch(tagsUrl);
+      const data = await resp.json();
+      currentObjectTags = data.tags || [];
+      renderObjectTags();
+    } catch (err) {
+      currentObjectTags = [];
+      renderObjectTags();
+    }
+  };
+
+  const renderObjectTags = () => {
+    if (!previewTagsList || !previewTagsEmpty || !previewTagsCount) return;
+    previewTagsCount.textContent = currentObjectTags.length;
+    if (currentObjectTags.length === 0) {
+      previewTagsList.innerHTML = '';
+      previewTagsEmpty.classList.remove('d-none');
+    } else {
+      previewTagsEmpty.classList.add('d-none');
+      previewTagsList.innerHTML = currentObjectTags.map(t => `<span class="badge bg-info-subtle text-info">${escapeHtml(t.Key)}=${escapeHtml(t.Value)}</span>`).join('');
+    }
+  };
+
+  const renderTagEditor = () => {
+    if (!previewTagsInputs) return;
+    previewTagsInputs.innerHTML = currentObjectTags.map((t, idx) => `
+      <div class="input-group input-group-sm mb-1">
+        <input type="text" class="form-control" placeholder="Key" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
+        <input type="text" class="form-control" placeholder="Value" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
+        <button class="btn btn-outline-danger" type="button" onclick="removeTagRow(${idx})">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
+        </button>
+      </div>
+    `).join('');
+  };
+
+  window.removeTagRow = (idx) => {
+    currentObjectTags.splice(idx, 1);
+    renderTagEditor();
+  };
+
+  editTagsButton?.addEventListener('click', () => {
+    isEditingTags = true;
+    previewTagsList.classList.add('d-none');
+    previewTagsEmpty.classList.add('d-none');
+    previewTagsEditor?.classList.remove('d-none');
+    renderTagEditor();
+  });
+
+  cancelTagsButton?.addEventListener('click', () => {
+    isEditingTags = false;
+    previewTagsEditor?.classList.add('d-none');
+    previewTagsList.classList.remove('d-none');
+    renderObjectTags();
+  });
+
+  addTagRow?.addEventListener('click', () => {
+    if (currentObjectTags.length >= 10) {
+      showMessage({ title: 'Limit reached', body: 'Maximum 10 tags allowed per object.', variant: 'warning' });
+      return;
+    }
+    currentObjectTags.push({ Key: '', Value: '' });
+    renderTagEditor();
+  });
+
+  saveTagsButton?.addEventListener('click', async () => {
+    if (!activeRow) return;
+    const tagsUrl = activeRow.dataset.tagsUrl;
+    if (!tagsUrl) return;
+    const inputs = previewTagsInputs?.querySelectorAll('.input-group');
+    const newTags = [];
+    inputs?.forEach((group, idx) => {
+      const key = group.querySelector(`[data-tag-key="${idx}"]`)?.value?.trim() || '';
+      const value = group.querySelector(`[data-tag-value="${idx}"]`)?.value?.trim() || '';
+      if (key) newTags.push({ Key: key, Value: value });
+    });
+    try {
+      const resp = await fetch(tagsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ tags: newTags })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to save tags');
+      currentObjectTags = newTags;
+      isEditingTags = false;
+      previewTagsEditor?.classList.add('d-none');
+      previewTagsList.classList.remove('d-none');
+      renderObjectTags();
+      showMessage({ title: 'Tags saved', body: 'Object tags updated successfully.', variant: 'success' });
+    } catch (err) {
+      showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
+    }
+  });
+
+  const copyMoveModalEl = document.getElementById('copyMoveModal');
+  const copyMoveModal = copyMoveModalEl ? new bootstrap.Modal(copyMoveModalEl) : null;
+  const copyMoveActionLabel = document.getElementById('copyMoveActionLabel');
+  const copyMoveConfirmLabel = document.getElementById('copyMoveConfirmLabel');
+  const copyMoveSource = document.getElementById('copyMoveSource');
+  const copyMoveDestBucket = document.getElementById('copyMoveDestBucket');
+  const copyMoveDestKey = document.getElementById('copyMoveDestKey');
+  const copyMoveConfirm = document.getElementById('copyMoveConfirm');
+  const bucketsForCopyUrl = objectsContainer?.dataset.bucketsForCopyUrl;
+  let copyMoveAction = 'copy';
+  let copyMoveSourceKey = '';
+
+  window.openCopyMoveModal = async (action, key) => {
+    copyMoveAction = action;
+    copyMoveSourceKey = key;
+    if (copyMoveActionLabel) copyMoveActionLabel.textContent = action === 'move' ? 'Move' : 'Copy';
+    if (copyMoveConfirmLabel) copyMoveConfirmLabel.textContent = action === 'move' ? 'Move' : 'Copy';
+    if (copyMoveSource) copyMoveSource.textContent = key;
+    if (copyMoveDestKey) copyMoveDestKey.value = key;
+    if (copyMoveDestBucket) {
+      copyMoveDestBucket.innerHTML = '<option value="">Loading buckets...</option>';
+      try {
+        const resp = await fetch(bucketsForCopyUrl);
+        const data = await resp.json();
+        const buckets = data.buckets || [];
+        copyMoveDestBucket.innerHTML = buckets.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('');
+      } catch {
+        copyMoveDestBucket.innerHTML = '<option value="">Failed to load buckets</option>';
+      }
+    }
+    copyMoveModal?.show();
+  };
+
+  copyMoveConfirm?.addEventListener('click', async () => {
+    const destBucket = copyMoveDestBucket?.value;
+    const destKey = copyMoveDestKey?.value?.trim();
+    if (!destBucket || !destKey) { showMessage({ title: 'Validation error', body: 'Destination bucket and key are required', variant: 'warning' }); return; }
+    const actionUrl = copyMoveAction === 'move'
+      ? urlTemplates?.move?.replace('KEY_PLACEHOLDER', encodeURIComponent(copyMoveSourceKey).replace(/%2F/g, '/'))
+      : urlTemplates?.copy?.replace('KEY_PLACEHOLDER', encodeURIComponent(copyMoveSourceKey).replace(/%2F/g, '/'));
+    if (!actionUrl) { showMessage({ title: 'Error', body: 'Copy/move URL not configured', variant: 'danger' }); return; }
+    try {
+      const resp = await fetch(actionUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
+        body: JSON.stringify({ dest_bucket: destBucket, dest_key: destKey })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `Failed to ${copyMoveAction} object`);
+      showMessage({ title: `Object ${copyMoveAction === 'move' ? 'moved' : 'copied'}`, body: `Successfully ${copyMoveAction === 'move' ? 'moved' : 'copied'} to ${destBucket}/${destKey}`, variant: 'success' });
+      copyMoveModal?.hide();
+      if (copyMoveAction === 'move') window.setTimeout(() => window.location.reload(), 500);
+    } catch (err) {
+      showMessage({ title: `${copyMoveAction === 'move' ? 'Move' : 'Copy'} failed`, body: err.message, variant: 'danger' });
+    }
+  });
+
+  const originalSelectRow = selectRow;
+  selectRow = (row) => {
+    originalSelectRow(row);
+    loadObjectTags(row);
+  };
+
+  if (lifecycleCard) loadLifecycleRules();
+
+  const lifecycleHistoryCard = document.getElementById('lifecycle-history-card');
+  const lifecycleHistoryBody = document.getElementById('lifecycle-history-body');
+  const lifecycleHistoryPagination = document.getElementById('lifecycle-history-pagination');
+  const showMoreHistoryBtn = document.getElementById('show-more-history');
+  const historyShownCount = document.getElementById('history-shown-count');
+  let historyExpanded = false;
+
+  const loadLifecycleHistory = async () => {
+    if (!lifecycleHistoryCard || !lifecycleHistoryBody) return;
+
+    const endpoint = lifecycleHistoryCard.dataset.historyEndpoint;
+    const limit = historyExpanded ? 50 : 5;
+
+    lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+
+    try {
+      const resp = await fetch(`${endpoint}?limit=${limit}`);
+      if (!resp.ok) throw new Error('Failed to fetch history');
+      const data = await resp.json();
+
+      if (!data.enabled) {
+        lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">Lifecycle enforcement is not enabled</td></tr>';
+        return;
+      }
+
+      const executions = data.executions || [];
+      const total = data.total || 0;
+
+      if (executions.length === 0) {
+        lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No executions recorded yet</td></tr>';
+        lifecycleHistoryPagination.style.display = 'none';
+        return;
+      }
+
+      lifecycleHistoryBody.innerHTML = executions.map(e => {
+        const date = new Date(e.timestamp * 1000);
+        const hasErrors = e.errors && e.errors.length > 0;
+        const hasActivity = e.objects_deleted > 0 || e.versions_deleted > 0 || e.uploads_aborted > 0;
+        let statusBadge;
+        if (hasErrors) {
+          statusBadge = '<span class="badge bg-danger">Errors</span>';
+        } else if (hasActivity) {
+          statusBadge = '<span class="badge bg-success">Success</span>';
+        } else {
+          statusBadge = '<span class="badge bg-secondary">No action</span>';
+        }
+        const errorTooltip = hasErrors ? ` title="${escapeHtml(e.errors.join('; '))}"` : '';
+        return `<tr${errorTooltip}>
+          <td class="small">${date.toLocaleString()}</td>
+          <td class="text-center"><span class="badge bg-danger-subtle text-danger">${e.objects_deleted}</span></td>
+          <td class="text-center"><span class="badge bg-warning-subtle text-warning">${e.versions_deleted}</span></td>
+          <td class="text-center"><span class="badge bg-secondary">${e.uploads_aborted}</span></td>
+          <td class="text-center">${statusBadge}</td>
+        </tr>`;
+      }).join('');
+
+      if (total > 5 && !historyExpanded) {
+        lifecycleHistoryPagination.style.display = '';
+        historyShownCount.textContent = `Showing ${Math.min(5, total)} of ${total}`;
+      } else {
+        lifecycleHistoryPagination.style.display = 'none';
+      }
+    } catch (err) {
+      console.error('Failed to load lifecycle history:', err);
+      lifecycleHistoryBody.innerHTML = '<tr><td colspan="5" class="text-center text-danger py-4">Failed to load history</td></tr>';
+    }
+  };
+
+  showMoreHistoryBtn?.addEventListener('click', () => {
+    historyExpanded = !historyExpanded;
+    showMoreHistoryBtn.textContent = historyExpanded ? 'Show less' : 'Show more...';
+    loadLifecycleHistory();
+  });
+
+  if (lifecycleHistoryCard) loadLifecycleHistory();
+
+  if (corsCard) loadCorsRules();
+  if (aclCard) loadAcl();
 </script>
 {% endblock %}

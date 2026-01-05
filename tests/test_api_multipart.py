@@ -8,8 +8,6 @@ def client(app):
 
 @pytest.fixture
 def auth_headers(app):
-    # Create a test user and return headers
-    # Using the user defined in conftest.py
     return {
         "X-Access-Key": "test",
         "X-Secret-Key": "secret"
@@ -75,19 +73,16 @@ def test_multipart_upload_flow(client, auth_headers):
 
 def test_abort_multipart_upload(client, auth_headers):
     client.put("/abort-bucket", headers=auth_headers)
-    
-    # Initiate
+
     resp = client.post("/abort-bucket/file.txt?uploads", headers=auth_headers)
     upload_id = fromstring(resp.data).find("UploadId").text
 
-    # Abort
     resp = client.delete(f"/abort-bucket/file.txt?uploadId={upload_id}", headers=auth_headers)
     assert resp.status_code == 204
 
-    # Try to upload part (should fail)
     resp = client.put(
         f"/abort-bucket/file.txt?partNumber=1&uploadId={upload_id}",
         headers=auth_headers,
         data=b"data"
     )
-    assert resp.status_code == 404  # NoSuchUpload
+    assert resp.status_code == 404

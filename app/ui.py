@@ -1,6 +1,6 @@
-"""Authenticated HTML UI for browsing buckets and objects."""
 from __future__ import annotations
 
+import io
 import json
 import uuid
 import psutil
@@ -26,9 +26,10 @@ from flask import (
 )
 from flask_wtf.csrf import generate_csrf
 
+from .acl import AclService, create_canned_acl, CANNED_ACLS
 from .bucket_policies import BucketPolicyStore
 from .connections import ConnectionStore, RemoteConnection
-from .extensions import limiter
+from .extensions import limiter, csrf
 from .iam import IamError
 from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
@@ -73,6 +74,10 @@ def _secret_store() -> EphemeralSecretStore:
     store: EphemeralSecretStore = current_app.extensions["secret_store"]
     store.purge_expired()
     return store
+
+
+def _acl() -> AclService:
+    return current_app.extensions["acl"]
 
 
 def _format_bytes(num: int) -> str:
@@ -271,6 +276,9 @@ def buckets_overview():
         })
     return render_template("buckets.html", buckets=visible_buckets, principal=principal)
 
+@ui_bp.get("/buckets")
+def buckets_redirect():
+    return redirect(url_for("ui.buckets_overview"))
 
 @ui_bp.post("/buckets")
 def create_bucket():
@@ -366,7 +374,7 @@ def bucket_detail(bucket_name: str):
     kms_keys = kms_manager.list_keys() if kms_manager else []
     kms_enabled = current_app.config.get("KMS_ENABLED", False)
     encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
-    can_manage_encryption = can_manage_versioning  # Same as other bucket properties
+    can_manage_encryption = can_manage_versioning
 
     bucket_quota = storage.get_bucket_quota(bucket_name)
     bucket_stats = storage.bucket_stats(bucket_name)
@@ -379,10 +387,21 @@ def bucket_detail(bucket_name: str):
 
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
 
+    lifecycle_url = url_for("ui.bucket_lifecycle", bucket_name=bucket_name)
+    cors_url = url_for("ui.bucket_cors", bucket_name=bucket_name)
+    acl_url = url_for("ui.bucket_acl", bucket_name=bucket_name)
+    folders_url = url_for("ui.create_folder", bucket_name=bucket_name)
+    buckets_for_copy_url = url_for("ui.list_buckets_for_copy", bucket_name=bucket_name)
+
     return render_template(
         "bucket_detail.html",
         bucket_name=bucket_name,
         objects_api_url=objects_api_url,
+        lifecycle_url=lifecycle_url,
+        cors_url=cors_url,
+        acl_url=acl_url,
+        folders_url=folders_url,
+        buckets_for_copy_url=buckets_for_copy_url,
         principal=principal,
         bucket_policy_text=policy_text,
         bucket_policy=bucket_policy,
@@ -434,13 +453,14 @@ def list_bucket_objects(bucket_name: str):
     except StorageError:
         versioning_enabled = False
 
-    # Pre-compute URL templates once (not per-object) for performance
-    # Frontend will construct actual URLs by replacing KEY_PLACEHOLDER
     preview_template = url_for("ui.object_preview", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     delete_template = url_for("ui.delete_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     presign_template = url_for("ui.object_presign", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     versions_template = url_for("ui.object_versions", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     restore_template = url_for("ui.restore_object_version", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER", version_id="VERSION_ID_PLACEHOLDER")
+    tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
 
     objects_data = []
     for obj in result.objects:
@@ -465,6 +485,9 @@ def list_bucket_objects(bucket_name: str):
             "delete": delete_template,
             "versions": versions_template,
             "restore": restore_template,
+            "tags": tags_template,
+            "copy": copy_template,
+            "move": move_template,
         },
     })
 
@@ -505,8 +528,6 @@ def upload_object(bucket_name: str):
     try:
         _authorize_ui(principal, bucket_name, "write")
         _storage().put_object(bucket_name, object_key, file.stream, metadata=metadata)
-        
-        # Trigger replication
         _replication().trigger_replication(bucket_name, object_key)
         
         message = f"Uploaded '{object_key}'"
@@ -542,6 +563,8 @@ def initiate_multipart_upload(bucket_name: str):
 
 
 @ui_bp.put("/buckets/<bucket_name>/multipart/<upload_id>/parts")
+@limiter.exempt
+@csrf.exempt
 def upload_multipart_part(bucket_name: str, upload_id: str):
     principal = _current_principal()
     try:
@@ -555,7 +578,11 @@ def upload_multipart_part(bucket_name: str, upload_id: str):
     if part_number < 1:
         return jsonify({"error": "partNumber must be >= 1"}), 400
     try:
-        etag = _storage().upload_multipart_part(bucket_name, upload_id, part_number, request.stream)
+        data = request.get_data()
+        if not data:
+            return jsonify({"error": "Empty request body"}), 400
+        stream = io.BytesIO(data)
+        etag = _storage().upload_multipart_part(bucket_name, upload_id, part_number, stream)
     except StorageError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"etag": etag, "part_number": part_number})
@@ -585,9 +612,14 @@ def complete_multipart_upload(bucket_name: str, upload_id: str):
         normalized.append({"part_number": number, "etag": etag})
     try:
         result = _storage().complete_multipart_upload(bucket_name, upload_id, normalized)
-        _replication().trigger_replication(bucket_name, result["key"])
-        
-        return jsonify(result)
+        _replication().trigger_replication(bucket_name, result.key)
+
+        return jsonify({
+            "key": result.key,
+            "size": result.size,
+            "etag": result.etag,
+            "last_modified": result.last_modified.isoformat() if result.last_modified else None,
+        })
     except StorageError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -732,20 +764,18 @@ def bulk_download_objects(bucket_name: str):
     if not cleaned:
         return jsonify({"error": "Select at least one object to download"}), 400
 
-    MAX_KEYS = current_app.config.get("BULK_DELETE_MAX_KEYS", 500)  # Reuse same limit for now
+    MAX_KEYS = current_app.config.get("BULK_DELETE_MAX_KEYS", 500)
     if len(cleaned) > MAX_KEYS:
         return jsonify({"error": f"A maximum of {MAX_KEYS} objects can be downloaded per request"}), 400
 
     unique_keys = list(dict.fromkeys(cleaned))
     storage = _storage()
     
-    # Verify permission to read bucket contents
     try:
         _authorize_ui(principal, bucket_name, "read")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
-    # Create ZIP archive of selected objects
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for key in unique_keys:
@@ -762,7 +792,6 @@ def bulk_download_objects(bucket_name: str):
                     path = storage.get_object_path(bucket_name, key)
                     zf.write(path, arcname=key)
             except (StorageError, IamError):
-                # Skip objects that can't be accessed
                 continue
     
     buffer.seek(0)
@@ -813,7 +842,6 @@ def object_preview(bucket_name: str, object_key: str) -> Response:
     
     download = request.args.get("download") == "1"
     
-    # Check if object is encrypted and needs decryption
     is_encrypted = "x-amz-server-side-encryption" in metadata
     if is_encrypted and hasattr(storage, 'get_object_data'):
         try:
@@ -849,7 +877,6 @@ def object_presign(bucket_name: str, object_key: str):
     encoded_key = quote(object_key, safe="/")
     url = f"{api_base}/presign/{bucket_name}/{encoded_key}"
     
-    # Use API base URL for forwarded headers so presigned URLs point to API, not UI
     parsed_api = urlparse(api_base)
     headers = _api_headers()
     headers["X-Forwarded-Host"] = parsed_api.netloc or "127.0.0.1:5000"
@@ -994,7 +1021,6 @@ def update_bucket_quota(bucket_name: str):
     """Update bucket quota configuration (admin only)."""
     principal = _current_principal()
     
-    # Quota management is admin-only
     is_admin = False
     try:
         _iam().authorize(principal, None, "iam:list_users")
@@ -1016,7 +1042,6 @@ def update_bucket_quota(bucket_name: str):
             flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     
-    # Parse quota values
     max_mb_str = request.form.get("max_mb", "").strip()
     max_objects_str = request.form.get("max_objects", "").strip()
     
@@ -1028,7 +1053,7 @@ def update_bucket_quota(bucket_name: str):
             max_mb = int(max_mb_str)
             if max_mb < 1:
                 raise ValueError("Size must be at least 1 MB")
-            max_bytes = max_mb * 1024 * 1024  # Convert MB to bytes
+            max_bytes = max_mb * 1024 * 1024 
         except ValueError as exc:
             flash(f"Invalid size value: {exc}", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
@@ -1081,7 +1106,6 @@ def update_bucket_encryption(bucket_name: str):
         flash("Invalid encryption algorithm", "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     
-    # Build encryption configuration in AWS S3 format
     encryption_config: dict[str, Any] = {
         "Rules": [
             {
@@ -1472,7 +1496,6 @@ def update_bucket_replication(bucket_name: str):
         if rule:
             rule.enabled = True
             _replication().set_rule(rule)
-            # When resuming, sync any pending objects that accumulated while paused
             if rule.mode == REPLICATION_MODE_ALL:
                 _replication().replicate_existing_objects(bucket_name)
                 flash("Replication resumed. Syncing pending objects in background.", "success")
@@ -1565,6 +1588,84 @@ def get_replication_status(bucket_name: str):
         "endpoint_healthy": endpoint_healthy,
         "endpoint_error": endpoint_error,
     })
+
+
+@ui_bp.get("/buckets/<bucket_name>/replication/failures")
+def get_replication_failures(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    failures = _replication().get_failed_items(bucket_name, limit, offset)
+    total = _replication().get_failure_count(bucket_name)
+
+    return jsonify({
+        "failures": [f.to_dict() for f in failures],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+@ui_bp.post("/buckets/<bucket_name>/replication/failures/<path:object_key>/retry")
+def retry_replication_failure(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    success = _replication().retry_failed_item(bucket_name, object_key)
+    if success:
+        return jsonify({"status": "submitted", "object_key": object_key})
+    return jsonify({"error": "Failed to submit retry"}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/replication/failures/retry-all")
+def retry_all_replication_failures(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    result = _replication().retry_all_failed(bucket_name)
+    return jsonify({
+        "status": "submitted",
+        "submitted": result["submitted"],
+        "skipped": result["skipped"],
+    })
+
+
+@ui_bp.delete("/buckets/<bucket_name>/replication/failures/<path:object_key>")
+def dismiss_replication_failure(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    success = _replication().dismiss_failure(bucket_name, object_key)
+    if success:
+        return jsonify({"status": "dismissed", "object_key": object_key})
+    return jsonify({"error": "Failure not found"}), 404
+
+
+@ui_bp.delete("/buckets/<bucket_name>/replication/failures")
+def clear_replication_failures(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "replication")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    _replication().clear_failures(bucket_name)
+    return jsonify({"status": "cleared"})
 
 
 @ui_bp.get("/connections/<connection_id>/health")
@@ -1664,6 +1765,358 @@ def metrics_dashboard():
             "uptime_days": uptime_days,
         }
     )
+
+
+@ui_bp.route("/buckets/<bucket_name>/lifecycle", methods=["GET", "POST", "DELETE"])
+def bucket_lifecycle(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "policy")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+
+    if request.method == "GET":
+        rules = storage.get_bucket_lifecycle(bucket_name) or []
+        return jsonify({"rules": rules})
+
+    if request.method == "DELETE":
+        storage.set_bucket_lifecycle(bucket_name, None)
+        return jsonify({"status": "ok", "message": "Lifecycle configuration deleted"})
+
+    payload = request.get_json(silent=True) or {}
+    rules = payload.get("rules", [])
+    if not isinstance(rules, list):
+        return jsonify({"error": "rules must be a list"}), 400
+
+    validated_rules = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return jsonify({"error": f"Rule {i} must be an object"}), 400
+        validated = {
+            "ID": str(rule.get("ID", f"rule-{i+1}")),
+            "Status": "Enabled" if rule.get("Status", "Enabled") == "Enabled" else "Disabled",
+        }
+        if rule.get("Prefix"):
+            validated["Prefix"] = str(rule["Prefix"])
+        if rule.get("Expiration"):
+            exp = rule["Expiration"]
+            if isinstance(exp, dict) and exp.get("Days"):
+                validated["Expiration"] = {"Days": int(exp["Days"])}
+        if rule.get("NoncurrentVersionExpiration"):
+            nve = rule["NoncurrentVersionExpiration"]
+            if isinstance(nve, dict) and nve.get("NoncurrentDays"):
+                validated["NoncurrentVersionExpiration"] = {"NoncurrentDays": int(nve["NoncurrentDays"])}
+        if rule.get("AbortIncompleteMultipartUpload"):
+            aimu = rule["AbortIncompleteMultipartUpload"]
+            if isinstance(aimu, dict) and aimu.get("DaysAfterInitiation"):
+                validated["AbortIncompleteMultipartUpload"] = {"DaysAfterInitiation": int(aimu["DaysAfterInitiation"])}
+        validated_rules.append(validated)
+
+    storage.set_bucket_lifecycle(bucket_name, validated_rules if validated_rules else None)
+    return jsonify({"status": "ok", "message": "Lifecycle configuration saved", "rules": validated_rules})
+
+
+@ui_bp.get("/buckets/<bucket_name>/lifecycle/history")
+def get_lifecycle_history(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "policy")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
+
+    lifecycle_manager = current_app.extensions.get("lifecycle")
+    if not lifecycle_manager:
+        return jsonify({
+            "executions": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "enabled": False,
+        })
+
+    records = lifecycle_manager.get_execution_history(bucket_name, limit, offset)
+    return jsonify({
+        "executions": [r.to_dict() for r in records],
+        "total": len(lifecycle_manager.get_execution_history(bucket_name, 1000, 0)),
+        "limit": limit,
+        "offset": offset,
+        "enabled": True,
+    })
+
+
+@ui_bp.route("/buckets/<bucket_name>/cors", methods=["GET", "POST", "DELETE"])
+def bucket_cors(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "policy")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+
+    if request.method == "GET":
+        rules = storage.get_bucket_cors(bucket_name) or []
+        return jsonify({"rules": rules})
+
+    if request.method == "DELETE":
+        storage.set_bucket_cors(bucket_name, None)
+        return jsonify({"status": "ok", "message": "CORS configuration deleted"})
+
+    payload = request.get_json(silent=True) or {}
+    rules = payload.get("rules", [])
+    if not isinstance(rules, list):
+        return jsonify({"error": "rules must be a list"}), 400
+
+    validated_rules = []
+    for i, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return jsonify({"error": f"Rule {i} must be an object"}), 400
+        origins = rule.get("AllowedOrigins", [])
+        methods = rule.get("AllowedMethods", [])
+        if not origins or not methods:
+            return jsonify({"error": f"Rule {i} must have AllowedOrigins and AllowedMethods"}), 400
+        validated = {
+            "AllowedOrigins": [str(o) for o in origins if o],
+            "AllowedMethods": [str(m).upper() for m in methods if m],
+        }
+        if rule.get("AllowedHeaders"):
+            validated["AllowedHeaders"] = [str(h) for h in rule["AllowedHeaders"] if h]
+        if rule.get("ExposeHeaders"):
+            validated["ExposeHeaders"] = [str(h) for h in rule["ExposeHeaders"] if h]
+        if rule.get("MaxAgeSeconds") is not None:
+            try:
+                validated["MaxAgeSeconds"] = int(rule["MaxAgeSeconds"])
+            except (ValueError, TypeError):
+                pass
+        validated_rules.append(validated)
+
+    storage.set_bucket_cors(bucket_name, validated_rules if validated_rules else None)
+    return jsonify({"status": "ok", "message": "CORS configuration saved", "rules": validated_rules})
+
+
+@ui_bp.route("/buckets/<bucket_name>/acl", methods=["GET", "POST"])
+def bucket_acl(bucket_name: str):
+    principal = _current_principal()
+    action = "read" if request.method == "GET" else "write"
+    try:
+        _authorize_ui(principal, bucket_name, action)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+
+    acl_service = _acl()
+    owner_id = principal.access_key if principal else "anonymous"
+
+    if request.method == "GET":
+        try:
+            acl = acl_service.get_bucket_acl(bucket_name)
+            if not acl:
+                acl = create_canned_acl("private", owner_id)
+            return jsonify({
+                "owner": acl.owner,
+                "grants": [g.to_dict() for g in acl.grants],
+                "canned_acls": list(CANNED_ACLS.keys()),
+            })
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    payload = request.get_json(silent=True) or {}
+    canned_acl = payload.get("canned_acl")
+    if canned_acl:
+        if canned_acl not in CANNED_ACLS:
+            return jsonify({"error": f"Invalid canned ACL: {canned_acl}"}), 400
+        acl_service.set_bucket_canned_acl(bucket_name, canned_acl, owner_id)
+        return jsonify({"status": "ok", "message": f"ACL set to {canned_acl}"})
+
+    return jsonify({"error": "canned_acl is required"}), 400
+
+
+@ui_bp.route("/buckets/<bucket_name>/objects/<path:object_key>/tags", methods=["GET", "POST"])
+def object_tags(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+
+    if request.method == "GET":
+        try:
+            tags = storage.get_object_tags(bucket_name, object_key)
+            return jsonify({"tags": tags})
+        except StorageError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+    try:
+        _authorize_ui(principal, bucket_name, "write", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    tags = payload.get("tags", [])
+    if not isinstance(tags, list):
+        return jsonify({"error": "tags must be a list"}), 400
+    if len(tags) > 10:
+        return jsonify({"error": "Maximum 10 tags allowed"}), 400
+
+    validated_tags = []
+    for tag in tags:
+        if isinstance(tag, dict) and tag.get("Key"):
+            validated_tags.append({
+                "Key": str(tag["Key"]),
+                "Value": str(tag.get("Value", ""))
+            })
+
+    try:
+        storage.set_object_tags(bucket_name, object_key, validated_tags if validated_tags else None)
+        return jsonify({"status": "ok", "message": "Tags saved", "tags": validated_tags})
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/folders")
+def create_folder(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "write")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    folder_name = str(payload.get("folder_name", "")).strip()
+    prefix = str(payload.get("prefix", "")).strip()
+
+    if not folder_name:
+        return jsonify({"error": "folder_name is required"}), 400
+
+    folder_name = folder_name.rstrip("/")
+    if "/" in folder_name:
+        return jsonify({"error": "Folder name cannot contain /"}), 400
+
+    folder_key = f"{prefix}{folder_name}/" if prefix else f"{folder_name}/"
+
+    import io
+    try:
+        _storage().put_object(bucket_name, folder_key, io.BytesIO(b""))
+        return jsonify({"status": "ok", "message": f"Folder '{folder_name}' created", "key": folder_key})
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/objects/<path:object_key>/copy")
+def copy_object(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    dest_bucket = str(payload.get("dest_bucket", bucket_name)).strip()
+    dest_key = str(payload.get("dest_key", "")).strip()
+
+    if not dest_key:
+        return jsonify({"error": "dest_key is required"}), 400
+
+    try:
+        _authorize_ui(principal, dest_bucket, "write", object_key=dest_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+
+    try:
+        source_path = storage.get_object_path(bucket_name, object_key)
+        source_metadata = storage.get_object_metadata(bucket_name, object_key)
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+    try:
+        with source_path.open("rb") as stream:
+            storage.put_object(dest_bucket, dest_key, stream, metadata=source_metadata or None)
+        return jsonify({
+            "status": "ok",
+            "message": f"Copied to {dest_bucket}/{dest_key}",
+            "dest_bucket": dest_bucket,
+            "dest_key": dest_key,
+        })
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.post("/buckets/<bucket_name>/objects/<path:object_key>/move")
+def move_object(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+        _authorize_ui(principal, bucket_name, "delete", object_key=object_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    dest_bucket = str(payload.get("dest_bucket", bucket_name)).strip()
+    dest_key = str(payload.get("dest_key", "")).strip()
+
+    if not dest_key:
+        return jsonify({"error": "dest_key is required"}), 400
+
+    if dest_bucket == bucket_name and dest_key == object_key:
+        return jsonify({"error": "Cannot move object to the same location"}), 400
+
+    try:
+        _authorize_ui(principal, dest_bucket, "write", object_key=dest_key)
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    storage = _storage()
+
+    try:
+        source_path = storage.get_object_path(bucket_name, object_key)
+        source_metadata = storage.get_object_metadata(bucket_name, object_key)
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+    try:
+        import io
+        with source_path.open("rb") as f:
+            data = f.read()
+        storage.put_object(dest_bucket, dest_key, io.BytesIO(data), metadata=source_metadata or None)
+        storage.delete_object(bucket_name, object_key)
+        return jsonify({
+            "status": "ok",
+            "message": f"Moved to {dest_bucket}/{dest_key}",
+            "dest_bucket": dest_bucket,
+            "dest_key": dest_key,
+        })
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@ui_bp.get("/buckets/<bucket_name>/list-for-copy")
+def list_buckets_for_copy(bucket_name: str):
+    principal = _current_principal()
+    buckets = _storage().list_buckets()
+    allowed = []
+    for bucket in buckets:
+        try:
+            _authorize_ui(principal, bucket.name, "write")
+            allowed.append(bucket.name)
+        except IamError:
+            pass
+    return jsonify({"buckets": allowed})
 
 
 @ui_bp.app_errorhandler(404)

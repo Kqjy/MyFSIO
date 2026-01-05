@@ -1,11 +1,12 @@
-"""Bucket policy loader/enforcer with a subset of AWS semantics."""
 from __future__ import annotations
 
 import json
+import re
+import time
 from dataclasses import dataclass
-from fnmatch import fnmatch
+from fnmatch import fnmatch, translate
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
 
 RESOURCE_PREFIX = "arn:aws:s3:::"
@@ -133,7 +134,22 @@ class BucketPolicyStatement:
     effect: str
     principals: List[str] | str
     actions: List[str]
-    resources: List[tuple[str | None, str | None]]
+    resources: List[Tuple[str | None, str | None]]
+    # Performance: Pre-compiled regex patterns for resource matching
+    _compiled_patterns: List[Tuple[str | None, Optional[Pattern[str]]]] | None = None
+
+    def _get_compiled_patterns(self) -> List[Tuple[str | None, Optional[Pattern[str]]]]:
+        """Lazily compile fnmatch patterns to regex for faster matching."""
+        if self._compiled_patterns is None:
+            self._compiled_patterns = []
+            for resource_bucket, key_pattern in self.resources:
+                if key_pattern is None:
+                    self._compiled_patterns.append((resource_bucket, None))
+                else:
+                    # Convert fnmatch pattern to regex
+                    regex_pattern = translate(key_pattern)
+                    self._compiled_patterns.append((resource_bucket, re.compile(regex_pattern)))
+        return self._compiled_patterns
 
     def matches_principal(self, access_key: Optional[str]) -> bool:
         if self.principals == "*":
@@ -149,15 +165,16 @@ class BucketPolicyStatement:
     def matches_resource(self, bucket: Optional[str], object_key: Optional[str]) -> bool:
         bucket = (bucket or "*").lower()
         key = object_key or ""
-        for resource_bucket, key_pattern in self.resources:
+        for resource_bucket, compiled_pattern in self._get_compiled_patterns():
             resource_bucket = (resource_bucket or "*").lower()
             if resource_bucket not in {"*", bucket}:
                 continue
-            if key_pattern is None:
+            if compiled_pattern is None:
                 if not key:
                     return True
                 continue
-            if fnmatch(key, key_pattern):
+            # Performance: Use pre-compiled regex instead of fnmatch
+            if compiled_pattern.match(key):
                 return True
         return False
 
@@ -174,8 +191,16 @@ class BucketPolicyStore:
         self._policies: Dict[str, List[BucketPolicyStatement]] = {}
         self._load()
         self._last_mtime = self._current_mtime()
+        # Performance: Avoid stat() on every request
+        self._last_stat_check = 0.0
+        self._stat_check_interval = 1.0  # Only check mtime every 1 second
 
     def maybe_reload(self) -> None:
+        # Performance: Skip stat check if we checked recently
+        now = time.time()
+        if now - self._last_stat_check < self._stat_check_interval:
+            return
+        self._last_stat_check = now
         current = self._current_mtime()
         if current is None or current == self._last_mtime:
             return

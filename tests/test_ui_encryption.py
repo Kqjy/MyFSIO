@@ -66,10 +66,9 @@ class TestUIBucketEncryption:
         """Encryption card should be visible on bucket detail page."""
         app = _make_encryption_app(tmp_path)
         client = app.test_client()
-        
-        # Login first
+
         client.post("/ui/login", data={"access_key": "test", "secret_key": "secret"}, follow_redirects=True)
-        
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         assert response.status_code == 200
         
@@ -81,15 +80,12 @@ class TestUIBucketEncryption:
         """Should be able to enable AES-256 encryption."""
         app = _make_encryption_app(tmp_path)
         client = app.test_client()
-        
-        # Login
+
         client.post("/ui/login", data={"access_key": "test", "secret_key": "secret"}, follow_redirects=True)
-        
-        # Get CSRF token
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         csrf_token = get_csrf_token(response)
-        
-        # Enable AES-256 encryption
+
         response = client.post(
             "/ui/buckets/test-bucket/encryption",
             data={
@@ -102,15 +98,13 @@ class TestUIBucketEncryption:
         
         assert response.status_code == 200
         html = response.data.decode("utf-8")
-        # Should see success message or enabled state
         assert "AES-256" in html or "encryption enabled" in html.lower()
     
     def test_enable_kms_encryption(self, tmp_path):
         """Should be able to enable KMS encryption."""
         app = _make_encryption_app(tmp_path, kms_enabled=True)
         client = app.test_client()
-        
-        # Create a KMS key first
+
         with app.app_context():
             kms = app.extensions.get("kms")
             if kms:
@@ -118,15 +112,12 @@ class TestUIBucketEncryption:
                 key_id = key.key_id
             else:
                 pytest.skip("KMS not available")
-        
-        # Login
+
         client.post("/ui/login", data={"access_key": "test", "secret_key": "secret"}, follow_redirects=True)
-        
-        # Get CSRF token
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         csrf_token = get_csrf_token(response)
-        
-        # Enable KMS encryption
+
         response = client.post(
             "/ui/buckets/test-bucket/encryption",
             data={
@@ -146,11 +137,9 @@ class TestUIBucketEncryption:
         """Should be able to disable encryption."""
         app = _make_encryption_app(tmp_path)
         client = app.test_client()
-        
-        # Login
+
         client.post("/ui/login", data={"access_key": "test", "secret_key": "secret"}, follow_redirects=True)
-        
-        # First enable encryption
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         csrf_token = get_csrf_token(response)
         
@@ -162,8 +151,7 @@ class TestUIBucketEncryption:
                 "algorithm": "AES256",
             },
         )
-        
-        # Now disable it
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         csrf_token = get_csrf_token(response)
         
@@ -184,13 +172,12 @@ class TestUIBucketEncryption:
         """Invalid encryption algorithm should be rejected."""
         app = _make_encryption_app(tmp_path)
         client = app.test_client()
-        
-        # Login
+
         client.post("/ui/login", data={"access_key": "test", "secret_key": "secret"}, follow_redirects=True)
-        
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         csrf_token = get_csrf_token(response)
-        
+
         response = client.post(
             "/ui/buckets/test-bucket/encryption",
             data={
@@ -200,23 +187,21 @@ class TestUIBucketEncryption:
             },
             follow_redirects=True,
         )
-        
+
         assert response.status_code == 200
         html = response.data.decode("utf-8")
         assert "Invalid" in html or "danger" in html
-    
+
     def test_encryption_persists_in_config(self, tmp_path):
         """Encryption config should persist in bucket config."""
         app = _make_encryption_app(tmp_path)
         client = app.test_client()
-        
-        # Login
+
         client.post("/ui/login", data={"access_key": "test", "secret_key": "secret"}, follow_redirects=True)
-        
-        # Enable encryption
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         csrf_token = get_csrf_token(response)
-        
+
         client.post(
             "/ui/buckets/test-bucket/encryption",
             data={
@@ -225,8 +210,7 @@ class TestUIBucketEncryption:
                 "algorithm": "AES256",
             },
         )
-        
-        # Verify it's stored
+
         with app.app_context():
             storage = app.extensions["object_storage"]
             config = storage.get_bucket_encryption("test-bucket")
@@ -243,14 +227,12 @@ class TestUIEncryptionWithoutPermission:
         """Read-only user should not be able to change encryption settings."""
         app = _make_encryption_app(tmp_path)
         client = app.test_client()
-        
-        # Login as readonly user
+
         client.post("/ui/login", data={"access_key": "readonly", "secret_key": "secret"}, follow_redirects=True)
-        
-        # This should fail or be rejected
+
         response = client.get("/ui/buckets/test-bucket?tab=properties")
         csrf_token = get_csrf_token(response)
-        
+
         response = client.post(
             "/ui/buckets/test-bucket/encryption",
             data={
@@ -260,9 +242,7 @@ class TestUIEncryptionWithoutPermission:
             },
             follow_redirects=True,
         )
-        
-        # Should either redirect with error or show permission denied
+
         assert response.status_code == 200
         html = response.data.decode("utf-8")
-        # Should contain error about permission denied
         assert "Access denied" in html or "permission" in html.lower() or "not authorized" in html.lower()

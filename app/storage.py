@@ -1,4 +1,3 @@
-"""Filesystem-backed object storage helpers."""
 from __future__ import annotations
 
 import hashlib
@@ -77,6 +76,14 @@ class StorageError(RuntimeError):
     """Raised when the storage layer encounters an unrecoverable problem."""
 
 
+class BucketNotFoundError(StorageError):
+    """Raised when the bucket does not exist."""
+
+
+class ObjectNotFoundError(StorageError):
+    """Raised when the object does not exist."""
+
+
 class QuotaExceededError(StorageError):
     """Raised when an operation would exceed bucket quota limits."""
     
@@ -91,7 +98,7 @@ class ObjectMeta:
     key: str
     size: int
     last_modified: datetime
-    etag: str
+    etag: Optional[str] = None
     metadata: Optional[Dict[str, str]] = None
 
 
@@ -107,7 +114,7 @@ class ListObjectsResult:
     objects: List[ObjectMeta]
     is_truncated: bool
     next_continuation_token: Optional[str]
-    total_count: Optional[int] = None  # Total objects in bucket (from stats cache)
+    total_count: Optional[int] = None
 
 
 def _utcnow() -> datetime:
@@ -131,17 +138,25 @@ class ObjectStorage:
     MULTIPART_MANIFEST = "manifest.json"
     BUCKET_CONFIG_FILE = ".bucket.json"
     KEY_INDEX_CACHE_TTL = 30
-    OBJECT_CACHE_MAX_SIZE = 100  # Maximum number of buckets to cache
+    OBJECT_CACHE_MAX_SIZE = 100
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
-        # LRU cache for object metadata with thread-safe access
         self._object_cache: OrderedDict[str, tuple[Dict[str, ObjectMeta], float]] = OrderedDict()
         self._cache_lock = threading.Lock()
-        # Cache version counter for detecting stale reads
+        self._bucket_locks: Dict[str, threading.Lock] = {}
         self._cache_version: Dict[str, int] = {}
+        self._bucket_config_cache: Dict[str, tuple[dict[str, Any], float]] = {}
+        self._bucket_config_cache_ttl = 30.0
+
+    def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
+        """Get or create a lock for a specific bucket. Reduces global lock contention."""
+        with self._cache_lock:
+            if bucket_id not in self._bucket_locks:
+                self._bucket_locks[bucket_id] = threading.Lock()
+            return self._bucket_locks[bucket_id]
 
     def list_buckets(self) -> List[BucketMeta]:
         buckets: List[BucketMeta] = []
@@ -158,6 +173,11 @@ class ObjectStorage:
 
     def bucket_exists(self, bucket_name: str) -> bool:
         return self._bucket_path(bucket_name).exists()
+
+    def _require_bucket_exists(self, bucket_path: Path) -> None:
+        """Raise BucketNotFoundError if bucket does not exist."""
+        if not bucket_path.exists():
+            raise BucketNotFoundError("Bucket does not exist")
 
     def _validate_bucket_name(self, bucket_name: str) -> None:
         if len(bucket_name) < 3 or len(bucket_name) > 63:
@@ -177,14 +197,14 @@ class ObjectStorage:
 
     def bucket_stats(self, bucket_name: str, cache_ttl: int = 60) -> dict[str, int]:
         """Return object count and total size for the bucket (cached).
-        
+
         Args:
             bucket_name: Name of the bucket
             cache_ttl: Cache time-to-live in seconds (default 60)
         """
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
 
         cache_path = self._system_bucket_root(bucket_name) / "stats.json"
         if cache_path.exists():
@@ -246,12 +266,13 @@ class ObjectStorage:
     def delete_bucket(self, bucket_name: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
-        if self._has_visible_objects(bucket_path):
+            raise BucketNotFoundError("Bucket does not exist")
+        has_objects, has_versions, has_multipart = self._check_bucket_contents(bucket_path)
+        if has_objects:
             raise StorageError("Bucket not empty")
-        if self._has_archived_versions(bucket_path):
+        if has_versions:
             raise StorageError("Bucket contains archived object versions")
-        if self._has_active_multipart_uploads(bucket_path):
+        if has_multipart:
             raise StorageError("Bucket has active multipart uploads")
         self._remove_tree(bucket_path)
         self._remove_tree(self._system_bucket_root(bucket_path.name))
@@ -278,7 +299,7 @@ class ObjectStorage:
         """
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
 
         object_cache = self._get_object_cache(bucket_id, bucket_path)
@@ -339,7 +360,7 @@ class ObjectStorage:
     ) -> ObjectMeta:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
 
         safe_key = self._sanitize_object_key(object_key)
@@ -393,22 +414,24 @@ class ObjectStorage:
         internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
         combined_meta = {**internal_meta, **(metadata or {})}
         self._write_metadata(bucket_id, safe_key, combined_meta)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
-        
-        return ObjectMeta(
+
+        obj_meta = ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
             last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
             etag=etag,
             metadata=metadata,
         )
+        self._update_object_cache_entry(bucket_id, safe_key.as_posix(), obj_meta)
+
+        return obj_meta
 
     def get_object_path(self, bucket_name: str, object_key: str) -> Path:
         path = self._object_path(bucket_name, object_key)
         if not path.exists():
-            raise StorageError("Object not found")
+            raise ObjectNotFoundError("Object not found")
         return path
 
     def get_object_metadata(self, bucket_name: str, object_key: str) -> Dict[str, str]:
@@ -449,9 +472,9 @@ class ObjectStorage:
         rel = path.relative_to(bucket_path)
         self._safe_unlink(path)
         self._delete_metadata(bucket_id, rel)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
+        self._update_object_cache_entry(bucket_id, safe_key.as_posix(), None)
         self._cleanup_empty_parents(path, bucket_path)
 
     def purge_object(self, bucket_name: str, object_key: str) -> None:
@@ -471,15 +494,15 @@ class ObjectStorage:
         legacy_version_dir = self._legacy_version_dir(bucket_id, rel)
         if legacy_version_dir.exists():
             shutil.rmtree(legacy_version_dir, ignore_errors=True)
-        
+
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
+        self._update_object_cache_entry(bucket_id, rel.as_posix(), None)
         self._cleanup_empty_parents(target, bucket_path)
 
     def is_versioning_enabled(self, bucket_name: str) -> bool:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         return self._is_versioning_enabled(bucket_path)
 
     def set_bucket_versioning(self, bucket_name: str, enabled: bool) -> None:
@@ -671,11 +694,11 @@ class ObjectStorage:
         """Get tags for an object."""
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         safe_key = self._sanitize_object_key(object_key)
         object_path = bucket_path / safe_key
         if not object_path.exists():
-            raise StorageError("Object does not exist")
+            raise ObjectNotFoundError("Object does not exist")
         
         for meta_file in (self._metadata_file(bucket_path.name, safe_key), self._legacy_metadata_file(bucket_path.name, safe_key)):
             if not meta_file.exists():
@@ -694,11 +717,11 @@ class ObjectStorage:
         """Set tags for an object."""
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         safe_key = self._sanitize_object_key(object_key)
         object_path = bucket_path / safe_key
         if not object_path.exists():
-            raise StorageError("Object does not exist")
+            raise ObjectNotFoundError("Object does not exist")
         
         meta_file = self._metadata_file(bucket_path.name, safe_key)
         
@@ -732,7 +755,7 @@ class ObjectStorage:
     def list_object_versions(self, bucket_name: str, object_key: str) -> List[Dict[str, Any]]:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
         safe_key = self._sanitize_object_key(object_key)
         version_dir = self._version_dir(bucket_id, safe_key)
@@ -756,7 +779,7 @@ class ObjectStorage:
     def restore_object_version(self, bucket_name: str, object_key: str, version_id: str) -> ObjectMeta:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
         safe_key = self._sanitize_object_key(object_key)
         version_dir = self._version_dir(bucket_id, safe_key)
@@ -790,10 +813,33 @@ class ObjectStorage:
             metadata=metadata or None,
         )
 
+    def delete_object_version(self, bucket_name: str, object_key: str, version_id: str) -> None:
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise BucketNotFoundError("Bucket does not exist")
+        bucket_id = bucket_path.name
+        safe_key = self._sanitize_object_key(object_key)
+        version_dir = self._version_dir(bucket_id, safe_key)
+        data_path = version_dir / f"{version_id}.bin"
+        meta_path = version_dir / f"{version_id}.json"
+        if not data_path.exists() and not meta_path.exists():
+            legacy_version_dir = self._legacy_version_dir(bucket_id, safe_key)
+            data_path = legacy_version_dir / f"{version_id}.bin"
+            meta_path = legacy_version_dir / f"{version_id}.json"
+        if not data_path.exists() and not meta_path.exists():
+            raise StorageError(f"Version {version_id} not found")
+        if data_path.exists():
+            data_path.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+        parent = data_path.parent
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+
     def list_orphaned_objects(self, bucket_name: str) -> List[Dict[str, Any]]:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
         version_roots = [self._bucket_versions_root(bucket_id), self._legacy_versions_root(bucket_id)]
         if not any(root.exists() for root in version_roots):
@@ -861,7 +907,7 @@ class ObjectStorage:
     ) -> str:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
-            raise StorageError("Bucket does not exist")
+            raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
         safe_key = self._sanitize_object_key(object_key)
         upload_id = uuid.uuid4().hex
@@ -888,8 +934,8 @@ class ObjectStorage:
 
         Uses file locking to safely update the manifest and handle concurrent uploads.
         """
-        if part_number < 1:
-            raise StorageError("part_number must be >= 1")
+        if part_number < 1 or part_number > 10000:
+            raise StorageError("part_number must be between 1 and 10000")
         bucket_path = self._bucket_path(bucket_name)
 
         upload_root = self._multipart_dir(bucket_path.name, upload_id)
@@ -898,7 +944,6 @@ class ObjectStorage:
         if not upload_root.exists():
             raise StorageError("Multipart upload not found")
 
-        # Write part to temporary file first, then rename atomically
         checksum = hashlib.md5()
         part_filename = f"part-{part_number:05d}.part"
         part_path = upload_root / part_filename
@@ -907,11 +952,8 @@ class ObjectStorage:
         try:
             with temp_path.open("wb") as target:
                 shutil.copyfileobj(_HashingReader(stream, checksum), target)
-
-            # Atomic rename (or replace on Windows)
             temp_path.replace(part_path)
         except OSError:
-            # Clean up temp file on failure
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
@@ -927,7 +969,6 @@ class ObjectStorage:
         manifest_path = upload_root / self.MULTIPART_MANIFEST
         lock_path = upload_root / ".manifest.lock"
 
-        # Retry loop for handling transient lock/read failures
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -1038,11 +1079,6 @@ class ObjectStorage:
                                     checksum.update(data)
                                     target.write(data)
 
-                    metadata = manifest.get("metadata")
-                    if metadata:
-                        self._write_metadata(bucket_id, safe_key, metadata)
-                    else:
-                        self._delete_metadata(bucket_id, safe_key)
         except BlockingIOError:
             raise StorageError("Another upload to this key is in progress")
         finally:
@@ -1054,16 +1090,25 @@ class ObjectStorage:
         shutil.rmtree(upload_root, ignore_errors=True)
 
         self._invalidate_bucket_stats_cache(bucket_id)
-        self._invalidate_object_cache(bucket_id)
 
         stat = destination.stat()
-        return ObjectMeta(
+        etag = checksum.hexdigest()
+        metadata = manifest.get("metadata")
+
+        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
+        combined_meta = {**internal_meta, **(metadata or {})}
+        self._write_metadata(bucket_id, safe_key, combined_meta)
+
+        obj_meta = ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
             last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
-            etag=checksum.hexdigest(),
+            etag=etag,
             metadata=metadata,
         )
+        self._update_object_cache_entry(bucket_id, safe_key.as_posix(), obj_meta)
+
+        return obj_meta
 
     def abort_multipart_upload(self, bucket_name: str, upload_id: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
@@ -1101,6 +1146,49 @@ class ObjectStorage:
         
         parts.sort(key=lambda x: x["PartNumber"])
         return parts
+
+    def list_multipart_uploads(self, bucket_name: str) -> List[Dict[str, Any]]:
+        """List all active multipart uploads for a bucket."""
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise BucketNotFoundError("Bucket does not exist")
+        bucket_id = bucket_path.name
+        uploads = []
+        multipart_root = self._multipart_bucket_root(bucket_id)
+        if multipart_root.exists():
+            for upload_dir in multipart_root.iterdir():
+                if not upload_dir.is_dir():
+                    continue
+                manifest_path = upload_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    uploads.append({
+                        "upload_id": manifest.get("upload_id", upload_dir.name),
+                        "object_key": manifest.get("object_key", ""),
+                        "created_at": manifest.get("created_at", ""),
+                    })
+                except (OSError, json.JSONDecodeError):
+                    continue
+        legacy_root = self._legacy_multipart_bucket_root(bucket_id)
+        if legacy_root.exists():
+            for upload_dir in legacy_root.iterdir():
+                if not upload_dir.is_dir():
+                    continue
+                manifest_path = upload_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    uploads.append({
+                        "upload_id": manifest.get("upload_id", upload_dir.name),
+                        "object_key": manifest.get("object_key", ""),
+                        "created_at": manifest.get("created_at", ""),
+                    })
+                except (OSError, json.JSONDecodeError):
+                    continue
+        return uploads
 
     def _bucket_path(self, bucket_name: str) -> Path:
         safe_name = self._sanitize_bucket_name(bucket_name)
@@ -1282,10 +1370,7 @@ class ObjectStorage:
                                 stat = entry.stat()
                                 
                                 etag = meta_cache.get(key)
-                                
-                                if not etag:
-                                    etag = f'"{stat.st_size}-{int(stat.st_mtime)}"'
-                                
+
                                 objects[key] = ObjectMeta(
                                     key=key,
                                     size=stat.st_size,
@@ -1305,37 +1390,39 @@ class ObjectStorage:
         """Get cached object metadata for a bucket, refreshing if stale.
 
         Uses LRU eviction to prevent unbounded cache growth.
-        Thread-safe with version tracking to detect concurrent invalidations.
+        Thread-safe with per-bucket locks to reduce contention.
         """
         now = time.time()
 
         with self._cache_lock:
             cached = self._object_cache.get(bucket_id)
-            cache_version = self._cache_version.get(bucket_id, 0)
-
             if cached:
                 objects, timestamp = cached
                 if now - timestamp < self.KEY_INDEX_CACHE_TTL:
-                    # Move to end (most recently used)
                     self._object_cache.move_to_end(bucket_id)
                     return objects
+            cache_version = self._cache_version.get(bucket_id, 0)
 
-        # Build cache outside lock to avoid holding lock during I/O
-        objects = self._build_object_cache(bucket_path)
+        bucket_lock = self._get_bucket_lock(bucket_id)
+        with bucket_lock:
+            with self._cache_lock:
+                cached = self._object_cache.get(bucket_id)
+                if cached:
+                    objects, timestamp = cached
+                    if now - timestamp < self.KEY_INDEX_CACHE_TTL:
+                        self._object_cache.move_to_end(bucket_id)
+                        return objects
+            objects = self._build_object_cache(bucket_path)
 
-        with self._cache_lock:
-            # Check if cache was invalidated while we were building
-            current_version = self._cache_version.get(bucket_id, 0)
-            if current_version != cache_version:
-                # Cache was invalidated, rebuild
-                objects = self._build_object_cache(bucket_path)
+            with self._cache_lock:
+                current_version = self._cache_version.get(bucket_id, 0)
+                if current_version != cache_version:
+                    objects = self._build_object_cache(bucket_path)
+                while len(self._object_cache) >= self.OBJECT_CACHE_MAX_SIZE:
+                    self._object_cache.popitem(last=False)
 
-            # Evict oldest entries if cache is full
-            while len(self._object_cache) >= self.OBJECT_CACHE_MAX_SIZE:
-                self._object_cache.popitem(last=False)
-
-            self._object_cache[bucket_id] = (objects, time.time())
-            self._object_cache.move_to_end(bucket_id)
+                self._object_cache[bucket_id] = (objects, time.time())
+                self._object_cache.move_to_end(bucket_id)
 
         return objects
 
@@ -1353,6 +1440,20 @@ class ObjectStorage:
             etag_index_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+    def _update_object_cache_entry(self, bucket_id: str, key: str, meta: Optional[ObjectMeta]) -> None:
+        """Update a single entry in the object cache instead of invalidating the whole cache.
+
+        This is a performance optimization - lazy update instead of full invalidation.
+        """
+        with self._cache_lock:
+            cached = self._object_cache.get(bucket_id)
+            if cached:
+                objects, timestamp = cached
+                if meta is None:
+                    objects.pop(key, None)
+                else:
+                    objects[key] = meta
 
     def _ensure_system_roots(self) -> None:
         for path in (
@@ -1373,19 +1474,31 @@ class ObjectStorage:
         return self._system_bucket_root(bucket_name) / self.BUCKET_CONFIG_FILE
 
     def _read_bucket_config(self, bucket_name: str) -> dict[str, Any]:
+        now = time.time()
+        cached = self._bucket_config_cache.get(bucket_name)
+        if cached:
+            config, cached_time = cached
+            if now - cached_time < self._bucket_config_cache_ttl:
+                return config.copy()
+
         config_path = self._bucket_config_path(bucket_name)
         if not config_path.exists():
+            self._bucket_config_cache[bucket_name] = ({}, now)
             return {}
         try:
             data = json.loads(config_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            config = data if isinstance(data, dict) else {}
+            self._bucket_config_cache[bucket_name] = (config, now)
+            return config.copy()
         except (OSError, json.JSONDecodeError):
+            self._bucket_config_cache[bucket_name] = ({}, now)
             return {}
 
     def _write_bucket_config(self, bucket_name: str, payload: dict[str, Any]) -> None:
         config_path = self._bucket_config_path(bucket_name)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(payload), encoding="utf-8")
+        self._bucket_config_cache[bucket_name] = (payload.copy(), time.time())
 
     def _set_bucket_config_entry(self, bucket_name: str, key: str, value: Any | None) -> None:
         config = self._read_bucket_config(bucket_name)
@@ -1507,33 +1620,64 @@ class ObjectStorage:
             except OSError:
                 continue
 
-    def _has_visible_objects(self, bucket_path: Path) -> bool:
+    def _check_bucket_contents(self, bucket_path: Path) -> tuple[bool, bool, bool]:
+        """Check bucket for objects, versions, and multipart uploads in a single pass.
+
+        Returns (has_visible_objects, has_archived_versions, has_active_multipart_uploads).
+        Uses early exit when all three are found.
+        """
+        has_objects = False
+        has_versions = False
+        has_multipart = False
+        bucket_name = bucket_path.name
+
         for path in bucket_path.rglob("*"):
+            if has_objects:
+                break
             if not path.is_file():
                 continue
             rel = path.relative_to(bucket_path)
             if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
                 continue
-            return True
-        return False
+            has_objects = True
+
+        for version_root in (
+            self._bucket_versions_root(bucket_name),
+            self._legacy_versions_root(bucket_name),
+        ):
+            if has_versions:
+                break
+            if version_root.exists():
+                for path in version_root.rglob("*"):
+                    if path.is_file():
+                        has_versions = True
+                        break
+
+        for uploads_root in (
+            self._multipart_bucket_root(bucket_name),
+            self._legacy_multipart_bucket_root(bucket_name),
+        ):
+            if has_multipart:
+                break
+            if uploads_root.exists():
+                for path in uploads_root.rglob("*"):
+                    if path.is_file():
+                        has_multipart = True
+                        break
+
+        return has_objects, has_versions, has_multipart
+
+    def _has_visible_objects(self, bucket_path: Path) -> bool:
+        has_objects, _, _ = self._check_bucket_contents(bucket_path)
+        return has_objects
 
     def _has_archived_versions(self, bucket_path: Path) -> bool:
-        for version_root in (
-            self._bucket_versions_root(bucket_path.name),
-            self._legacy_versions_root(bucket_path.name),
-        ):
-            if version_root.exists() and any(path.is_file() for path in version_root.rglob("*")):
-                return True
-        return False
+        _, has_versions, _ = self._check_bucket_contents(bucket_path)
+        return has_versions
 
     def _has_active_multipart_uploads(self, bucket_path: Path) -> bool:
-        for uploads_root in (
-            self._multipart_bucket_root(bucket_path.name),
-            self._legacy_multipart_bucket_root(bucket_path.name),
-        ):
-            if uploads_root.exists() and any(path.is_file() for path in uploads_root.rglob("*")):
-                return True
-        return False
+        _, _, has_multipart = self._check_bucket_contents(bucket_path)
+        return has_multipart
 
     def _remove_tree(self, path: Path) -> None:
         if not path.exists():
@@ -1542,7 +1686,7 @@ class ObjectStorage:
             try:
                 os.chmod(target_path, stat.S_IRWXU)
                 func(target_path)
-            except Exception as exc:  # pragma: no cover - fallback failure
+            except Exception as exc:
                 raise StorageError(f"Unable to delete bucket contents: {exc}") from exc
 
         try:

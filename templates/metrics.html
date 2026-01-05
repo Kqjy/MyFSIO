@@ -219,24 +219,42 @@
   </div>
   
   <div class="col-lg-4">
-    <div class="card shadow-sm border-0 h-100 overflow-hidden" style="background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);">
+    {% set has_issues = (cpu_percent > 80) or (memory.percent > 85) or (disk.percent > 90) %}
+    <div class="card shadow-sm border-0 h-100 overflow-hidden" style="background: linear-gradient(135deg, {% if has_issues %}#ef4444 0%, #f97316{% else %}#3b82f6 0%, #8b5cf6{% endif %} 100%);">
       <div class="card-body p-4 d-flex flex-column justify-content-center text-white position-relative">
         <div class="position-absolute top-0 end-0 opacity-25" style="transform: translate(20%, -20%);">
-          <svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" fill="currentColor" class="bi bi-cloud-check" viewBox="0 0 16 16">
+          <svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" fill="currentColor" class="bi bi-{% if has_issues %}exclamation-triangle{% else %}cloud-check{% endif %}" viewBox="0 0 16 16">
+            {% if has_issues %}
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+            {% else %}
             <path fill-rule="evenodd" d="M10.354 6.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7 8.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
             <path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
+            {% endif %}
           </svg>
         </div>
         <div class="mb-3">
-          <span class="badge bg-white text-primary fw-semibold px-3 py-2">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-check-circle-fill me-1" viewBox="0 0 16 16">
+          <span class="badge bg-white {% if has_issues %}text-danger{% else %}text-primary{% endif %} fw-semibold px-3 py-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-{% if has_issues %}exclamation-circle-fill{% else %}check-circle-fill{% endif %} me-1" viewBox="0 0 16 16">
+              {% if has_issues %}
+              <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM8 4a.905.905 0 0 0-.9.995l.35 3.507a.552.552 0 0 0 1.1 0l.35-3.507A.905.905 0 0 0 8 4zm.002 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/>
+              {% else %}
               <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+              {% endif %}
             </svg>
             v{{ app.version }}
           </span>
         </div>
-        <h4 class="card-title fw-bold mb-3">System Status</h4>
-        <p class="card-text opacity-90 mb-4">All systems operational. Your storage infrastructure is running smoothly with no detected issues.</p>
+        <h4 class="card-title fw-bold mb-3">System Health</h4>
+        {% if has_issues %}
+        <ul class="list-unstyled small mb-4 opacity-90">
+          {% if cpu_percent > 80 %}<li class="mb-1">CPU usage is high ({{ cpu_percent }}%)</li>{% endif %}
+          {% if memory.percent > 85 %}<li class="mb-1">Memory usage is high ({{ memory.percent }}%)</li>{% endif %}
+          {% if disk.percent > 90 %}<li class="mb-1">Disk space is critically low ({{ disk.percent }}% used)</li>{% endif %}
+        </ul>
+        {% else %}
+        <p class="card-text opacity-90 mb-4 small">All resources are within normal operating parameters.</p>
+        {% endif %}
         <div class="d-flex gap-4">
           <div>
             <div class="h3 fw-bold mb-0">{{ app.uptime_days }}d</div>

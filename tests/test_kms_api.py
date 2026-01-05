@@ -23,8 +23,7 @@ def kms_client(tmp_path):
         "ENCRYPTION_MASTER_KEY_PATH": str(tmp_path / "master.key"),
         "KMS_KEYS_PATH": str(tmp_path / "kms_keys.json"),
     })
-    
-    # Create default IAM config with admin user
+
     iam_config = {
         "users": [
             {
@@ -83,7 +82,6 @@ class TestKMSKeyManagement:
     
     def test_list_keys(self, kms_client, auth_headers):
         """Test listing KMS keys."""
-        # Create some keys
         kms_client.post("/kms/keys", json={"Description": "Key 1"}, headers=auth_headers)
         kms_client.post("/kms/keys", json={"Description": "Key 2"}, headers=auth_headers)
         
@@ -97,7 +95,6 @@ class TestKMSKeyManagement:
     
     def test_get_key(self, kms_client, auth_headers):
         """Test getting a specific key."""
-        # Create a key
         create_response = kms_client.post(
             "/kms/keys",
             json={"KeyId": "test-key", "Description": "Test key"},
@@ -120,36 +117,28 @@ class TestKMSKeyManagement:
     
     def test_delete_key(self, kms_client, auth_headers):
         """Test deleting a key."""
-        # Create a key
         kms_client.post("/kms/keys", json={"KeyId": "test-key"}, headers=auth_headers)
-        
-        # Delete it
+
         response = kms_client.delete("/kms/keys/test-key", headers=auth_headers)
-        
+
         assert response.status_code == 204
-        
-        # Verify it's gone
+
         get_response = kms_client.get("/kms/keys/test-key", headers=auth_headers)
         assert get_response.status_code == 404
     
     def test_enable_disable_key(self, kms_client, auth_headers):
         """Test enabling and disabling a key."""
-        # Create a key
         kms_client.post("/kms/keys", json={"KeyId": "test-key"}, headers=auth_headers)
-        
-        # Disable
+
         response = kms_client.post("/kms/keys/test-key/disable", headers=auth_headers)
         assert response.status_code == 200
-        
-        # Verify disabled
+
         get_response = kms_client.get("/kms/keys/test-key", headers=auth_headers)
         assert get_response.get_json()["KeyMetadata"]["Enabled"] is False
-        
-        # Enable
+
         response = kms_client.post("/kms/keys/test-key/enable", headers=auth_headers)
         assert response.status_code == 200
-        
-        # Verify enabled
+
         get_response = kms_client.get("/kms/keys/test-key", headers=auth_headers)
         assert get_response.get_json()["KeyMetadata"]["Enabled"] is True
 
@@ -159,13 +148,11 @@ class TestKMSEncryption:
     
     def test_encrypt_decrypt(self, kms_client, auth_headers):
         """Test encrypting and decrypting data."""
-        # Create a key
         kms_client.post("/kms/keys", json={"KeyId": "test-key"}, headers=auth_headers)
-        
+
         plaintext = b"Hello, World!"
         plaintext_b64 = base64.b64encode(plaintext).decode()
-        
-        # Encrypt
+
         encrypt_response = kms_client.post(
             "/kms/encrypt",
             json={"KeyId": "test-key", "Plaintext": plaintext_b64},
@@ -177,8 +164,7 @@ class TestKMSEncryption:
         
         assert "CiphertextBlob" in encrypt_data
         assert encrypt_data["KeyId"] == "test-key"
-        
-        # Decrypt
+
         decrypt_response = kms_client.post(
             "/kms/decrypt",
             json={"CiphertextBlob": encrypt_data["CiphertextBlob"]},
@@ -198,8 +184,7 @@ class TestKMSEncryption:
         plaintext = b"Contextualized data"
         plaintext_b64 = base64.b64encode(plaintext).decode()
         context = {"purpose": "testing", "bucket": "my-bucket"}
-        
-        # Encrypt with context
+
         encrypt_response = kms_client.post(
             "/kms/encrypt",
             json={
@@ -212,8 +197,7 @@ class TestKMSEncryption:
         
         assert encrypt_response.status_code == 200
         ciphertext = encrypt_response.get_json()["CiphertextBlob"]
-        
-        # Decrypt with same context succeeds
+
         decrypt_response = kms_client.post(
             "/kms/decrypt",
             json={
@@ -224,8 +208,7 @@ class TestKMSEncryption:
         )
         
         assert decrypt_response.status_code == 200
-        
-        # Decrypt with wrong context fails
+
         wrong_context_response = kms_client.post(
             "/kms/decrypt",
             json={
@@ -325,11 +308,9 @@ class TestKMSReEncrypt:
     
     def test_re_encrypt(self, kms_client, auth_headers):
         """Test re-encrypting data with a different key."""
-        # Create two keys
         kms_client.post("/kms/keys", json={"KeyId": "key-1"}, headers=auth_headers)
         kms_client.post("/kms/keys", json={"KeyId": "key-2"}, headers=auth_headers)
-        
-        # Encrypt with key-1
+
         plaintext = b"Data to re-encrypt"
         encrypt_response = kms_client.post(
             "/kms/encrypt",
@@ -341,8 +322,7 @@ class TestKMSReEncrypt:
         )
         
         ciphertext = encrypt_response.get_json()["CiphertextBlob"]
-        
-        # Re-encrypt with key-2
+
         re_encrypt_response = kms_client.post(
             "/kms/re-encrypt",
             json={
@@ -357,8 +337,7 @@ class TestKMSReEncrypt:
         
         assert data["SourceKeyId"] == "key-1"
         assert data["KeyId"] == "key-2"
-        
-        # Verify new ciphertext can be decrypted
+
         decrypt_response = kms_client.post(
             "/kms/decrypt",
             json={"CiphertextBlob": data["CiphertextBlob"]},
@@ -398,7 +377,7 @@ class TestKMSRandom:
         data = response.get_json()
         
         random_bytes = base64.b64decode(data["Plaintext"])
-        assert len(random_bytes) == 32  # Default is 32 bytes
+        assert len(random_bytes) == 32
 
 
 class TestClientSideEncryption:
@@ -422,11 +401,9 @@ class TestClientSideEncryption:
     
     def test_client_encrypt_decrypt(self, kms_client, auth_headers):
         """Test client-side encryption and decryption."""
-        # Generate a key
         key_response = kms_client.post("/kms/client/generate-key", headers=auth_headers)
         key = key_response.get_json()["key"]
-        
-        # Encrypt
+
         plaintext = b"Client-side encrypted data"
         encrypt_response = kms_client.post(
             "/kms/client/encrypt",
@@ -439,8 +416,7 @@ class TestClientSideEncryption:
         
         assert encrypt_response.status_code == 200
         encrypted = encrypt_response.get_json()
-        
-        # Decrypt
+
         decrypt_response = kms_client.post(
             "/kms/client/decrypt",
             json={
@@ -461,7 +437,6 @@ class TestEncryptionMaterials:
     
     def test_get_encryption_materials(self, kms_client, auth_headers):
         """Test getting encryption materials for client-side S3 encryption."""
-        # Create a key
         kms_client.post("/kms/keys", json={"KeyId": "s3-key"}, headers=auth_headers)
         
         response = kms_client.post(
@@ -477,8 +452,7 @@ class TestEncryptionMaterials:
         assert "EncryptedKey" in data
         assert data["KeyId"] == "s3-key"
         assert data["Algorithm"] == "AES-256-GCM"
-        
-        # Verify key is 256 bits
+
         key = base64.b64decode(data["PlaintextKey"])
         assert len(key) == 32
 
@@ -489,8 +463,7 @@ class TestKMSAuthentication:
     def test_unauthenticated_request_fails(self, kms_client):
         """Test that unauthenticated requests are rejected."""
         response = kms_client.get("/kms/keys")
-        
-        # Should fail with 403 (no credentials)
+
         assert response.status_code == 403
     
     def test_invalid_credentials_fail(self, kms_client):

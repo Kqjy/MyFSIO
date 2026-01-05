@@ -1,4 +1,3 @@
-"""Key Management Service (KMS) for encryption key management."""
 from __future__ import annotations
 
 import base64
@@ -211,7 +210,27 @@ class KMSManager:
         """List all keys."""
         self._load_keys()
         return list(self._keys.values())
-    
+
+    def get_default_key_id(self) -> str:
+        """Get the default KMS key ID, creating one if none exist."""
+        self._load_keys()
+        for key in self._keys.values():
+            if key.enabled:
+                return key.key_id
+        default_key = self.create_key(description="Default KMS Key")
+        return default_key.key_id
+
+    def get_provider(self, key_id: str | None = None) -> "KMSEncryptionProvider":
+        """Get a KMS encryption provider for the specified key."""
+        if key_id is None:
+            key_id = self.get_default_key_id()
+        key = self.get_key(key_id)
+        if not key:
+            raise EncryptionError(f"Key not found: {key_id}")
+        if not key.enabled:
+            raise EncryptionError(f"Key is disabled: {key_id}")
+        return KMSEncryptionProvider(self, key_id)
+
     def enable_key(self, key_id: str) -> None:
         """Enable a key."""
         self._load_keys()

@@ -1,4 +1,3 @@
-"""Application factory for the mini S3-compatible object store."""
 from __future__ import annotations
 
 import logging
@@ -16,6 +15,8 @@ from flask_cors import CORS
 from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from .access_logging import AccessLoggingService
+from .acl import AclService
 from .bucket_policies import BucketPolicyStore
 from .config import AppConfig
 from .connections import ConnectionStore
@@ -23,6 +24,9 @@ from .encryption import EncryptionManager
 from .extensions import limiter, csrf
 from .iam import IamService
 from .kms import KMSManager
+from .lifecycle import LifecycleManager
+from .notifications import NotificationService
+from .object_lock import ObjectLockService
 from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage
@@ -120,7 +124,7 @@ def create_app(
     )
     
     connections = ConnectionStore(connections_path)
-    replication = ReplicationManager(storage, connections, replication_rules_path)
+    replication = ReplicationManager(storage, connections, replication_rules_path, storage_root)
     
     encryption_config = {
         "encryption_enabled": app.config.get("ENCRYPTION_ENABLED", False),
@@ -140,6 +144,22 @@ def create_app(
         from .encrypted_storage import EncryptedObjectStorage
         storage = EncryptedObjectStorage(storage, encryption_manager)
 
+    acl_service = AclService(storage_root)
+    object_lock_service = ObjectLockService(storage_root)
+    notification_service = NotificationService(storage_root)
+    access_logging_service = AccessLoggingService(storage_root)
+    access_logging_service.set_storage(storage)
+
+    lifecycle_manager = None
+    if app.config.get("LIFECYCLE_ENABLED", False):
+        base_storage = storage.storage if hasattr(storage, 'storage') else storage
+        lifecycle_manager = LifecycleManager(
+            base_storage,
+            interval_seconds=app.config.get("LIFECYCLE_INTERVAL_SECONDS", 3600),
+            storage_root=storage_root,
+        )
+        lifecycle_manager.start()
+
     app.extensions["object_storage"] = storage
     app.extensions["iam"] = iam
     app.extensions["bucket_policies"] = bucket_policies
@@ -149,6 +169,11 @@ def create_app(
     app.extensions["replication"] = replication
     app.extensions["encryption"] = encryption_manager
     app.extensions["kms"] = kms_manager
+    app.extensions["acl"] = acl_service
+    app.extensions["lifecycle"] = lifecycle_manager
+    app.extensions["object_lock"] = object_lock_service
+    app.extensions["notifications"] = notification_service
+    app.extensions["access_logging"] = access_logging_service
 
     @app.errorhandler(500)
     def internal_error(error):
@@ -265,17 +290,17 @@ def _configure_logging(app: Flask) -> None:
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(request_id)s | %(method)s %(path)s | %(message)s"
     )
-    
-    # Stream Handler (stdout) - Primary for Docker
+
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(_RequestContextFilter())
 
     logger = app.logger
+    for handler in logger.handlers[:]:
+        handler.close()
     logger.handlers.clear()
     logger.addHandler(stream_handler)
 
-    # File Handler (optional, if configured)
     if app.config.get("LOG_TO_FILE"):
         log_file = Path(app.config["LOG_FILE"])
         log_file.parent.mkdir(parents=True, exist_ok=True)

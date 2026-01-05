@@ -4,7 +4,6 @@ import pytest
 from xml.etree.ElementTree import fromstring
 
 
-# Helper to create file-like stream
 def _stream(data: bytes):
     return io.BytesIO(data)
 
@@ -19,13 +18,11 @@ class TestListObjectsV2:
     """Tests for ListObjectsV2 endpoint."""
 
     def test_list_objects_v2_basic(self, client, signer, storage):
-        # Create bucket and objects
         storage.create_bucket("v2-test")
         storage.put_object("v2-test", "file1.txt", _stream(b"hello"))
         storage.put_object("v2-test", "file2.txt", _stream(b"world"))
         storage.put_object("v2-test", "folder/file3.txt", _stream(b"nested"))
 
-        # ListObjectsV2 request
         headers = signer("GET", "/v2-test?list-type=2")
         resp = client.get("/v2-test", query_string={"list-type": "2"}, headers=headers)
         assert resp.status_code == 200
@@ -46,7 +43,6 @@ class TestListObjectsV2:
         storage.put_object("prefix-test", "photos/2024/mar.jpg", _stream(b"mar"))
         storage.put_object("prefix-test", "docs/readme.md", _stream(b"readme"))
 
-        # List with prefix and delimiter
         headers = signer("GET", "/prefix-test?list-type=2&prefix=photos/&delimiter=/")
         resp = client.get(
             "/prefix-test",
@@ -56,11 +52,10 @@ class TestListObjectsV2:
         assert resp.status_code == 200
 
         root = fromstring(resp.data)
-        # Should show common prefixes for 2023/ and 2024/
         prefixes = [el.find("Prefix").text for el in root.findall("CommonPrefixes")]
         assert "photos/2023/" in prefixes
         assert "photos/2024/" in prefixes
-        assert len(root.findall("Contents")) == 0  # No direct files under photos/
+        assert len(root.findall("Contents")) == 0
 
 
 class TestPutBucketVersioning:
@@ -78,7 +73,6 @@ class TestPutBucketVersioning:
         resp = client.put("/version-test", query_string={"versioning": ""}, data=payload, headers=headers)
         assert resp.status_code == 200
 
-        # Verify via GET
         headers = signer("GET", "/version-test?versioning")
         resp = client.get("/version-test", query_string={"versioning": ""}, headers=headers)
         root = fromstring(resp.data)
@@ -110,15 +104,13 @@ class TestDeleteBucketTagging:
         storage.create_bucket("tag-delete-test")
         storage.set_bucket_tags("tag-delete-test", [{"Key": "env", "Value": "test"}])
 
-        # Delete tags
         headers = signer("DELETE", "/tag-delete-test?tagging")
         resp = client.delete("/tag-delete-test", query_string={"tagging": ""}, headers=headers)
         assert resp.status_code == 204
 
-        # Verify tags are gone
         headers = signer("GET", "/tag-delete-test?tagging")
         resp = client.get("/tag-delete-test", query_string={"tagging": ""}, headers=headers)
-        assert resp.status_code == 404  # NoSuchTagSet
+        assert resp.status_code == 404
 
 
 class TestDeleteBucketCors:
@@ -130,15 +122,13 @@ class TestDeleteBucketCors:
             {"AllowedOrigins": ["*"], "AllowedMethods": ["GET"]}
         ])
 
-        # Delete CORS
         headers = signer("DELETE", "/cors-delete-test?cors")
         resp = client.delete("/cors-delete-test", query_string={"cors": ""}, headers=headers)
         assert resp.status_code == 204
 
-        # Verify CORS is gone
         headers = signer("GET", "/cors-delete-test?cors")
         resp = client.get("/cors-delete-test", query_string={"cors": ""}, headers=headers)
-        assert resp.status_code == 404  # NoSuchCORSConfiguration
+        assert resp.status_code == 404
 
 
 class TestGetBucketLocation:
@@ -173,7 +163,6 @@ class TestBucketAcl:
     def test_put_bucket_acl(self, client, signer, storage):
         storage.create_bucket("acl-put-test")
 
-        # PUT with canned ACL header
         headers = signer("PUT", "/acl-put-test?acl")
         headers["x-amz-acl"] = "public-read"
         resp = client.put("/acl-put-test", query_string={"acl": ""}, headers=headers)
@@ -188,7 +177,6 @@ class TestCopyObject:
         storage.create_bucket("copy-dst")
         storage.put_object("copy-src", "original.txt", _stream(b"original content"))
 
-        # Copy object
         headers = signer("PUT", "/copy-dst/copied.txt")
         headers["x-amz-copy-source"] = "/copy-src/original.txt"
         resp = client.put("/copy-dst/copied.txt", headers=headers)
@@ -199,7 +187,6 @@ class TestCopyObject:
         assert root.find("ETag") is not None
         assert root.find("LastModified") is not None
 
-        # Verify copy exists
         path = storage.get_object_path("copy-dst", "copied.txt")
         assert path.read_bytes() == b"original content"
 
@@ -208,7 +195,6 @@ class TestCopyObject:
         storage.create_bucket("meta-dst")
         storage.put_object("meta-src", "source.txt", _stream(b"data"), metadata={"old": "value"})
 
-        # Copy with REPLACE directive
         headers = signer("PUT", "/meta-dst/target.txt")
         headers["x-amz-copy-source"] = "/meta-src/source.txt"
         headers["x-amz-metadata-directive"] = "REPLACE"
@@ -216,7 +202,6 @@ class TestCopyObject:
         resp = client.put("/meta-dst/target.txt", headers=headers)
         assert resp.status_code == 200
 
-        # Verify new metadata (note: header keys are Title-Cased)
         meta = storage.get_object_metadata("meta-dst", "target.txt")
         assert "New" in meta or "new" in meta
         assert "old" not in meta and "Old" not in meta
@@ -229,7 +214,6 @@ class TestObjectTagging:
         storage.create_bucket("obj-tag-test")
         storage.put_object("obj-tag-test", "tagged.txt", _stream(b"content"))
 
-        # PUT tags
         payload = b"""<?xml version="1.0" encoding="UTF-8"?>
         <Tagging>
             <TagSet>
@@ -247,7 +231,6 @@ class TestObjectTagging:
         )
         assert resp.status_code == 204
 
-        # GET tags
         headers = signer("GET", "/obj-tag-test/tagged.txt?tagging")
         resp = client.get("/obj-tag-test/tagged.txt", query_string={"tagging": ""}, headers=headers)
         assert resp.status_code == 200
@@ -257,12 +240,10 @@ class TestObjectTagging:
         assert tags["project"] == "demo"
         assert tags["env"] == "test"
 
-        # DELETE tags
         headers = signer("DELETE", "/obj-tag-test/tagged.txt?tagging")
         resp = client.delete("/obj-tag-test/tagged.txt", query_string={"tagging": ""}, headers=headers)
         assert resp.status_code == 204
 
-        # Verify empty
         headers = signer("GET", "/obj-tag-test/tagged.txt?tagging")
         resp = client.get("/obj-tag-test/tagged.txt", query_string={"tagging": ""}, headers=headers)
         root = fromstring(resp.data)
@@ -272,7 +253,6 @@ class TestObjectTagging:
         storage.create_bucket("tag-limit")
         storage.put_object("tag-limit", "file.txt", _stream(b"x"))
 
-        # Try to set 11 tags (limit is 10)
         tags = "".join(f"<Tag><Key>key{i}</Key><Value>val{i}</Value></Tag>" for i in range(11))
         payload = f"<Tagging><TagSet>{tags}</TagSet></Tagging>".encode()
 

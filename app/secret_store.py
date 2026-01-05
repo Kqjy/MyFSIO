@@ -1,4 +1,3 @@
-"""Ephemeral store for one-time secrets communicated to the UI."""
 from __future__ import annotations
 
 import secrets

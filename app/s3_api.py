@@ -16,11 +16,16 @@ from xml.etree.ElementTree import Element, SubElement, tostring, fromstring, Par
 from flask import Blueprint, Response, current_app, jsonify, request, g
 from werkzeug.http import http_date
 
+from .access_logging import AccessLoggingService, LoggingConfiguration
+from .acl import AclService
 from .bucket_policies import BucketPolicyStore
+from .encryption import SSECEncryption, SSECMetadata, EncryptionError
 from .extensions import limiter
 from .iam import IamError, Principal
+from .notifications import NotificationService, NotificationConfiguration, WebhookDestination
+from .object_lock import ObjectLockService, ObjectLockRetention, ObjectLockConfig, ObjectLockError, RetentionMode
 from .replication import ReplicationManager
-from .storage import ObjectStorage, StorageError, QuotaExceededError
+from .storage import ObjectStorage, StorageError, QuotaExceededError, BucketNotFoundError, ObjectNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,10 @@ s3_api_bp = Blueprint("s3_api", __name__)
 
 def _storage() -> ObjectStorage:
     return current_app.extensions["object_storage"]
+
+
+def _acl() -> AclService:
+    return current_app.extensions["acl"]
 
 
 def _iam():
@@ -44,6 +53,18 @@ def _bucket_policies() -> BucketPolicyStore:
     return store
 
 
+def _object_lock() -> ObjectLockService:
+    return current_app.extensions["object_lock"]
+
+
+def _notifications() -> NotificationService:
+    return current_app.extensions["notifications"]
+
+
+def _access_logging() -> AccessLoggingService:
+    return current_app.extensions["access_logging"]
+
+
 def _xml_response(element: Element, status: int = 200) -> Response:
     xml_bytes = tostring(element, encoding="utf-8")
     return Response(xml_bytes, status=status, mimetype="application/xml")
@@ -56,6 +77,37 @@ def _error_response(code: str, message: str, status: int) -> Response:
     SubElement(error, "Resource").text = request.path
     SubElement(error, "RequestId").text = uuid.uuid4().hex
     return _xml_response(error, status)
+
+
+def _parse_range_header(range_header: str, file_size: int) -> list[tuple[int, int]] | None:
+    if not range_header.startswith("bytes="):
+        return None
+    ranges = []
+    range_spec = range_header[6:]
+    for part in range_spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("-"):
+            suffix_length = int(part[1:])
+            if suffix_length <= 0:
+                return None
+            start = max(0, file_size - suffix_length)
+            end = file_size - 1
+        elif part.endswith("-"):
+            start = int(part[:-1])
+            if start >= file_size:
+                return None
+            end = file_size - 1
+        else:
+            start_str, end_str = part.split("-", 1)
+            start = int(start_str)
+            end = int(end_str)
+            if start > end or start >= file_size:
+                return None
+            end = min(end, file_size - 1)
+        ranges.append((start, end))
+    return ranges if ranges else None
 
 
 def _sign(key: bytes, msg: str) -> bytes:
@@ -165,7 +217,6 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(calculated_signature, signature):
-        # Only log detailed signature debug info if DEBUG_SIGV4 is enabled
         if current_app.config.get("DEBUG_SIGV4"):
             logger.warning(
                 "SigV4 signature mismatch",
@@ -178,6 +229,11 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
                 }
             )
         raise IamError("SignatureDoesNotMatch")
+
+    session_token = req.headers.get("X-Amz-Security-Token")
+    if session_token:
+        if not _iam().validate_session_token(access_key, session_token):
+            raise IamError("InvalidToken")
 
     return _iam().get_principal(access_key)
 
@@ -203,7 +259,13 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         raise IamError("Invalid Date format")
     
     now = datetime.now(timezone.utc)
-    if now > req_time + timedelta(seconds=int(expires)):
+    try:
+        expires_seconds = int(expires)
+        if expires_seconds <= 0:
+            raise IamError("Invalid Expires value: must be positive")
+    except ValueError:
+        raise IamError("Invalid Expires value: must be an integer")
+    if now > req_time + timedelta(seconds=expires_seconds):
         raise IamError("Request expired")
 
     secret_key = _iam().get_secret_key(access_key)
@@ -257,10 +319,15 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     
     signing_key = _get_signature_key(secret_key, date_stamp, region, service)
     calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-    
+
     if not hmac.compare_digest(calculated_signature, signature):
         raise IamError("SignatureDoesNotMatch")
-    
+
+    session_token = req.args.get("X-Amz-Security-Token")
+    if session_token:
+        if not _iam().validate_session_token(access_key, session_token):
+            raise IamError("InvalidToken")
+
     return _iam().get_principal(access_key)
 
 
@@ -321,6 +388,19 @@ def _authorize_action(principal: Principal | None, bucket_name: str | None, acti
         return
     if policy_decision == "allow":
         return
+
+    acl_allowed = False
+    if bucket_name:
+        acl_service = _acl()
+        acl_allowed = acl_service.evaluate_bucket_acl(
+            bucket_name,
+            access_key,
+            action,
+            is_authenticated=principal is not None,
+        )
+    if acl_allowed:
+        return
+
     raise iam_error or IamError("Access denied")
 
 
@@ -838,6 +918,9 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "versions": _bucket_list_versions_handler,
         "lifecycle": _bucket_lifecycle_handler,
         "quota": _bucket_quota_handler,
+        "object-lock": _bucket_object_lock_handler,
+        "notification": _bucket_notification_handler,
+        "logging": _bucket_logging_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -958,25 +1041,26 @@ def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
     if request.method == "GET":
         try:
             tags = storage.get_object_tags(bucket_name, object_key)
+        except BucketNotFoundError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        except ObjectNotFoundError as exc:
+            return _error_response("NoSuchKey", str(exc), 404)
         except StorageError as exc:
-            message = str(exc)
-            if "Bucket" in message:
-                return _error_response("NoSuchBucket", message, 404)
-            return _error_response("NoSuchKey", message, 404)
+            return _error_response("InternalError", str(exc), 500)
         return _xml_response(_render_tagging_document(tags))
     
     if request.method == "DELETE":
         try:
             storage.delete_object_tags(bucket_name, object_key)
+        except BucketNotFoundError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        except ObjectNotFoundError as exc:
+            return _error_response("NoSuchKey", str(exc), 404)
         except StorageError as exc:
-            message = str(exc)
-            if "Bucket" in message:
-                return _error_response("NoSuchBucket", message, 404)
-            return _error_response("NoSuchKey", message, 404)
+            return _error_response("InternalError", str(exc), 500)
         current_app.logger.info("Object tags deleted", extra={"bucket": bucket_name, "key": object_key})
         return Response(status=204)
-    
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     try:
         tags = _parse_tagging_document(payload)
@@ -986,11 +1070,12 @@ def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
         return _error_response("InvalidTag", "A maximum of 10 tags is supported for objects", 400)
     try:
         storage.set_object_tags(bucket_name, object_key, tags)
+    except BucketNotFoundError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+    except ObjectNotFoundError as exc:
+        return _error_response("NoSuchKey", str(exc), 404)
     except StorageError as exc:
-        message = str(exc)
-        if "Bucket" in message:
-            return _error_response("NoSuchBucket", message, 404)
-        return _error_response("NoSuchKey", message, 404)
+        return _error_response("InternalError", str(exc), 500)
     current_app.logger.info("Object tags updated", extra={"bucket": bucket_name, "key": object_key, "tags": len(tags)})
     return Response(status=204)
 
@@ -1044,7 +1129,7 @@ def _bucket_cors_handler(bucket_name: str) -> Response:
             return _error_response("NoSuchBucket", str(exc), 404)
         current_app.logger.info("Bucket CORS deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     if not payload.strip():
         try:
@@ -1132,6 +1217,8 @@ def _bucket_location_handler(bucket_name: str) -> Response:
 
 
 def _bucket_acl_handler(bucket_name: str) -> Response:
+    from .acl import create_canned_acl, Acl, AclGrant, GRANTEE_ALL_USERS, GRANTEE_AUTHENTICATED_USERS
+
     if request.method not in {"GET", "PUT"}:
         return _method_not_allowed(["GET", "PUT"])
     principal, error = _require_principal()
@@ -1144,26 +1231,41 @@ def _bucket_acl_handler(bucket_name: str) -> Response:
     storage = _storage()
     if not storage.bucket_exists(bucket_name):
         return _error_response("NoSuchBucket", "Bucket does not exist", 404)
-    
+
+    acl_service = _acl()
+    owner_id = principal.access_key if principal else "anonymous"
+
     if request.method == "PUT":
-        # Accept canned ACL headers for S3 compatibility (not fully implemented)
         canned_acl = request.headers.get("x-amz-acl", "private")
-        current_app.logger.info("Bucket ACL set (canned)", extra={"bucket": bucket_name, "acl": canned_acl})
+        acl = acl_service.set_bucket_canned_acl(bucket_name, canned_acl, owner_id)
+        current_app.logger.info("Bucket ACL set", extra={"bucket": bucket_name, "acl": canned_acl})
         return Response(status=200)
-    
+
+    acl = acl_service.get_bucket_acl(bucket_name)
+    if not acl:
+        acl = create_canned_acl("private", owner_id)
+
     root = Element("AccessControlPolicy")
-    owner = SubElement(root, "Owner")
-    SubElement(owner, "ID").text = principal.access_key if principal else "anonymous"
-    SubElement(owner, "DisplayName").text = principal.display_name if principal else "Anonymous"
-    
-    acl = SubElement(root, "AccessControlList")
-    grant = SubElement(acl, "Grant")
-    grantee = SubElement(grant, "Grantee")
-    grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "CanonicalUser")
-    SubElement(grantee, "ID").text = principal.access_key if principal else "anonymous"
-    SubElement(grantee, "DisplayName").text = principal.display_name if principal else "Anonymous"
-    SubElement(grant, "Permission").text = "FULL_CONTROL"
-    
+    owner_el = SubElement(root, "Owner")
+    SubElement(owner_el, "ID").text = acl.owner
+    SubElement(owner_el, "DisplayName").text = acl.owner
+
+    acl_el = SubElement(root, "AccessControlList")
+    for grant in acl.grants:
+        grant_el = SubElement(acl_el, "Grant")
+        grantee = SubElement(grant_el, "Grantee")
+        if grant.grantee == GRANTEE_ALL_USERS:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "Group")
+            SubElement(grantee, "URI").text = "http://acs.amazonaws.com/groups/global/AllUsers"
+        elif grant.grantee == GRANTEE_AUTHENTICATED_USERS:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "Group")
+            SubElement(grantee, "URI").text = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+        else:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "CanonicalUser")
+            SubElement(grantee, "ID").text = grant.grantee
+            SubElement(grantee, "DisplayName").text = grant.grantee
+        SubElement(grant_el, "Permission").text = grant.permission
+
     return _xml_response(root)
 
 
@@ -1189,7 +1291,10 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
     
     prefix = request.args.get("prefix", "")
     delimiter = request.args.get("delimiter", "")
-    max_keys = min(int(request.args.get("max-keys", 1000)), 1000)
+    try:
+        max_keys = max(1, min(int(request.args.get("max-keys", 1000)), 1000))
+    except ValueError:
+        return _error_response("InvalidArgument", "max-keys must be an integer", 400)
     key_marker = request.args.get("key-marker", "")
     
     if prefix:
@@ -1220,7 +1325,8 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
         SubElement(version, "VersionId").text = "null"
         SubElement(version, "IsLatest").text = "true"
         SubElement(version, "LastModified").text = obj.last_modified.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        SubElement(version, "ETag").text = f'"{obj.etag}"'
+        if obj.etag:
+            SubElement(version, "ETag").text = f'"{obj.etag}"'
         SubElement(version, "Size").text = str(obj.size)
         SubElement(version, "StorageClass").text = "STANDARD"
         
@@ -1290,8 +1396,7 @@ def _bucket_lifecycle_handler(bucket_name: str) -> Response:
         storage.set_bucket_lifecycle(bucket_name, None)
         current_app.logger.info("Bucket lifecycle deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    
-    # PUT
+
     payload = request.get_data(cache=False) or b""
     if not payload.strip():
         return _error_response("MalformedXML", "Request body is required", 400)
@@ -1382,7 +1487,10 @@ def _parse_lifecycle_config(payload: bytes) -> list:
             expiration: dict = {}
             days_el = exp_el.find("{*}Days") or exp_el.find("Days")
             if days_el is not None and days_el.text:
-                expiration["Days"] = int(days_el.text.strip())
+                days_val = int(days_el.text.strip())
+                if days_val <= 0:
+                    raise ValueError("Expiration Days must be a positive integer")
+                expiration["Days"] = days_val
             date_el = exp_el.find("{*}Date") or exp_el.find("Date")
             if date_el is not None and date_el.text:
                 expiration["Date"] = date_el.text.strip()
@@ -1397,7 +1505,10 @@ def _parse_lifecycle_config(payload: bytes) -> list:
             nve: dict = {}
             days_el = nve_el.find("{*}NoncurrentDays") or nve_el.find("NoncurrentDays")
             if days_el is not None and days_el.text:
-                nve["NoncurrentDays"] = int(days_el.text.strip())
+                noncurrent_days = int(days_el.text.strip())
+                if noncurrent_days <= 0:
+                    raise ValueError("NoncurrentDays must be a positive integer")
+                nve["NoncurrentDays"] = noncurrent_days
             if nve:
                 rule["NoncurrentVersionExpiration"] = nve
         
@@ -1406,7 +1517,10 @@ def _parse_lifecycle_config(payload: bytes) -> list:
             aimu: dict = {}
             days_el = aimu_el.find("{*}DaysAfterInitiation") or aimu_el.find("DaysAfterInitiation")
             if days_el is not None and days_el.text:
-                aimu["DaysAfterInitiation"] = int(days_el.text.strip())
+                days_after = int(days_el.text.strip())
+                if days_after <= 0:
+                    raise ValueError("DaysAfterInitiation must be a positive integer")
+                aimu["DaysAfterInitiation"] = days_after
             if aimu:
                 rule["AbortIncompleteMultipartUpload"] = aimu
         
@@ -1454,8 +1568,7 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
             return _error_response("NoSuchBucket", str(exc), 404)
         current_app.logger.info("Bucket quota deleted", extra={"bucket": bucket_name})
         return Response(status=204)
-    
-    # PUT
+
     payload = request.get_json(silent=True)
     if not payload:
         return _error_response("MalformedRequest", "Request body must be JSON with quota limits", 400)
@@ -1492,6 +1605,336 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
         extra={"bucket": bucket_name, "max_size_bytes": max_size_bytes, "max_objects": max_objects}
     )
     return Response(status=204)
+
+
+def _bucket_object_lock_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    lock_service = _object_lock()
+
+    if request.method == "GET":
+        config = lock_service.get_bucket_lock_config(bucket_name)
+        root = Element("ObjectLockConfiguration", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        SubElement(root, "ObjectLockEnabled").text = "Enabled" if config.enabled else "Disabled"
+        return _xml_response(root)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    enabled_el = root.find("{*}ObjectLockEnabled") or root.find("ObjectLockEnabled")
+    enabled = (enabled_el.text or "").strip() == "Enabled" if enabled_el is not None else False
+
+    config = ObjectLockConfig(enabled=enabled)
+    lock_service.set_bucket_lock_config(bucket_name, config)
+
+    current_app.logger.info("Bucket object lock updated", extra={"bucket": bucket_name, "enabled": enabled})
+    return Response(status=200)
+
+
+def _bucket_notification_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    notification_service = _notifications()
+
+    if request.method == "GET":
+        configs = notification_service.get_bucket_notifications(bucket_name)
+        root = Element("NotificationConfiguration", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        for config in configs:
+            webhook_el = SubElement(root, "WebhookConfiguration")
+            SubElement(webhook_el, "Id").text = config.id
+            for event in config.events:
+                SubElement(webhook_el, "Event").text = event
+            dest_el = SubElement(webhook_el, "Destination")
+            SubElement(dest_el, "Url").text = config.destination.url
+            if config.prefix_filter or config.suffix_filter:
+                filter_el = SubElement(webhook_el, "Filter")
+                key_el = SubElement(filter_el, "S3Key")
+                if config.prefix_filter:
+                    rule_el = SubElement(key_el, "FilterRule")
+                    SubElement(rule_el, "Name").text = "prefix"
+                    SubElement(rule_el, "Value").text = config.prefix_filter
+                if config.suffix_filter:
+                    rule_el = SubElement(key_el, "FilterRule")
+                    SubElement(rule_el, "Name").text = "suffix"
+                    SubElement(rule_el, "Value").text = config.suffix_filter
+        return _xml_response(root)
+
+    if request.method == "DELETE":
+        notification_service.delete_bucket_notifications(bucket_name)
+        current_app.logger.info("Bucket notifications deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        notification_service.delete_bucket_notifications(bucket_name)
+        return Response(status=200)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    configs: list[NotificationConfiguration] = []
+    for webhook_el in root.findall("{*}WebhookConfiguration") or root.findall("WebhookConfiguration"):
+        config_id = _find_element_text(webhook_el, "Id") or uuid.uuid4().hex
+        events = [el.text for el in webhook_el.findall("{*}Event") or webhook_el.findall("Event") if el.text]
+
+        dest_el = _find_element(webhook_el, "Destination")
+        url = _find_element_text(dest_el, "Url") if dest_el else ""
+        if not url:
+            return _error_response("InvalidArgument", "Destination URL is required", 400)
+
+        prefix = ""
+        suffix = ""
+        filter_el = _find_element(webhook_el, "Filter")
+        if filter_el:
+            key_el = _find_element(filter_el, "S3Key")
+            if key_el:
+                for rule_el in key_el.findall("{*}FilterRule") or key_el.findall("FilterRule"):
+                    name = _find_element_text(rule_el, "Name")
+                    value = _find_element_text(rule_el, "Value")
+                    if name == "prefix":
+                        prefix = value
+                    elif name == "suffix":
+                        suffix = value
+
+        configs.append(NotificationConfiguration(
+            id=config_id,
+            events=events,
+            destination=WebhookDestination(url=url),
+            prefix_filter=prefix,
+            suffix_filter=suffix,
+        ))
+
+    notification_service.set_bucket_notifications(bucket_name, configs)
+    current_app.logger.info("Bucket notifications updated", extra={"bucket": bucket_name, "configs": len(configs)})
+    return Response(status=200)
+
+
+def _bucket_logging_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    logging_service = _access_logging()
+
+    if request.method == "GET":
+        config = logging_service.get_bucket_logging(bucket_name)
+        root = Element("BucketLoggingStatus", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        if config and config.enabled:
+            logging_enabled = SubElement(root, "LoggingEnabled")
+            SubElement(logging_enabled, "TargetBucket").text = config.target_bucket
+            SubElement(logging_enabled, "TargetPrefix").text = config.target_prefix
+        return _xml_response(root)
+
+    if request.method == "DELETE":
+        logging_service.delete_bucket_logging(bucket_name)
+        current_app.logger.info("Bucket logging deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        logging_service.delete_bucket_logging(bucket_name)
+        return Response(status=200)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    logging_enabled = _find_element(root, "LoggingEnabled")
+    if logging_enabled is None:
+        logging_service.delete_bucket_logging(bucket_name)
+        return Response(status=200)
+
+    target_bucket = _find_element_text(logging_enabled, "TargetBucket")
+    if not target_bucket:
+        return _error_response("InvalidArgument", "TargetBucket is required", 400)
+
+    if not storage.bucket_exists(target_bucket):
+        return _error_response("InvalidTargetBucketForLogging", "Target bucket does not exist", 400)
+
+    target_prefix = _find_element_text(logging_enabled, "TargetPrefix")
+
+    config = LoggingConfiguration(
+        target_bucket=target_bucket,
+        target_prefix=target_prefix,
+        enabled=True,
+    )
+    logging_service.set_bucket_logging(bucket_name, config)
+
+    current_app.logger.info(
+        "Bucket logging updated",
+        extra={"bucket": bucket_name, "target_bucket": target_bucket, "target_prefix": target_prefix}
+    )
+    return Response(status=200)
+
+
+def _object_retention_handler(bucket_name: str, object_key: str) -> Response:
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "write" if request.method == "PUT" else "read", object_key=object_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    try:
+        storage.get_object_path(bucket_name, object_key)
+    except StorageError:
+        return _error_response("NoSuchKey", "Object does not exist", 404)
+
+    lock_service = _object_lock()
+
+    if request.method == "GET":
+        retention = lock_service.get_object_retention(bucket_name, object_key)
+        if not retention:
+            return _error_response("NoSuchObjectLockConfiguration", "No retention policy", 404)
+
+        root = Element("Retention", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        SubElement(root, "Mode").text = retention.mode.value
+        SubElement(root, "RetainUntilDate").text = retention.retain_until_date.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return _xml_response(root)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    mode_str = _find_element_text(root, "Mode")
+    retain_until_str = _find_element_text(root, "RetainUntilDate")
+
+    if not mode_str or not retain_until_str:
+        return _error_response("InvalidArgument", "Mode and RetainUntilDate are required", 400)
+
+    try:
+        mode = RetentionMode(mode_str)
+    except ValueError:
+        return _error_response("InvalidArgument", f"Invalid retention mode: {mode_str}", 400)
+
+    try:
+        retain_until = datetime.fromisoformat(retain_until_str.replace("Z", "+00:00"))
+    except ValueError:
+        return _error_response("InvalidArgument", f"Invalid date format: {retain_until_str}", 400)
+
+    bypass = request.headers.get("x-amz-bypass-governance-retention", "").lower() == "true"
+
+    retention = ObjectLockRetention(mode=mode, retain_until_date=retain_until)
+    try:
+        lock_service.set_object_retention(bucket_name, object_key, retention, bypass_governance=bypass)
+    except ObjectLockError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    current_app.logger.info(
+        "Object retention set",
+        extra={"bucket": bucket_name, "key": object_key, "mode": mode_str, "until": retain_until_str}
+    )
+    return Response(status=200)
+
+
+def _object_legal_hold_handler(bucket_name: str, object_key: str) -> Response:
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "write" if request.method == "PUT" else "read", object_key=object_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    try:
+        storage.get_object_path(bucket_name, object_key)
+    except StorageError:
+        return _error_response("NoSuchKey", "Object does not exist", 404)
+
+    lock_service = _object_lock()
+
+    if request.method == "GET":
+        enabled = lock_service.get_legal_hold(bucket_name, object_key)
+        root = Element("LegalHold", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+        SubElement(root, "Status").text = "ON" if enabled else "OFF"
+        return _xml_response(root)
+
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+
+    try:
+        root = fromstring(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+
+    status = _find_element_text(root, "Status")
+    if status not in {"ON", "OFF"}:
+        return _error_response("InvalidArgument", "Status must be ON or OFF", 400)
+
+    lock_service.set_legal_hold(bucket_name, object_key, status == "ON")
+
+    current_app.logger.info(
+        "Object legal hold set",
+        extra={"bucket": bucket_name, "key": object_key, "status": status}
+    )
+    return Response(status=200)
 
 
 def _bulk_delete_handler(bucket_name: str) -> Response:
@@ -1540,29 +1983,28 @@ def _bulk_delete_handler(bucket_name: str) -> Response:
         return _error_response("MalformedXML", "A maximum of 1000 objects can be deleted per request", 400)
 
     storage = _storage()
-    deleted: list[str] = []
+    deleted: list[dict[str, str | None]] = []
     errors: list[dict[str, str]] = []
     for entry in objects:
         key = entry["Key"] or ""
         version_id = entry.get("VersionId")
-        if version_id:
-            errors.append({
-                "Key": key,
-                "Code": "InvalidRequest",
-                "Message": "VersionId is not supported for bulk deletes",
-            })
-            continue
         try:
-            storage.delete_object(bucket_name, key)
-            deleted.append(key)
+            if version_id:
+                storage.delete_object_version(bucket_name, key, version_id)
+                deleted.append({"Key": key, "VersionId": version_id})
+            else:
+                storage.delete_object(bucket_name, key)
+                deleted.append({"Key": key, "VersionId": None})
         except StorageError as exc:
             errors.append({"Key": key, "Code": "InvalidRequest", "Message": str(exc)})
 
     result = Element("DeleteResult")
     if not quiet:
-        for key in deleted:
+        for item in deleted:
             deleted_el = SubElement(result, "Deleted")
-            SubElement(deleted_el, "Key").text = key
+            SubElement(deleted_el, "Key").text = item["Key"]
+            if item.get("VersionId"):
+                SubElement(deleted_el, "VersionId").text = item["VersionId"]
     for err in errors:
         error_el = SubElement(result, "Error")
         SubElement(error_el, "Key").text = err.get("Key", "")
@@ -1664,7 +2106,10 @@ def bucket_handler(bucket_name: str) -> Response:
     list_type = request.args.get("list-type")
     prefix = request.args.get("prefix", "")
     delimiter = request.args.get("delimiter", "")
-    max_keys = min(int(request.args.get("max-keys", current_app.config["UI_PAGE_SIZE"])), 1000)
+    try:
+        max_keys = max(1, min(int(request.args.get("max-keys", current_app.config["UI_PAGE_SIZE"])), 1000))
+    except ValueError:
+        return _error_response("InvalidArgument", "max-keys must be an integer", 400)
     
     marker = request.args.get("marker", "")  # ListObjects v1
     continuation_token = request.args.get("continuation-token", "")  # ListObjectsV2
@@ -1677,7 +2122,7 @@ def bucket_handler(bucket_name: str) -> Response:
         if continuation_token:
             try:
                 effective_start = base64.urlsafe_b64decode(continuation_token.encode()).decode("utf-8")
-            except Exception:
+            except (ValueError, UnicodeDecodeError):
                 effective_start = continuation_token
         elif start_after:
             effective_start = start_after
@@ -1757,10 +2202,11 @@ def bucket_handler(bucket_name: str) -> Response:
             obj_el = SubElement(root, "Contents")
             SubElement(obj_el, "Key").text = meta.key
             SubElement(obj_el, "LastModified").text = meta.last_modified.isoformat()
-            SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
+            if meta.etag:
+                SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
             SubElement(obj_el, "Size").text = str(meta.size)
             SubElement(obj_el, "StorageClass").text = "STANDARD"
-        
+
         for cp in common_prefixes:
             cp_el = SubElement(root, "CommonPrefixes")
             SubElement(cp_el, "Prefix").text = cp
@@ -1773,15 +2219,16 @@ def bucket_handler(bucket_name: str) -> Response:
         SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
         if delimiter:
             SubElement(root, "Delimiter").text = delimiter
-        
+
         if is_truncated and delimiter and next_marker:
             SubElement(root, "NextMarker").text = next_marker
-        
+
         for meta in objects:
             obj_el = SubElement(root, "Contents")
             SubElement(obj_el, "Key").text = meta.key
             SubElement(obj_el, "LastModified").text = meta.last_modified.isoformat()
-            SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
+            if meta.etag:
+                SubElement(obj_el, "ETag").text = f'"{meta.etag}"'
             SubElement(obj_el, "Size").text = str(meta.size)
         
         for cp in common_prefixes:
@@ -1799,6 +2246,12 @@ def object_handler(bucket_name: str, object_key: str):
     if "tagging" in request.args:
         return _object_tagging_handler(bucket_name, object_key)
 
+    if "retention" in request.args:
+        return _object_retention_handler(bucket_name, object_key)
+
+    if "legal-hold" in request.args:
+        return _object_legal_hold_handler(bucket_name, object_key)
+
     if request.method == "POST":
         if "uploads" in request.args:
             return _initiate_multipart_upload(bucket_name, object_key)
@@ -1814,22 +2267,28 @@ def object_handler(bucket_name: str, object_key: str):
         if copy_source:
             return _copy_object(bucket_name, object_key, copy_source)
 
-        _, error = _object_principal("write", bucket_name, object_key)
+        principal, error = _object_principal("write", bucket_name, object_key)
         if error:
             return error
-        
+
+        bypass_governance = request.headers.get("x-amz-bypass-governance-retention", "").lower() == "true"
+        lock_service = _object_lock()
+        can_overwrite, lock_reason = lock_service.can_overwrite_object(bucket_name, object_key, bypass_governance=bypass_governance)
+        if not can_overwrite:
+            return _error_response("AccessDenied", lock_reason, 403)
+
         stream = request.stream
         content_encoding = request.headers.get("Content-Encoding", "").lower()
         if "aws-chunked" in content_encoding:
             stream = AwsChunkedDecoder(stream)
 
         metadata = _extract_request_metadata()
-        
+
         content_type = request.headers.get("Content-Type")
         validation_error = _validate_content_type(object_key, content_type)
         if validation_error:
             return _error_response("InvalidArgument", validation_error, 400)
-        
+
         try:
             meta = storage.put_object(
                 bucket_name,
@@ -1849,11 +2308,23 @@ def object_handler(bucket_name: str, object_key: str):
             extra={"bucket": bucket_name, "key": object_key, "size": meta.size},
         )
         response = Response(status=200)
-        response.headers["ETag"] = f'"{meta.etag}"'
-        
+        if meta.etag:
+            response.headers["ETag"] = f'"{meta.etag}"'
+
+        _notifications().emit_object_created(
+            bucket_name,
+            object_key,
+            size=meta.size,
+            etag=meta.etag,
+            request_id=getattr(g, "request_id", ""),
+            source_ip=request.remote_addr or "",
+            user_identity=principal.access_key if principal else "",
+            operation="Put",
+        )
+
         if "S3ReplicationAgent" not in request.headers.get("User-Agent", ""):
             _replication_manager().trigger_replication(bucket_name, object_key, action="write")
-            
+
         return response
 
     if request.method in {"GET", "HEAD"}:
@@ -1873,20 +2344,67 @@ def object_handler(bucket_name: str, object_key: str):
         is_encrypted = "x-amz-server-side-encryption" in metadata
         
         if request.method == "GET":
+            range_header = request.headers.get("Range")
+
             if is_encrypted and hasattr(storage, 'get_object_data'):
                 try:
                     data, clean_metadata = storage.get_object_data(bucket_name, object_key)
-                    response = Response(data, mimetype=mimetype)
-                    logged_bytes = len(data)
-                    response.headers["Content-Length"] = len(data)
+                    file_size = len(data)
                     etag = hashlib.md5(data).hexdigest()
+
+                    if range_header:
+                        try:
+                            ranges = _parse_range_header(range_header, file_size)
+                        except (ValueError, TypeError):
+                            ranges = None
+                        if ranges is None:
+                            return _error_response("InvalidRange", "Range Not Satisfiable", 416)
+                        start, end = ranges[0]
+                        partial_data = data[start:end + 1]
+                        response = Response(partial_data, status=206, mimetype=mimetype)
+                        response.headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+                        response.headers["Content-Length"] = len(partial_data)
+                        logged_bytes = len(partial_data)
+                    else:
+                        response = Response(data, mimetype=mimetype)
+                        response.headers["Content-Length"] = file_size
+                        logged_bytes = file_size
                 except StorageError as exc:
                     return _error_response("InternalError", str(exc), 500)
             else:
                 stat = path.stat()
-                response = Response(_stream_file(path), mimetype=mimetype, direct_passthrough=True)
-                logged_bytes = stat.st_size
+                file_size = stat.st_size
                 etag = storage._compute_etag(path)
+
+                if range_header:
+                    try:
+                        ranges = _parse_range_header(range_header, file_size)
+                    except (ValueError, TypeError):
+                        ranges = None
+                    if ranges is None:
+                        return _error_response("InvalidRange", "Range Not Satisfiable", 416)
+                    start, end = ranges[0]
+                    length = end - start + 1
+
+                    def stream_range(file_path, start_pos, length_to_read):
+                        with open(file_path, "rb") as f:
+                            f.seek(start_pos)
+                            remaining = length_to_read
+                            while remaining > 0:
+                                chunk_size = min(65536, remaining)
+                                chunk = f.read(chunk_size)
+                                if not chunk:
+                                    break
+                                remaining -= len(chunk)
+                                yield chunk
+
+                    response = Response(stream_range(path, start, length), status=206, mimetype=mimetype, direct_passthrough=True)
+                    response.headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+                    response.headers["Content-Length"] = length
+                    logged_bytes = length
+                else:
+                    response = Response(_stream_file(path), mimetype=mimetype, direct_passthrough=True)
+                    logged_bytes = file_size
         else:
             if is_encrypted and hasattr(storage, 'get_object_data'):
                 try:
@@ -1904,6 +2422,21 @@ def object_handler(bucket_name: str, object_key: str):
             logged_bytes = 0
 
         _apply_object_headers(response, file_stat=path.stat() if not is_encrypted else None, metadata=metadata, etag=etag)
+
+        if request.method == "GET":
+            response_overrides = {
+                "response-content-type": "Content-Type",
+                "response-content-language": "Content-Language",
+                "response-expires": "Expires",
+                "response-cache-control": "Cache-Control",
+                "response-content-disposition": "Content-Disposition",
+                "response-content-encoding": "Content-Encoding",
+            }
+            for param, header in response_overrides.items():
+                value = request.args.get(param)
+                if value:
+                    response.headers[header] = value
+
         action = "Object read" if request.method == "GET" else "Object head"
         current_app.logger.info(action, extra={"bucket": bucket_name, "key": object_key, "bytes": logged_bytes})
         return response
@@ -1914,13 +2447,30 @@ def object_handler(bucket_name: str, object_key: str):
     _, error = _object_principal("delete", bucket_name, object_key)
     if error:
         return error
+
+    bypass_governance = request.headers.get("x-amz-bypass-governance-retention", "").lower() == "true"
+    lock_service = _object_lock()
+    can_delete, lock_reason = lock_service.can_delete_object(bucket_name, object_key, bypass_governance=bypass_governance)
+    if not can_delete:
+        return _error_response("AccessDenied", lock_reason, 403)
+
     storage.delete_object(bucket_name, object_key)
+    lock_service.delete_object_lock_metadata(bucket_name, object_key)
     current_app.logger.info("Object deleted", extra={"bucket": bucket_name, "key": object_key})
-    
+
+    principal, _ = _require_principal()
+    _notifications().emit_object_removed(
+        bucket_name,
+        object_key,
+        request_id=getattr(g, "request_id", ""),
+        source_ip=request.remote_addr or "",
+        user_identity=principal.access_key if principal else "",
+    )
+
     user_agent = request.headers.get("User-Agent", "")
     if "S3ReplicationAgent" not in user_agent:
         _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
-        
+
     return Response(status=204)
 
 
@@ -2122,9 +2672,45 @@ def _copy_object(dest_bucket: str, dest_key: str, copy_source: str) -> Response:
         source_path = storage.get_object_path(source_bucket, source_key)
     except StorageError:
         return _error_response("NoSuchKey", "Source object not found", 404)
-    
+
+    source_stat = source_path.stat()
+    source_etag = storage._compute_etag(source_path)
+    source_mtime = datetime.fromtimestamp(source_stat.st_mtime, timezone.utc)
+
+    copy_source_if_match = request.headers.get("x-amz-copy-source-if-match")
+    if copy_source_if_match:
+        expected_etag = copy_source_if_match.strip('"')
+        if source_etag != expected_etag:
+            return _error_response("PreconditionFailed", "Source ETag does not match", 412)
+
+    copy_source_if_none_match = request.headers.get("x-amz-copy-source-if-none-match")
+    if copy_source_if_none_match:
+        not_expected_etag = copy_source_if_none_match.strip('"')
+        if source_etag == not_expected_etag:
+            return _error_response("PreconditionFailed", "Source ETag matches", 412)
+
+    copy_source_if_modified_since = request.headers.get("x-amz-copy-source-if-modified-since")
+    if copy_source_if_modified_since:
+        from email.utils import parsedate_to_datetime
+        try:
+            if_modified = parsedate_to_datetime(copy_source_if_modified_since)
+            if source_mtime <= if_modified:
+                return _error_response("PreconditionFailed", "Source not modified since specified date", 412)
+        except (TypeError, ValueError):
+            pass
+
+    copy_source_if_unmodified_since = request.headers.get("x-amz-copy-source-if-unmodified-since")
+    if copy_source_if_unmodified_since:
+        from email.utils import parsedate_to_datetime
+        try:
+            if_unmodified = parsedate_to_datetime(copy_source_if_unmodified_since)
+            if source_mtime > if_unmodified:
+                return _error_response("PreconditionFailed", "Source modified since specified date", 412)
+        except (TypeError, ValueError):
+            pass
+
     source_metadata = storage.get_object_metadata(source_bucket, source_key)
-    
+
     metadata_directive = request.headers.get("x-amz-metadata-directive", "COPY").upper()
     if metadata_directive == "REPLACE":
         metadata = _extract_request_metadata()
@@ -2166,53 +2752,87 @@ def _copy_object(dest_bucket: str, dest_key: str, copy_source: str) -> Response:
     
     root = Element("CopyObjectResult")
     SubElement(root, "LastModified").text = meta.last_modified.isoformat()
-    SubElement(root, "ETag").text = f'"{meta.etag}"'
+    if meta.etag:
+        SubElement(root, "ETag").text = f'"{meta.etag}"'
     return _xml_response(root)
 
 
 class AwsChunkedDecoder:
-    """Decodes aws-chunked encoded streams."""
+    """Decodes aws-chunked encoded streams.
+
+    Performance optimized with buffered line reading instead of byte-by-byte.
+    """
+
     def __init__(self, stream):
         self.stream = stream
-        self.buffer = b""
+        self._read_buffer = bytearray()
         self.chunk_remaining = 0
         self.finished = False
+
+    def _read_line(self) -> bytes:
+        """Read until CRLF using buffered reads instead of byte-by-byte.
+
+        Performance: Reads in batches of 64-256 bytes instead of 1 byte at a time.
+        """
+        line = bytearray()
+        while True:
+            if self._read_buffer:
+                idx = self._read_buffer.find(b"\r\n")
+                if idx != -1:
+                    line.extend(self._read_buffer[: idx + 2])
+                    del self._read_buffer[: idx + 2]
+                    return bytes(line)
+                line.extend(self._read_buffer)
+                self._read_buffer.clear()
+
+            chunk = self.stream.read(64)
+            if not chunk:
+                return bytes(line) if line else b""
+            self._read_buffer.extend(chunk)
+
+    def _read_exact(self, n: int) -> bytes:
+        """Read exactly n bytes, using buffer first."""
+        result = bytearray()
+        if self._read_buffer:
+            take = min(len(self._read_buffer), n)
+            result.extend(self._read_buffer[:take])
+            del self._read_buffer[:take]
+            n -= take
+        if n > 0:
+            data = self.stream.read(n)
+            if data:
+                result.extend(data)
+
+        return bytes(result)
 
     def read(self, size=-1):
         if self.finished:
             return b""
 
-        result = b""
+        result = bytearray()
         while size == -1 or len(result) < size:
             if self.chunk_remaining > 0:
                 to_read = self.chunk_remaining
                 if size != -1:
                     to_read = min(to_read, size - len(result))
-                
-                chunk = self.stream.read(to_read)
+
+                chunk = self._read_exact(to_read)
                 if not chunk:
                     raise IOError("Unexpected EOF in chunk data")
-                
-                result += chunk
+
+                result.extend(chunk)
                 self.chunk_remaining -= len(chunk)
-                
+
                 if self.chunk_remaining == 0:
-                    crlf = self.stream.read(2)
+                    crlf = self._read_exact(2)
                     if crlf != b"\r\n":
                         raise IOError("Malformed chunk: missing CRLF")
             else:
-                line = b""
-                while True:
-                    char = self.stream.read(1)
-                    if not char:
-                        if not line:
-                            self.finished = True
-                            return result
-                        raise IOError("Unexpected EOF in chunk size")
-                    line += char
-                    if line.endswith(b"\r\n"):
-                        break
-                
+                line = self._read_line()
+                if not line:
+                    self.finished = True
+                    return bytes(result)
+
                 try:
                     line_str = line.decode("ascii").strip()
                     if ";" in line_str:
@@ -2224,21 +2844,14 @@ class AwsChunkedDecoder:
                 if chunk_size == 0:
                     self.finished = True
                     while True:
-                        line = b""
-                        while True:
-                            char = self.stream.read(1)
-                            if not char:
-                                break
-                            line += char
-                            if line.endswith(b"\r\n"):
-                                break
-                        if line == b"\r\n" or not line:
+                        trailer = self._read_line()
+                        if trailer == b"\r\n" or not trailer:
                             break
-                    return result
-                
+                    return bytes(result)
+
                 self.chunk_remaining = chunk_size
-        
-        return result
+
+        return bytes(result)
 
 
 def _initiate_multipart_upload(bucket_name: str, object_key: str) -> Response:
@@ -2353,8 +2966,9 @@ def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
     SubElement(root, "Location").text = location
     SubElement(root, "Bucket").text = bucket_name
     SubElement(root, "Key").text = object_key
-    SubElement(root, "ETag").text = f'"{meta.etag}"'
-    
+    if meta.etag:
+        SubElement(root, "ETag").text = f'"{meta.etag}"'
+
     return _xml_response(root)
 
 
@@ -2369,10 +2983,11 @@ def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
 
     try:
         _storage().abort_multipart_upload(bucket_name, upload_id)
+    except BucketNotFoundError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
     except StorageError as exc:
-        if "Bucket does not exist" in str(exc):
-            return _error_response("NoSuchBucket", str(exc), 404)
-            
+        current_app.logger.warning(f"Error aborting multipart upload: {exc}")
+
     return Response(status=204)
 
 
@@ -2384,13 +2999,15 @@ def resolve_principal():
            (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
             g.principal = _verify_sigv4(request)
             return
-    except Exception:
-        pass
-    
+    except IamError as exc:
+        logger.debug(f"SigV4 authentication failed: {exc}")
+    except (ValueError, KeyError) as exc:
+        logger.debug(f"SigV4 parsing error: {exc}")
+
     access_key = request.headers.get("X-Access-Key")
     secret_key = request.headers.get("X-Secret-Key")
     if access_key and secret_key:
         try:
             g.principal = _iam().authenticate(access_key, secret_key)
-        except Exception:
-            pass
+        except IamError as exc:
+            logger.debug(f"Header authentication failed: {exc}")

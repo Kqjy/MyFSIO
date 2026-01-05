@@ -1,14 +1,14 @@
-"""Lightweight IAM-style user and policy management."""
 from __future__ import annotations
 
 import json
 import math
 import secrets
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 class IamError(RuntimeError):
@@ -26,14 +26,12 @@ IAM_ACTIONS = {
 ALLOWED_ACTIONS = (S3_ACTIONS | IAM_ACTIONS) | {"iam:*"}
 
 ACTION_ALIASES = {
-    # List actions
     "list": "list",
     "s3:listbucket": "list",
     "s3:listallmybuckets": "list",
     "s3:listbucketversions": "list",
     "s3:listmultipartuploads": "list",
     "s3:listparts": "list",
-    # Read actions
     "read": "read",
     "s3:getobject": "read",
     "s3:getobjectversion": "read",
@@ -43,7 +41,6 @@ ACTION_ALIASES = {
     "s3:getbucketversioning": "read",
     "s3:headobject": "read",
     "s3:headbucket": "read",
-    # Write actions
     "write": "write",
     "s3:putobject": "write",
     "s3:createbucket": "write",
@@ -54,23 +51,19 @@ ACTION_ALIASES = {
     "s3:completemultipartupload": "write",
     "s3:abortmultipartupload": "write",
     "s3:copyobject": "write",
-    # Delete actions
     "delete": "delete",
     "s3:deleteobject": "delete",
     "s3:deleteobjectversion": "delete",
     "s3:deletebucket": "delete",
     "s3:deleteobjecttagging": "delete",
-    # Share actions (ACL)
     "share": "share",
     "s3:putobjectacl": "share",
     "s3:putbucketacl": "share",
     "s3:getbucketacl": "share",
-    # Policy actions
     "policy": "policy",
     "s3:putbucketpolicy": "policy",
     "s3:getbucketpolicy": "policy",
     "s3:deletebucketpolicy": "policy",
-    # Replication actions
     "replication": "replication",
     "s3:getreplicationconfiguration": "replication",
     "s3:putreplicationconfiguration": "replication",
@@ -78,7 +71,6 @@ ACTION_ALIASES = {
     "s3:replicateobject": "replication",
     "s3:replicatetags": "replication",
     "s3:replicatedelete": "replication",
-    # IAM actions
     "iam:listusers": "iam:list_users",
     "iam:createuser": "iam:create_user",
     "iam:deleteuser": "iam:delete_user",
@@ -115,13 +107,23 @@ class IamService:
         self._raw_config: Dict[str, Any] = {}
         self._failed_attempts: Dict[str, Deque[datetime]] = {}
         self._last_load_time = 0.0
+        self._credential_cache: Dict[str, Tuple[str, Principal, float]] = {}
+        self._cache_ttl = 60.0 
+        self._last_stat_check = 0.0
+        self._stat_check_interval = 1.0
+        self._sessions: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     def _maybe_reload(self) -> None:
         """Reload configuration if the file has changed on disk."""
+        now = time.time()
+        if now - self._last_stat_check < self._stat_check_interval:
+            return
+        self._last_stat_check = now
         try:
             if self.config_path.stat().st_mtime > self._last_load_time:
                 self._load()
+                self._credential_cache.clear() 
         except OSError:
             pass
 
@@ -180,18 +182,70 @@ class IamService:
         elapsed = (datetime.now(timezone.utc) - oldest).total_seconds()
         return int(max(0, self.auth_lockout_window.total_seconds() - elapsed))
 
-    def principal_for_key(self, access_key: str) -> Principal:
+    def create_session_token(self, access_key: str, duration_seconds: int = 3600) -> str:
+        """Create a temporary session token for an access key."""
         self._maybe_reload()
         record = self._users.get(access_key)
         if not record:
             raise IamError("Unknown access key")
-        return self._build_principal(access_key, record)
+        self._cleanup_expired_sessions()
+        token = secrets.token_urlsafe(32)
+        expires_at = time.time() + duration_seconds
+        self._sessions[token] = {
+            "access_key": access_key,
+            "expires_at": expires_at,
+        }
+        return token
+
+    def validate_session_token(self, access_key: str, session_token: str) -> bool:
+        """Validate a session token for an access key."""
+        session = self._sessions.get(session_token)
+        if not session:
+            return False
+        if session["access_key"] != access_key:
+            return False
+        if time.time() > session["expires_at"]:
+            del self._sessions[session_token]
+            return False
+        return True
+
+    def _cleanup_expired_sessions(self) -> None:
+        """Remove expired session tokens."""
+        now = time.time()
+        expired = [token for token, data in self._sessions.items() if now > data["expires_at"]]
+        for token in expired:
+            del self._sessions[token]
+
+    def principal_for_key(self, access_key: str) -> Principal:
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return principal
+
+        self._maybe_reload()
+        record = self._users.get(access_key)
+        if not record:
+            raise IamError("Unknown access key")
+        principal = self._build_principal(access_key, record)
+        self._credential_cache[access_key] = (record["secret_key"], principal, now)
+        return principal
 
     def secret_for_key(self, access_key: str) -> str:
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return secret
+
         self._maybe_reload()
         record = self._users.get(access_key)
         if not record:
             raise IamError("Unknown access key")
+        principal = self._build_principal(access_key, record)
+        self._credential_cache[access_key] = (record["secret_key"], principal, now)
         return record["secret_key"]
 
     def authorize(self, principal: Principal, bucket_name: str | None, action: str) -> None:
@@ -442,11 +496,33 @@ class IamService:
         raise IamError("User not found")
 
     def get_secret_key(self, access_key: str) -> str | None:
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return secret
+
         self._maybe_reload()
         record = self._users.get(access_key)
-        return record["secret_key"] if record else None
+        if record:
+            principal = self._build_principal(access_key, record)
+            self._credential_cache[access_key] = (record["secret_key"], principal, now)
+            return record["secret_key"]
+        return None
 
     def get_principal(self, access_key: str) -> Principal | None:
+        now = time.time()
+        cached = self._credential_cache.get(access_key)
+        if cached:
+            secret, principal, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return principal
+
         self._maybe_reload()
         record = self._users.get(access_key)
-        return self._build_principal(access_key, record) if record else None
+        if record:
+            principal = self._build_principal(access_key, record)
+            self._credential_cache[access_key] = (record["secret_key"], principal, now)
+            return principal
+        return None

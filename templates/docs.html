@@ -14,6 +14,37 @@
   </div>
 </section>
 <div class="row g-4">
+  <div class="col-12 d-xl-none">
+    <div class="card shadow-sm docs-sidebar-mobile mb-0">
+      <div class="card-body py-3">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <h3 class="h6 text-uppercase text-muted mb-0">On this page</h3>
+          <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#mobileDocsToc" aria-expanded="false" aria-controls="mobileDocsToc">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+            </svg>
+          </button>
+        </div>
+        <div class="collapse" id="mobileDocsToc">
+          <ul class="list-unstyled docs-toc mb-0 small">
+            <li><a href="#setup">Set up &amp; run</a></li>
+            <li><a href="#background">Running in background</a></li>
+            <li><a href="#auth">Authentication &amp; IAM</a></li>
+            <li><a href="#console">Console tour</a></li>
+            <li><a href="#automation">Automation / CLI</a></li>
+            <li><a href="#api">REST endpoints</a></li>
+            <li><a href="#examples">API Examples</a></li>
+            <li><a href="#replication">Site Replication</a></li>
+            <li><a href="#versioning">Object Versioning</a></li>
+            <li><a href="#quotas">Bucket Quotas</a></li>
+            <li><a href="#encryption">Encryption</a></li>
+            <li><a href="#lifecycle">Lifecycle Rules</a></li>
+            <li><a href="#troubleshooting">Troubleshooting</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="col-xl-8">
     <article id="setup" class="card shadow-sm docs-section">
       <div class="card-body">
@@ -526,15 +557,46 @@ curl -X POST "{{ api_base }}/presign/mybucket/upload.bin" \
             </li>
         </ol>
 
-        <div class="alert alert-light border mb-0">
-            <div class="d-flex gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1" viewBox="0 0 16 16">
+        <div class="alert alert-light border mb-3 overflow-hidden">
+            <div class="d-flex flex-column flex-sm-row gap-2 mb-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1 flex-shrink-0 d-none d-sm-block" viewBox="0 0 16 16">
                   <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
                   <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
                 </svg>
-                <div>
-                    <strong>Headless Target Setup?</strong>
-                    <p class="small text-muted mb-0">If your target server has no UI, use the Python API directly to bootstrap credentials. See <code>docs.md</code> in the project root for the <code>setup_target.py</code> script.</p>
+                <div class="flex-grow-1 min-width-0">
+                    <strong>Headless Target Setup</strong>
+                    <p class="small text-muted mb-2">If your target server has no UI, create a <code>setup_target.py</code> script to bootstrap credentials:</p>
+<pre class="mb-0 overflow-auto" style="max-width: 100%;"><code class="language-python"># setup_target.py
+from pathlib import Path
+from app.iam import IamService
+from app.storage import ObjectStorage
+
+# Initialize services (paths match default config)
+data_dir = Path("data")
+iam = IamService(data_dir / ".myfsio.sys" / "config" / "iam.json")
+storage = ObjectStorage(data_dir)
+
+# 1. Create the bucket
+bucket_name = "backup-bucket"
+try:
+    storage.create_bucket(bucket_name)
+    print(f"Bucket '{bucket_name}' created.")
+except Exception as e:
+    print(f"Bucket creation skipped: {e}")
+
+# 2. Create the user
+try:
+    creds = iam.create_user(
+        display_name="Replication User",
+        policies=[{"bucket": bucket_name, "actions": ["write", "read", "list"]}]
+    )
+    print("\n--- CREDENTIALS GENERATED ---")
+    print(f"Access Key: {creds['access_key']}")
+    print(f"Secret Key: {creds['secret_key']}")
+    print("-----------------------------")
+except Exception as e:
+    print(f"User creation failed: {e}")</code></pre>
+                    <p class="small text-muted mt-2 mb-0">Save and run: <code>python setup_target.py</code></p>
                 </div>
             </div>
         </div>
@@ -545,11 +607,49 @@ curl -X POST "{{ api_base }}/presign/mybucket/upload.bin" \
             <li>Follow the steps above to replicate <strong>A → B</strong>.</li>
             <li>Repeat the process on Server B to replicate <strong>B → A</strong> (create a connection to A, enable rule).</li>
         </ol>
-        <p class="small text-muted mb-0">
+        <p class="small text-muted mb-3">
             <strong>Loop Prevention:</strong> The system automatically detects replication traffic using a custom User-Agent (<code>S3ReplicationAgent</code>). This prevents infinite loops where an object replicated from A to B is immediately replicated back to A.
             <br>
             <strong>Deletes:</strong> Deleting an object on one server will propagate the deletion to the other server.
         </p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Error Handling &amp; Rate Limits</h3>
+        <p class="small text-muted mb-3">The replication system handles transient failures automatically:</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Behavior</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Retry Logic</strong></td>
+                <td>boto3 automatically handles 429 (rate limit) errors using exponential backoff with <code>max_attempts=2</code></td>
+              </tr>
+              <tr>
+                <td><strong>Concurrency</strong></td>
+                <td>Uses a ThreadPoolExecutor with 4 parallel workers for replication tasks</td>
+              </tr>
+              <tr>
+                <td><strong>Timeouts</strong></td>
+                <td>Connect: 5s, Read: 30s. Large files use streaming transfers</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="alert alert-warning border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle text-warning mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+              <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+            </svg>
+            <div>
+              <strong>Large File Counts:</strong> When replicating buckets with many objects, the target server's rate limits may cause delays. There is no built-in pause mechanism. Consider increasing <code>RATE_LIMIT_DEFAULT</code> on the target server during bulk replication operations.
+            </div>
+          </div>
+        </div>
       </div>
     </article>
     <article id="versioning" class="card shadow-sm docs-section">
@@ -794,10 +894,92 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
         </p>
       </div>
     </article>
-    <article id="troubleshooting" class="card shadow-sm docs-section">
+    <article id="lifecycle" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">12</span>
+          <h2 class="h4 mb-0">Lifecycle Rules</h2>
+        </div>
+        <p class="text-muted">Automatically delete expired objects, clean up old versions, and abort incomplete multipart uploads using time-based lifecycle rules.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">How It Works</h3>
+        <p class="small text-muted mb-3">
+          Lifecycle rules run on a background timer (Python <code>threading.Timer</code>), not a system cronjob. The enforcement cycle triggers every <strong>3600 seconds (1 hour)</strong> by default. Each cycle scans all buckets with lifecycle configurations and applies matching rules.
+        </p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Expiration Types</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Expiration (Days)</strong></td>
+                <td>Delete current objects older than N days from their last modification</td>
+              </tr>
+              <tr>
+                <td><strong>Expiration (Date)</strong></td>
+                <td>Delete current objects after a specific date (ISO 8601 format)</td>
+              </tr>
+              <tr>
+                <td><strong>NoncurrentVersionExpiration</strong></td>
+                <td>Delete non-current (archived) versions older than N days from when they became non-current</td>
+              </tr>
+              <tr>
+                <td><strong>AbortIncompleteMultipartUpload</strong></td>
+                <td>Abort multipart uploads that have been in progress longer than N days</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
+<pre class="mb-3"><code class="language-bash"># Set lifecycle rule (delete objects older than 30 days)
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '[{
+    "ID": "expire-old-objects",
+    "Status": "Enabled",
+    "Prefix": "",
+    "Expiration": {"Days": 30}
+  }]'
+
+# Abort incomplete multipart uploads after 7 days
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '[{
+    "ID": "cleanup-multipart",
+    "Status": "Enabled",
+    "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
+  }]'
+
+# Get current lifecycle configuration
+curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Prefix Filtering:</strong> Use the <code>Prefix</code> field to scope rules to specific paths (e.g., <code>"logs/"</code>). Leave empty to apply to all objects in the bucket.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="troubleshooting" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">13</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -835,6 +1017,11 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
                 <td>Proxy headers missing or <code>API_BASE_URL</code> incorrect</td>
                 <td>Ensure your proxy sends <code>X-Forwarded-Host</code>/<code>Proto</code> headers, or explicitly set <code>API_BASE_URL</code> to your public domain.</td>
               </tr>
+              <tr>
+                <td>Large folder uploads hitting rate limits (429)</td>
+                <td><code>RATE_LIMIT_DEFAULT</code> exceeded (200/min)</td>
+                <td>Increase rate limit in env config, use Redis backend (<code>RATE_LIMIT_STORAGE_URI=redis://host:port</code>) for distributed setups, or upload in smaller batches.</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -857,6 +1044,7 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
           <li><a href="#versioning">Object Versioning</a></li>
           <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>
+          <li><a href="#lifecycle">Lifecycle Rules</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>
         </ul>
         <div class="docs-sidebar-callouts">
