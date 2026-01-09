@@ -189,6 +189,52 @@ All configuration is done via environment variables. The table below lists every
 | `KMS_ENABLED` | `false` | Enable KMS key management for encryption. |
 | `KMS_KEYS_PATH` | `data/.myfsio.sys/keys/kms_keys.json` | Path to store KMS key metadata. |
 
+
+## Lifecycle Rules
+
+Lifecycle rules automate object management by scheduling deletions based on object age.
+
+### Enabling Lifecycle Enforcement
+
+By default, lifecycle enforcement is disabled. Enable it by setting the environment variable:
+
+```bash
+LIFECYCLE_ENABLED=true python run.py
+```
+
+Or in your `myfsio.env` file:
+```
+LIFECYCLE_ENABLED=true
+LIFECYCLE_INTERVAL_SECONDS=3600  # Check interval (default: 1 hour)
+```
+
+### Configuring Rules
+
+Once enabled, configure lifecycle rules via:
+- **Web UI:** Bucket Details → Lifecycle tab → Add Rule
+- **S3 API:** `PUT /<bucket>?lifecycle` with XML configuration
+
+### Available Actions
+
+| Action | Description |
+|--------|-------------|
+| **Expiration** | Delete current version objects after N days |
+| **NoncurrentVersionExpiration** | Delete old versions N days after becoming noncurrent (requires versioning) |
+| **AbortIncompleteMultipartUpload** | Clean up incomplete multipart uploads after N days |
+
+### Example Configuration (XML)
+
+```xml
+<LifecycleConfiguration>
+  <Rule>
+    <ID>DeleteOldLogs</ID>
+    <Status>Enabled</Status>
+    <Filter><Prefix>logs/</Prefix></Filter>
+    <Expiration><Days>30</Days></Expiration>
+  </Rule>
+</LifecycleConfiguration>
+```
+
 ### Performance Tuning
 
 | Variable | Default | Notes |

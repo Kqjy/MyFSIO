@@ -374,6 +374,7 @@ def bucket_detail(bucket_name: str):
     kms_keys = kms_manager.list_keys() if kms_manager else []
     kms_enabled = current_app.config.get("KMS_ENABLED", False)
     encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
+    lifecycle_enabled = current_app.config.get("LIFECYCLE_ENABLED", False)
     can_manage_encryption = can_manage_versioning
 
     bucket_quota = storage.get_bucket_quota(bucket_name)
@@ -418,6 +419,7 @@ def bucket_detail(bucket_name: str):
         kms_keys=kms_keys,
         kms_enabled=kms_enabled,
         encryption_enabled=encryption_enabled,
+        lifecycle_enabled=lifecycle_enabled,
         bucket_quota=bucket_quota,
         bucket_stats=bucket_stats,
         can_manage_quota=can_manage_quota,

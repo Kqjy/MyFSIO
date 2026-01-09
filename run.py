@@ -6,6 +6,17 @@ import os
 import sys
 import warnings
 from multiprocessing import Process
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+for _env_file in [
+    Path("/opt/myfsio/myfsio.env"),
+    Path.cwd() / ".env",
+    Path.cwd() / "myfsio.env",
+]:
+    if _env_file.exists():
+        load_dotenv(_env_file, override=True)
 
 from app import create_api_app, create_ui_app
 from app.config import AppConfig
