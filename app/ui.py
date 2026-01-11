@@ -102,6 +102,12 @@ def _friendly_error_message(exc: Exception) -> str:
     return message
 
 
+def _wants_json() -> bool:
+    return request.accept_mimetypes.best_match(
+        ["application/json", "text/html"]
+    ) == "application/json"
+
+
 def _policy_allows_public_read(policy: dict[str, Any]) -> bool:
     statements = policy.get("Statement", [])
     if isinstance(statements, dict):
@@ -285,13 +291,19 @@ def create_bucket():
     principal = _current_principal()
     bucket_name = request.form.get("bucket_name", "").strip()
     if not bucket_name:
+        if _wants_json():
+            return jsonify({"error": "Bucket name is required"}), 400
         flash("Bucket name is required", "danger")
         return redirect(url_for("ui.buckets_overview"))
     try:
         _authorize_ui(principal, bucket_name, "write")
         _storage().create_bucket(bucket_name)
+        if _wants_json():
+            return jsonify({"success": True, "message": f"Bucket '{bucket_name}' created", "bucket_name": bucket_name})
         flash(f"Bucket '{bucket_name}' created", "success")
     except (StorageError, FileExistsError, IamError) as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 400
         flash(_friendly_error_message(exc), "danger")
     return redirect(url_for("ui.buckets_overview"))
 
@@ -649,8 +661,12 @@ def delete_bucket(bucket_name: str):
         _storage().delete_bucket(bucket_name)
         _bucket_policies().delete_policy(bucket_name)
         _replication_manager().delete_rule(bucket_name)
+        if _wants_json():
+            return jsonify({"success": True, "message": f"Bucket '{bucket_name}' removed"})
         flash(f"Bucket '{bucket_name}' removed", "success")
     except (StorageError, IamError) as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 400
         flash(_friendly_error_message(exc), "danger")
     return redirect(url_for("ui.buckets_overview"))
 
@@ -664,12 +680,17 @@ def delete_object(bucket_name: str, object_key: str):
         _authorize_ui(principal, bucket_name, "delete", object_key=object_key)
         if purge_versions:
             _storage().purge_object(bucket_name, object_key)
-            flash(f"Permanently deleted '{object_key}' and all versions", "success")
+            message = f"Permanently deleted '{object_key}' and all versions"
         else:
             _storage().delete_object(bucket_name, object_key)
             _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
-            flash(f"Deleted '{object_key}'", "success")
+            message = f"Deleted '{object_key}'"
+        if _wants_json():
+            return jsonify({"success": True, "message": message})
+        flash(message, "success")
     except (IamError, StorageError) as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 400
         flash(_friendly_error_message(exc), "danger")
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name))
 
@@ -979,22 +1000,32 @@ def update_bucket_policy(bucket_name: str):
     try:
         _authorize_ui(principal, bucket_name, "policy")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 403
         flash(str(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name))
     store = _bucket_policies()
     if action == "delete":
         store.delete_policy(bucket_name)
+        if _wants_json():
+            return jsonify({"success": True, "message": "Bucket policy removed"})
         flash("Bucket policy removed", "info")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="permissions"))
     document = request.form.get("policy_document", "").strip()
     if not document:
+        if _wants_json():
+            return jsonify({"error": "Provide a JSON policy document"}), 400
         flash("Provide a JSON policy document", "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="permissions"))
     try:
         payload = json.loads(document)
         store.set_policy(bucket_name, payload)
+        if _wants_json():
+            return jsonify({"success": True, "message": "Bucket policy saved"})
         flash("Bucket policy saved", "success")
     except (json.JSONDecodeError, ValueError) as exc:
+        if _wants_json():
+            return jsonify({"error": f"Policy error: {exc}"}), 400
         flash(f"Policy error: {exc}", "danger")
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="permissions"))
 
@@ -1005,6 +1036,8 @@ def update_bucket_versioning(bucket_name: str):
     try:
         _authorize_ui(principal, bucket_name, "write")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 403
         flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
     state = request.form.get("state", "enable")
@@ -1012,9 +1045,14 @@ def update_bucket_versioning(bucket_name: str):
     try:
         _storage().set_bucket_versioning(bucket_name, enable)
     except StorageError as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 400
         flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    flash("Versioning enabled" if enable else "Versioning suspended", "success")
+    message = "Versioning enabled" if enable else "Versioning suspended"
+    if _wants_json():
+        return jsonify({"success": True, "message": message, "enabled": enable})
+    flash(message, "success")
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
 
 
@@ -1022,62 +1060,83 @@ def update_bucket_versioning(bucket_name: str):
 def update_bucket_quota(bucket_name: str):
     """Update bucket quota configuration (admin only)."""
     principal = _current_principal()
-    
+
     is_admin = False
     try:
         _iam().authorize(principal, None, "iam:list_users")
         is_admin = True
     except IamError:
         pass
-    
+
     if not is_admin:
+        if _wants_json():
+            return jsonify({"error": "Only administrators can manage bucket quotas"}), 403
         flash("Only administrators can manage bucket quotas", "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    
+
     action = request.form.get("action", "set")
-    
+
     if action == "remove":
         try:
             _storage().set_bucket_quota(bucket_name, max_bytes=None, max_objects=None)
+            if _wants_json():
+                return jsonify({"success": True, "message": "Bucket quota removed"})
             flash("Bucket quota removed", "info")
         except StorageError as exc:
+            if _wants_json():
+                return jsonify({"error": _friendly_error_message(exc)}), 400
             flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    
+
     max_mb_str = request.form.get("max_mb", "").strip()
     max_objects_str = request.form.get("max_objects", "").strip()
-    
+
     max_bytes = None
     max_objects = None
-    
+
     if max_mb_str:
         try:
             max_mb = int(max_mb_str)
             if max_mb < 1:
                 raise ValueError("Size must be at least 1 MB")
-            max_bytes = max_mb * 1024 * 1024 
+            max_bytes = max_mb * 1024 * 1024
         except ValueError as exc:
+            if _wants_json():
+                return jsonify({"error": f"Invalid size value: {exc}"}), 400
             flash(f"Invalid size value: {exc}", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    
+
     if max_objects_str:
         try:
             max_objects = int(max_objects_str)
             if max_objects < 0:
                 raise ValueError("Object count must be non-negative")
         except ValueError as exc:
+            if _wants_json():
+                return jsonify({"error": f"Invalid object count: {exc}"}), 400
             flash(f"Invalid object count: {exc}", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    
+
     try:
         _storage().set_bucket_quota(bucket_name, max_bytes=max_bytes, max_objects=max_objects)
         if max_bytes is None and max_objects is None:
-            flash("Bucket quota removed", "info")
+            message = "Bucket quota removed"
         else:
-            flash("Bucket quota updated", "success")
+            message = "Bucket quota updated"
+        if _wants_json():
+            return jsonify({
+                "success": True,
+                "message": message,
+                "max_bytes": max_bytes,
+                "max_objects": max_objects,
+                "has_quota": max_bytes is not None or max_objects is not None
+            })
+        flash(message, "success" if max_bytes or max_objects else "info")
     except StorageError as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 400
         flash(_friendly_error_message(exc), "danger")
-    
+
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
 
 
@@ -1088,26 +1147,34 @@ def update_bucket_encryption(bucket_name: str):
     try:
         _authorize_ui(principal, bucket_name, "write")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 403
         flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    
+
     action = request.form.get("action", "enable")
-    
+
     if action == "disable":
         try:
             _storage().set_bucket_encryption(bucket_name, None)
+            if _wants_json():
+                return jsonify({"success": True, "message": "Default encryption disabled", "enabled": False})
             flash("Default encryption disabled", "info")
         except StorageError as exc:
+            if _wants_json():
+                return jsonify({"error": _friendly_error_message(exc)}), 400
             flash(_friendly_error_message(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    
+
     algorithm = request.form.get("algorithm", "AES256")
     kms_key_id = request.form.get("kms_key_id", "").strip() or None
-    
+
     if algorithm not in ("AES256", "aws:kms"):
+        if _wants_json():
+            return jsonify({"error": "Invalid encryption algorithm"}), 400
         flash("Invalid encryption algorithm", "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
-    
+
     encryption_config: dict[str, Any] = {
         "Rules": [
             {
@@ -1117,19 +1184,24 @@ def update_bucket_encryption(bucket_name: str):
             }
         ]
     }
-    
+
     if algorithm == "aws:kms" and kms_key_id:
         encryption_config["Rules"][0]["ApplyServerSideEncryptionByDefault"]["KMSMasterKeyID"] = kms_key_id
-    
+
     try:
         _storage().set_bucket_encryption(bucket_name, encryption_config)
         if algorithm == "aws:kms":
-            flash("Default KMS encryption enabled", "success")
+            message = "Default KMS encryption enabled"
         else:
-            flash("Default AES-256 encryption enabled", "success")
+            message = "Default AES-256 encryption enabled"
+        if _wants_json():
+            return jsonify({"success": True, "message": message, "enabled": True, "algorithm": algorithm})
+        flash(message, "success")
     except StorageError as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 400
         flash(_friendly_error_message(exc), "danger")
-    
+
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
 
 
@@ -1178,10 +1250,14 @@ def create_iam_user():
     try:
         _iam().authorize(principal, None, "iam:create_user")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 403
         flash(str(exc), "danger")
         return redirect(url_for("ui.iam_dashboard"))
     display_name = request.form.get("display_name", "").strip() or "Unnamed"
     if len(display_name) > 64:
+        if _wants_json():
+            return jsonify({"error": "Display name must be 64 characters or fewer"}), 400
         flash("Display name must be 64 characters or fewer", "danger")
         return redirect(url_for("ui.iam_dashboard"))
     policies_text = request.form.get("policies", "").strip()
@@ -1190,11 +1266,15 @@ def create_iam_user():
         try:
             policies = json.loads(policies_text)
         except json.JSONDecodeError as exc:
+            if _wants_json():
+                return jsonify({"error": f"Invalid JSON: {exc}"}), 400
             flash(f"Invalid JSON: {exc}", "danger")
             return redirect(url_for("ui.iam_dashboard"))
     try:
         created = _iam().create_user(display_name=display_name, policies=policies)
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 400
         flash(str(exc), "danger")
         return redirect(url_for("ui.iam_dashboard"))
 
@@ -1205,6 +1285,15 @@ def create_iam_user():
             "operation": "create",
         }
     )
+    if _wants_json():
+        return jsonify({
+            "success": True,
+            "message": f"Created user {created['access_key']}",
+            "access_key": created["access_key"],
+            "secret_key": created["secret_key"],
+            "display_name": display_name,
+            "policies": policies or []
+        })
     flash(f"Created user {created['access_key']}. Copy the secret below.", "success")
     return redirect(url_for("ui.iam_dashboard", secret_token=token))
 
@@ -1256,18 +1345,26 @@ def update_iam_user(access_key: str):
     try:
         _iam().authorize(principal, None, "iam:create_user")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 403
         flash(str(exc), "danger")
         return redirect(url_for("ui.iam_dashboard"))
 
     display_name = request.form.get("display_name", "").strip()
     if display_name:
         if len(display_name) > 64:
+            if _wants_json():
+                return jsonify({"error": "Display name must be 64 characters or fewer"}), 400
             flash("Display name must be 64 characters or fewer", "danger")
         else:
             try:
                 _iam().update_user(access_key, display_name)
+                if _wants_json():
+                    return jsonify({"success": True, "message": f"Updated user {access_key}", "display_name": display_name})
                 flash(f"Updated user {access_key}", "success")
             except IamError as exc:
+                if _wants_json():
+                    return jsonify({"error": str(exc)}), 400
                 flash(str(exc), "danger")
 
     return redirect(url_for("ui.iam_dashboard"))
@@ -1279,6 +1376,8 @@ def delete_iam_user(access_key: str):
     try:
         _iam().authorize(principal, None, "iam:delete_user")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 403
         flash(str(exc), "danger")
         return redirect(url_for("ui.iam_dashboard"))
 
@@ -1286,16 +1385,24 @@ def delete_iam_user(access_key: str):
         try:
             _iam().delete_user(access_key)
             session.pop("credentials", None)
+            if _wants_json():
+                return jsonify({"success": True, "message": "Your account has been deleted", "redirect": url_for("ui.login")})
             flash("Your account has been deleted.", "info")
             return redirect(url_for("ui.login"))
         except IamError as exc:
+            if _wants_json():
+                return jsonify({"error": str(exc)}), 400
             flash(str(exc), "danger")
             return redirect(url_for("ui.iam_dashboard"))
 
     try:
         _iam().delete_user(access_key)
+        if _wants_json():
+            return jsonify({"success": True, "message": f"Deleted user {access_key}"})
         flash(f"Deleted user {access_key}", "success")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 400
         flash(str(exc), "danger")
     return redirect(url_for("ui.iam_dashboard"))
 
@@ -1306,6 +1413,8 @@ def update_iam_policies(access_key: str):
     try:
         _iam().authorize(principal, None, "iam:update_policy")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 403
         flash(str(exc), "danger")
         return redirect(url_for("ui.iam_dashboard"))
 
@@ -1318,13 +1427,19 @@ def update_iam_policies(access_key: str):
             if not isinstance(policies, list):
                 raise ValueError("Policies must be a list")
         except (ValueError, json.JSONDecodeError):
+            if _wants_json():
+                return jsonify({"error": "Invalid JSON format for policies"}), 400
             flash("Invalid JSON format for policies", "danger")
             return redirect(url_for("ui.iam_dashboard"))
 
     try:
         _iam().update_user_policies(access_key, policies)
+        if _wants_json():
+            return jsonify({"success": True, "message": f"Updated policies for {access_key}", "policies": policies})
         flash(f"Updated policies for {access_key}", "success")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 400
         flash(str(exc), "danger")
 
     return redirect(url_for("ui.iam_dashboard"))
@@ -1336,19 +1451,23 @@ def create_connection():
     try:
         _iam().authorize(principal, None, "iam:list_users")
     except IamError:
+        if _wants_json():
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.buckets_overview"))
-        
+
     name = request.form.get("name", "").strip()
     endpoint = request.form.get("endpoint_url", "").strip()
     access_key = request.form.get("access_key", "").strip()
     secret_key = request.form.get("secret_key", "").strip()
     region = request.form.get("region", "us-east-1").strip()
-    
+
     if not all([name, endpoint, access_key, secret_key]):
+        if _wants_json():
+            return jsonify({"error": "All fields are required"}), 400
         flash("All fields are required", "danger")
         return redirect(url_for("ui.connections_dashboard"))
-        
+
     conn = RemoteConnection(
         id=str(uuid.uuid4()),
         name=name,
@@ -1358,6 +1477,8 @@ def create_connection():
         region=region
     )
     _connections().add(conn)
+    if _wants_json():
+        return jsonify({"success": True, "message": f"Connection '{name}' created", "connection_id": conn.id})
     flash(f"Connection '{name}' created", "success")
     return redirect(url_for("ui.connections_dashboard"))
 
@@ -1417,11 +1538,15 @@ def update_connection(connection_id: str):
     try:
         _iam().authorize(principal, None, "iam:list_users")
     except IamError:
+        if _wants_json():
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.buckets_overview"))
 
     conn = _connections().get(connection_id)
     if not conn:
+        if _wants_json():
+            return jsonify({"error": "Connection not found"}), 404
         flash("Connection not found", "danger")
         return redirect(url_for("ui.connections_dashboard"))
 
@@ -1432,6 +1557,8 @@ def update_connection(connection_id: str):
     region = request.form.get("region", "us-east-1").strip()
 
     if not all([name, endpoint, access_key, secret_key]):
+        if _wants_json():
+            return jsonify({"error": "All fields are required"}), 400
         flash("All fields are required", "danger")
         return redirect(url_for("ui.connections_dashboard"))
 
@@ -1440,8 +1567,20 @@ def update_connection(connection_id: str):
     conn.access_key = access_key
     conn.secret_key = secret_key
     conn.region = region
-    
+
     _connections().save()
+    if _wants_json():
+        return jsonify({
+            "success": True,
+            "message": f"Connection '{name}' updated",
+            "connection": {
+                "id": connection_id,
+                "name": name,
+                "endpoint_url": endpoint,
+                "access_key": access_key,
+                "region": region
+            }
+        })
     flash(f"Connection '{name}' updated", "success")
     return redirect(url_for("ui.connections_dashboard"))
 
@@ -1452,10 +1591,14 @@ def delete_connection(connection_id: str):
     try:
         _iam().authorize(principal, None, "iam:list_users")
     except IamError:
+        if _wants_json():
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.buckets_overview"))
-        
+
     _connections().delete(connection_id)
+    if _wants_json():
+        return jsonify({"success": True, "message": "Connection deleted"})
     flash("Connection deleted", "success")
     return redirect(url_for("ui.connections_dashboard"))
 
@@ -1466,31 +1609,41 @@ def update_bucket_replication(bucket_name: str):
     try:
         _authorize_ui(principal, bucket_name, "replication")
     except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 403
         flash(str(exc), "danger")
         return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
-    
+
     is_admin = False
     try:
         _iam().authorize(principal, None, "iam:list_users")
         is_admin = True
     except IamError:
         is_admin = False
-        
+
     action = request.form.get("action")
-    
+
     if action == "delete":
         if not is_admin:
+            if _wants_json():
+                return jsonify({"error": "Only administrators can remove replication configuration"}), 403
             flash("Only administrators can remove replication configuration", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
         _replication().delete_rule(bucket_name)
+        if _wants_json():
+            return jsonify({"success": True, "message": "Replication configuration removed", "action": "delete"})
         flash("Replication configuration removed", "info")
     elif action == "pause":
         rule = _replication().get_rule(bucket_name)
         if rule:
             rule.enabled = False
             _replication().set_rule(rule)
+            if _wants_json():
+                return jsonify({"success": True, "message": "Replication paused", "action": "pause", "enabled": False})
             flash("Replication paused", "info")
         else:
+            if _wants_json():
+                return jsonify({"error": "No replication configuration to pause"}), 404
             flash("No replication configuration to pause", "warning")
     elif action == "resume":
         from .replication import REPLICATION_MODE_ALL
@@ -1500,24 +1653,33 @@ def update_bucket_replication(bucket_name: str):
             _replication().set_rule(rule)
             if rule.mode == REPLICATION_MODE_ALL:
                 _replication().replicate_existing_objects(bucket_name)
-                flash("Replication resumed. Syncing pending objects in background.", "success")
+                message = "Replication resumed. Syncing pending objects in background."
             else:
-                flash("Replication resumed", "success")
+                message = "Replication resumed"
+            if _wants_json():
+                return jsonify({"success": True, "message": message, "action": "resume", "enabled": True})
+            flash(message, "success")
         else:
+            if _wants_json():
+                return jsonify({"error": "No replication configuration to resume"}), 404
             flash("No replication configuration to resume", "warning")
     elif action == "create":
         if not is_admin:
+            if _wants_json():
+                return jsonify({"error": "Only administrators can configure replication settings"}), 403
             flash("Only administrators can configure replication settings", "danger")
             return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
-            
+
         from .replication import REPLICATION_MODE_NEW_ONLY, REPLICATION_MODE_ALL
         import time
-        
+
         target_conn_id = request.form.get("target_connection_id")
         target_bucket = request.form.get("target_bucket", "").strip()
         replication_mode = request.form.get("replication_mode", REPLICATION_MODE_NEW_ONLY)
-        
+
         if not target_conn_id or not target_bucket:
+            if _wants_json():
+                return jsonify({"error": "Target connection and bucket are required"}), 400
             flash("Target connection and bucket are required", "danger")
         else:
             rule = ReplicationRule(
@@ -1529,15 +1691,20 @@ def update_bucket_replication(bucket_name: str):
                 created_at=time.time(),
             )
             _replication().set_rule(rule)
-            
+
             if replication_mode == REPLICATION_MODE_ALL:
                 _replication().replicate_existing_objects(bucket_name)
-                flash("Replication configured. Existing objects are being replicated in the background.", "success")
+                message = "Replication configured. Existing objects are being replicated in the background."
             else:
-                flash("Replication configured. Only new uploads will be replicated.", "success")
+                message = "Replication configured. Only new uploads will be replicated."
+            if _wants_json():
+                return jsonify({"success": True, "message": message, "action": "create", "enabled": True})
+            flash(message, "success")
     else:
+        if _wants_json():
+            return jsonify({"error": "Invalid action"}), 400
         flash("Invalid action", "danger")
-            
+
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="replication"))
 
 
@@ -1767,6 +1934,67 @@ def metrics_dashboard():
             "uptime_days": uptime_days,
         }
     )
+
+
+@ui_bp.route("/metrics/api")
+def metrics_api():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    import time
+
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+
+    storage_root = current_app.config["STORAGE_ROOT"]
+    disk = psutil.disk_usage(storage_root)
+
+    storage = _storage()
+    buckets = storage.list_buckets()
+    total_buckets = len(buckets)
+
+    total_objects = 0
+    total_bytes_used = 0
+    total_versions = 0
+
+    cache_ttl = current_app.config.get("BUCKET_STATS_CACHE_TTL", 60)
+    for bucket in buckets:
+        stats = storage.bucket_stats(bucket.name, cache_ttl=cache_ttl)
+        total_objects += stats.get("total_objects", stats.get("objects", 0))
+        total_bytes_used += stats.get("total_bytes", stats.get("bytes", 0))
+        total_versions += stats.get("version_count", 0)
+
+    boot_time = psutil.boot_time()
+    uptime_seconds = time.time() - boot_time
+    uptime_days = int(uptime_seconds / 86400)
+
+    return jsonify({
+        "cpu_percent": cpu_percent,
+        "memory": {
+            "total": _format_bytes(memory.total),
+            "available": _format_bytes(memory.available),
+            "used": _format_bytes(memory.used),
+            "percent": memory.percent,
+        },
+        "disk": {
+            "total": _format_bytes(disk.total),
+            "free": _format_bytes(disk.free),
+            "used": _format_bytes(disk.used),
+            "percent": disk.percent,
+        },
+        "app": {
+            "buckets": total_buckets,
+            "objects": total_objects,
+            "versions": total_versions,
+            "storage_used": _format_bytes(total_bytes_used),
+            "storage_raw": total_bytes_used,
+            "uptime_days": uptime_days,
+        }
+    })
 
 
 @ui_bp.route("/buckets/<bucket_name>/lifecycle", methods=["GET", "POST", "DELETE"])

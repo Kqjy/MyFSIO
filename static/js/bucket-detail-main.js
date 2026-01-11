@@ -525,7 +525,7 @@
         const deleteObjectForm = document.getElementById('deleteObjectForm');
         const deleteObjectKey = document.getElementById('deleteObjectKey');
         if (deleteModal && deleteObjectForm) {
-          deleteObjectForm.action = row.dataset.deleteEndpoint;
+          deleteObjectForm.setAttribute('action', row.dataset.deleteEndpoint);
           if (deleteObjectKey) deleteObjectKey.textContent = row.dataset.key;
           deleteModal.show();
         }
@@ -866,6 +866,10 @@
   };
 
   const showMessage = ({ title = 'Notice', body = '', bodyHtml = null, variant = 'info', actionText = null, onAction = null }) => {
+    if (!actionText && !onAction && window.showToast) {
+      window.showToast(body || title, title, variant);
+      return;
+    }
     if (!messageModal) {
       window.alert(body || title);
       return;
@@ -1147,7 +1151,11 @@
       }
       const summary = messageParts.length ? messageParts.join(', ') : 'Bulk delete finished';
       showMessage({ title: 'Bulk delete complete', body: data.message || summary, variant: errorCount ? 'warning' : 'success' });
-      window.setTimeout(() => window.location.reload(), 600);
+      selectedRows.clear();
+      previewEmpty.classList.remove('d-none');
+      previewPanel.classList.add('d-none');
+      activeRow = null;
+      loadObjects(false);
     } catch (error) {
       bulkDeleteModal?.hide();
       showMessage({ title: 'Delete failed', body: (error && error.message) || 'Unable to delete selected objects', variant: 'danger' });
@@ -1377,7 +1385,7 @@
       }
       showMessage({ title: 'Restore scheduled', body: data.message || 'Object restored from archive.', variant: 'success' });
       await loadArchivedObjects();
-      window.setTimeout(() => window.location.reload(), 600);
+      loadObjects(false);
     } catch (error) {
       showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore archived object', variant: 'danger' });
     }
@@ -1470,7 +1478,7 @@
       }
       await loadObjectVersions(row, { force: true });
       showMessage({ title: 'Version restored', body: data.message || 'The selected version has been restored.', variant: 'success' });
-      window.setTimeout(() => window.location.reload(), 500);
+      loadObjects(false);
     } catch (error) {
       showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore version', variant: 'danger' });
     }
@@ -1562,6 +1570,54 @@
   const deleteModal = deleteModalEl ? new bootstrap.Modal(deleteModalEl) : null;
   const deleteObjectForm = document.getElementById('deleteObjectForm');
   const deleteObjectKey = document.getElementById('deleteObjectKey');
+
+  if (deleteObjectForm) {
+    deleteObjectForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const submitBtn = deleteObjectForm.querySelector('[type="submit"]');
+      const originalHtml = submitBtn ? submitBtn.innerHTML : '';
+      try {
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Deleting...';
+        }
+        const formData = new FormData(deleteObjectForm);
+        const csrfToken = formData.get('csrf_token') || (window.getCsrfToken ? window.getCsrfToken() : '');
+        const formAction = deleteObjectForm.getAttribute('action');
+        const response = await fetch(formAction, {
+          method: 'POST',
+          headers: {
+            'X-CSRFToken': csrfToken,
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: formData
+        });
+        const contentType = response.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          throw new Error('Server returned an unexpected response. Please try again.');
+        }
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || 'Unable to delete object');
+        }
+        if (deleteModal) deleteModal.hide();
+        showMessage({ title: 'Object deleted', body: data.message || 'The object has been deleted.', variant: 'success' });
+        previewEmpty.classList.remove('d-none');
+        previewPanel.classList.add('d-none');
+        activeRow = null;
+        loadObjects(false);
+      } catch (err) {
+        if (deleteModal) deleteModal.hide();
+        showMessage({ title: 'Delete failed', body: err.message || 'Unable to delete object', variant: 'danger' });
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalHtml;
+        }
+      }
+    });
+  }
 
   const resetPreviewMedia = () => {
     [previewImage, previewVideo, previewIframe].forEach((el) => {
@@ -2234,6 +2290,7 @@
     const finishUploadSession = () => {
       if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
       if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
+      hideFloatingProgress();
 
       if (bulkUploadSuccessCount) bulkUploadSuccessCount.textContent = uploadSuccessFiles.length;
       if (uploadSuccessFiles.length === 0 && bulkUploadSuccessAlert) {
@@ -2256,13 +2313,22 @@
       updateUploadBtnText();
       updateQueueListDisplay();
 
-      if (uploadSuccessFiles.length > 0) {
-        if (uploadBtnText) uploadBtnText.textContent = 'Refreshing...';
-        const objectsTabUrl = window.location.pathname + '?tab=objects';
-        window.setTimeout(() => window.location.href = objectsTabUrl, 800);
-      } else {
-        if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
-        if (uploadFileInput) uploadFileInput.disabled = false;
+      if (uploadSubmitBtn) uploadSubmitBtn.disabled = false;
+      if (uploadFileInput) {
+        uploadFileInput.disabled = false;
+        uploadFileInput.value = '';
+      }
+
+      loadObjects(false);
+
+      const successCount = uploadSuccessFiles.length;
+      const errorCount = uploadErrorFiles.length;
+      if (successCount > 0 && errorCount > 0) {
+        showMessage({ title: 'Upload complete', body: `${successCount} uploaded, ${errorCount} failed.`, variant: 'warning' });
+      } else if (successCount > 0) {
+        showMessage({ title: 'Upload complete', body: `${successCount} object(s) uploaded successfully.`, variant: 'success' });
+      } else if (errorCount > 0) {
+        showMessage({ title: 'Upload failed', body: `${errorCount} file(s) failed to upload.`, variant: 'danger' });
       }
     };
 
@@ -2300,6 +2366,10 @@
         if (uploadSubmitBtn) uploadSubmitBtn.disabled = true;
         refreshUploadDropLabel();
         updateUploadBtnText();
+
+        if (uploadModal) uploadModal.hide();
+        showFloatingProgress();
+        showMessage({ title: 'Upload started', body: `Uploading ${files.length} file(s)...`, variant: 'info' });
       }
 
       const fileCount = files.length;
@@ -2609,6 +2679,10 @@
     };
 
     loadReplicationStats();
+
+    if (window.pollingManager) {
+      window.pollingManager.start('replication', loadReplicationStats);
+    }
 
     const refreshBtn = document.querySelector('[data-refresh-replication]');
     refreshBtn?.addEventListener('click', () => {
@@ -3407,7 +3481,12 @@
       if (!resp.ok) throw new Error(data.error || `Failed to ${copyMoveAction} object`);
       showMessage({ title: `Object ${copyMoveAction === 'move' ? 'moved' : 'copied'}`, body: `Successfully ${copyMoveAction === 'move' ? 'moved' : 'copied'} to ${destBucket}/${destKey}`, variant: 'success' });
       copyMoveModal?.hide();
-      if (copyMoveAction === 'move') window.setTimeout(() => window.location.reload(), 500);
+      if (copyMoveAction === 'move') {
+        previewEmpty.classList.remove('d-none');
+        previewPanel.classList.add('d-none');
+        activeRow = null;
+        loadObjects(false);
+      }
     } catch (err) {
       showMessage({ title: `${copyMoveAction === 'move' ? 'Move' : 'Copy'} failed`, body: err.message, variant: 'danger' });
     }
@@ -3495,9 +3574,383 @@
     loadLifecycleHistory();
   });
 
-  if (lifecycleHistoryCard) loadLifecycleHistory();
+  if (lifecycleHistoryCard) {
+    loadLifecycleHistory();
+    if (window.pollingManager) {
+      window.pollingManager.start('lifecycle', loadLifecycleHistory);
+    }
+  }
 
   if (corsCard) loadCorsRules();
   if (aclCard) loadAcl();
+
+  function updateVersioningBadge(enabled) {
+    var badge = document.querySelector('.badge.rounded-pill');
+    if (!badge) return;
+    badge.classList.remove('text-bg-success', 'text-bg-secondary');
+    badge.classList.add(enabled ? 'text-bg-success' : 'text-bg-secondary');
+    var icon = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
+      '<path d="M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2zm.995-14.901a1 1 0 1 0-1.99 0A5.002 5.002 0 0 0 3 6c0 1.098-.5 6-2 7h14c-1.5-1-2-5.902-2-7 0-2.42-1.72-4.44-4.005-4.901z"/>' +
+      '</svg>';
+    badge.innerHTML = icon + (enabled ? 'Versioning On' : 'Versioning Off');
+    versioningEnabled = enabled;
+  }
+
+  function interceptForm(formId, options) {
+    var form = document.getElementById(formId);
+    if (!form) return;
+
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      window.UICore.submitFormAjax(form, {
+        successMessage: options.successMessage || 'Operation completed',
+        onSuccess: function(data) {
+          if (options.onSuccess) options.onSuccess(data);
+          if (options.closeModal) {
+            var modal = bootstrap.Modal.getInstance(document.getElementById(options.closeModal));
+            if (modal) modal.hide();
+          }
+          if (options.reload) {
+            setTimeout(function() { location.reload(); }, 500);
+          }
+        }
+      });
+    });
+  }
+
+  function updateVersioningCard(enabled) {
+    var card = document.getElementById('bucket-versioning-card');
+    if (!card) return;
+    var cardBody = card.querySelector('.card-body');
+    if (!cardBody) return;
+
+    var enabledHtml = '<div class="alert alert-success d-flex align-items-start mb-4" role="alert">' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+      '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>' +
+      '</svg><div><strong>Versioning is enabled</strong>' +
+      '<p class="mb-0 small">All previous versions of objects are preserved. You can roll back accidental changes or deletions at any time.</p>' +
+      '</div></div>' +
+      '<button class="btn btn-outline-danger" type="button" data-bs-toggle="modal" data-bs-target="#suspendVersioningModal">' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
+      '<path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>' +
+      '</svg>Suspend Versioning</button>';
+
+    var disabledHtml = '<div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+      '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
+      '<path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>' +
+      '</svg><div><strong>Versioning is suspended</strong>' +
+      '<p class="mb-0 small">New object uploads overwrite existing objects. Enable versioning to preserve previous versions.</p>' +
+      '</div></div>' +
+      '<form method="post" id="enableVersioningForm">' +
+      '<input type="hidden" name="csrf_token" value="' + window.UICore.getCsrfToken() + '" />' +
+      '<input type="hidden" name="state" value="enable" />' +
+      '<button class="btn btn-success" type="submit">' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
+      '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>' +
+      '</svg>Enable Versioning</button></form>';
+
+    cardBody.innerHTML = enabled ? enabledHtml : disabledHtml;
+
+    var archivedCardEl = document.getElementById('archived-objects-card');
+    if (archivedCardEl) {
+      archivedCardEl.style.display = enabled ? '' : 'none';
+    }
+
+    var dropZone = document.getElementById('objects-drop-zone');
+    if (dropZone) {
+      dropZone.setAttribute('data-versioning', enabled ? 'true' : 'false');
+    }
+
+    if (!enabled) {
+      var newForm = document.getElementById('enableVersioningForm');
+      if (newForm) {
+        newForm.setAttribute('action', window.BucketDetailConfig?.endpoints?.versioning || '');
+        newForm.addEventListener('submit', function(e) {
+          e.preventDefault();
+          window.UICore.submitFormAjax(newForm, {
+            successMessage: 'Versioning enabled',
+            onSuccess: function() {
+              updateVersioningBadge(true);
+              updateVersioningCard(true);
+            }
+          });
+        });
+      }
+    }
+  }
+
+  function updateEncryptionCard(enabled, algorithm) {
+    var encCard = document.getElementById('bucket-encryption-card');
+    if (!encCard) return;
+    var alertContainer = encCard.querySelector('.alert');
+    if (alertContainer) {
+      if (enabled) {
+        alertContainer.className = 'alert alert-success d-flex align-items-start mb-4';
+        var algoText = algorithm === 'aws:kms' ? 'KMS' : 'AES-256';
+        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+          '<path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>' +
+          '<path d="M9.5 6.5a1.5 1.5 0 0 1-1 1.415l.385 1.99a.5.5 0 0 1-.491.595h-.788a.5.5 0 0 1-.49-.595l.384-1.99a1.5 1.5 0 1 1 2-1.415z"/>' +
+          '</svg><div><strong>Default encryption enabled (' + algoText + ')</strong>' +
+          '<p class="mb-0 small">All new objects uploaded to this bucket will be automatically encrypted.</p></div>';
+      } else {
+        alertContainer.className = 'alert alert-secondary d-flex align-items-start mb-4';
+        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+          '<path d="M11 1a2 2 0 0 0-2 2v4a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h5V3a3 3 0 0 1 6 0v4a.5.5 0 0 1-1 0V3a2 2 0 0 0-2-2zM3 8a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H3z"/>' +
+          '</svg><div><strong>Default encryption disabled</strong>' +
+          '<p class="mb-0 small">Objects are stored without default encryption. You can enable server-side encryption below.</p></div>';
+      }
+    }
+    var disableBtn = document.getElementById('disableEncryptionBtn');
+    if (disableBtn) {
+      disableBtn.style.display = enabled ? '' : 'none';
+    }
+  }
+
+  function updateQuotaCard(hasQuota, maxBytes, maxObjects) {
+    var quotaCard = document.getElementById('bucket-quota-card');
+    if (!quotaCard) return;
+    var alertContainer = quotaCard.querySelector('.alert');
+    if (alertContainer) {
+      if (hasQuota) {
+        alertContainer.className = 'alert alert-info d-flex align-items-start mb-4';
+        var quotaParts = [];
+        if (maxBytes) quotaParts.push(formatBytes(maxBytes) + ' storage');
+        if (maxObjects) quotaParts.push(maxObjects.toLocaleString() + ' objects');
+        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+          '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM8 4a.905.905 0 0 0-.9.995l.35 3.507a.552.552 0 0 0 1.1 0l.35-3.507A.905.905 0 0 0 8 4zm.002 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/>' +
+          '</svg><div><strong>Storage quota active</strong>' +
+          '<p class="mb-0 small">This bucket is limited to ' + quotaParts.join(' and ') + '.</p></div>';
+      } else {
+        alertContainer.className = 'alert alert-secondary d-flex align-items-start mb-4';
+        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+          '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
+          '<path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>' +
+          '</svg><div><strong>No storage quota</strong>' +
+          '<p class="mb-0 small">This bucket has no storage or object count limits. Set limits below to control usage.</p></div>';
+      }
+    }
+    var removeBtn = document.getElementById('removeQuotaBtn');
+    if (removeBtn) {
+      removeBtn.style.display = hasQuota ? '' : 'none';
+    }
+    var maxMbInput = document.getElementById('max_mb');
+    var maxObjInput = document.getElementById('max_objects');
+    if (maxMbInput) maxMbInput.value = maxBytes ? Math.floor(maxBytes / 1048576) : '';
+    if (maxObjInput) maxObjInput.value = maxObjects || '';
+  }
+
+  function updatePolicyCard(hasPolicy, preset) {
+    var policyCard = document.querySelector('#permissions-pane .card');
+    if (!policyCard) return;
+    var alertContainer = policyCard.querySelector('.alert');
+    if (alertContainer) {
+      if (hasPolicy) {
+        alertContainer.className = 'alert alert-info d-flex align-items-start mb-4';
+        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+          '<path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>' +
+          '</svg><div><strong>Policy attached</strong>' +
+          '<p class="mb-0 small">A bucket policy is attached to this bucket. Access is granted via both IAM and bucket policy rules.</p></div>';
+      } else {
+        alertContainer.className = 'alert alert-secondary d-flex align-items-start mb-4';
+        alertContainer.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">' +
+          '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
+          '<path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>' +
+          '</svg><div><strong>IAM only</strong>' +
+          '<p class="mb-0 small">No bucket policy is attached. Access is controlled by IAM policies only.</p></div>';
+      }
+    }
+    document.querySelectorAll('.preset-btn').forEach(function(btn) {
+      btn.classList.remove('active');
+      if (btn.dataset.preset === preset) btn.classList.add('active');
+    });
+    var presetInputEl = document.getElementById('policyPreset');
+    if (presetInputEl) presetInputEl.value = preset;
+    var deletePolicyBtn = document.getElementById('deletePolicyBtn');
+    if (deletePolicyBtn) {
+      deletePolicyBtn.style.display = hasPolicy ? '' : 'none';
+    }
+  }
+
+  interceptForm('enableVersioningForm', {
+    successMessage: 'Versioning enabled',
+    onSuccess: function(data) {
+      updateVersioningBadge(true);
+      updateVersioningCard(true);
+    }
+  });
+
+  interceptForm('suspendVersioningForm', {
+    successMessage: 'Versioning suspended',
+    closeModal: 'suspendVersioningModal',
+    onSuccess: function(data) {
+      updateVersioningBadge(false);
+      updateVersioningCard(false);
+    }
+  });
+
+  interceptForm('encryptionForm', {
+    successMessage: 'Encryption settings saved',
+    onSuccess: function(data) {
+      updateEncryptionCard(data.enabled !== false, data.algorithm || 'AES256');
+    }
+  });
+
+  interceptForm('quotaForm', {
+    successMessage: 'Quota settings saved',
+    onSuccess: function(data) {
+      updateQuotaCard(data.has_quota, data.max_bytes, data.max_objects);
+    }
+  });
+
+  interceptForm('bucketPolicyForm', {
+    successMessage: 'Bucket policy saved',
+    onSuccess: function(data) {
+      var policyModeEl = document.getElementById('policyMode');
+      var policyPresetEl = document.getElementById('policyPreset');
+      var preset = policyModeEl && policyModeEl.value === 'delete' ? 'private' :
+                   (policyPresetEl?.value || 'custom');
+      updatePolicyCard(preset !== 'private', preset);
+    }
+  });
+
+  var deletePolicyForm = document.getElementById('deletePolicyForm');
+  if (deletePolicyForm) {
+    deletePolicyForm.addEventListener('submit', function(e) {
+      e.preventDefault();
+      window.UICore.submitFormAjax(deletePolicyForm, {
+        successMessage: 'Bucket policy deleted',
+        onSuccess: function(data) {
+          var modal = bootstrap.Modal.getInstance(document.getElementById('deletePolicyModal'));
+          if (modal) modal.hide();
+          updatePolicyCard(false, 'private');
+          var policyTextarea = document.getElementById('policyDocument');
+          if (policyTextarea) policyTextarea.value = '';
+        }
+      });
+    });
+  }
+
+  var disableEncBtn = document.getElementById('disableEncryptionBtn');
+  if (disableEncBtn) {
+    disableEncBtn.addEventListener('click', function() {
+      var form = document.getElementById('encryptionForm');
+      if (!form) return;
+      document.getElementById('encryptionAction').value = 'disable';
+      window.UICore.submitFormAjax(form, {
+        successMessage: 'Encryption disabled',
+        onSuccess: function(data) {
+          document.getElementById('encryptionAction').value = 'enable';
+          updateEncryptionCard(false, null);
+        }
+      });
+    });
+  }
+
+  var removeQuotaBtn = document.getElementById('removeQuotaBtn');
+  if (removeQuotaBtn) {
+    removeQuotaBtn.addEventListener('click', function() {
+      var form = document.getElementById('quotaForm');
+      if (!form) return;
+      document.getElementById('quotaAction').value = 'remove';
+      window.UICore.submitFormAjax(form, {
+        successMessage: 'Quota removed',
+        onSuccess: function(data) {
+          document.getElementById('quotaAction').value = 'set';
+          updateQuotaCard(false, null, null);
+        }
+      });
+    });
+  }
+
+  function reloadReplicationPane() {
+    var replicationPane = document.getElementById('replication-pane');
+    if (!replicationPane) return;
+    fetch(window.location.pathname + '?tab=replication', {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' }
+    })
+    .then(function(resp) { return resp.text(); })
+    .then(function(html) {
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(html, 'text/html');
+      var newPane = doc.getElementById('replication-pane');
+      if (newPane) {
+        replicationPane.innerHTML = newPane.innerHTML;
+        initReplicationForms();
+        initReplicationStats();
+      }
+    })
+    .catch(function(err) {
+      console.error('Failed to reload replication pane:', err);
+    });
+  }
+
+  function initReplicationForms() {
+    document.querySelectorAll('form[action*="replication"]').forEach(function(form) {
+      if (form.dataset.ajaxBound) return;
+      form.dataset.ajaxBound = 'true';
+      var actionInput = form.querySelector('input[name="action"]');
+      if (!actionInput) return;
+      var action = actionInput.value;
+
+      form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var msg = action === 'pause' ? 'Replication paused' :
+                  action === 'resume' ? 'Replication resumed' :
+                  action === 'delete' ? 'Replication disabled' :
+                  action === 'create' ? 'Replication configured' : 'Operation completed';
+        window.UICore.submitFormAjax(form, {
+          successMessage: msg,
+          onSuccess: function(data) {
+            var modal = bootstrap.Modal.getInstance(document.getElementById('disableReplicationModal'));
+            if (modal) modal.hide();
+            reloadReplicationPane();
+          }
+        });
+      });
+    });
+  }
+
+  function initReplicationStats() {
+    var statsContainer = document.getElementById('replication-stats-cards');
+    if (!statsContainer) return;
+    var statusEndpoint = statsContainer.dataset.statusEndpoint;
+    if (!statusEndpoint) return;
+
+    var syncedEl = statsContainer.querySelector('[data-stat="synced"]');
+    var pendingEl = statsContainer.querySelector('[data-stat="pending"]');
+    var orphanedEl = statsContainer.querySelector('[data-stat="orphaned"]');
+    var bytesEl = statsContainer.querySelector('[data-stat="bytes"]');
+
+    fetch(statusEndpoint)
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        if (syncedEl) syncedEl.textContent = data.objects_synced || 0;
+        if (pendingEl) pendingEl.textContent = data.objects_pending || 0;
+        if (orphanedEl) orphanedEl.textContent = data.objects_orphaned || 0;
+        if (bytesEl) bytesEl.textContent = formatBytes(data.bytes_synced || 0);
+      })
+      .catch(function(err) {
+        console.error('Failed to load replication stats:', err);
+      });
+  }
+
+  initReplicationForms();
+  initReplicationStats();
+
+  var deleteBucketForm = document.getElementById('deleteBucketForm');
+  if (deleteBucketForm) {
+    deleteBucketForm.addEventListener('submit', function(e) {
+      e.preventDefault();
+      window.UICore.submitFormAjax(deleteBucketForm, {
+        successMessage: 'Bucket deleted',
+        onSuccess: function() {
+          window.location.href = window.BucketDetailConfig?.endpoints?.bucketsOverview || '/ui/buckets';
+        }
+      });
+    });
+  }
+
+  window.BucketDetailConfig = window.BucketDetailConfig || {};
 
 })();

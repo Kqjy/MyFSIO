@@ -473,15 +473,13 @@
                     </svg>
                     Save Policy
                   </button>
-                  {% if bucket_policy %}
-                  <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deletePolicyModal">
+                  <button type="button" class="btn btn-outline-danger" id="deletePolicyBtn" data-bs-toggle="modal" data-bs-target="#deletePolicyModal"{% if not bucket_policy %} style="display: none;"{% endif %}>
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
                       <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
                     </svg>
                     Delete Policy
                   </button>
-                  {% endif %}
                 </div>
               </form>
               {% else %}
@@ -636,7 +634,7 @@
                   Suspend Versioning
                 </button>
                 {% else %}
-              <form method="post" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}">
+              <form method="post" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}" id="enableVersioningForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
                 <input type="hidden" name="state" value="enable" />
                 <button class="btn btn-success" type="submit">
@@ -931,7 +929,8 @@
               {% if can_manage_quota %}
               <form method="post" action="{{ url_for('ui.update_bucket_quota', bucket_name=bucket_name) }}" id="quotaForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-                
+                <input type="hidden" name="action" value="set" id="quotaAction" />
+
                 <div class="mb-3">
                   <label for="max_mb" class="form-label fw-medium">Maximum Storage Size</label>
                   <div class="input-group">
@@ -958,14 +957,12 @@
                     </svg>
                     Save Quota Settings
                   </button>
-                  {% if has_quota %}
-                  <button type="submit" class="btn btn-outline-danger" id="removeQuotaBtn" name="action" value="remove">
+                  <button type="button" class="btn btn-outline-danger" id="removeQuotaBtn"{% if not has_quota %} style="display: none;"{% endif %}>
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
                     </svg>
                     Remove Quota
                   </button>
-                  {% endif %}
                 </div>
               </form>
               {% else %}
@@ -1856,7 +1853,7 @@
       </div>
       <div class="modal-footer border-0 pt-0">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <form method="post" action="{{ url_for('ui.update_bucket_policy', bucket_name=bucket_name) }}" class="d-inline">
+        <form method="post" action="{{ url_for('ui.update_bucket_policy', bucket_name=bucket_name) }}" class="d-inline" id="deletePolicyForm">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="mode" value="delete" />
           <button type="submit" class="btn btn-danger">Delete Policy</button>
@@ -2037,7 +2034,7 @@
         </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="{{ url_for('ui.delete_bucket', bucket_name=bucket_name) }}">
+      <form method="post" action="{{ url_for('ui.delete_bucket', bucket_name=bucket_name) }}" id="deleteBucketForm">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <div class="modal-body">
           <div class="alert alert-danger d-flex align-items-center mb-3" role="alert">
@@ -2267,7 +2264,7 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-        <form method="POST" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}" class="d-inline">
+        <form method="POST" action="{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}" class="d-inline" id="suspendVersioningForm">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
           <input type="hidden" name="state" value="suspend" />
           <button type="submit" class="btn btn-warning">
@@ -2552,4 +2549,12 @@
 <script src="{{ url_for('static', filename='js/bucket-detail-upload.js') }}"></script>
 <script src="{{ url_for('static', filename='js/bucket-detail-operations.js') }}"></script>
 <script src="{{ url_for('static', filename='js/bucket-detail-main.js') }}"></script>
+<script>
+window.BucketDetailConfig = {
+  endpoints: {
+    versioning: "{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}",
+    bucketsOverview: "{{ url_for('ui.buckets_overview') }}"
+  }
+};
+</script>
 {% endblock %}

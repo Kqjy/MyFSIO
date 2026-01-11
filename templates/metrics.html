@@ -6,11 +6,11 @@
     <p class="text-muted mb-0">Real-time server performance and storage usage</p>
   </div>
   <div class="d-flex gap-2 align-items-center">
-    <span class="d-flex align-items-center gap-2 text-muted small">
+    <span class="d-flex align-items-center gap-2 text-muted small" id="metricsLiveIndicator">
       <span class="live-indicator"></span>
-      Live
+      Auto-refresh: <span id="refreshCountdown">5</span>s
     </span>
-    <button class="btn btn-outline-secondary btn-sm" onclick="window.location.reload()">
+    <button class="btn btn-outline-secondary btn-sm" id="refreshMetricsBtn">
       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-arrow-clockwise me-1" viewBox="0 0 16 16">
         <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
         <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
@@ -32,15 +32,13 @@
             </svg>
           </div>
         </div>
-        <h2 class="display-6 fw-bold mb-2 stat-value">{{ cpu_percent }}<span class="fs-4 fw-normal text-muted">%</span></h2>
+        <h2 class="display-6 fw-bold mb-2 stat-value"><span data-metric="cpu_percent">{{ cpu_percent }}</span><span class="fs-4 fw-normal text-muted">%</span></h2>
         <div class="progress" style="height: 8px; border-radius: 4px;">
-          <div class="progress-bar {% if cpu_percent > 80 %}bg-danger{% elif cpu_percent > 50 %}bg-warning{% else %}bg-primary{% endif %}" role="progressbar" style="width: {{ cpu_percent }}%"></div>
+          <div class="progress-bar bg-primary" data-metric="cpu_bar" role="progressbar" style="width: {{ cpu_percent }}%"></div>
         </div>
         <div class="mt-2 d-flex justify-content-between">
           <small class="text-muted">Current load</small>
-          <small class="{% if cpu_percent > 80 %}text-danger{% elif cpu_percent > 50 %}text-warning{% else %}text-success{% endif %}">
-            {% if cpu_percent > 80 %}High{% elif cpu_percent > 50 %}Medium{% else %}Normal{% endif %}
-          </small>
+          <small data-metric="cpu_status" class="text-success">Normal</small>
         </div>
       </div>
     </div>
@@ -57,13 +55,13 @@
             </svg>
           </div>
         </div>
-        <h2 class="display-6 fw-bold mb-2 stat-value">{{ memory.percent }}<span class="fs-4 fw-normal text-muted">%</span></h2>
+        <h2 class="display-6 fw-bold mb-2 stat-value"><span data-metric="memory_percent">{{ memory.percent }}</span><span class="fs-4 fw-normal text-muted">%</span></h2>
         <div class="progress" style="height: 8px; border-radius: 4px;">
-          <div class="progress-bar bg-info" role="progressbar" style="width: {{ memory.percent }}%"></div>
+          <div class="progress-bar bg-info" data-metric="memory_bar" role="progressbar" style="width: {{ memory.percent }}%"></div>
         </div>
         <div class="mt-2 d-flex justify-content-between">
-          <small class="text-muted">{{ memory.used }} used</small>
-          <small class="text-muted">{{ memory.total }} total</small>
+          <small class="text-muted"><span data-metric="memory_used">{{ memory.used }}</span> used</small>
+          <small class="text-muted"><span data-metric="memory_total">{{ memory.total }}</span> total</small>
         </div>
       </div>
     </div>
@@ -81,13 +79,13 @@
             </svg>
           </div>
         </div>
-        <h2 class="display-6 fw-bold mb-2 stat-value">{{ disk.percent }}<span class="fs-4 fw-normal text-muted">%</span></h2>
+        <h2 class="display-6 fw-bold mb-2 stat-value"><span data-metric="disk_percent">{{ disk.percent }}</span><span class="fs-4 fw-normal text-muted">%</span></h2>
         <div class="progress" style="height: 8px; border-radius: 4px;">
-          <div class="progress-bar {% if disk.percent > 90 %}bg-danger{% elif disk.percent > 75 %}bg-warning{% else %}bg-warning{% endif %}" role="progressbar" style="width: {{ disk.percent }}%"></div>
+          <div class="progress-bar bg-warning" data-metric="disk_bar" role="progressbar" style="width: {{ disk.percent }}%"></div>
         </div>
         <div class="mt-2 d-flex justify-content-between">
-          <small class="text-muted">{{ disk.free }} free</small>
-          <small class="text-muted">{{ disk.total }} total</small>
+          <small class="text-muted"><span data-metric="disk_free">{{ disk.free }}</span> free</small>
+          <small class="text-muted"><span data-metric="disk_total">{{ disk.total }}</span> total</small>
         </div>
       </div>
     </div>
@@ -104,15 +102,15 @@
             </svg>
           </div>
         </div>
-        <h2 class="display-6 fw-bold mb-2 stat-value">{{ app.storage_used }}</h2>
+        <h2 class="display-6 fw-bold mb-2 stat-value" data-metric="storage_used">{{ app.storage_used }}</h2>
         <div class="d-flex gap-3 mt-3">
           <div class="text-center flex-fill">
-            <div class="h5 fw-bold mb-0">{{ app.buckets }}</div>
+            <div class="h5 fw-bold mb-0" data-metric="buckets_count">{{ app.buckets }}</div>
             <small class="text-muted">Buckets</small>
           </div>
           <div class="vr"></div>
           <div class="text-center flex-fill">
-            <div class="h5 fw-bold mb-0">{{ app.objects }}</div>
+            <div class="h5 fw-bold mb-0" data-metric="objects_count">{{ app.objects }}</div>
             <small class="text-muted">Objects</small>
           </div>
         </div>
@@ -269,4 +267,110 @@
     </div>
   </div>
 </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function() {
+  var refreshInterval = 5000;
+  var countdown = 5;
+  var countdownEl = document.getElementById('refreshCountdown');
+  var refreshBtn = document.getElementById('refreshMetricsBtn');
+  var countdownTimer = null;
+  var fetchTimer = null;
+
+  function updateMetrics() {
+    fetch('/ui/metrics/api')
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        var el;
+        el = document.querySelector('[data-metric="cpu_percent"]');
+        if (el) el.textContent = data.cpu_percent;
+        el = document.querySelector('[data-metric="cpu_bar"]');
+        if (el) {
+          el.style.width = data.cpu_percent + '%';
+          el.className = 'progress-bar ' + (data.cpu_percent > 80 ? 'bg-danger' : data.cpu_percent > 50 ? 'bg-warning' : 'bg-primary');
+        }
+        el = document.querySelector('[data-metric="cpu_status"]');
+        if (el) {
+          el.textContent = data.cpu_percent > 80 ? 'High' : data.cpu_percent > 50 ? 'Medium' : 'Normal';
+          el.className = data.cpu_percent > 80 ? 'text-danger' : data.cpu_percent > 50 ? 'text-warning' : 'text-success';
+        }
+
+        el = document.querySelector('[data-metric="memory_percent"]');
+        if (el) el.textContent = data.memory.percent;
+        el = document.querySelector('[data-metric="memory_bar"]');
+        if (el) el.style.width = data.memory.percent + '%';
+        el = document.querySelector('[data-metric="memory_used"]');
+        if (el) el.textContent = data.memory.used;
+        el = document.querySelector('[data-metric="memory_total"]');
+        if (el) el.textContent = data.memory.total;
+
+        el = document.querySelector('[data-metric="disk_percent"]');
+        if (el) el.textContent = data.disk.percent;
+        el = document.querySelector('[data-metric="disk_bar"]');
+        if (el) {
+          el.style.width = data.disk.percent + '%';
+          el.className = 'progress-bar ' + (data.disk.percent > 90 ? 'bg-danger' : 'bg-warning');
+        }
+        el = document.querySelector('[data-metric="disk_free"]');
+        if (el) el.textContent = data.disk.free;
+        el = document.querySelector('[data-metric="disk_total"]');
+        if (el) el.textContent = data.disk.total;
+
+        el = document.querySelector('[data-metric="storage_used"]');
+        if (el) el.textContent = data.app.storage_used;
+        el = document.querySelector('[data-metric="buckets_count"]');
+        if (el) el.textContent = data.app.buckets;
+        el = document.querySelector('[data-metric="objects_count"]');
+        if (el) el.textContent = data.app.objects;
+
+        countdown = 5;
+      })
+      .catch(function(err) {
+        console.error('Metrics fetch error:', err);
+      });
+  }
+
+  function startCountdown() {
+    if (countdownTimer) clearInterval(countdownTimer);
+    countdown = 5;
+    if (countdownEl) countdownEl.textContent = countdown;
+    countdownTimer = setInterval(function() {
+      countdown--;
+      if (countdownEl) countdownEl.textContent = countdown;
+      if (countdown <= 0) {
+        countdown = 5;
+      }
+    }, 1000);
+  }
+
+  function startPolling() {
+    if (fetchTimer) clearInterval(fetchTimer);
+    fetchTimer = setInterval(function() {
+      if (!document.hidden) {
+        updateMetrics();
+      }
+    }, refreshInterval);
+    startCountdown();
+  }
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function() {
+      updateMetrics();
+      countdown = 5;
+      if (countdownEl) countdownEl.textContent = countdown;
+    });
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) {
+      updateMetrics();
+      startPolling();
+    }
+  });
+
+  startPolling();
+})();
+</script>
 {% endblock %}
