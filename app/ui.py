@@ -62,6 +62,20 @@ def _bucket_policies() -> BucketPolicyStore:
     return store
 
 
+def _build_policy_context() -> dict[str, Any]:
+    ctx: dict[str, Any] = {}
+    if request.headers.get("Referer"):
+        ctx["aws:Referer"] = request.headers.get("Referer")
+    if request.access_route:
+        ctx["aws:SourceIp"] = request.access_route[0]
+    elif request.remote_addr:
+        ctx["aws:SourceIp"] = request.remote_addr
+    ctx["aws:SecureTransport"] = str(request.is_secure).lower()
+    if request.headers.get("User-Agent"):
+        ctx["aws:UserAgent"] = request.headers.get("User-Agent")
+    return ctx
+
+
 def _connections() -> ConnectionStore:
     return current_app.extensions["connections"]
 
@@ -172,7 +186,8 @@ def _authorize_ui(principal, bucket_name: str | None, action: str, *, object_key
     enforce_bucket_policies = current_app.config.get("UI_ENFORCE_BUCKET_POLICIES", True)
     if bucket_name and enforce_bucket_policies:
         access_key = principal.access_key if principal else None
-        decision = _bucket_policies().evaluate(access_key, bucket_name, object_key, action)
+        policy_context = _build_policy_context()
+        decision = _bucket_policies().evaluate(access_key, bucket_name, object_key, action, policy_context)
         if decision == "deny":
             raise IamError("Access denied by bucket policy")
     if not iam_allowed and decision != "allow":

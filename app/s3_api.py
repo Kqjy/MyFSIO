@@ -53,6 +53,20 @@ def _bucket_policies() -> BucketPolicyStore:
     return store
 
 
+def _build_policy_context() -> Dict[str, Any]:
+    ctx: Dict[str, Any] = {}
+    if request.headers.get("Referer"):
+        ctx["aws:Referer"] = request.headers.get("Referer")
+    if request.access_route:
+        ctx["aws:SourceIp"] = request.access_route[0]
+    elif request.remote_addr:
+        ctx["aws:SourceIp"] = request.remote_addr
+    ctx["aws:SecureTransport"] = str(request.is_secure).lower()
+    if request.headers.get("User-Agent"):
+        ctx["aws:UserAgent"] = request.headers.get("User-Agent")
+    return ctx
+
+
 def _object_lock() -> ObjectLockService:
     return current_app.extensions["object_lock"]
 
@@ -380,7 +394,8 @@ def _authorize_action(principal: Principal | None, bucket_name: str | None, acti
     policy_decision = None
     access_key = principal.access_key if principal else None
     if bucket_name:
-        policy_decision = _bucket_policies().evaluate(access_key, bucket_name, object_key, action)
+        policy_context = _build_policy_context()
+        policy_decision = _bucket_policies().evaluate(access_key, bucket_name, object_key, action, policy_context)
         if policy_decision == "deny":
             raise IamError("Access denied by bucket policy")
 
@@ -407,11 +422,13 @@ def _authorize_action(principal: Principal | None, bucket_name: str | None, acti
 def _enforce_bucket_policy(principal: Principal | None, bucket_name: str | None, object_key: str | None, action: str) -> None:
     if not bucket_name:
         return
+    policy_context = _build_policy_context()
     decision = _bucket_policies().evaluate(
         principal.access_key if principal else None,
         bucket_name,
         object_key,
         action,
+        policy_context,
     )
     if decision == "deny":
         raise IamError("Access denied by bucket policy")
