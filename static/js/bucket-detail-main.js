@@ -80,6 +80,7 @@
   const objectsContainer = document.querySelector('.objects-table-container[data-bucket]');
   const bulkDeleteEndpoint = objectsContainer?.dataset.bulkDeleteEndpoint || '';
   const objectsApiUrl = objectsContainer?.dataset.objectsApi || '';
+  const objectsStreamUrl = objectsContainer?.dataset.objectsStream || '';
   const versionPanel = document.getElementById('version-panel');
   const versionList = document.getElementById('version-list');
   const refreshVersionsButton = document.getElementById('refreshVersionsButton');
@@ -112,6 +113,12 @@
   let currentPrefix = '';
   let allObjects = [];
   let urlTemplates = null;
+  let streamAbortController = null;
+  let useStreaming = !!objectsStreamUrl;
+  let streamingComplete = false;
+  const STREAM_RENDER_BATCH = 500;
+  let pendingStreamObjects = [];
+  let streamRenderScheduled = false;
 
   const buildUrlFromTemplate = (template, key) => {
     if (!template) return '';
@@ -411,7 +418,167 @@
     }
   };
 
-  const loadObjects = async (append = false) => {
+  const processStreamObject = (obj) => {
+    const key = obj.key;
+    return {
+      key: key,
+      size: obj.size,
+      lastModified: obj.last_modified,
+      lastModifiedDisplay: obj.last_modified_display,
+      etag: obj.etag,
+      previewUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.preview, key) : '',
+      downloadUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.download, key) : '',
+      presignEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.presign, key) : '',
+      deleteEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.delete, key) : '',
+      metadata: '{}',
+      versionsEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.versions, key) : '',
+      restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : '',
+      tagsUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.tags, key) : '',
+      copyUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.copy, key) : '',
+      moveUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.move, key) : ''
+    };
+  };
+
+  const flushPendingStreamObjects = () => {
+    if (pendingStreamObjects.length === 0) return;
+    const batch = pendingStreamObjects.splice(0, pendingStreamObjects.length);
+    batch.forEach(obj => {
+      loadedObjectCount++;
+      allObjects.push(obj);
+    });
+    updateObjectCountBadge();
+    if (loadMoreStatus) {
+      if (streamingComplete) {
+        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
+      } else {
+        const countText = totalObjectCount > 0 ? ` of ${totalObjectCount.toLocaleString()}` : '';
+        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()}${countText} loading...`;
+      }
+    }
+    refreshVirtualList();
+    streamRenderScheduled = false;
+  };
+
+  const scheduleStreamRender = () => {
+    if (streamRenderScheduled) return;
+    streamRenderScheduled = true;
+    requestAnimationFrame(flushPendingStreamObjects);
+  };
+
+  const loadObjectsStreaming = async () => {
+    if (isLoadingObjects) return;
+    isLoadingObjects = true;
+    streamingComplete = false;
+
+    if (objectsLoadingRow) objectsLoadingRow.style.display = '';
+    nextContinuationToken = null;
+    loadedObjectCount = 0;
+    totalObjectCount = 0;
+    allObjects = [];
+    pendingStreamObjects = [];
+
+    streamAbortController = new AbortController();
+
+    try {
+      const params = new URLSearchParams();
+      if (currentPrefix) params.set('prefix', currentPrefix);
+
+      const response = await fetch(`${objectsStreamUrl}?${params}`, {
+        signal: streamAbortController.signal
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      if (objectsLoadingRow) objectsLoadingRow.remove();
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            switch (msg.type) {
+              case 'meta':
+                urlTemplates = msg.url_templates;
+                versioningEnabled = msg.versioning_enabled;
+                if (objectsContainer) {
+                  objectsContainer.dataset.versioning = versioningEnabled ? 'true' : 'false';
+                }
+                break;
+              case 'count':
+                totalObjectCount = msg.total_count || 0;
+                break;
+              case 'object':
+                pendingStreamObjects.push(processStreamObject(msg));
+                if (pendingStreamObjects.length >= STREAM_RENDER_BATCH) {
+                  scheduleStreamRender();
+                }
+                break;
+              case 'error':
+                throw new Error(msg.error);
+              case 'done':
+                streamingComplete = true;
+                break;
+            }
+          } catch (parseErr) {
+            console.warn('Failed to parse stream line:', line, parseErr);
+          }
+        }
+        if (pendingStreamObjects.length > 0) {
+          scheduleStreamRender();
+        }
+      }
+
+      if (buffer.trim()) {
+        try {
+          const msg = JSON.parse(buffer);
+          if (msg.type === 'object') {
+            pendingStreamObjects.push(processStreamObject(msg));
+          } else if (msg.type === 'done') {
+            streamingComplete = true;
+          }
+        } catch (e) {}
+      }
+
+      flushPendingStreamObjects();
+      streamingComplete = true;
+      hasMoreObjects = false;
+      updateObjectCountBadge();
+
+      if (loadMoreStatus) {
+        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
+      }
+      if (typeof updateLoadMoreButton === 'function') {
+        updateLoadMoreButton();
+      }
+      refreshVirtualList();
+      renderBreadcrumb(currentPrefix);
+
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      console.error('Streaming failed, falling back to paginated:', error);
+      useStreaming = false;
+      isLoadingObjects = false;
+      await loadObjectsPaginated(false);
+      return;
+    } finally {
+      isLoadingObjects = false;
+      streamAbortController = null;
+    }
+  };
+
+  const loadObjectsPaginated = async (append = false) => {
     if (isLoadingObjects) return;
     isLoadingObjects = true;
 
@@ -419,6 +586,7 @@
       if (objectsLoadingRow) objectsLoadingRow.style.display = '';
       nextContinuationToken = null;
       loadedObjectCount = 0;
+      totalObjectCount = 0;
       allObjects = [];
     }
 
@@ -458,29 +626,12 @@
 
       data.objects.forEach(obj => {
         loadedObjectCount++;
-        const key = obj.key;
-        allObjects.push({
-          key: key,
-          size: obj.size,
-          lastModified: obj.last_modified,
-          lastModifiedDisplay: obj.last_modified_display,
-          etag: obj.etag,
-          previewUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.preview, key) : '',
-          downloadUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.download, key) : '',
-          presignEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.presign, key) : '',
-          deleteEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.delete, key) : '',
-          metadata: '{}',
-          versionsEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.versions, key) : '',
-          restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : '',
-          tagsUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.tags, key) : '',
-          copyUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.copy, key) : '',
-          moveUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.move, key) : ''
-        });
+        allObjects.push(processStreamObject(obj));
       });
 
       updateObjectCountBadge();
       hasMoreObjects = data.is_truncated;
-      
+
       if (loadMoreStatus) {
         if (data.is_truncated) {
           loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} of ${totalObjectCount.toLocaleString()} loaded`;
@@ -488,7 +639,7 @@
           loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
         }
       }
-      
+
       if (typeof updateLoadMoreButton === 'function') {
         updateLoadMoreButton();
       }
@@ -509,6 +660,13 @@
         loadMoreSpinner.classList.add('d-none');
       }
     }
+  };
+
+  const loadObjects = async (append = false) => {
+    if (useStreaming && !append) {
+      return loadObjectsStreaming();
+    }
+    return loadObjectsPaginated(append);
   };
 
   const attachRowHandlers = () => {
@@ -3943,8 +4101,8 @@
     deleteBucketForm.addEventListener('submit', function(e) {
       e.preventDefault();
       window.UICore.submitFormAjax(deleteBucketForm, {
-        successMessage: 'Bucket deleted',
         onSuccess: function() {
+          sessionStorage.setItem('flashMessage', JSON.stringify({ title: 'Bucket deleted', variant: 'success' }));
           window.location.href = window.BucketDetailConfig?.endpoints?.bucketsOverview || '/ui/buckets';
         }
       });

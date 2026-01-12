@@ -146,6 +146,7 @@
         data-bucket="{{ bucket_name }}"
         data-versioning="{{ 'true' if versioning_enabled else 'false' }}"
         data-objects-api="{{ objects_api_url }}"
+        data-objects-stream="{{ objects_stream_url }}"
         data-bulk-delete-endpoint="{{ url_for('ui.bulk_delete_objects', bucket_name=bucket_name) }}"
         data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
         data-folders-url="{{ folders_url }}"

@@ -309,3 +309,16 @@ window.UICore.setupJsonAutoIndent = function(textarea) {
     }
   });
 };
+
+document.addEventListener('DOMContentLoaded', function() {
+  var flashMessage = sessionStorage.getItem('flashMessage');
+  if (flashMessage) {
+    sessionStorage.removeItem('flashMessage');
+    try {
+      var msg = JSON.parse(flashMessage);
+      if (window.showToast) {
+        window.showToast(msg.body || msg.title, msg.title, msg.variant || 'info');
+      }
+    } catch (e) {}
+  }
+});

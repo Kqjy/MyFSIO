@@ -137,10 +137,10 @@ class ObjectStorage:
     BUCKET_VERSIONS_DIR = "versions"
     MULTIPART_MANIFEST = "manifest.json"
     BUCKET_CONFIG_FILE = ".bucket.json"
-    KEY_INDEX_CACHE_TTL = 30
+    DEFAULT_CACHE_TTL = 5
     OBJECT_CACHE_MAX_SIZE = 100
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, cache_ttl: int = DEFAULT_CACHE_TTL) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
@@ -150,6 +150,7 @@ class ObjectStorage:
         self._cache_version: Dict[str, int] = {}
         self._bucket_config_cache: Dict[str, tuple[dict[str, Any], float]] = {}
         self._bucket_config_cache_ttl = 30.0
+        self._cache_ttl = cache_ttl
 
     def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
         """Get or create a lock for a specific bucket. Reduces global lock contention."""
@@ -1398,7 +1399,7 @@ class ObjectStorage:
             cached = self._object_cache.get(bucket_id)
             if cached:
                 objects, timestamp = cached
-                if now - timestamp < self.KEY_INDEX_CACHE_TTL:
+                if now - timestamp < self._cache_ttl:
                     self._object_cache.move_to_end(bucket_id)
                     return objects
             cache_version = self._cache_version.get(bucket_id, 0)
@@ -1409,7 +1410,7 @@ class ObjectStorage:
                 cached = self._object_cache.get(bucket_id)
                 if cached:
                     objects, timestamp = cached
-                    if now - timestamp < self.KEY_INDEX_CACHE_TTL:
+                    if now - timestamp < self._cache_ttl:
                         self._object_cache.move_to_end(bucket_id)
                         return objects
             objects = self._build_object_cache(bucket_path)
@@ -1454,6 +1455,36 @@ class ObjectStorage:
                     objects.pop(key, None)
                 else:
                     objects[key] = meta
+
+    def warm_cache(self, bucket_names: Optional[List[str]] = None) -> None:
+        """Pre-warm the object cache for specified buckets or all buckets.
+
+        This is called on startup to ensure the first request is fast.
+        """
+        if bucket_names is None:
+            bucket_names = [b.name for b in self.list_buckets()]
+
+        for bucket_name in bucket_names:
+            try:
+                bucket_path = self._bucket_path(bucket_name)
+                if bucket_path.exists():
+                    self._get_object_cache(bucket_path.name, bucket_path)
+            except Exception:
+                pass
+
+    def warm_cache_async(self, bucket_names: Optional[List[str]] = None) -> threading.Thread:
+        """Start cache warming in a background thread.
+
+        Returns the thread object so caller can optionally wait for it.
+        """
+        thread = threading.Thread(
+            target=self.warm_cache,
+            args=(bucket_names,),
+            daemon=True,
+            name="cache-warmer",
+        )
+        thread.start()
+        return thread
 
     def _ensure_system_roots(self) -> None:
         for path in (

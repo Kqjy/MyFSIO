@@ -16,6 +16,7 @@ from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .access_logging import AccessLoggingService
+from .compression import GzipMiddleware
 from .acl import AclService
 from .bucket_policies import BucketPolicyStore
 from .config import AppConfig
@@ -89,13 +90,24 @@ def create_app(
     # Trust X-Forwarded-* headers from proxies
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
+    # Enable gzip compression for responses (10-20x smaller JSON payloads)
+    if app.config.get("ENABLE_GZIP", True):
+        app.wsgi_app = GzipMiddleware(app.wsgi_app, compression_level=6)
+
     _configure_cors(app)
     _configure_logging(app)
 
     limiter.init_app(app)
     csrf.init_app(app)
 
-    storage = ObjectStorage(Path(app.config["STORAGE_ROOT"]))
+    storage = ObjectStorage(
+        Path(app.config["STORAGE_ROOT"]),
+        cache_ttl=app.config.get("OBJECT_CACHE_TTL", 5),
+    )
+
+    if app.config.get("WARM_CACHE_ON_STARTUP", True) and not app.config.get("TESTING"):
+        storage.warm_cache_async()
+
     iam = IamService(
         Path(app.config["IAM_CONFIG"]),
         auth_max_attempts=app.config.get("AUTH_MAX_ATTEMPTS", 5),

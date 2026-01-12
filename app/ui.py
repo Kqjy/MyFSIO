@@ -399,6 +399,7 @@ def bucket_detail(bucket_name: str):
         pass
 
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
+    objects_stream_url = url_for("ui.stream_bucket_objects", bucket_name=bucket_name)
 
     lifecycle_url = url_for("ui.bucket_lifecycle", bucket_name=bucket_name)
     cors_url = url_for("ui.bucket_cors", bucket_name=bucket_name)
@@ -410,6 +411,7 @@ def bucket_detail(bucket_name: str):
         "bucket_detail.html",
         bucket_name=bucket_name,
         objects_api_url=objects_api_url,
+        objects_stream_url=objects_stream_url,
         lifecycle_url=lifecycle_url,
         cors_url=cors_url,
         acl_url=acl_url,
@@ -504,6 +506,100 @@ def list_bucket_objects(bucket_name: str):
             "move": move_template,
         },
     })
+
+
+@ui_bp.get("/buckets/<bucket_name>/objects/stream")
+def stream_bucket_objects(bucket_name: str):
+    """Streaming NDJSON endpoint for progressive object listing.
+
+    Streams objects as newline-delimited JSON for fast progressive rendering.
+    First line is metadata, subsequent lines are objects.
+    """
+    principal = _current_principal()
+    storage = _storage()
+    try:
+        _authorize_ui(principal, bucket_name, "list")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    prefix = request.args.get("prefix") or None
+
+    try:
+        versioning_enabled = storage.is_versioning_enabled(bucket_name)
+    except StorageError:
+        versioning_enabled = False
+
+    preview_template = url_for("ui.object_preview", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    delete_template = url_for("ui.delete_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    presign_template = url_for("ui.object_presign", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    versions_template = url_for("ui.object_versions", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    restore_template = url_for("ui.restore_object_version", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER", version_id="VERSION_ID_PLACEHOLDER")
+    tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+
+    def generate():
+        meta_line = json.dumps({
+            "type": "meta",
+            "versioning_enabled": versioning_enabled,
+            "url_templates": {
+                "preview": preview_template,
+                "download": preview_template + "?download=1",
+                "presign": presign_template,
+                "delete": delete_template,
+                "versions": versions_template,
+                "restore": restore_template,
+                "tags": tags_template,
+                "copy": copy_template,
+                "move": move_template,
+            },
+        }) + "\n"
+        yield meta_line
+
+        continuation_token = None
+        total_count = None
+        batch_size = 5000
+
+        while True:
+            try:
+                result = storage.list_objects(
+                    bucket_name,
+                    max_keys=batch_size,
+                    continuation_token=continuation_token,
+                    prefix=prefix,
+                )
+            except StorageError as exc:
+                yield json.dumps({"type": "error", "error": str(exc)}) + "\n"
+                return
+
+            if total_count is None:
+                total_count = result.total_count
+                yield json.dumps({"type": "count", "total_count": total_count}) + "\n"
+
+            for obj in result.objects:
+                yield json.dumps({
+                    "type": "object",
+                    "key": obj.key,
+                    "size": obj.size,
+                    "last_modified": obj.last_modified.isoformat(),
+                    "last_modified_display": obj.last_modified.strftime("%b %d, %Y %H:%M"),
+                    "etag": obj.etag,
+                }) + "\n"
+
+            if not result.is_truncated:
+                break
+            continuation_token = result.next_continuation_token
+
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return Response(
+        generate(),
+        mimetype='application/x-ndjson',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        }
+    )
 
 
 @ui_bp.post("/buckets/<bucket_name>/upload")
