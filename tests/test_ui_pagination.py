@@ -184,5 +184,5 @@ class TestPaginatedObjectListing:
             assert resp.status_code == 200
             
             html = resp.data.decode("utf-8")
-            # Should have the JavaScript loading infrastructure
-            assert "loadObjects" in html or "objectsApiUrl" in html
+            # Should have the JavaScript loading infrastructure (external JS file)
+            assert "bucket-detail-main.js" in html

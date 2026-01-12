@@ -67,6 +67,7 @@ class AppConfig:
     stream_chunk_size: int
     multipart_min_part_size: int
     bucket_stats_cache_ttl: int
+    object_cache_ttl: int
     encryption_enabled: bool
     encryption_master_key_path: Path
     kms_enabled: bool
@@ -161,8 +162,9 @@ class AppConfig:
         cors_allow_headers = _csv(str(_get("CORS_ALLOW_HEADERS", "*")), ["*"])
         cors_expose_headers = _csv(str(_get("CORS_EXPOSE_HEADERS", "*")), ["*"])
         session_lifetime_days = int(_get("SESSION_LIFETIME_DAYS", 30))
-        bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60)) 
-        
+        bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60))
+        object_cache_ttl = int(_get("OBJECT_CACHE_TTL", 5))
+
         encryption_enabled = str(_get("ENCRYPTION_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
         encryption_keys_dir = storage_root / ".myfsio.sys" / "keys"
         encryption_master_key_path = Path(_get("ENCRYPTION_MASTER_KEY_PATH", encryption_keys_dir / "master.key")).resolve()
@@ -200,6 +202,7 @@ class AppConfig:
                    stream_chunk_size=stream_chunk_size,
                    multipart_min_part_size=multipart_min_part_size,
                    bucket_stats_cache_ttl=bucket_stats_cache_ttl,
+                   object_cache_ttl=object_cache_ttl,
                    encryption_enabled=encryption_enabled,
                    encryption_master_key_path=encryption_master_key_path,
                    kms_enabled=kms_enabled,
@@ -315,6 +318,7 @@ class AppConfig:
             "STREAM_CHUNK_SIZE": self.stream_chunk_size,
             "MULTIPART_MIN_PART_SIZE": self.multipart_min_part_size,
             "BUCKET_STATS_CACHE_TTL": self.bucket_stats_cache_ttl,
+            "OBJECT_CACHE_TTL": self.object_cache_ttl,
             "LOG_LEVEL": self.log_level,
             "LOG_TO_FILE": self.log_to_file,
             "LOG_FILE": str(self.log_path),

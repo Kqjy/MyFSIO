@@ -921,6 +921,7 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "object-lock": _bucket_object_lock_handler,
         "notification": _bucket_notification_handler,
         "logging": _bucket_logging_handler,
+        "uploads": _bucket_uploads_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -1811,6 +1812,72 @@ def _bucket_logging_handler(bucket_name: str) -> Response:
         extra={"bucket": bucket_name, "target_bucket": target_bucket, "target_prefix": target_prefix}
     )
     return Response(status=200)
+
+
+def _bucket_uploads_handler(bucket_name: str) -> Response:
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "list")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+
+    key_marker = request.args.get("key-marker", "")
+    upload_id_marker = request.args.get("upload-id-marker", "")
+    prefix = request.args.get("prefix", "")
+    delimiter = request.args.get("delimiter", "")
+    try:
+        max_uploads = max(1, min(int(request.args.get("max-uploads", 1000)), 1000))
+    except ValueError:
+        return _error_response("InvalidArgument", "max-uploads must be an integer", 400)
+
+    uploads = storage.list_multipart_uploads(bucket_name, include_orphaned=True)
+
+    if prefix:
+        uploads = [u for u in uploads if u["object_key"].startswith(prefix)]
+    if key_marker:
+        uploads = [u for u in uploads if u["object_key"] > key_marker or
+                   (u["object_key"] == key_marker and upload_id_marker and u["upload_id"] > upload_id_marker)]
+
+    uploads.sort(key=lambda u: (u["object_key"], u["upload_id"]))
+
+    is_truncated = len(uploads) > max_uploads
+    if is_truncated:
+        uploads = uploads[:max_uploads]
+
+    root = Element("ListMultipartUploadsResult", xmlns="http://s3.amazonaws.com/doc/2006-03-01/")
+    SubElement(root, "Bucket").text = bucket_name
+    SubElement(root, "KeyMarker").text = key_marker
+    SubElement(root, "UploadIdMarker").text = upload_id_marker
+    if prefix:
+        SubElement(root, "Prefix").text = prefix
+    if delimiter:
+        SubElement(root, "Delimiter").text = delimiter
+    SubElement(root, "MaxUploads").text = str(max_uploads)
+    SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
+
+    if is_truncated and uploads:
+        SubElement(root, "NextKeyMarker").text = uploads[-1]["object_key"]
+        SubElement(root, "NextUploadIdMarker").text = uploads[-1]["upload_id"]
+
+    for upload in uploads:
+        upload_el = SubElement(root, "Upload")
+        SubElement(upload_el, "Key").text = upload["object_key"]
+        SubElement(upload_el, "UploadId").text = upload["upload_id"]
+        if upload.get("created_at"):
+            SubElement(upload_el, "Initiated").text = upload["created_at"]
+        if upload.get("orphaned"):
+            SubElement(upload_el, "StorageClass").text = "ORPHANED"
+
+    return _xml_response(root)
 
 
 def _object_retention_handler(bucket_name: str, object_key: str) -> Response:

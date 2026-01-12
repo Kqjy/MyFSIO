@@ -116,8 +116,8 @@
         <div class="card h-100 iam-user-card">
           <div class="card-body">
             <div class="d-flex align-items-start justify-content-between mb-3">
-              <div class="d-flex align-items-center gap-3">
-                <div class="user-avatar user-avatar-lg">
+              <div class="d-flex align-items-center gap-3 min-width-0 overflow-hidden">
+                <div class="user-avatar user-avatar-lg flex-shrink-0">
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
                     <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
                   </svg>
@@ -127,7 +127,7 @@
                   <code class="small text-muted d-block text-truncate" title="{{ user.access_key }}">{{ user.access_key }}</code>
                 </div>
               </div>
-              <div class="dropdown">
+              <div class="dropdown flex-shrink-0">
                 <button class="btn btn-sm btn-icon" type="button" data-bs-toggle="dropdown" aria-expanded="false">
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
                     <path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
@@ -454,339 +454,20 @@
 
 {% block extra_scripts %}
 {{ super() }}
+<script src="{{ url_for('static', filename='js/iam-management.js') }}"></script>
 <script>
-  (function () {
-    function setupJsonAutoIndent(textarea) {
-      if (!textarea) return;
-
-      textarea.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-
-          const start = this.selectionStart;
-          const end = this.selectionEnd;
-          const value = this.value;
-
-          const lineStart = value.lastIndexOf('\n', start - 1) + 1;
-          const currentLine = value.substring(lineStart, start);
-
-          const indentMatch = currentLine.match(/^(\s*)/);
-          let indent = indentMatch ? indentMatch[1] : '';
-
-          const trimmedLine = currentLine.trim();
-          const lastChar = trimmedLine.slice(-1);
-
-          const charBeforeCursor = value.substring(start - 1, start).trim();
-
-          let newIndent = indent;
-          let insertAfter = '';
-
-          if (lastChar === '{' || lastChar === '[') {
-            newIndent = indent + '  ';
-
-            const charAfterCursor = value.substring(start, start + 1).trim();
-            if ((lastChar === '{' && charAfterCursor === '}') ||
-                (lastChar === '[' && charAfterCursor === ']')) {
-              insertAfter = '\n' + indent;
-            }
-          } else if (lastChar === ',' || lastChar === ':') {
-            newIndent = indent;
-          }
-
-          const insertion = '\n' + newIndent + insertAfter;
-          const newValue = value.substring(0, start) + insertion + value.substring(end);
-
-          this.value = newValue;
-
-          const newCursorPos = start + 1 + newIndent.length;
-          this.selectionStart = this.selectionEnd = newCursorPos;
-
-          this.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-
-        if (e.key === 'Tab') {
-          e.preventDefault();
-          const start = this.selectionStart;
-          const end = this.selectionEnd;
-
-          if (e.shiftKey) {
-            const lineStart = this.value.lastIndexOf('\n', start - 1) + 1;
-            const lineContent = this.value.substring(lineStart, start);
-            if (lineContent.startsWith('  ')) {
-              this.value = this.value.substring(0, lineStart) +
-                           this.value.substring(lineStart + 2);
-              this.selectionStart = this.selectionEnd = Math.max(lineStart, start - 2);
-            }
-          } else {
-            this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
-            this.selectionStart = this.selectionEnd = start + 2;
-          }
-
-          this.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      });
+  IAMManagement.init({
+    users: JSON.parse(document.getElementById('iamUsersJson').textContent || '[]'),
+    currentUserKey: {{ principal.access_key | tojson }},
+    iamLocked: {{ iam_locked | tojson }},
+    csrfToken: "{{ csrf_token() }}",
+    endpoints: {
+      createUser: "{{ url_for('ui.create_iam_user') }}",
+      updateUser: "{{ url_for('ui.update_iam_user', access_key='ACCESS_KEY') }}",
+      deleteUser: "{{ url_for('ui.delete_iam_user', access_key='ACCESS_KEY') }}",
+      updatePolicies: "{{ url_for('ui.update_iam_policies', access_key='ACCESS_KEY') }}",
+      rotateSecret: "{{ url_for('ui.rotate_iam_secret', access_key='ACCESS_KEY') }}"
     }
-
-    setupJsonAutoIndent(document.getElementById('policyEditorDocument'));
-    setupJsonAutoIndent(document.getElementById('createUserPolicies'));
-
-    const currentUserKey = {{ principal.access_key | tojson }};
-    const configCopyButtons = document.querySelectorAll('.config-copy');
-    configCopyButtons.forEach((button) => {
-      button.addEventListener('click', async () => {
-        const targetId = button.dataset.copyTarget;
-        const target = document.getElementById(targetId);
-        if (!target) return;
-        const text = target.innerText;
-        try {
-          await navigator.clipboard.writeText(text);
-          button.textContent = 'Copied!';
-          setTimeout(() => {
-            button.textContent = 'Copy JSON';
-          }, 1500);
-        } catch (err) {
-          console.error('Unable to copy IAM config', err);
-        }
-      });
-    });
-
-    const secretCopyButton = document.querySelector('[data-secret-copy]');
-    if (secretCopyButton) {
-      secretCopyButton.addEventListener('click', async () => {
-        const secretInput = document.getElementById('disclosedSecretValue');
-        if (!secretInput) return;
-        try {
-          await navigator.clipboard.writeText(secretInput.value);
-          secretCopyButton.textContent = 'Copied!';
-          setTimeout(() => {
-            secretCopyButton.textContent = 'Copy';
-          }, 1500);
-        } catch (err) {
-          console.error('Unable to copy IAM secret', err);
-        }
-      });
-    }
-
-    const iamUsersData = document.getElementById('iamUsersJson');
-    const users = iamUsersData ? JSON.parse(iamUsersData.textContent || '[]') : [];
-
-    const policyModalEl = document.getElementById('policyEditorModal');
-    const policyModal = new bootstrap.Modal(policyModalEl);
-    const userLabelEl = document.getElementById('policyEditorUserLabel');
-    const userInputEl = document.getElementById('policyEditorUser');
-    const textareaEl = document.getElementById('policyEditorDocument');
-    const formEl = document.getElementById('policyEditorForm');
-    const templateButtons = document.querySelectorAll('[data-policy-template]');
-    const iamLocked = {{ iam_locked | tojson }};
-
-    if (iamLocked) return;
-
-    const userPolicies = (accessKey) => {
-      const target = users.find((user) => user.access_key === accessKey);
-      return target ? JSON.stringify(target.policies, null, 2) : '';
-    };
-
-    const applyTemplate = (name) => {
-      const templates = {
-        full: [
-          {
-            bucket: '*',
-            actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'iam:list_users', 'iam:*'],
-          },
-        ],
-        readonly: [
-          {
-            bucket: '*',
-            actions: ['list', 'read'],
-          },
-        ],
-        writer: [
-          {
-            bucket: '*',
-            actions: ['list', 'read', 'write'],
-          },
-        ],
-      };
-      if (templates[name]) {
-        textareaEl.value = JSON.stringify(templates[name], null, 2);
-      }
-    };
-
-    templateButtons.forEach((button) => {
-      button.addEventListener('click', () => applyTemplate(button.dataset.policyTemplate));
-    });
-
-    const createUserPoliciesEl = document.getElementById('createUserPolicies');
-    const createTemplateButtons = document.querySelectorAll('[data-create-policy-template]');
-    
-    const applyCreateTemplate = (name) => {
-      const templates = {
-        full: [
-          {
-            bucket: '*',
-            actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'iam:list_users', 'iam:*'],
-          },
-        ],
-        readonly: [
-          {
-            bucket: '*',
-            actions: ['list', 'read'],
-          },
-        ],
-        writer: [
-          {
-            bucket: '*',
-            actions: ['list', 'read', 'write'],
-          },
-        ],
-      };
-      if (templates[name] && createUserPoliciesEl) {
-        createUserPoliciesEl.value = JSON.stringify(templates[name], null, 2);
-      }
-    };
-
-    createTemplateButtons.forEach((button) => {
-      button.addEventListener('click', () => applyCreateTemplate(button.dataset.createPolicyTemplate));
-    });
-
-    formEl?.addEventListener('submit', (event) => {
-      const key = userInputEl.value;
-      if (!key) {
-        event.preventDefault();
-        return;
-      }
-      const template = formEl.dataset.actionTemplate;
-      formEl.action = template.replace('ACCESS_KEY_PLACEHOLDER', key);
-    });
-
-    document.querySelectorAll('[data-policy-editor]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const key = button.getAttribute('data-access-key');
-        if (!key) return;
-        
-        userLabelEl.textContent = key;
-        userInputEl.value = key;
-        textareaEl.value = userPolicies(key);
-        
-        policyModal.show();
-      });
-    });
-
-    const editUserModal = new bootstrap.Modal(document.getElementById('editUserModal'));
-    const editUserForm = document.getElementById('editUserForm');
-    const editUserDisplayName = document.getElementById('editUserDisplayName');
-    
-    document.querySelectorAll('[data-edit-user]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const key = btn.dataset.editUser;
-            const name = btn.dataset.displayName;
-            editUserDisplayName.value = name;
-            editUserForm.action = "{{ url_for('ui.update_iam_user', access_key='ACCESS_KEY') }}".replace('ACCESS_KEY', key);
-            editUserModal.show();
-        });
-    });
-
-    const deleteUserModal = new bootstrap.Modal(document.getElementById('deleteUserModal'));
-    const deleteUserForm = document.getElementById('deleteUserForm');
-    const deleteUserLabel = document.getElementById('deleteUserLabel');
-    const deleteSelfWarning = document.getElementById('deleteSelfWarning');
-
-    document.querySelectorAll('[data-delete-user]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const key = btn.dataset.deleteUser;
-            deleteUserLabel.textContent = key;
-            deleteUserForm.action = "{{ url_for('ui.delete_iam_user', access_key='ACCESS_KEY') }}".replace('ACCESS_KEY', key);
-            
-            if (key === currentUserKey) {
-                deleteSelfWarning.classList.remove('d-none');
-            } else {
-                deleteSelfWarning.classList.add('d-none');
-            }
-            
-            deleteUserModal.show();
-        });
-    });
-
-    const rotateSecretModal = new bootstrap.Modal(document.getElementById('rotateSecretModal'));
-    const rotateUserLabel = document.getElementById('rotateUserLabel');
-    const confirmRotateBtn = document.getElementById('confirmRotateBtn');
-    const rotateCancelBtn = document.getElementById('rotateCancelBtn');
-    const rotateDoneBtn = document.getElementById('rotateDoneBtn');
-    const rotateSecretConfirm = document.getElementById('rotateSecretConfirm');
-    const rotateSecretResult = document.getElementById('rotateSecretResult');
-    const newSecretKeyInput = document.getElementById('newSecretKey');
-    const copyNewSecretBtn = document.getElementById('copyNewSecret');
-    let currentRotateKey = null;
-
-    document.querySelectorAll('[data-rotate-user]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            currentRotateKey = btn.dataset.rotateUser;
-            rotateUserLabel.textContent = currentRotateKey;
-
-            rotateSecretConfirm.classList.remove('d-none');
-            rotateSecretResult.classList.add('d-none');
-            confirmRotateBtn.classList.remove('d-none');
-            rotateCancelBtn.classList.remove('d-none');
-            rotateDoneBtn.classList.add('d-none');
-            
-            rotateSecretModal.show();
-        });
-    });
-
-    confirmRotateBtn.addEventListener('click', async () => {
-        if (!currentRotateKey) return;
-        
-        confirmRotateBtn.disabled = true;
-        confirmRotateBtn.textContent = "Rotating...";
-        
-        try {
-            const url = "{{ url_for('ui.rotate_iam_secret', access_key='ACCESS_KEY') }}".replace('ACCESS_KEY', currentRotateKey);
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Accept': 'application/json',
-                    'X-CSRFToken': "{{ csrf_token() }}"
-                }
-            });
-            
-            if (!response.ok) {
-                const data = await response.json();
-                throw new Error(data.error || 'Failed to rotate secret');
-            }
-            
-            const data = await response.json();
-            newSecretKeyInput.value = data.secret_key;
-
-            rotateSecretConfirm.classList.add('d-none');
-            rotateSecretResult.classList.remove('d-none');
-            confirmRotateBtn.classList.add('d-none');
-            rotateCancelBtn.classList.add('d-none');
-            rotateDoneBtn.classList.remove('d-none');
-            
-        } catch (err) {
-            if (window.showToast) {
-              window.showToast(err.message, 'Error', 'danger');
-            }
-            rotateSecretModal.hide();
-        } finally {
-            confirmRotateBtn.disabled = false;
-            confirmRotateBtn.textContent = "Rotate Key";
-        }
-    });
-
-    copyNewSecretBtn.addEventListener('click', async () => {
-        try {
-            await navigator.clipboard.writeText(newSecretKeyInput.value);
-            copyNewSecretBtn.textContent = 'Copied!';
-            setTimeout(() => copyNewSecretBtn.textContent = 'Copy', 1500);
-        } catch (err) {
-            console.error('Failed to copy', err);
-        }
-    });
-    
-    rotateDoneBtn.addEventListener('click', () => {
-        window.location.reload();
-    });
-  })();
+  });
 </script>
 {% endblock %}

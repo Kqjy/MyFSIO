@@ -104,7 +104,7 @@
         </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="{{ url_for('ui.create_bucket') }}">
+      <form method="post" action="{{ url_for('ui.create_bucket') }}" id="createBucketForm">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
         <div class="modal-body pt-0">
           <label class="form-label fw-medium">Bucket name</label>
@@ -205,6 +205,25 @@
       });
       row.style.cursor = 'pointer';
     });
+
+    var createForm = document.getElementById('createBucketForm');
+    if (createForm) {
+      createForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        window.UICore.submitFormAjax(createForm, {
+          successMessage: 'Bucket created',
+          onSuccess: function(data) {
+            var modal = bootstrap.Modal.getInstance(document.getElementById('createBucketModal'));
+            if (modal) modal.hide();
+            if (data.bucket_name) {
+              window.location.href = '{{ url_for("ui.bucket_detail", bucket_name="__BUCKET__") }}'.replace('__BUCKET__', data.bucket_name);
+            } else {
+              location.reload();
+            }
+          }
+        });
+      });
+    }
   })();
 </script>
 {% endblock %}
