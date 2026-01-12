@@ -1985,12 +1985,16 @@
     const floatingProgressStatus = document.getElementById('floatingUploadStatus');
     const floatingProgressTitle = document.getElementById('floatingUploadTitle');
     const floatingProgressExpand = document.getElementById('floatingUploadExpand');
+    const floatingProgressCancel = document.getElementById('floatingUploadCancel');
     const uploadQueueContainer = document.getElementById('uploadQueueContainer');
     const uploadQueueList = document.getElementById('uploadQueueList');
     const uploadQueueCount = document.getElementById('uploadQueueCount');
     const clearUploadQueueBtn = document.getElementById('clearUploadQueueBtn');
     let isUploading = false;
     let uploadQueue = [];
+    let activeXHRs = [];
+    let activeMultipartUpload = null;
+    let uploadCancelled = false;
     let uploadStats = {
       totalFiles: 0,
       completedFiles: 0,
@@ -2054,6 +2058,38 @@
       if (uploadModal) {
         uploadModal.show();
       }
+    });
+
+    const cancelAllUploads = async () => {
+      uploadCancelled = true;
+
+      activeXHRs.forEach(xhr => {
+        try { xhr.abort(); } catch {}
+      });
+      activeXHRs = [];
+
+      if (activeMultipartUpload) {
+        const { abortUrl } = activeMultipartUpload;
+        const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
+        try {
+          await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
+        } catch {}
+        activeMultipartUpload = null;
+      }
+
+      uploadQueue = [];
+      isProcessingQueue = false;
+      isUploading = false;
+      setUploadLockState(false);
+      hideFloatingProgress();
+      resetUploadUI();
+
+      showMessage({ title: 'Upload cancelled', body: 'All uploads have been cancelled.', variant: 'info' });
+      loadObjects(false);
+    };
+
+    floatingProgressCancel?.addEventListener('click', () => {
+      cancelAllUploads();
     });
 
     const refreshUploadDropLabel = () => {
@@ -2177,6 +2213,8 @@
     const uploadMultipart = async (file, objectKey, metadata, progressItem) => {
       const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
 
+      if (uploadCancelled) throw new Error('Upload cancelled');
+
       updateProgressItem(progressItem, { status: 'Initiating...', loaded: 0, total: file.size });
       const initResp = await fetch(multipartInitUrl, {
         method: 'POST',
@@ -2193,12 +2231,16 @@
       const completeUrl = multipartCompleteTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
       const abortUrl = multipartAbortTemplate.replace('UPLOAD_ID_PLACEHOLDER', upload_id);
 
+      activeMultipartUpload = { upload_id, abortUrl };
+
       const parts = [];
       const totalParts = Math.ceil(file.size / CHUNK_SIZE);
       let uploadedBytes = 0;
 
       try {
         for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+          if (uploadCancelled) throw new Error('Upload cancelled');
+
           const start = (partNumber - 1) * CHUNK_SIZE;
           const end = Math.min(start + CHUNK_SIZE, file.size);
           const chunk = file.slice(start, end);
@@ -2219,6 +2261,8 @@
             },
             body: chunk
           });
+
+          if (uploadCancelled) throw new Error('Upload cancelled');
 
           if (!partResp.ok) {
             const err = await partResp.json().catch(() => ({}));
@@ -2249,11 +2293,15 @@
           throw new Error(err.error || 'Failed to complete upload');
         }
 
+        activeMultipartUpload = null;
         return await completeResp.json();
       } catch (err) {
-        try {
-          await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
-        } catch {}
+        if (!uploadCancelled) {
+          try {
+            await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
+          } catch {}
+        }
+        activeMultipartUpload = null;
         throw err;
       }
     };
@@ -2268,8 +2316,14 @@
         if (csrfToken) formData.append('csrf_token', csrfToken);
 
         const xhr = new XMLHttpRequest();
+        activeXHRs.push(xhr);
         xhr.open('POST', uploadForm.action, true);
         xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+        const removeXHR = () => {
+          const idx = activeXHRs.indexOf(xhr);
+          if (idx > -1) activeXHRs.splice(idx, 1);
+        };
 
         xhr.upload.addEventListener('progress', (e) => {
           if (e.lengthComputable) {
@@ -2284,6 +2338,7 @@
         });
 
         xhr.addEventListener('load', () => {
+          removeXHR();
           if (xhr.status >= 200 && xhr.status < 300) {
             try {
               const data = JSON.parse(xhr.responseText);
@@ -2305,8 +2360,8 @@
           }
         });
 
-        xhr.addEventListener('error', () => reject(new Error('Network error')));
-        xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+        xhr.addEventListener('error', () => { removeXHR(); reject(new Error('Network error')); });
+        xhr.addEventListener('abort', () => { removeXHR(); reject(new Error('Upload cancelled')); });
 
         xhr.send(formData);
       });
@@ -2399,7 +2454,7 @@
       if (isProcessingQueue) return;
       isProcessingQueue = true;
 
-      while (uploadQueue.length > 0) {
+      while (uploadQueue.length > 0 && !uploadCancelled) {
         const item = uploadQueue.shift();
         const { file, keyPrefix, metadata } = item;
         updateQueueListDisplay();
@@ -2440,7 +2495,7 @@
 
       isProcessingQueue = false;
 
-      if (uploadQueue.length === 0) {
+      if (uploadQueue.length === 0 && !uploadCancelled) {
         finishUploadSession();
       }
     };
@@ -2507,6 +2562,7 @@
 
       if (!isUploading) {
         isUploading = true;
+        uploadCancelled = false;
         uploadSuccessFiles = [];
         uploadErrorFiles = [];
         uploadStats = {
