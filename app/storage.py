@@ -1148,47 +1148,57 @@ class ObjectStorage:
         parts.sort(key=lambda x: x["PartNumber"])
         return parts
 
-    def list_multipart_uploads(self, bucket_name: str) -> List[Dict[str, Any]]:
-        """List all active multipart uploads for a bucket."""
+    def list_multipart_uploads(self, bucket_name: str, include_orphaned: bool = False) -> List[Dict[str, Any]]:
+        """List all active multipart uploads for a bucket.
+
+        Args:
+            bucket_name: The bucket to list uploads for.
+            include_orphaned: If True, also include upload directories that have
+                files but no valid manifest.json (orphaned/interrupted uploads).
+        """
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
         uploads = []
-        multipart_root = self._multipart_bucket_root(bucket_id)
-        if multipart_root.exists():
+
+        for multipart_root in (
+            self._multipart_bucket_root(bucket_id),
+            self._legacy_multipart_bucket_root(bucket_id),
+        ):
+            if not multipart_root.exists():
+                continue
             for upload_dir in multipart_root.iterdir():
                 if not upload_dir.is_dir():
                     continue
                 manifest_path = upload_dir / "manifest.json"
-                if not manifest_path.exists():
-                    continue
-                try:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    uploads.append({
-                        "upload_id": manifest.get("upload_id", upload_dir.name),
-                        "object_key": manifest.get("object_key", ""),
-                        "created_at": manifest.get("created_at", ""),
-                    })
-                except (OSError, json.JSONDecodeError):
-                    continue
-        legacy_root = self._legacy_multipart_bucket_root(bucket_id)
-        if legacy_root.exists():
-            for upload_dir in legacy_root.iterdir():
-                if not upload_dir.is_dir():
-                    continue
-                manifest_path = upload_dir / "manifest.json"
-                if not manifest_path.exists():
-                    continue
-                try:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    uploads.append({
-                        "upload_id": manifest.get("upload_id", upload_dir.name),
-                        "object_key": manifest.get("object_key", ""),
-                        "created_at": manifest.get("created_at", ""),
-                    })
-                except (OSError, json.JSONDecodeError):
-                    continue
+                if manifest_path.exists():
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        uploads.append({
+                            "upload_id": manifest.get("upload_id", upload_dir.name),
+                            "object_key": manifest.get("object_key", ""),
+                            "created_at": manifest.get("created_at", ""),
+                        })
+                    except (OSError, json.JSONDecodeError):
+                        if include_orphaned:
+                            has_files = any(upload_dir.rglob("*"))
+                            if has_files:
+                                uploads.append({
+                                    "upload_id": upload_dir.name,
+                                    "object_key": "(unknown)",
+                                    "created_at": "",
+                                    "orphaned": True,
+                                })
+                elif include_orphaned:
+                    has_files = any(f.is_file() for f in upload_dir.rglob("*"))
+                    if has_files:
+                        uploads.append({
+                            "upload_id": upload_dir.name,
+                            "object_key": "(unknown)",
+                            "created_at": "",
+                            "orphaned": True,
+                        })
         return uploads
 
     def _bucket_path(self, bucket_name: str) -> Path:

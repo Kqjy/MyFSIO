@@ -2527,7 +2527,6 @@
 
         if (uploadModal) uploadModal.hide();
         showFloatingProgress();
-        showMessage({ title: 'Upload started', body: `Uploading ${files.length} file(s)...`, variant: 'info' });
       }
 
       const fileCount = files.length;
