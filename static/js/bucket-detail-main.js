@@ -559,9 +559,6 @@
       if (loadMoreStatus) {
         loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
       }
-      if (typeof updateLoadMoreButton === 'function') {
-        updateLoadMoreButton();
-      }
       refreshVirtualList();
       renderBreadcrumb(currentPrefix);
 
@@ -638,10 +635,6 @@
         } else {
           loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
         }
-      }
-
-      if (typeof updateLoadMoreButton === 'function') {
-        updateLoadMoreButton();
       }
 
       refreshVirtualList();
@@ -739,22 +732,9 @@
 
   const scrollSentinel = document.getElementById('scroll-sentinel');
   const scrollContainer = document.querySelector('.objects-table-container');
-  const loadMoreBtn = document.getElementById('load-more-btn');
 
   if (scrollContainer) {
     scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
-  }
-
-  loadMoreBtn?.addEventListener('click', () => {
-    if (hasMoreObjects && !isLoadingObjects) {
-      loadObjects(true);
-    }
-  });
-
-  function updateLoadMoreButton() {
-    if (loadMoreBtn) {
-      loadMoreBtn.classList.toggle('d-none', !hasMoreObjects);
-    }
   }
 
   if (scrollSentinel && scrollContainer) {
@@ -785,10 +765,6 @@
     viewportObserver.observe(scrollSentinel);
   }
 
-  const pageSizeSelect = document.getElementById('page-size-select');
-  pageSizeSelect?.addEventListener('change', (e) => {
-    pageSize = parseInt(e.target.value, 10);
-  });
 
   if (objectsApiUrl) {
     loadObjects();

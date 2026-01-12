@@ -1,15 +1,75 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatch, translate
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
 
 RESOURCE_PREFIX = "arn:aws:s3:::"
+
+
+def _match_string_like(value: str, pattern: str) -> bool:
+    regex = translate(pattern)
+    return bool(re.match(regex, value, re.IGNORECASE))
+
+
+def _ip_in_cidr(ip_str: str, cidr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        network = ipaddress.ip_network(cidr, strict=False)
+        return ip in network
+    except ValueError:
+        return False
+
+
+def _evaluate_condition_operator(
+    operator: str,
+    condition_key: str,
+    condition_values: List[str],
+    context: Dict[str, Any],
+) -> bool:
+    context_value = context.get(condition_key)
+    op_lower = operator.lower()
+    if_exists = op_lower.endswith("ifexists")
+    if if_exists:
+        op_lower = op_lower[:-8]
+
+    if context_value is None:
+        return if_exists
+
+    context_value_str = str(context_value)
+    context_value_lower = context_value_str.lower()
+
+    if op_lower == "stringequals":
+        return context_value_str in condition_values
+    elif op_lower == "stringnotequals":
+        return context_value_str not in condition_values
+    elif op_lower == "stringequalsignorecase":
+        return context_value_lower in [v.lower() for v in condition_values]
+    elif op_lower == "stringnotequalsignorecase":
+        return context_value_lower not in [v.lower() for v in condition_values]
+    elif op_lower == "stringlike":
+        return any(_match_string_like(context_value_str, p) for p in condition_values)
+    elif op_lower == "stringnotlike":
+        return not any(_match_string_like(context_value_str, p) for p in condition_values)
+    elif op_lower == "ipaddress":
+        return any(_ip_in_cidr(context_value_str, cidr) for cidr in condition_values)
+    elif op_lower == "notipaddress":
+        return not any(_ip_in_cidr(context_value_str, cidr) for cidr in condition_values)
+    elif op_lower == "bool":
+        bool_val = context_value_lower in ("true", "1", "yes")
+        return str(bool_val).lower() in [v.lower() for v in condition_values]
+    elif op_lower == "null":
+        is_null = context_value is None or context_value == ""
+        expected_null = condition_values[0].lower() in ("true", "1", "yes") if condition_values else True
+        return is_null == expected_null
+
+    return True
 
 ACTION_ALIASES = {
     # List actions
@@ -135,18 +195,16 @@ class BucketPolicyStatement:
     principals: List[str] | str
     actions: List[str]
     resources: List[Tuple[str | None, str | None]]
-    # Performance: Pre-compiled regex patterns for resource matching
+    conditions: Dict[str, Dict[str, List[str]]] = field(default_factory=dict)
     _compiled_patterns: List[Tuple[str | None, Optional[Pattern[str]]]] | None = None
 
     def _get_compiled_patterns(self) -> List[Tuple[str | None, Optional[Pattern[str]]]]:
-        """Lazily compile fnmatch patterns to regex for faster matching."""
         if self._compiled_patterns is None:
             self._compiled_patterns = []
             for resource_bucket, key_pattern in self.resources:
                 if key_pattern is None:
                     self._compiled_patterns.append((resource_bucket, None))
                 else:
-                    # Convert fnmatch pattern to regex
                     regex_pattern = translate(key_pattern)
                     self._compiled_patterns.append((resource_bucket, re.compile(regex_pattern)))
         return self._compiled_patterns
@@ -173,10 +231,20 @@ class BucketPolicyStatement:
                 if not key:
                     return True
                 continue
-            # Performance: Use pre-compiled regex instead of fnmatch
             if compiled_pattern.match(key):
                 return True
         return False
+
+    def matches_condition(self, context: Optional[Dict[str, Any]]) -> bool:
+        if not self.conditions:
+            return True
+        if context is None:
+            context = {}
+        for operator, key_values in self.conditions.items():
+            for condition_key, condition_values in key_values.items():
+                if not _evaluate_condition_operator(operator, condition_key, condition_values, context):
+                    return False
+        return True
 
 
 class BucketPolicyStore:
@@ -219,6 +287,7 @@ class BucketPolicyStore:
         bucket: Optional[str],
         object_key: Optional[str],
         action: str,
+        context: Optional[Dict[str, Any]] = None,
     ) -> str | None:
         bucket = (bucket or "").lower()
         statements = self._policies.get(bucket) or []
@@ -229,6 +298,8 @@ class BucketPolicyStore:
             if not statement.matches_action(action):
                 continue
             if not statement.matches_resource(bucket, object_key):
+                continue
+            if not statement.matches_condition(context):
                 continue
             if statement.effect == "deny":
                 return "deny"
@@ -294,6 +365,7 @@ class BucketPolicyStore:
             if not resources:
                 continue
             effect = statement.get("Effect", "Allow").lower()
+            conditions = self._normalize_conditions(statement.get("Condition", {}))
             statements.append(
                 BucketPolicyStatement(
                     sid=statement.get("Sid"),
@@ -301,6 +373,24 @@ class BucketPolicyStore:
                     principals=principals,
                     actions=actions or ["*"],
                     resources=resources,
+                    conditions=conditions,
                 )
             )
         return statements
+
+    def _normalize_conditions(self, condition_block: Dict[str, Any]) -> Dict[str, Dict[str, List[str]]]:
+        if not condition_block or not isinstance(condition_block, dict):
+            return {}
+        normalized: Dict[str, Dict[str, List[str]]] = {}
+        for operator, key_values in condition_block.items():
+            if not isinstance(key_values, dict):
+                continue
+            normalized[operator] = {}
+            for cond_key, cond_values in key_values.items():
+                if isinstance(cond_values, str):
+                    normalized[operator][cond_key] = [cond_values]
+                elif isinstance(cond_values, list):
+                    normalized[operator][cond_key] = [str(v) for v in cond_values]
+                else:
+                    normalized[operator][cond_key] = [str(cond_values)]
+        return normalized

@@ -337,4 +337,6 @@ class AppConfig:
             "KMS_KEYS_PATH": str(self.kms_keys_path),
             "DEFAULT_ENCRYPTION_ALGORITHM": self.default_encryption_algorithm,
             "DISPLAY_TIMEZONE": self.display_timezone,
+            "LIFECYCLE_ENABLED": self.lifecycle_enabled,
+            "LIFECYCLE_INTERVAL_SECONDS": self.lifecycle_interval_seconds,
         }
