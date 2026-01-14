@@ -1,4 +1,4 @@
-(function() {
+(function () {
   'use strict';
 
   const { formatBytes, escapeHtml, fallbackCopy, setupJsonAutoIndent } = window.BucketDetailUtils || {
@@ -23,7 +23,7 @@
         .replace(/'/g, '&#039;');
     },
     fallbackCopy: () => false,
-    setupJsonAutoIndent: () => {}
+    setupJsonAutoIndent: () => { }
   };
 
   setupJsonAutoIndent(document.getElementById('policyDocument'));
@@ -323,7 +323,7 @@
       const bKey = b.type === 'folder' ? b.path : b.data.key;
       return aKey.localeCompare(bKey);
     });
-    
+
     return items;
   };
 
@@ -400,14 +400,14 @@
     } else {
       renderVirtualRows();
     }
-    
+
     updateFolderViewStatus();
   };
-  
+
   const updateFolderViewStatus = () => {
     const folderViewStatusEl = document.getElementById('folder-view-status');
     if (!folderViewStatusEl) return;
-    
+
     if (currentPrefix) {
       const folderCount = visibleItems.filter(i => i.type === 'folder').length;
       const fileCount = visibleItems.filter(i => i.type === 'file').length;
@@ -548,7 +548,7 @@
           } else if (msg.type === 'done') {
             streamingComplete = true;
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       flushPendingStreamObjects();
@@ -687,20 +687,20 @@
       selectCheckbox?.addEventListener('change', () => {
         toggleRowSelection(row, selectCheckbox.checked);
       });
-      
+
       if (selectedRows.has(row.dataset.key)) {
         selectCheckbox.checked = true;
         row.classList.add('table-active');
       }
     });
-    
+
     const folderRows = document.querySelectorAll('.folder-row');
     folderRows.forEach(row => {
       if (row.dataset.handlersAttached) return;
       row.dataset.handlersAttached = 'true';
-      
+
       const folderPath = row.dataset.folderPath;
-      
+
       const checkbox = row.querySelector('[data-folder-select]');
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
@@ -720,7 +720,7 @@
         e.stopPropagation();
         navigateToFolder(folderPath);
       });
-      
+
       row.addEventListener('click', (e) => {
         if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
         navigateToFolder(folderPath);
@@ -750,7 +750,7 @@
       threshold: 0
     });
     containerObserver.observe(scrollSentinel);
-    
+
     const viewportObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
@@ -781,7 +781,7 @@
       if (e.target.closest('[data-delete-object]') || e.target.closest('[data-object-select]') || e.target.closest('a')) {
         return;
       }
-      
+
       selectRow(row);
     });
   }
@@ -791,14 +791,14 @@
   const getFoldersAtPrefix = (prefix) => {
     const folders = new Set();
     const files = [];
-    
+
     allObjects.forEach(obj => {
       const key = obj.key;
       if (!key.startsWith(prefix)) return;
-      
+
       const remainder = key.slice(prefix.length);
       const slashIndex = remainder.indexOf('/');
-      
+
       if (slashIndex === -1) {
 
         files.push(obj);
@@ -808,7 +808,7 @@
         folders.add(prefix + folderName);
       }
     });
-    
+
     return { folders: Array.from(folders).sort(), files };
   };
 
@@ -819,12 +819,12 @@
 
   const renderBreadcrumb = (prefix) => {
     if (!folderBreadcrumb) return;
-    
+
     if (!prefix && !hasFolders()) {
       folderBreadcrumb.classList.add('d-none');
       return;
     }
-    
+
     folderBreadcrumb.classList.remove('d-none');
     const ol = folderBreadcrumb.querySelector('ol');
     ol.innerHTML = '';
@@ -859,7 +859,7 @@
         accumulated += part + '/';
         const li = document.createElement('li');
         li.className = 'breadcrumb-item';
-        
+
         if (index === parts.length - 1) {
           li.classList.add('active');
           li.setAttribute('aria-current', 'page');
@@ -892,12 +892,12 @@
     const folderName = displayName || folderPath.slice(currentPrefix.length).replace(/\/$/, '');
     const { count: objectCount, mayHaveMore } = countObjectsInFolder(folderPath);
     const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
-    
+
     const tr = document.createElement('tr');
     tr.className = 'folder-row';
     tr.dataset.folderPath = folderPath;
     tr.style.cursor = 'pointer';
-    
+
     tr.innerHTML = `
       <td class="text-center align-middle" onclick="event.stopPropagation();">
         <input class="form-check-input" type="checkbox" data-folder-select="${escapeHtml(folderPath)}" aria-label="Select folder" />
@@ -922,7 +922,7 @@
         </button>
       </td>
     `;
-    
+
     return tr;
   };
 
@@ -947,7 +947,7 @@
 
   const renderObjectsView = () => {
     if (!objectsTableBody) return;
-    
+
     const { folders, files } = getFoldersAtPrefix(currentPrefix);
 
     objectsTableBody.innerHTML = '';
@@ -1397,11 +1397,11 @@
     const metadata = version.metadata && typeof version.metadata === 'object' ? Object.entries(version.metadata) : [];
     const metadataHtml = metadata.length
       ? `<div class="mt-3"><div class="fw-semibold text-uppercase small">Metadata</div><hr class="my-2"><div class="metadata-stack small">${metadata
-          .map(
-            ([key, value]) =>
-              `<div class="metadata-entry"><div class="metadata-key small">${escapeHtml(key)}</div><div class="metadata-value text-break">${escapeHtml(value)}</div></div>`
-          )
-          .join('')}</div></div>`
+        .map(
+          ([key, value]) =>
+            `<div class="metadata-entry"><div class="metadata-key small">${escapeHtml(key)}</div><div class="metadata-value text-break">${escapeHtml(value)}</div></div>`
+        )
+        .join('')}</div></div>`
       : '';
     const summaryHtml = `
       <div class="small">
@@ -1673,7 +1673,7 @@
     if (!endpoint) {
       versionPanel.classList.add('d-none');
       return;
-       }
+    }
     versionPanel.classList.remove('d-none');
     if (!force && versionsCache.has(endpoint)) {
       renderVersionEntries(versionsCache.get(endpoint), row);
@@ -1913,7 +1913,7 @@
       textArea.remove();
       return success;
     };
-    
+
     let copied = false;
 
     if (navigator.clipboard && window.isSecureContext) {
@@ -1928,7 +1928,7 @@
     if (!copied) {
       copied = fallbackCopy(presignLink.value);
     }
-    
+
     if (copied) {
       copyPresignLink.textContent = 'Copied!';
       window.setTimeout(() => {
@@ -2040,7 +2040,7 @@
       uploadCancelled = true;
 
       activeXHRs.forEach(xhr => {
-        try { xhr.abort(); } catch {}
+        try { xhr.abort(); } catch { }
       });
       activeXHRs = [];
 
@@ -2049,7 +2049,7 @@
         const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
         try {
           await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
-        } catch {}
+        } catch { }
         activeMultipartUpload = null;
       }
 
@@ -2275,7 +2275,7 @@
         if (!uploadCancelled) {
           try {
             await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
-          } catch {}
+          } catch { }
         }
         activeMultipartUpload = null;
         throw err;
@@ -2588,7 +2588,7 @@
     uploadForm.addEventListener('submit', async (event) => {
       const files = uploadFileInput.files;
       if (!files || files.length === 0) return;
-      
+
       const keyPrefix = (uploadKeyPrefix?.value || '').trim();
 
       if (files.length === 1 && !keyPrefix) {
@@ -2609,7 +2609,7 @@
         uploadSubmitBtn.disabled = true;
         if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
       }
-      
+
       await performBulkUpload(Array.from(files));
     });
 
@@ -2810,7 +2810,7 @@
             }
           }
           if (statusAlert) statusAlert.classList.add('d-none');
-          
+
           // Update status badge to show "Paused" with warning styling
           if (statusBadge) {
             statusBadge.className = 'badge bg-warning-subtle text-warning px-3 py-2';
@@ -2820,14 +2820,14 @@
               </svg>
               <span>Paused (Endpoint Unavailable)</span>`;
           }
-          
+
           // Hide the pause button since replication is effectively already paused
           if (pauseForm) pauseForm.classList.add('d-none');
         } else {
           // Hide warning and show success alert
           if (endpointWarning) endpointWarning.classList.add('d-none');
           if (statusAlert) statusAlert.classList.remove('d-none');
-          
+
           // Restore status badge to show "Enabled"
           if (statusBadge) {
             statusBadge.className = 'badge bg-success-subtle text-success px-3 py-2';
@@ -2837,7 +2837,7 @@
               </svg>
               <span>Enabled</span>`;
           }
-          
+
           // Show the pause button
           if (pauseForm) pauseForm.classList.remove('d-none');
         }
@@ -3074,7 +3074,7 @@
 
   const targetBucketInput = document.getElementById('target_bucket');
   const targetBucketFeedback = document.getElementById('target_bucket_feedback');
-  
+
   const validateBucketName = (name) => {
     if (!name) return { valid: false, error: 'Bucket name is required' };
     if (name.length < 3) return { valid: false, error: 'Bucket name must be at least 3 characters' };
@@ -3177,7 +3177,7 @@
 
   const loadLifecycleRules = async () => {
     if (!lifecycleUrl || !lifecycleRulesBody) return;
-    lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
     try {
       const resp = await fetch(lifecycleUrl);
       const data = await resp.json();
@@ -3185,19 +3185,20 @@
       lifecycleRules = data.rules || [];
       renderLifecycleRules();
     } catch (err) {
-      lifecycleRulesBody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+      lifecycleRulesBody.innerHTML = `<tr><td colspan="7" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
     }
   };
 
   const renderLifecycleRules = () => {
     if (!lifecycleRulesBody) return;
     if (lifecycleRules.length === 0) {
-      lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No lifecycle rules configured</td></tr>';
+      lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No lifecycle rules configured</td></tr>';
       return;
     }
     lifecycleRulesBody.innerHTML = lifecycleRules.map((rule, idx) => {
       const expiration = rule.Expiration?.Days ? `${rule.Expiration.Days}d` : '-';
       const noncurrent = rule.NoncurrentVersionExpiration?.NoncurrentDays ? `${rule.NoncurrentVersionExpiration.NoncurrentDays}d` : '-';
+      const abortMpu = rule.AbortIncompleteMultipartUpload?.DaysAfterInitiation ? `${rule.AbortIncompleteMultipartUpload.DaysAfterInitiation}d` : '-';
       const statusClass = rule.Status === 'Enabled' ? 'bg-success' : 'bg-secondary';
       return `<tr>
         <td><code class="small">${escapeHtml(rule.ID || '')}</code></td>
@@ -3205,6 +3206,7 @@
         <td><span class="badge ${statusClass}">${escapeHtml(rule.Status)}</span></td>
         <td class="small">${expiration}</td>
         <td class="small">${noncurrent}</td>
+        <td class="small">${abortMpu}</td>
         <td class="text-end">
           <div class="btn-group btn-group-sm">
             <button class="btn btn-outline-secondary" onclick="editLifecycleRule(${idx})" title="Edit rule">
@@ -3490,7 +3492,7 @@
     });
   });
 
-  document.getElementById('objects-table')?.addEventListener('show.bs.dropdown', function(e) {
+  document.getElementById('objects-table')?.addEventListener('show.bs.dropdown', function (e) {
     const dropdown = e.target.closest('.dropdown');
     const menu = dropdown?.querySelector('.dropdown-menu');
     const btn = e.target;
@@ -3789,18 +3791,18 @@
     var form = document.getElementById(formId);
     if (!form) return;
 
-    form.addEventListener('submit', function(e) {
+    form.addEventListener('submit', function (e) {
       e.preventDefault();
       window.UICore.submitFormAjax(form, {
         successMessage: options.successMessage || 'Operation completed',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           if (options.onSuccess) options.onSuccess(data);
           if (options.closeModal) {
             var modal = bootstrap.Modal.getInstance(document.getElementById(options.closeModal));
             if (modal) modal.hide();
           }
           if (options.reload) {
-            setTimeout(function() { location.reload(); }, 500);
+            setTimeout(function () { location.reload(); }, 500);
           }
         }
       });
@@ -3855,11 +3857,11 @@
       var newForm = document.getElementById('enableVersioningForm');
       if (newForm) {
         newForm.setAttribute('action', window.BucketDetailConfig?.endpoints?.versioning || '');
-        newForm.addEventListener('submit', function(e) {
+        newForm.addEventListener('submit', function (e) {
           e.preventDefault();
           window.UICore.submitFormAjax(newForm, {
             successMessage: 'Versioning enabled',
-            onSuccess: function() {
+            onSuccess: function () {
               updateVersioningBadge(true);
               updateVersioningCard(true);
             }
@@ -3949,7 +3951,7 @@
           '<p class="mb-0 small">No bucket policy is attached. Access is controlled by IAM policies only.</p></div>';
       }
     }
-    document.querySelectorAll('.preset-btn').forEach(function(btn) {
+    document.querySelectorAll('.preset-btn').forEach(function (btn) {
       btn.classList.remove('active');
       if (btn.dataset.preset === preset) btn.classList.add('active');
     });
@@ -3963,7 +3965,7 @@
 
   interceptForm('enableVersioningForm', {
     successMessage: 'Versioning enabled',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateVersioningBadge(true);
       updateVersioningCard(true);
     }
@@ -3972,7 +3974,7 @@
   interceptForm('suspendVersioningForm', {
     successMessage: 'Versioning suspended',
     closeModal: 'suspendVersioningModal',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateVersioningBadge(false);
       updateVersioningCard(false);
     }
@@ -3980,36 +3982,36 @@
 
   interceptForm('encryptionForm', {
     successMessage: 'Encryption settings saved',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateEncryptionCard(data.enabled !== false, data.algorithm || 'AES256');
     }
   });
 
   interceptForm('quotaForm', {
     successMessage: 'Quota settings saved',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateQuotaCard(data.has_quota, data.max_bytes, data.max_objects);
     }
   });
 
   interceptForm('bucketPolicyForm', {
     successMessage: 'Bucket policy saved',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       var policyModeEl = document.getElementById('policyMode');
       var policyPresetEl = document.getElementById('policyPreset');
       var preset = policyModeEl && policyModeEl.value === 'delete' ? 'private' :
-                   (policyPresetEl?.value || 'custom');
+        (policyPresetEl?.value || 'custom');
       updatePolicyCard(preset !== 'private', preset);
     }
   });
 
   var deletePolicyForm = document.getElementById('deletePolicyForm');
   if (deletePolicyForm) {
-    deletePolicyForm.addEventListener('submit', function(e) {
+    deletePolicyForm.addEventListener('submit', function (e) {
       e.preventDefault();
       window.UICore.submitFormAjax(deletePolicyForm, {
         successMessage: 'Bucket policy deleted',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           var modal = bootstrap.Modal.getInstance(document.getElementById('deletePolicyModal'));
           if (modal) modal.hide();
           updatePolicyCard(false, 'private');
@@ -4022,13 +4024,13 @@
 
   var disableEncBtn = document.getElementById('disableEncryptionBtn');
   if (disableEncBtn) {
-    disableEncBtn.addEventListener('click', function() {
+    disableEncBtn.addEventListener('click', function () {
       var form = document.getElementById('encryptionForm');
       if (!form) return;
       document.getElementById('encryptionAction').value = 'disable';
       window.UICore.submitFormAjax(form, {
         successMessage: 'Encryption disabled',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           document.getElementById('encryptionAction').value = 'enable';
           updateEncryptionCard(false, null);
         }
@@ -4038,13 +4040,13 @@
 
   var removeQuotaBtn = document.getElementById('removeQuotaBtn');
   if (removeQuotaBtn) {
-    removeQuotaBtn.addEventListener('click', function() {
+    removeQuotaBtn.addEventListener('click', function () {
       var form = document.getElementById('quotaForm');
       if (!form) return;
       document.getElementById('quotaAction').value = 'remove';
       window.UICore.submitFormAjax(form, {
         successMessage: 'Quota removed',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           document.getElementById('quotaAction').value = 'set';
           updateQuotaCard(false, null, null);
         }
@@ -4058,39 +4060,39 @@
     fetch(window.location.pathname + '?tab=replication', {
       headers: { 'X-Requested-With': 'XMLHttpRequest' }
     })
-    .then(function(resp) { return resp.text(); })
-    .then(function(html) {
-      var parser = new DOMParser();
-      var doc = parser.parseFromString(html, 'text/html');
-      var newPane = doc.getElementById('replication-pane');
-      if (newPane) {
-        replicationPane.innerHTML = newPane.innerHTML;
-        initReplicationForms();
-        initReplicationStats();
-      }
-    })
-    .catch(function(err) {
-      console.error('Failed to reload replication pane:', err);
-    });
+      .then(function (resp) { return resp.text(); })
+      .then(function (html) {
+        var parser = new DOMParser();
+        var doc = parser.parseFromString(html, 'text/html');
+        var newPane = doc.getElementById('replication-pane');
+        if (newPane) {
+          replicationPane.innerHTML = newPane.innerHTML;
+          initReplicationForms();
+          initReplicationStats();
+        }
+      })
+      .catch(function (err) {
+        console.error('Failed to reload replication pane:', err);
+      });
   }
 
   function initReplicationForms() {
-    document.querySelectorAll('form[action*="replication"]').forEach(function(form) {
+    document.querySelectorAll('form[action*="replication"]').forEach(function (form) {
       if (form.dataset.ajaxBound) return;
       form.dataset.ajaxBound = 'true';
       var actionInput = form.querySelector('input[name="action"]');
       if (!actionInput) return;
       var action = actionInput.value;
 
-      form.addEventListener('submit', function(e) {
+      form.addEventListener('submit', function (e) {
         e.preventDefault();
         var msg = action === 'pause' ? 'Replication paused' :
-                  action === 'resume' ? 'Replication resumed' :
-                  action === 'delete' ? 'Replication disabled' :
-                  action === 'create' ? 'Replication configured' : 'Operation completed';
+          action === 'resume' ? 'Replication resumed' :
+            action === 'delete' ? 'Replication disabled' :
+              action === 'create' ? 'Replication configured' : 'Operation completed';
         window.UICore.submitFormAjax(form, {
           successMessage: msg,
-          onSuccess: function(data) {
+          onSuccess: function (data) {
             var modal = bootstrap.Modal.getInstance(document.getElementById('disableReplicationModal'));
             if (modal) modal.hide();
             reloadReplicationPane();
@@ -4112,14 +4114,14 @@
     var bytesEl = statsContainer.querySelector('[data-stat="bytes"]');
 
     fetch(statusEndpoint)
-      .then(function(resp) { return resp.json(); })
-      .then(function(data) {
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
         if (syncedEl) syncedEl.textContent = data.objects_synced || 0;
         if (pendingEl) pendingEl.textContent = data.objects_pending || 0;
         if (orphanedEl) orphanedEl.textContent = data.objects_orphaned || 0;
         if (bytesEl) bytesEl.textContent = formatBytes(data.bytes_synced || 0);
       })
-      .catch(function(err) {
+      .catch(function (err) {
         console.error('Failed to load replication stats:', err);
       });
   }
@@ -4129,10 +4131,10 @@
 
   var deleteBucketForm = document.getElementById('deleteBucketForm');
   if (deleteBucketForm) {
-    deleteBucketForm.addEventListener('submit', function(e) {
+    deleteBucketForm.addEventListener('submit', function (e) {
       e.preventDefault();
       window.UICore.submitFormAjax(deleteBucketForm, {
-        onSuccess: function() {
+        onSuccess: function () {
           sessionStorage.setItem('flashMessage', JSON.stringify({ title: 'Bucket deleted', variant: 'success' }));
           window.location.href = window.BucketDetailConfig?.endpoints?.bucketsOverview || '/ui/buckets';
         }
