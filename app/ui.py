@@ -41,9 +41,15 @@ from .storage import ObjectStorage, StorageError
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
 
 
-def _format_datetime_display(dt: datetime) -> str:
-    """Format a datetime for display using the configured timezone."""
-    display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
+def _format_datetime_display(dt: datetime, display_tz: str | None = None) -> str:
+    """Format a datetime for display using the configured timezone.
+    
+    Args:
+        dt: The datetime to format
+        display_tz: Optional timezone string. If not provided, reads from current_app.config.
+    """
+    if display_tz is None:
+        display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
     if display_tz and display_tz != "UTC":
         try:
             tz = ZoneInfo(display_tz)
@@ -52,7 +58,7 @@ def _format_datetime_display(dt: datetime) -> str:
             dt = dt.astimezone(tz)
         except (KeyError, ValueError):
             pass
-    return dt.strftime("%b %d, %Y %H:%M")
+    return dt.isoformat()
 
 
 
@@ -587,6 +593,7 @@ def stream_bucket_objects(bucket_name: str):
     tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
 
     def generate():
         meta_line = json.dumps({
@@ -632,7 +639,7 @@ def stream_bucket_objects(bucket_name: str):
                     "key": obj.key,
                     "size": obj.size,
                     "last_modified": obj.last_modified.isoformat(),
-                    "last_modified_display": _format_datetime_display(obj.last_modified),
+                    "last_modified_display": _format_datetime_display(obj.last_modified, display_tz),
                     "etag": obj.etag,
                 }) + "\n"
 

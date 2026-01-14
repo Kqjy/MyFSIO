@@ -1520,7 +1520,7 @@
     </div>
     {% endif %}
 
-    {% if can_edit_policy %}
+    {% if can_manage_lifecycle %}
     <div class="tab-pane fade {{ 'show active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-pane" role="tabpanel" aria-labelledby="lifecycle-tab" tabindex="0">
       {% if not lifecycle_enabled %}
       <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
@@ -1679,7 +1679,9 @@
         </div>
       </div>
     </div>
+    {% endif %}
 
+    {% if can_manage_cors %}
     <div class="tab-pane fade {{ 'show active' if active_tab == 'cors' else '' }}" id="cors-pane" role="tabpanel" aria-labelledby="cors-tab" tabindex="0">
       <div class="row g-4">
         <div class="col-lg-8">
