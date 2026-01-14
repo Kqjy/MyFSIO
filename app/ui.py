@@ -41,11 +41,11 @@ from .storage import ObjectStorage, StorageError
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
 
 
-def _format_datetime_display(dt: datetime, display_tz: str | None = None) -> str:
-    """Format a datetime for display using the configured timezone.
+def _convert_to_display_tz(dt: datetime, display_tz: str | None = None) -> datetime:
+    """Convert a datetime to the configured display timezone.
     
     Args:
-        dt: The datetime to format
+        dt: The datetime to convert
         display_tz: Optional timezone string. If not provided, reads from current_app.config.
     """
     if display_tz is None:
@@ -58,7 +58,29 @@ def _format_datetime_display(dt: datetime, display_tz: str | None = None) -> str
             dt = dt.astimezone(tz)
         except (KeyError, ValueError):
             pass
+    return dt
+
+
+def _format_datetime_display(dt: datetime, display_tz: str | None = None) -> str:
+    """Format a datetime for display using the configured timezone.
+    
+    Args:
+        dt: The datetime to format
+        display_tz: Optional timezone string. If not provided, reads from current_app.config.
+    """
+    dt = _convert_to_display_tz(dt, display_tz)
     return dt.strftime("%b %d, %Y %H:%M")
+
+
+def _format_datetime_iso(dt: datetime, display_tz: str | None = None) -> str:
+    """Format a datetime as ISO format using the configured timezone.
+    
+    Args:
+        dt: The datetime to format
+        display_tz: Optional timezone string. If not provided, reads from current_app.config.
+    """
+    dt = _convert_to_display_tz(dt, display_tz)
+    return dt.isoformat()
 
 
 
@@ -541,6 +563,7 @@ def list_bucket_objects(bucket_name: str):
             "size": obj.size,
             "last_modified": obj.last_modified.isoformat(),
             "last_modified_display": _format_datetime_display(obj.last_modified),
+            "last_modified_iso": _format_datetime_iso(obj.last_modified),
             "etag": obj.etag,
         })
 
@@ -640,6 +663,7 @@ def stream_bucket_objects(bucket_name: str):
                     "size": obj.size,
                     "last_modified": obj.last_modified.isoformat(),
                     "last_modified_display": _format_datetime_display(obj.last_modified, display_tz),
+                    "last_modified_iso": _format_datetime_iso(obj.last_modified, display_tz),
                     "etag": obj.etag,
                 }) + "\n"
 

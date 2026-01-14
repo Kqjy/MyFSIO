@@ -137,6 +137,7 @@
     tr.dataset.size = obj.size;
     tr.dataset.lastModified = obj.lastModified || obj.last_modified;
     tr.dataset.lastModifiedDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleString();
+    tr.dataset.lastModifiedIso = obj.lastModifiedIso || obj.last_modified_iso || obj.lastModified || obj.last_modified;
     tr.dataset.etag = obj.etag;
     tr.dataset.previewUrl = obj.previewUrl || obj.preview_url;
     tr.dataset.downloadUrl = obj.downloadUrl || obj.download_url;
@@ -426,6 +427,7 @@
       size: obj.size,
       lastModified: obj.last_modified,
       lastModifiedDisplay: obj.last_modified_display,
+      lastModifiedIso: obj.last_modified_iso,
       etag: obj.etag,
       previewUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.preview, key) : '',
       downloadUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.download, key) : '',
@@ -1793,7 +1795,7 @@
 
     previewKey.textContent = row.dataset.key;
     previewSize.textContent = formatBytes(Number(row.dataset.size));
-    previewModified.textContent = row.dataset.lastModified;
+    previewModified.textContent = row.dataset.lastModifiedIso || row.dataset.lastModified;
     previewEtag.textContent = row.dataset.etag;
     downloadButton.href = row.dataset.downloadUrl;
     downloadButton.classList.remove('disabled');
