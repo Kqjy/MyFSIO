@@ -381,6 +381,23 @@ def bucket_detail(bucket_name: str):
             can_edit_policy = True
         except IamError:
             can_edit_policy = False
+
+    can_manage_lifecycle = False
+    if principal:
+        try:
+            _iam().authorize(principal, bucket_name, "lifecycle")
+            can_manage_lifecycle = True
+        except IamError:
+            can_manage_lifecycle = False
+
+    can_manage_cors = False
+    if principal:
+        try:
+            _iam().authorize(principal, bucket_name, "cors")
+            can_manage_cors = True
+        except IamError:
+            can_manage_cors = False
+
     try:
         versioning_enabled = storage.is_versioning_enabled(bucket_name)
     except StorageError:
@@ -452,6 +469,8 @@ def bucket_detail(bucket_name: str):
         bucket_policy_text=policy_text,
         bucket_policy=bucket_policy,
         can_edit_policy=can_edit_policy,
+        can_manage_lifecycle=can_manage_lifecycle,
+        can_manage_cors=can_manage_cors,
         can_manage_versioning=can_manage_versioning,
         can_manage_replication=can_manage_replication,
         can_manage_encryption=can_manage_encryption,
@@ -2128,7 +2147,7 @@ def metrics_api():
 def bucket_lifecycle(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "policy")
+        _authorize_ui(principal, bucket_name, "lifecycle")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
@@ -2181,7 +2200,7 @@ def bucket_lifecycle(bucket_name: str):
 def get_lifecycle_history(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "policy")
+        _authorize_ui(principal, bucket_name, "lifecycle")
     except IamError:
         return jsonify({"error": "Access denied"}), 403
 
@@ -2212,7 +2231,7 @@ def get_lifecycle_history(bucket_name: str):
 def bucket_cors(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "policy")
+        _authorize_ui(principal, bucket_name, "cors")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 

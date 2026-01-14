@@ -72,13 +72,11 @@ def _evaluate_condition_operator(
     return True
 
 ACTION_ALIASES = {
-    # List actions
     "s3:listbucket": "list",
     "s3:listallmybuckets": "list",
     "s3:listbucketversions": "list",
     "s3:listmultipartuploads": "list",
     "s3:listparts": "list",
-    # Read actions
     "s3:getobject": "read",
     "s3:getobjectversion": "read",
     "s3:getobjecttagging": "read",
@@ -87,7 +85,6 @@ ACTION_ALIASES = {
     "s3:getbucketversioning": "read",
     "s3:headobject": "read",
     "s3:headbucket": "read",
-    # Write actions
     "s3:putobject": "write",
     "s3:createbucket": "write",
     "s3:putobjecttagging": "write",
@@ -97,26 +94,30 @@ ACTION_ALIASES = {
     "s3:completemultipartupload": "write",
     "s3:abortmultipartupload": "write",
     "s3:copyobject": "write",
-    # Delete actions
     "s3:deleteobject": "delete",
     "s3:deleteobjectversion": "delete",
     "s3:deletebucket": "delete",
     "s3:deleteobjecttagging": "delete",
-    # Share actions (ACL)
     "s3:putobjectacl": "share",
     "s3:putbucketacl": "share",
     "s3:getbucketacl": "share",
-    # Policy actions
     "s3:putbucketpolicy": "policy",
     "s3:getbucketpolicy": "policy",
     "s3:deletebucketpolicy": "policy",
-    # Replication actions
     "s3:getreplicationconfiguration": "replication",
     "s3:putreplicationconfiguration": "replication",
     "s3:deletereplicationconfiguration": "replication",
     "s3:replicateobject": "replication",
     "s3:replicatetags": "replication",
     "s3:replicatedelete": "replication",
+    "s3:getlifecycleconfiguration": "lifecycle",
+    "s3:putlifecycleconfiguration": "lifecycle",
+    "s3:deletelifecycleconfiguration": "lifecycle",
+    "s3:getbucketlifecycle": "lifecycle",
+    "s3:putbucketlifecycle": "lifecycle",
+    "s3:getbucketcors": "cors",
+    "s3:putbucketcors": "cors",
+    "s3:deletebucketcors": "cors",
 }
 
 

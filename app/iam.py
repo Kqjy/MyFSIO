@@ -15,7 +15,7 @@ class IamError(RuntimeError):
     """Raised when authentication or authorization fails."""
 
 
-S3_ACTIONS = {"list", "read", "write", "delete", "share", "policy", "replication"}
+S3_ACTIONS = {"list", "read", "write", "delete", "share", "policy", "replication", "lifecycle", "cors"}
 IAM_ACTIONS = {
     "iam:list_users",
     "iam:create_user",
@@ -71,6 +71,16 @@ ACTION_ALIASES = {
     "s3:replicateobject": "replication",
     "s3:replicatetags": "replication",
     "s3:replicatedelete": "replication",
+    "lifecycle": "lifecycle",
+    "s3:getlifecycleconfiguration": "lifecycle",
+    "s3:putlifecycleconfiguration": "lifecycle",
+    "s3:deletelifecycleconfiguration": "lifecycle",
+    "s3:getbucketlifecycle": "lifecycle",
+    "s3:putbucketlifecycle": "lifecycle",
+    "cors": "cors",
+    "s3:getbucketcors": "cors",
+    "s3:putbucketcors": "cors",
+    "s3:deletebucketcors": "cors",
     "iam:listusers": "iam:list_users",
     "iam:createuser": "iam:create_user",
     "iam:deleteuser": "iam:delete_user",

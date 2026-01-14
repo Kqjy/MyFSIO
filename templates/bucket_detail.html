@@ -67,12 +67,14 @@
       </button>
     </li>
     {% endif %}
-    {% if can_edit_policy %}
+    {% if can_manage_lifecycle %}
     <li class="nav-item" role="presentation">
       <button class="nav-link {{ 'active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button" role="tab" aria-controls="lifecycle-pane" aria-selected="{{ 'true' if active_tab == 'lifecycle' else 'false' }}">
         Lifecycle
       </button>
     </li>
+    {% endif %}
+    {% if can_manage_cors %}
     <li class="nav-item" role="presentation">
       <button class="nav-link {{ 'active' if active_tab == 'cors' else '' }}" id="cors-tab" data-bs-toggle="tab" data-bs-target="#cors-pane" type="button" role="tab" aria-controls="cors-pane" aria-selected="{{ 'true' if active_tab == 'cors' else 'false' }}">
         CORS
