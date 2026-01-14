@@ -5,8 +5,10 @@ import json
 import uuid
 import psutil
 import shutil
+from datetime import datetime, timezone as dt_timezone
 from typing import Any
 from urllib.parse import quote, urlparse
+from zoneinfo import ZoneInfo
 
 import boto3
 import requests
@@ -37,6 +39,20 @@ from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage, StorageError
 
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
+
+
+def _format_datetime_display(dt: datetime) -> str:
+    """Format a datetime for display using the configured timezone."""
+    display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
+    if display_tz and display_tz != "UTC":
+        try:
+            tz = ZoneInfo(display_tz)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=dt_timezone.utc)
+            dt = dt.astimezone(tz)
+        except (KeyError, ValueError):
+            pass
+    return dt.strftime("%b %d, %Y %H:%M")
 
 
 
@@ -499,7 +515,7 @@ def list_bucket_objects(bucket_name: str):
             "key": obj.key,
             "size": obj.size,
             "last_modified": obj.last_modified.isoformat(),
-            "last_modified_display": obj.last_modified.strftime("%b %d, %Y %H:%M"),
+            "last_modified_display": _format_datetime_display(obj.last_modified),
             "etag": obj.etag,
         })
 
@@ -597,7 +613,7 @@ def stream_bucket_objects(bucket_name: str):
                     "key": obj.key,
                     "size": obj.size,
                     "last_modified": obj.last_modified.isoformat(),
-                    "last_modified_display": obj.last_modified.strftime("%b %d, %Y %H:%M"),
+                    "last_modified_display": _format_datetime_display(obj.last_modified),
                     "etag": obj.etag,
                 }) + "\n"
 
