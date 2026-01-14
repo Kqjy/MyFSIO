@@ -58,7 +58,7 @@ def _format_datetime_display(dt: datetime, display_tz: str | None = None) -> str
             dt = dt.astimezone(tz)
         except (KeyError, ValueError):
             pass
-    return dt.isoformat()
+    return dt.strftime("%b %d, %Y %H:%M")
 
 
 

@@ -1793,7 +1793,7 @@
 
     previewKey.textContent = row.dataset.key;
     previewSize.textContent = formatBytes(Number(row.dataset.size));
-    previewModified.textContent = row.dataset.lastModifiedDisplay || row.dataset.lastModified;
+    previewModified.textContent = row.dataset.lastModified;
     previewEtag.textContent = row.dataset.etag;
     downloadButton.href = row.dataset.downloadUrl;
     downloadButton.classList.remove('disabled');
