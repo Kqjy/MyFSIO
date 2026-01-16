@@ -227,6 +227,30 @@ def create_app(
         except (ValueError, OSError):
             return "Unknown"
 
+    @app.template_filter("format_datetime")
+    def format_datetime_filter(dt, include_tz: bool = True) -> str:
+        """Format datetime object as human-readable string in configured timezone."""
+        from datetime import datetime, timezone as dt_timezone
+        from zoneinfo import ZoneInfo
+        if not dt:
+            return ""
+        try:
+            display_tz = app.config.get("DISPLAY_TIMEZONE", "UTC")
+            if display_tz and display_tz != "UTC":
+                try:
+                    tz = ZoneInfo(display_tz)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=dt_timezone.utc)
+                    dt = dt.astimezone(tz)
+                except (KeyError, ValueError):
+                    pass
+            tz_abbr = dt.strftime("%Z") or "UTC"
+            if include_tz:
+                return f"{dt.strftime('%b %d, %Y %H:%M')} ({tz_abbr})"
+            return dt.strftime("%b %d, %Y %H:%M")
+        except (ValueError, AttributeError):
+            return str(dt)
+
     if include_api:
         from .s3_api import s3_api_bp
         from .kms_api import kms_api_bp

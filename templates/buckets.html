@@ -51,7 +51,7 @@
             </div>
             <div>
               <h5 class="bucket-name text-break">{{ bucket.meta.name }}</h5>
-              <small class="text-muted">Created {{ bucket.meta.created_at.strftime('%b %d, %Y %H:%M') }} ({{ bucket.meta.created_at.strftime('%Z') or 'UTC' }})</small>
+              <small class="text-muted">Created {{ bucket.meta.created_at | format_datetime }}</small>
             </div>
           </div>
           <span class="badge {{ bucket.access_badge }} bucket-access-badge">{{ bucket.access_label }}</span>
