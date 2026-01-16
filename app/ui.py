@@ -6,6 +6,7 @@ import uuid
 import psutil
 import shutil
 from datetime import datetime, timezone as dt_timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
@@ -150,6 +151,69 @@ def _format_bytes(num: int) -> str:
             return f"{value:.1f} {unit}"
         value /= step
     return f"{value:.1f} PB"
+
+
+_metrics_last_save_time: float = 0.0
+
+
+def _get_metrics_history_path() -> Path:
+    storage_root = Path(current_app.config["STORAGE_ROOT"])
+    return storage_root / ".myfsio.sys" / "config" / "metrics_history.json"
+
+
+def _load_metrics_history() -> dict:
+    path = _get_metrics_history_path()
+    if not path.exists():
+        return {"history": []}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"history": []}
+
+
+def _save_metrics_snapshot(cpu_percent: float, memory_percent: float, disk_percent: float, storage_bytes: int) -> None:
+    global _metrics_last_save_time
+
+    if not current_app.config.get("METRICS_HISTORY_ENABLED", False):
+        return
+
+    import time
+    from datetime import datetime, timezone
+
+    interval_minutes = current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5)
+    now_ts = time.time()
+    if now_ts - _metrics_last_save_time < interval_minutes * 60:
+        return
+
+    path = _get_metrics_history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = _load_metrics_history()
+    history = data.get("history", [])
+    retention_hours = current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24)
+
+    now = datetime.now(timezone.utc)
+    snapshot = {
+        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cpu_percent": round(cpu_percent, 2),
+        "memory_percent": round(memory_percent, 2),
+        "disk_percent": round(disk_percent, 2),
+        "storage_bytes": storage_bytes,
+    }
+    history.append(snapshot)
+
+    cutoff = now.timestamp() - (retention_hours * 3600)
+    history = [
+        h for h in history
+        if datetime.fromisoformat(h["timestamp"].replace("Z", "+00:00")).timestamp() > cutoff
+    ]
+
+    data["history"] = history
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _metrics_last_save_time = now_ts
+    except OSError:
+        pass
 
 
 def _friendly_error_message(exc: Exception) -> str:
@@ -2101,18 +2165,18 @@ def metrics_dashboard():
     return render_template(
         "metrics.html",
         principal=principal,
-        cpu_percent=cpu_percent,
+        cpu_percent=round(cpu_percent, 2),
         memory={
             "total": _format_bytes(memory.total),
             "available": _format_bytes(memory.available),
             "used": _format_bytes(memory.used),
-            "percent": memory.percent,
+            "percent": round(memory.percent, 2),
         },
         disk={
             "total": _format_bytes(disk.total),
             "free": _format_bytes(disk.free),
             "used": _format_bytes(disk.used),
-            "percent": disk.percent,
+            "percent": round(disk.percent, 2),
         },
         app={
             "buckets": total_buckets,
@@ -2122,7 +2186,8 @@ def metrics_dashboard():
             "storage_raw": total_bytes_used,
             "version": APP_VERSION,
             "uptime_days": uptime_days,
-        }
+        },
+        metrics_history_enabled=current_app.config.get("METRICS_HISTORY_ENABLED", False),
     )
 
 
@@ -2162,19 +2227,21 @@ def metrics_api():
     uptime_seconds = time.time() - boot_time
     uptime_days = int(uptime_seconds / 86400)
 
+    _save_metrics_snapshot(cpu_percent, memory.percent, disk.percent, total_bytes_used)
+
     return jsonify({
-        "cpu_percent": cpu_percent,
+        "cpu_percent": round(cpu_percent, 2),
         "memory": {
             "total": _format_bytes(memory.total),
             "available": _format_bytes(memory.available),
             "used": _format_bytes(memory.used),
-            "percent": memory.percent,
+            "percent": round(memory.percent, 2),
         },
         "disk": {
             "total": _format_bytes(disk.total),
             "free": _format_bytes(disk.free),
             "used": _format_bytes(disk.used),
-            "percent": disk.percent,
+            "percent": round(disk.percent, 2),
         },
         "app": {
             "buckets": total_buckets,
@@ -2184,6 +2251,73 @@ def metrics_api():
             "storage_raw": total_bytes_used,
             "uptime_days": uptime_days,
         }
+    })
+
+
+@ui_bp.route("/metrics/history")
+def metrics_history():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    if not current_app.config.get("METRICS_HISTORY_ENABLED", False):
+        return jsonify({"enabled": False, "history": []})
+
+    hours = request.args.get("hours", type=int)
+    if hours is None:
+        hours = current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24)
+
+    data = _load_metrics_history()
+    history = data.get("history", [])
+
+    if hours:
+        from datetime import datetime, timezone
+        cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+        history = [
+            h for h in history
+            if datetime.fromisoformat(h["timestamp"].replace("Z", "+00:00")).timestamp() > cutoff
+        ]
+
+    return jsonify({
+        "enabled": True,
+        "retention_hours": current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+        "interval_minutes": current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+        "history": history,
+    })
+
+
+@ui_bp.route("/metrics/settings", methods=["GET", "PUT"])
+def metrics_settings():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    if request.method == "GET":
+        return jsonify({
+            "enabled": current_app.config.get("METRICS_HISTORY_ENABLED", False),
+            "retention_hours": current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+            "interval_minutes": current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+        })
+
+    data = request.get_json() or {}
+
+    if "enabled" in data:
+        current_app.config["METRICS_HISTORY_ENABLED"] = bool(data["enabled"])
+    if "retention_hours" in data:
+        current_app.config["METRICS_HISTORY_RETENTION_HOURS"] = max(1, int(data["retention_hours"]))
+    if "interval_minutes" in data:
+        current_app.config["METRICS_HISTORY_INTERVAL_MINUTES"] = max(1, int(data["interval_minutes"]))
+
+    return jsonify({
+        "enabled": current_app.config.get("METRICS_HISTORY_ENABLED", False),
+        "retention_hours": current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+        "interval_minutes": current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
     })
 
 

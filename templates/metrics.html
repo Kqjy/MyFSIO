@@ -267,9 +267,49 @@
     </div>
   </div>
 </div>
+
+{% if metrics_history_enabled %}
+<div class="row g-4 mt-2">
+  <div class="col-12">
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-transparent border-0 pt-4 px-4 d-flex justify-content-between align-items-center">
+        <h5 class="card-title mb-0 fw-semibold">Metrics History</h5>
+        <div class="d-flex gap-2 align-items-center">
+          <select class="form-select form-select-sm" id="historyTimeRange" style="width: auto;">
+            <option value="1">Last 1 hour</option>
+            <option value="6">Last 6 hours</option>
+            <option value="24" selected>Last 24 hours</option>
+            <option value="168">Last 7 days</option>
+          </select>
+        </div>
+      </div>
+      <div class="card-body p-4">
+        <div class="row">
+          <div class="col-md-4 mb-4">
+            <h6 class="text-muted small fw-bold text-uppercase mb-3">CPU Usage</h6>
+            <canvas id="cpuHistoryChart" height="200"></canvas>
+          </div>
+          <div class="col-md-4 mb-4">
+            <h6 class="text-muted small fw-bold text-uppercase mb-3">Memory Usage</h6>
+            <canvas id="memoryHistoryChart" height="200"></canvas>
+          </div>
+          <div class="col-md-4 mb-4">
+            <h6 class="text-muted small fw-bold text-uppercase mb-3">Disk Usage</h6>
+            <canvas id="diskHistoryChart" height="200"></canvas>
+          </div>
+        </div>
+        <p class="text-muted small mb-0 text-center" id="historyStatus">Loading history data...</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block extra_scripts %}
+{% if metrics_history_enabled %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+{% endif %}
 <script>
 (function() {
   var refreshInterval = 5000;
@@ -285,7 +325,7 @@
       .then(function(data) {
         var el;
         el = document.querySelector('[data-metric="cpu_percent"]');
-        if (el) el.textContent = data.cpu_percent;
+        if (el) el.textContent = data.cpu_percent.toFixed(2);
         el = document.querySelector('[data-metric="cpu_bar"]');
         if (el) {
           el.style.width = data.cpu_percent + '%';
@@ -298,7 +338,7 @@
         }
 
         el = document.querySelector('[data-metric="memory_percent"]');
-        if (el) el.textContent = data.memory.percent;
+        if (el) el.textContent = data.memory.percent.toFixed(2);
         el = document.querySelector('[data-metric="memory_bar"]');
         if (el) el.style.width = data.memory.percent + '%';
         el = document.querySelector('[data-metric="memory_used"]');
@@ -307,7 +347,7 @@
         if (el) el.textContent = data.memory.total;
 
         el = document.querySelector('[data-metric="disk_percent"]');
-        if (el) el.textContent = data.disk.percent;
+        if (el) el.textContent = data.disk.percent.toFixed(2);
         el = document.querySelector('[data-metric="disk_bar"]');
         if (el) {
           el.style.width = data.disk.percent + '%';
@@ -372,5 +412,138 @@
 
   startPolling();
 })();
+
+{% if metrics_history_enabled %}
+(function() {
+  var cpuChart = null;
+  var memoryChart = null;
+  var diskChart = null;
+  var historyStatus = document.getElementById('historyStatus');
+  var timeRangeSelect = document.getElementById('historyTimeRange');
+  var historyTimer = null;
+  var MAX_DATA_POINTS = 500;
+
+  function createChart(ctx, label, color) {
+    return new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: label,
+          data: [],
+          borderColor: color,
+          backgroundColor: color + '20',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointHoverRadius: 6,
+          hitRadius: 10,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: function(ctx) { return ctx.parsed.y.toFixed(2) + '%'; }
+            }
+          }
+        },
+        scales: {
+          x: {
+            display: true,
+            ticks: { maxTicksAuto: true, maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 10 }
+          },
+          y: {
+            display: true,
+            min: 0,
+            max: 100,
+            ticks: { callback: function(v) { return v + '%'; } }
+          }
+        }
+      }
+    });
+  }
+
+  function initCharts() {
+    var cpuCtx = document.getElementById('cpuHistoryChart');
+    var memCtx = document.getElementById('memoryHistoryChart');
+    var diskCtx = document.getElementById('diskHistoryChart');
+    if (cpuCtx) cpuChart = createChart(cpuCtx, 'CPU %', '#0d6efd');
+    if (memCtx) memoryChart = createChart(memCtx, 'Memory %', '#0dcaf0');
+    if (diskCtx) diskChart = createChart(diskCtx, 'Disk %', '#ffc107');
+  }
+
+  function formatTime(ts) {
+    var d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function loadHistory() {
+    if (document.hidden) return;
+    var hours = timeRangeSelect ? timeRangeSelect.value : 24;
+    fetch('/ui/metrics/history?hours=' + hours)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.enabled || !data.history || data.history.length === 0) {
+          if (historyStatus) historyStatus.textContent = 'No history data available yet. Data is recorded every ' + (data.interval_minutes || 5) + ' minutes.';
+          return;
+        }
+        var history = data.history.slice(-MAX_DATA_POINTS);
+        var labels = history.map(function(h) { return formatTime(h.timestamp); });
+        var cpuData = history.map(function(h) { return h.cpu_percent; });
+        var memData = history.map(function(h) { return h.memory_percent; });
+        var diskData = history.map(function(h) { return h.disk_percent; });
+
+        if (cpuChart) {
+          cpuChart.data.labels = labels;
+          cpuChart.data.datasets[0].data = cpuData;
+          cpuChart.update('none');
+        }
+        if (memoryChart) {
+          memoryChart.data.labels = labels;
+          memoryChart.data.datasets[0].data = memData;
+          memoryChart.update('none');
+        }
+        if (diskChart) {
+          diskChart.data.labels = labels;
+          diskChart.data.datasets[0].data = diskData;
+          diskChart.update('none');
+        }
+        if (historyStatus) historyStatus.textContent = 'Showing ' + history.length + ' data points';
+      })
+      .catch(function(err) {
+        console.error('History fetch error:', err);
+        if (historyStatus) historyStatus.textContent = 'Failed to load history data';
+      });
+  }
+
+  function startHistoryPolling() {
+    if (historyTimer) clearInterval(historyTimer);
+    historyTimer = setInterval(loadHistory, 60000);
+  }
+
+  if (timeRangeSelect) {
+    timeRangeSelect.addEventListener('change', loadHistory);
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      if (historyTimer) clearInterval(historyTimer);
+      historyTimer = null;
+    } else {
+      loadHistory();
+      startHistoryPolling();
+    }
+  });
+
+  initCharts();
+  loadHistory();
+  startHistoryPolling();
+})();
+{% endif %}
 </script>
 {% endblock %}

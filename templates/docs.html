@@ -39,6 +39,7 @@
             <li><a href="#quotas">Bucket Quotas</a></li>
             <li><a href="#encryption">Encryption</a></li>
             <li><a href="#lifecycle">Lifecycle Rules</a></li>
+            <li><a href="#metrics">Metrics History</a></li>
             <li><a href="#troubleshooting">Troubleshooting</a></li>
           </ul>
         </div>
@@ -180,6 +181,24 @@ python run.py --mode ui
                 <td><code>LOG_TO_FILE</code></td>
                 <td><code>true</code></td>
                 <td>Enable file logging.</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Metrics History Settings</td>
+              </tr>
+              <tr>
+                <td><code>METRICS_HISTORY_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable metrics history recording and charts (opt-in).</td>
+              </tr>
+              <tr>
+                <td><code>METRICS_HISTORY_RETENTION_HOURS</code></td>
+                <td><code>24</code></td>
+                <td>How long to retain metrics history data.</td>
+              </tr>
+              <tr>
+                <td><code>METRICS_HISTORY_INTERVAL_MINUTES</code></td>
+                <td><code>5</code></td>
+                <td>Interval between history snapshots.</td>
               </tr>
             </tbody>
           </table>
@@ -976,10 +995,94 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
         </div>
       </div>
     </article>
-    <article id="troubleshooting" class="card shadow-sm docs-section">
+    <article id="metrics" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">13</span>
+          <h2 class="h4 mb-0">Metrics History</h2>
+        </div>
+        <p class="text-muted">Track CPU, memory, and disk usage over time with optional metrics history. Disabled by default to minimize overhead.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Metrics History</h3>
+        <p class="small text-muted">Set the environment variable to opt-in:</p>
+<pre class="mb-3"><code class="language-bash"># PowerShell
+$env:METRICS_HISTORY_ENABLED = "true"
+python run.py
+
+# Bash
+export METRICS_HISTORY_ENABLED=true
+python run.py</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Configuration Options</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Variable</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>METRICS_HISTORY_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable/disable metrics history recording</td>
+              </tr>
+              <tr>
+                <td><code>METRICS_HISTORY_RETENTION_HOURS</code></td>
+                <td><code>24</code></td>
+                <td>How long to keep history data (hours)</td>
+              </tr>
+              <tr>
+                <td><code>METRICS_HISTORY_INTERVAL_MINUTES</code></td>
+                <td><code>5</code></td>
+                <td>Interval between snapshots (minutes)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">API Endpoints</h3>
+<pre class="mb-3"><code class="language-bash"># Get metrics history (last 24 hours by default)
+curl "{{ api_base | replace('/api', '/ui') }}/metrics/history" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Get history for specific time range
+curl "{{ api_base | replace('/api', '/ui') }}/metrics/history?hours=6" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Get current settings
+curl "{{ api_base | replace('/api', '/ui') }}/metrics/settings" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Update settings at runtime
+curl -X PUT "{{ api_base | replace('/api', '/ui') }}/metrics/settings" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"enabled": true, "retention_hours": 48, "interval_minutes": 10}'</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
+        <p class="small text-muted mb-3">History data is stored at:</p>
+        <code class="d-block mb-3">data/.myfsio.sys/config/metrics_history.json</code>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>UI Charts:</strong> When enabled, the Metrics dashboard displays line charts showing CPU, memory, and disk usage trends with a time range selector (1h, 6h, 24h, 7d).
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="troubleshooting" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">14</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -1045,6 +1148,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
           <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>
           <li><a href="#lifecycle">Lifecycle Rules</a></li>
+          <li><a href="#metrics">Metrics History</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>
         </ul>
         <div class="docs-sidebar-callouts">
