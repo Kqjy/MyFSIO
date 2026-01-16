@@ -1366,7 +1366,7 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
                 SubElement(ver_elem, "Key").text = obj.key
                 SubElement(ver_elem, "VersionId").text = v.get("version_id", "unknown")
                 SubElement(ver_elem, "IsLatest").text = "false"
-                SubElement(ver_elem, "LastModified").text = v.get("archived_at", "")
+                SubElement(ver_elem, "LastModified").text = v.get("archived_at") or "1970-01-01T00:00:00Z"
                 SubElement(ver_elem, "ETag").text = f'"{v.get("etag", "")}"'
                 SubElement(ver_elem, "Size").text = str(v.get("size", 0))
                 SubElement(ver_elem, "StorageClass").text = "STANDARD"

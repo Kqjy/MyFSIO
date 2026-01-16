@@ -63,13 +63,14 @@ def _convert_to_display_tz(dt: datetime, display_tz: str | None = None) -> datet
 
 def _format_datetime_display(dt: datetime, display_tz: str | None = None) -> str:
     """Format a datetime for display using the configured timezone.
-    
+
     Args:
         dt: The datetime to format
         display_tz: Optional timezone string. If not provided, reads from current_app.config.
     """
     dt = _convert_to_display_tz(dt, display_tz)
-    return dt.strftime("%b %d, %Y %H:%M")
+    tz_abbr = dt.strftime("%Z") or "UTC"
+    return f"{dt.strftime('%b %d, %Y %H:%M')} ({tz_abbr})"
 
 
 def _format_datetime_iso(dt: datetime, display_tz: str | None = None) -> str:
@@ -558,6 +559,11 @@ def list_bucket_objects(bucket_name: str):
 
     objects_data = []
     for obj in result.objects:
+        metadata = {}
+        try:
+            metadata = storage.get_object_metadata(bucket_name, obj.key)
+        except Exception:
+            pass
         objects_data.append({
             "key": obj.key,
             "size": obj.size,
@@ -565,6 +571,7 @@ def list_bucket_objects(bucket_name: str):
             "last_modified_display": _format_datetime_display(obj.last_modified),
             "last_modified_iso": _format_datetime_iso(obj.last_modified),
             "etag": obj.etag,
+            "metadata": metadata,
         })
 
     return jsonify({
@@ -657,6 +664,11 @@ def stream_bucket_objects(bucket_name: str):
                 yield json.dumps({"type": "count", "total_count": total_count}) + "\n"
 
             for obj in result.objects:
+                metadata = {}
+                try:
+                    metadata = storage.get_object_metadata(bucket_name, obj.key)
+                except Exception:
+                    pass
                 yield json.dumps({
                     "type": "object",
                     "key": obj.key,
@@ -665,6 +677,7 @@ def stream_bucket_objects(bucket_name: str):
                     "last_modified_display": _format_datetime_display(obj.last_modified, display_tz),
                     "last_modified_iso": _format_datetime_iso(obj.last_modified, display_tz),
                     "etag": obj.etag,
+                    "metadata": metadata,
                 }) + "\n"
 
             if not result.is_truncated:

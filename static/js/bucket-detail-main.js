@@ -28,6 +28,57 @@
 
   setupJsonAutoIndent(document.getElementById('policyDocument'));
 
+  const getFileTypeIcon = (key) => {
+    const ext = (key.split('.').pop() || '').toLowerCase();
+    const iconMap = {
+      image: ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'tif'],
+      document: ['pdf', 'doc', 'docx', 'txt', 'rtf', 'odt', 'pages'],
+      spreadsheet: ['xls', 'xlsx', 'csv', 'ods', 'numbers'],
+      archive: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'],
+      code: ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'cpp', 'c', 'h', 'hpp', 'cs', 'go', 'rs', 'rb', 'php', 'html', 'htm', 'css', 'scss', 'sass', 'less', 'json', 'xml', 'yaml', 'yml', 'md', 'sh', 'bat', 'ps1', 'sql'],
+      audio: ['mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'wma', 'aiff'],
+      video: ['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'm4v', 'mpeg', 'mpg'],
+    };
+    const icons = {
+      image: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-success flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+        <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
+      </svg>`,
+      document: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-danger flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+        <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 8h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5z"/>
+      </svg>`,
+      spreadsheet: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-success flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2zM9.5 3A1.5 1.5 0 0 0 11 4.5h2V9H3V2a1 1 0 0 1 1-1h5.5v2zM3 12v-2h2v2H3zm0 1h2v2H4a1 1 0 0 1-1-1v-1zm3 2v-2h3v2H6zm4 0v-2h3v1a1 1 0 0 1-1 1h-2zm3-3h-3v-2h3v2zm-7 0v-2h3v2H6z"/>
+      </svg>`,
+      archive: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-secondary flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M6.5 7.5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v.938l.4 1.599a1 1 0 0 1-.416 1.074l-.93.62a1 1 0 0 1-1.109 0l-.93-.62a1 1 0 0 1-.415-1.074l.4-1.599V7.5z"/>
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1h-2v1h-1v1h1v1h-1v1h1v1H6V5H5V4h1V3H5V2h1V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+      </svg>`,
+      code: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-info flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+        <path d="M8.646 6.646a.5.5 0 0 1 .708 0l2 2a.5.5 0 0 1 0 .708l-2 2a.5.5 0 0 1-.708-.708L10.293 9 8.646 7.354a.5.5 0 0 1 0-.708zm-1.292 0a.5.5 0 0 0-.708 0l-2 2a.5.5 0 0 0 0 .708l2 2a.5.5 0 0 0 .708-.708L5.707 9l1.647-1.646a.5.5 0 0 0 0-.708z"/>
+      </svg>`,
+      audio: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M6 13c0 1.105-1.12 2-2.5 2S1 14.105 1 13c0-1.104 1.12-2 2.5-2s2.5.896 2.5 2zm9-2c0 1.105-1.12 2-2.5 2s-2.5-.895-2.5-2 1.12-2 2.5-2 2.5.895 2.5 2z"/>
+        <path fill-rule="evenodd" d="M14 11V2h1v9h-1zM6 3v10H5V3h1z"/>
+        <path d="M5 2.905a1 1 0 0 1 .9-.995l8-.8a1 1 0 0 1 1.1.995V3L5 4V2.905z"/>
+      </svg>`,
+      video: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-danger flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M0 12V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2zm6.79-6.907A.5.5 0 0 0 6 5.5v5a.5.5 0 0 0 .79.407l3.5-2.5a.5.5 0 0 0 0-.814l-3.5-2.5z"/>
+      </svg>`,
+      default: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-muted flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+      </svg>`,
+    };
+    for (const [type, extensions] of Object.entries(iconMap)) {
+      if (extensions.includes(ext)) {
+        return icons[type];
+      }
+    }
+    return icons.default;
+  };
+
   const selectAllCheckbox = document.querySelector('[data-select-all]');
   const bulkDeleteButton = document.querySelector('[data-bulk-delete-trigger]');
   const bulkDeleteLabel = bulkDeleteButton?.querySelector('[data-bulk-delete-label]');
@@ -158,8 +209,11 @@
         <input class="form-check-input" type="checkbox" data-object-select aria-label="Select ${escapeHtml(obj.key)}" />
       </td>
       <td class="object-key text-break" title="${escapeHtml(obj.key)}">
-        <div class="fw-medium">${escapeHtml(keyToShow)}</div>
-        <div class="text-muted small">Modified ${escapeHtml(lastModDisplay)}</div>
+        <div class="fw-medium d-flex align-items-center gap-2">
+          ${getFileTypeIcon(obj.key)}
+          <span>${escapeHtml(keyToShow)}</span>
+        </div>
+        <div class="text-muted small ms-4 ps-2">Modified ${escapeHtml(lastModDisplay)}</div>
       </td>
       <td class="text-end text-nowrap">
         <span class="text-muted small">${formatBytes(obj.size)}</span>
