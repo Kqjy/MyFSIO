@@ -100,6 +100,7 @@
   const previewPlaceholder = document.getElementById('preview-placeholder');
   const previewImage = document.getElementById('preview-image');
   const previewVideo = document.getElementById('preview-video');
+  const previewAudio = document.getElementById('preview-audio');
   const previewIframe = document.getElementById('preview-iframe');
   const downloadButton = document.getElementById('downloadButton');
   const presignButton = document.getElementById('presignButton');
@@ -186,20 +187,20 @@
     tr.dataset.objectRow = '';
     tr.dataset.key = obj.key;
     tr.dataset.size = obj.size;
-    tr.dataset.lastModified = obj.lastModified || obj.last_modified;
-    tr.dataset.lastModifiedDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleString();
-    tr.dataset.lastModifiedIso = obj.lastModifiedIso || obj.last_modified_iso || obj.lastModified || obj.last_modified;
-    tr.dataset.etag = obj.etag;
-    tr.dataset.previewUrl = obj.previewUrl || obj.preview_url;
-    tr.dataset.downloadUrl = obj.downloadUrl || obj.download_url;
-    tr.dataset.presignEndpoint = obj.presignEndpoint || obj.presign_endpoint;
-    tr.dataset.deleteEndpoint = obj.deleteEndpoint || obj.delete_endpoint;
-    tr.dataset.metadata = typeof obj.metadata === 'string' ? obj.metadata : JSON.stringify(obj.metadata || {});
-    tr.dataset.versionsEndpoint = obj.versionsEndpoint || obj.versions_endpoint;
-    tr.dataset.restoreTemplate = obj.restoreTemplate || obj.restore_template;
-    tr.dataset.tagsUrl = obj.tagsUrl || obj.tags_url;
-    tr.dataset.copyUrl = obj.copyUrl || obj.copy_url;
-    tr.dataset.moveUrl = obj.moveUrl || obj.move_url;
+    tr.dataset.lastModified = obj.lastModified ?? obj.last_modified ?? '';
+    tr.dataset.lastModifiedDisplay = obj.lastModifiedDisplay ?? obj.last_modified_display ?? new Date(obj.lastModified || obj.last_modified).toLocaleString();
+    tr.dataset.lastModifiedIso = obj.lastModifiedIso ?? obj.last_modified_iso ?? obj.lastModified ?? obj.last_modified ?? '';
+    tr.dataset.etag = obj.etag ?? '';
+    tr.dataset.previewUrl = obj.previewUrl ?? obj.preview_url ?? '';
+    tr.dataset.downloadUrl = obj.downloadUrl ?? obj.download_url ?? '';
+    tr.dataset.presignEndpoint = obj.presignEndpoint ?? obj.presign_endpoint ?? '';
+    tr.dataset.deleteEndpoint = obj.deleteEndpoint ?? obj.delete_endpoint ?? '';
+    tr.dataset.metadataUrl = obj.metadataUrl ?? obj.metadata_url ?? '';
+    tr.dataset.versionsEndpoint = obj.versionsEndpoint ?? obj.versions_endpoint ?? '';
+    tr.dataset.restoreTemplate = obj.restoreTemplate ?? obj.restore_template ?? '';
+    tr.dataset.tagsUrl = obj.tagsUrl ?? obj.tags_url ?? '';
+    tr.dataset.copyUrl = obj.copyUrl ?? obj.copy_url ?? '';
+    tr.dataset.moveUrl = obj.moveUrl ?? obj.move_url ?? '';
 
     const keyToShow = displayKey || obj.key;
     const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleDateString();
@@ -487,7 +488,7 @@
       downloadUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.download, key) : '',
       presignEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.presign, key) : '',
       deleteEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.delete, key) : '',
-      metadata: '{}',
+      metadataUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.metadata, key) : '',
       versionsEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.versions, key) : '',
       restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : '',
       tagsUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.tags, key) : '',
@@ -1411,15 +1412,30 @@
     }
   };
 
+  const INTERNAL_METADATA_KEYS = new Set([
+    '__etag__',
+    '__size__',
+    '__content_type__',
+    '__last_modified__',
+    '__storage_class__',
+  ]);
+
+  const isInternalKey = (key) => INTERNAL_METADATA_KEYS.has(key.toLowerCase());
+
   const renderMetadata = (metadata) => {
     if (!previewMetadata || !previewMetadataList) return;
     previewMetadataList.innerHTML = '';
-    if (!metadata || Object.keys(metadata).length === 0) {
+    if (!metadata) {
+      previewMetadata.classList.add('d-none');
+      return;
+    }
+    const userMetadata = Object.entries(metadata).filter(([key]) => !isInternalKey(key));
+    if (userMetadata.length === 0) {
       previewMetadata.classList.add('d-none');
       return;
     }
     previewMetadata.classList.remove('d-none');
-    Object.entries(metadata).forEach(([key, value]) => {
+    userMetadata.forEach(([key, value]) => {
       const wrapper = document.createElement('div');
       wrapper.className = 'metadata-entry';
       const label = document.createElement('div');
@@ -1811,9 +1827,10 @@
   }
 
   const resetPreviewMedia = () => {
-    [previewImage, previewVideo, previewIframe].forEach((el) => {
+    [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
+      if (!el) return;
       el.classList.add('d-none');
-      if (el.tagName === 'VIDEO') {
+      if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') {
         el.pause();
         el.removeAttribute('src');
       }
@@ -1824,28 +1841,27 @@
     previewPlaceholder.classList.remove('d-none');
   };
 
-  function metadataFromRow(row) {
-    if (!row || !row.dataset.metadata) {
-      return null;
-    }
+  async function fetchMetadata(metadataUrl) {
+    if (!metadataUrl) return null;
     try {
-      const parsed = JSON.parse(row.dataset.metadata);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed;
+      const resp = await fetch(metadataUrl);
+      if (resp.ok) {
+        const data = await resp.json();
+        return data.metadata || {};
       }
-    } catch (err) {
-      console.warn('Failed to parse metadata for row', err);
+    } catch (e) {
+      console.warn('Failed to load metadata', e);
     }
     return null;
   }
 
-  function selectRow(row) {
+  async function selectRow(row) {
     document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('table-active'));
     row.classList.add('table-active');
     previewEmpty.classList.add('d-none');
     previewPanel.classList.remove('d-none');
     activeRow = row;
-    renderMetadata(metadataFromRow(row));
+    renderMetadata(null);
 
     previewKey.textContent = row.dataset.key;
     previewSize.textContent = formatBytes(Number(row.dataset.size));
@@ -1868,18 +1884,36 @@
     resetPreviewMedia();
     const previewUrl = row.dataset.previewUrl;
     const lower = row.dataset.key.toLowerCase();
-    if (lower.match(/\.(png|jpg|jpeg|gif|webp|svg)$/)) {
+    if (previewUrl && lower.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp)$/)) {
       previewImage.src = previewUrl;
       previewImage.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
-    } else if (lower.match(/\.(mp4|webm|ogg)$/)) {
+    } else if (previewUrl && lower.match(/\.(mp4|webm|ogv|mov|avi|mkv)$/)) {
       previewVideo.src = previewUrl;
       previewVideo.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
-    } else if (lower.match(/\.(txt|log|json|md|csv)$/)) {
+    } else if (previewUrl && lower.match(/\.(mp3|wav|flac|ogg|aac|m4a|wma)$/)) {
+      previewAudio.src = previewUrl;
+      previewAudio.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    } else if (previewUrl && lower.match(/\.(pdf)$/)) {
       previewIframe.src = previewUrl;
+      previewIframe.style.minHeight = '500px';
       previewIframe.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
+    } else if (previewUrl && lower.match(/\.(txt|log|json|md|csv|xml|html|htm|js|ts|py|java|c|cpp|h|css|scss|yaml|yml|toml|ini|cfg|conf|sh|bat)$/)) {
+      previewIframe.src = previewUrl;
+      previewIframe.style.minHeight = '200px';
+      previewIframe.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    }
+
+    const metadataUrl = row.dataset.metadataUrl;
+    if (metadataUrl) {
+      const metadata = await fetchMetadata(metadataUrl);
+      if (activeRow === row) {
+        renderMetadata(metadata);
+      }
     }
   }
 
@@ -3741,8 +3775,8 @@
   });
 
   const originalSelectRow = selectRow;
-  selectRow = (row) => {
-    originalSelectRow(row);
+  selectRow = async (row) => {
+    await originalSelectRow(row);
     loadObjectTags(row);
   };
 

@@ -620,14 +620,10 @@ def list_bucket_objects(bucket_name: str):
     tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    metadata_template = url_for("ui.object_metadata", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
 
     objects_data = []
     for obj in result.objects:
-        metadata = {}
-        try:
-            metadata = storage.get_object_metadata(bucket_name, obj.key)
-        except Exception:
-            pass
         objects_data.append({
             "key": obj.key,
             "size": obj.size,
@@ -635,7 +631,6 @@ def list_bucket_objects(bucket_name: str):
             "last_modified_display": _format_datetime_display(obj.last_modified),
             "last_modified_iso": _format_datetime_iso(obj.last_modified),
             "etag": obj.etag,
-            "metadata": metadata,
         })
 
     return jsonify({
@@ -654,6 +649,7 @@ def list_bucket_objects(bucket_name: str):
             "tags": tags_template,
             "copy": copy_template,
             "move": move_template,
+            "metadata": metadata_template,
         },
     })
 
@@ -687,6 +683,7 @@ def stream_bucket_objects(bucket_name: str):
     tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    metadata_template = url_for("ui.object_metadata", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
 
     def generate():
@@ -703,6 +700,7 @@ def stream_bucket_objects(bucket_name: str):
                 "tags": tags_template,
                 "copy": copy_template,
                 "move": move_template,
+                "metadata": metadata_template,
             },
         }) + "\n"
         yield meta_line
@@ -728,11 +726,6 @@ def stream_bucket_objects(bucket_name: str):
                 yield json.dumps({"type": "count", "total_count": total_count}) + "\n"
 
             for obj in result.objects:
-                metadata = {}
-                try:
-                    metadata = storage.get_object_metadata(bucket_name, obj.key)
-                except Exception:
-                    pass
                 yield json.dumps({
                     "type": "object",
                     "key": obj.key,
@@ -741,7 +734,6 @@ def stream_bucket_objects(bucket_name: str):
                     "last_modified_display": _format_datetime_display(obj.last_modified, display_tz),
                     "last_modified_iso": _format_datetime_iso(obj.last_modified, display_tz),
                     "etag": obj.etag,
-                    "metadata": metadata,
                 }) + "\n"
 
             if not result.is_truncated:
@@ -1179,6 +1171,20 @@ def object_presign(bucket_name: str, object_key: str):
         else:
             body = {"error": text or "API returned an empty response"}
     return jsonify(body), response.status_code
+
+
+@ui_bp.get("/buckets/<bucket_name>/objects/<path:object_key>/metadata")
+def object_metadata(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    storage = _storage()
+    try:
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+        metadata = storage.get_object_metadata(bucket_name, object_key)
+        return jsonify({"metadata": metadata})
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 404
 
 
 @ui_bp.get("/buckets/<bucket_name>/objects/<path:object_key>/versions")
