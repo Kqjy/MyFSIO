@@ -16,6 +16,7 @@ from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .access_logging import AccessLoggingService
+from .operation_metrics import OperationMetricsCollector, classify_endpoint
 from .compression import GzipMiddleware
 from .acl import AclService
 from .bucket_policies import BucketPolicyStore
@@ -187,6 +188,15 @@ def create_app(
     app.extensions["notifications"] = notification_service
     app.extensions["access_logging"] = access_logging_service
 
+    operation_metrics_collector = None
+    if app.config.get("OPERATION_METRICS_ENABLED", False):
+        operation_metrics_collector = OperationMetricsCollector(
+            storage_root,
+            interval_minutes=app.config.get("OPERATION_METRICS_INTERVAL_MINUTES", 5),
+            retention_hours=app.config.get("OPERATION_METRICS_RETENTION_HOURS", 24),
+        )
+    app.extensions["operation_metrics"] = operation_metrics_collector
+
     @app.errorhandler(500)
     def internal_error(error):
         return render_template('500.html'), 500
@@ -356,6 +366,7 @@ def _configure_logging(app: Flask) -> None:
     def _log_request_start() -> None:
         g.request_id = uuid.uuid4().hex
         g.request_started_at = time.perf_counter()
+        g.request_bytes_in = request.content_length or 0
         app.logger.info(
             "Request started",
             extra={"path": request.path, "method": request.method, "remote_addr": request.remote_addr},
@@ -377,4 +388,21 @@ def _configure_logging(app: Flask) -> None:
             },
         )
         response.headers["X-Request-Duration-ms"] = f"{duration_ms:.2f}"
+
+        operation_metrics = app.extensions.get("operation_metrics")
+        if operation_metrics:
+            bytes_in = getattr(g, "request_bytes_in", 0)
+            bytes_out = response.content_length or 0
+            error_code = getattr(g, "s3_error_code", None)
+            endpoint_type = classify_endpoint(request.path)
+            operation_metrics.record_request(
+                method=request.method,
+                endpoint_type=endpoint_type,
+                status_code=response.status_code,
+                latency_ms=duration_ms,
+                bytes_in=bytes_in,
+                bytes_out=bytes_out,
+                error_code=error_code,
+            )
+
         return response

@@ -87,6 +87,9 @@ class AppConfig:
     metrics_history_enabled: bool
     metrics_history_retention_hours: int
     metrics_history_interval_minutes: int
+    operation_metrics_enabled: bool
+    operation_metrics_interval_minutes: int
+    operation_metrics_retention_hours: int
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -186,6 +189,9 @@ class AppConfig:
         metrics_history_enabled = str(_get("METRICS_HISTORY_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
         metrics_history_retention_hours = int(_get("METRICS_HISTORY_RETENTION_HOURS", 24))
         metrics_history_interval_minutes = int(_get("METRICS_HISTORY_INTERVAL_MINUTES", 5))
+        operation_metrics_enabled = str(_get("OPERATION_METRICS_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        operation_metrics_interval_minutes = int(_get("OPERATION_METRICS_INTERVAL_MINUTES", 5))
+        operation_metrics_retention_hours = int(_get("OPERATION_METRICS_RETENTION_HOURS", 24))
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -227,7 +233,10 @@ class AppConfig:
                    lifecycle_interval_seconds=lifecycle_interval_seconds,
                    metrics_history_enabled=metrics_history_enabled,
                    metrics_history_retention_hours=metrics_history_retention_hours,
-                   metrics_history_interval_minutes=metrics_history_interval_minutes)
+                   metrics_history_interval_minutes=metrics_history_interval_minutes,
+                   operation_metrics_enabled=operation_metrics_enabled,
+                   operation_metrics_interval_minutes=operation_metrics_interval_minutes,
+                   operation_metrics_retention_hours=operation_metrics_retention_hours)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -359,4 +368,7 @@ class AppConfig:
             "METRICS_HISTORY_ENABLED": self.metrics_history_enabled,
             "METRICS_HISTORY_RETENTION_HOURS": self.metrics_history_retention_hours,
             "METRICS_HISTORY_INTERVAL_MINUTES": self.metrics_history_interval_minutes,
+            "OPERATION_METRICS_ENABLED": self.operation_metrics_enabled,
+            "OPERATION_METRICS_INTERVAL_MINUTES": self.operation_metrics_interval_minutes,
+            "OPERATION_METRICS_RETENTION_HOURS": self.operation_metrics_retention_hours,
         }

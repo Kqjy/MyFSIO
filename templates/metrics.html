@@ -268,6 +268,121 @@
   </div>
 </div>
 
+{% if operation_metrics_enabled %}
+<div class="row g-4 mt-2">
+  <div class="col-12">
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-transparent border-0 pt-4 px-4 d-flex justify-content-between align-items-center">
+        <h5 class="card-title mb-0 fw-semibold">API Operations</h5>
+        <div class="d-flex align-items-center gap-3">
+          <span class="small text-muted" id="opStatus">Loading...</span>
+          <button class="btn btn-outline-secondary btn-sm" id="resetOpMetricsBtn" title="Reset current window">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-arrow-counterclockwise" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
+              <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="card-body p-4">
+        <div class="row g-3 mb-4">
+          <div class="col-6 col-md-4 col-lg-2">
+            <div class="text-center p-3 bg-light rounded h-100">
+              <h4 class="fw-bold mb-1" id="opTotalRequests">0</h4>
+              <small class="text-muted">Requests</small>
+            </div>
+          </div>
+          <div class="col-6 col-md-4 col-lg-2">
+            <div class="text-center p-3 bg-light rounded h-100">
+              <h4 class="fw-bold mb-1 text-success" id="opSuccessRate">0%</h4>
+              <small class="text-muted">Success</small>
+            </div>
+          </div>
+          <div class="col-6 col-md-4 col-lg-2">
+            <div class="text-center p-3 bg-light rounded h-100">
+              <h4 class="fw-bold mb-1 text-danger" id="opErrorCount">0</h4>
+              <small class="text-muted">Errors</small>
+            </div>
+          </div>
+          <div class="col-6 col-md-4 col-lg-2">
+            <div class="text-center p-3 bg-light rounded h-100">
+              <h4 class="fw-bold mb-1 text-info" id="opAvgLatency">0ms</h4>
+              <small class="text-muted">Latency</small>
+            </div>
+          </div>
+          <div class="col-6 col-md-4 col-lg-2">
+            <div class="text-center p-3 bg-light rounded h-100">
+              <h4 class="fw-bold mb-1 text-primary" id="opBytesIn">0 B</h4>
+              <small class="text-muted">Bytes In</small>
+            </div>
+          </div>
+          <div class="col-6 col-md-4 col-lg-2">
+            <div class="text-center p-3 bg-light rounded h-100">
+              <h4 class="fw-bold mb-1 text-secondary" id="opBytesOut">0 B</h4>
+              <small class="text-muted">Bytes Out</small>
+            </div>
+          </div>
+        </div>
+        <div class="row g-4">
+          <div class="col-lg-6">
+            <div class="bg-light rounded p-3">
+              <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Method</h6>
+              <div style="height: 220px; display: flex; align-items: center; justify-content: center;">
+                <canvas id="methodChart"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-6">
+            <div class="bg-light rounded p-3">
+              <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Status</h6>
+              <div style="height: 220px;">
+                <canvas id="statusChart"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="row g-4 mt-1">
+          <div class="col-lg-6">
+            <div class="bg-light rounded p-3">
+              <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Endpoint</h6>
+              <div style="height: 180px;">
+                <canvas id="endpointChart"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-6">
+            <div class="bg-light rounded p-3 h-100 d-flex flex-column">
+              <div class="d-flex justify-content-between align-items-start mb-3">
+                <h6 class="text-muted small fw-bold text-uppercase mb-0">S3 Error Codes</h6>
+                <span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;" title="Tracks S3 API errors like NoSuchKey, AccessDenied, etc.">API Only</span>
+              </div>
+              <div class="flex-grow-1 d-flex flex-column" style="min-height: 150px;">
+                <div class="d-flex border-bottom pb-2 mb-2" style="font-size: 0.75rem;">
+                  <div class="text-muted fw-semibold" style="flex: 1;">Code</div>
+                  <div class="text-muted fw-semibold text-end" style="width: 60px;">Count</div>
+                  <div class="text-muted fw-semibold text-end" style="width: 100px;">Distribution</div>
+                </div>
+                <div id="errorCodesContainer" class="flex-grow-1" style="overflow-y: auto;">
+                  <div id="errorCodesBody">
+                    <div class="text-muted small text-center py-4">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16">
+                        <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                        <path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/>
+                      </svg>
+                      <div>No S3 API errors</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% if metrics_history_enabled %}
 <div class="row g-4 mt-2">
   <div class="col-12">
@@ -307,7 +422,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-{% if metrics_history_enabled %}
+{% if metrics_history_enabled or operation_metrics_enabled %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 {% endif %}
 <script>
@@ -412,6 +527,237 @@
 
   startPolling();
 })();
+
+{% if operation_metrics_enabled %}
+(function() {
+  var methodChart = null;
+  var statusChart = null;
+  var endpointChart = null;
+  var opStatus = document.getElementById('opStatus');
+  var opTimer = null;
+  var methodColors = {
+    'GET': '#0d6efd',
+    'PUT': '#198754',
+    'POST': '#ffc107',
+    'DELETE': '#dc3545',
+    'HEAD': '#6c757d',
+    'OPTIONS': '#0dcaf0'
+  };
+  var statusColors = {
+    '2xx': '#198754',
+    '3xx': '#0dcaf0',
+    '4xx': '#ffc107',
+    '5xx': '#dc3545'
+  };
+  var endpointColors = {
+    'object': '#0d6efd',
+    'bucket': '#198754',
+    'ui': '#6c757d',
+    'service': '#0dcaf0',
+    'kms': '#ffc107'
+  };
+
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    var k = 1024;
+    var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  }
+
+  function initOpCharts() {
+    var methodCtx = document.getElementById('methodChart');
+    var statusCtx = document.getElementById('statusChart');
+    var endpointCtx = document.getElementById('endpointChart');
+
+    if (methodCtx) {
+      methodChart = new Chart(methodCtx, {
+        type: 'doughnut',
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            backgroundColor: []
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          plugins: {
+            legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } }
+          }
+        }
+      });
+    }
+
+    if (statusCtx) {
+      statusChart = new Chart(statusCtx, {
+        type: 'bar',
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            backgroundColor: []
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { beginAtZero: true, ticks: { stepSize: 1 } }
+          }
+        }
+      });
+    }
+
+    if (endpointCtx) {
+      endpointChart = new Chart(endpointCtx, {
+        type: 'bar',
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            backgroundColor: []
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          indexAxis: 'y',
+          animation: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { beginAtZero: true, ticks: { stepSize: 1 } }
+          }
+        }
+      });
+    }
+  }
+
+  function updateOpMetrics() {
+    if (document.hidden) return;
+    fetch('/ui/metrics/operations')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.enabled || !data.stats) {
+          if (opStatus) opStatus.textContent = 'Operation metrics not available';
+          return;
+        }
+        var stats = data.stats;
+        var totals = stats.totals || {};
+
+        var totalEl = document.getElementById('opTotalRequests');
+        var successEl = document.getElementById('opSuccessRate');
+        var errorEl = document.getElementById('opErrorCount');
+        var latencyEl = document.getElementById('opAvgLatency');
+        var bytesInEl = document.getElementById('opBytesIn');
+        var bytesOutEl = document.getElementById('opBytesOut');
+
+        if (totalEl) totalEl.textContent = totals.count || 0;
+        if (successEl) {
+          var rate = totals.count > 0 ? ((totals.success_count / totals.count) * 100).toFixed(1) : 0;
+          successEl.textContent = rate + '%';
+        }
+        if (errorEl) errorEl.textContent = totals.error_count || 0;
+        if (latencyEl) latencyEl.textContent = (totals.latency_avg_ms || 0).toFixed(1) + 'ms';
+        if (bytesInEl) bytesInEl.textContent = formatBytes(totals.bytes_in || 0);
+        if (bytesOutEl) bytesOutEl.textContent = formatBytes(totals.bytes_out || 0);
+
+        if (methodChart && stats.by_method) {
+          var methods = Object.keys(stats.by_method);
+          var methodData = methods.map(function(m) { return stats.by_method[m].count; });
+          var methodBg = methods.map(function(m) { return methodColors[m] || '#6c757d'; });
+          methodChart.data.labels = methods;
+          methodChart.data.datasets[0].data = methodData;
+          methodChart.data.datasets[0].backgroundColor = methodBg;
+          methodChart.update('none');
+        }
+
+        if (statusChart && stats.by_status_class) {
+          var statuses = Object.keys(stats.by_status_class).sort();
+          var statusData = statuses.map(function(s) { return stats.by_status_class[s]; });
+          var statusBg = statuses.map(function(s) { return statusColors[s] || '#6c757d'; });
+          statusChart.data.labels = statuses;
+          statusChart.data.datasets[0].data = statusData;
+          statusChart.data.datasets[0].backgroundColor = statusBg;
+          statusChart.update('none');
+        }
+
+        if (endpointChart && stats.by_endpoint) {
+          var endpoints = Object.keys(stats.by_endpoint);
+          var endpointData = endpoints.map(function(e) { return stats.by_endpoint[e].count; });
+          var endpointBg = endpoints.map(function(e) { return endpointColors[e] || '#6c757d'; });
+          endpointChart.data.labels = endpoints;
+          endpointChart.data.datasets[0].data = endpointData;
+          endpointChart.data.datasets[0].backgroundColor = endpointBg;
+          endpointChart.update('none');
+        }
+
+        var errorBody = document.getElementById('errorCodesBody');
+        if (errorBody && stats.error_codes) {
+          var errorCodes = Object.entries(stats.error_codes);
+          errorCodes.sort(function(a, b) { return b[1] - a[1]; });
+          var totalErrors = errorCodes.reduce(function(sum, e) { return sum + e[1]; }, 0);
+          errorCodes = errorCodes.slice(0, 10);
+          if (errorCodes.length === 0) {
+            errorBody.innerHTML = '<div class="text-muted small text-center py-4">' +
+              '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16">' +
+              '<path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>' +
+              '<path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/>' +
+              '</svg><div>No S3 API errors</div></div>';
+          } else {
+            errorBody.innerHTML = errorCodes.map(function(e) {
+              var pct = totalErrors > 0 ? ((e[1] / totalErrors) * 100).toFixed(0) : 0;
+              return '<div class="d-flex align-items-center py-1" style="font-size: 0.8rem;">' +
+                '<div style="flex: 1;"><code class="text-danger">' + e[0] + '</code></div>' +
+                '<div class="text-end fw-semibold" style="width: 60px;">' + e[1] + '</div>' +
+                '<div style="width: 100px; padding-left: 10px;"><div class="progress" style="height: 6px;"><div class="progress-bar bg-danger" style="width: ' + pct + '%"></div></div></div>' +
+                '</div>';
+            }).join('');
+          }
+        }
+
+        var windowMins = Math.floor(stats.window_seconds / 60);
+        var windowSecs = stats.window_seconds % 60;
+        var windowStr = windowMins > 0 ? windowMins + 'm ' + windowSecs + 's' : windowSecs + 's';
+        if (opStatus) opStatus.textContent = 'Window: ' + windowStr + ' | ' + new Date().toLocaleTimeString();
+      })
+      .catch(function(err) {
+        console.error('Operation metrics fetch error:', err);
+        if (opStatus) opStatus.textContent = 'Failed to load';
+      });
+  }
+
+  function startOpPolling() {
+    if (opTimer) clearInterval(opTimer);
+    opTimer = setInterval(updateOpMetrics, 5000);
+  }
+
+  var resetBtn = document.getElementById('resetOpMetricsBtn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function() {
+      updateOpMetrics();
+    });
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      if (opTimer) clearInterval(opTimer);
+      opTimer = null;
+    } else {
+      updateOpMetrics();
+      startOpPolling();
+    }
+  });
+
+  initOpCharts();
+  updateOpMetrics();
+  startOpPolling();
+})();
+{% endif %}
 
 {% if metrics_history_enabled %}
 (function() {

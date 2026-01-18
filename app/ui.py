@@ -141,6 +141,10 @@ def _acl() -> AclService:
     return current_app.extensions["acl"]
 
 
+def _operation_metrics():
+    return current_app.extensions.get("operation_metrics")
+
+
 def _format_bytes(num: int) -> str:
     step = 1024
     units = ["B", "KB", "MB", "GB", "TB", "PB"]
@@ -2196,6 +2200,7 @@ def metrics_dashboard():
             "uptime_days": uptime_days,
         },
         metrics_history_enabled=current_app.config.get("METRICS_HISTORY_ENABLED", False),
+        operation_metrics_enabled=current_app.config.get("OPERATION_METRICS_ENABLED", False),
     )
 
 
@@ -2326,6 +2331,52 @@ def metrics_settings():
         "enabled": current_app.config.get("METRICS_HISTORY_ENABLED", False),
         "retention_hours": current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
         "interval_minutes": current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+    })
+
+
+@ui_bp.get("/metrics/operations")
+def metrics_operations():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    collector = _operation_metrics()
+    if not collector:
+        return jsonify({
+            "enabled": False,
+            "stats": None,
+        })
+
+    return jsonify({
+        "enabled": True,
+        "stats": collector.get_current_stats(),
+    })
+
+
+@ui_bp.get("/metrics/operations/history")
+def metrics_operations_history():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    collector = _operation_metrics()
+    if not collector:
+        return jsonify({
+            "enabled": False,
+            "history": [],
+        })
+
+    hours = request.args.get("hours", type=int)
+    return jsonify({
+        "enabled": True,
+        "history": collector.get_history(hours),
+        "interval_minutes": current_app.config.get("OPERATION_METRICS_INTERVAL_MINUTES", 5),
     })
 
 

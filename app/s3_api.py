@@ -88,6 +88,7 @@ def _xml_response(element: Element, status: int = 200) -> Response:
 
 
 def _error_response(code: str, message: str, status: int) -> Response:
+    g.s3_error_code = code
     error = Element("Error")
     SubElement(error, "Code").text = code
     SubElement(error, "Message").text = message
