@@ -1773,11 +1773,9 @@ class ObjectStorage:
             raise StorageError("Object key contains null bytes")
         if object_key.startswith(("/", "\\")):
             raise StorageError("Object key cannot start with a slash")
-        normalized = unicodedata.normalize("NFC", object_key)
-        if normalized != object_key:
-            raise StorageError("Object key must use normalized Unicode")
-        
-        candidate = Path(normalized)
+        object_key = unicodedata.normalize("NFC", object_key)
+
+        candidate = Path(object_key)
         if ".." in candidate.parts:
             raise StorageError("Object key contains parent directory references")
         

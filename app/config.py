@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -8,6 +9,13 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+
+def _validate_rate_limit(value: str) -> str:
+    pattern = r"^\d+\s+per\s+(second|minute|hour|day)$"
+    if not re.match(pattern, value):
+        raise ValueError(f"Invalid rate limit format: {value}. Expected format: '200 per minute'")
+    return value
 
 if getattr(sys, "frozen", False):
     # Running in a PyInstaller bundle
@@ -151,7 +159,7 @@ class AppConfig:
         log_path = log_dir / str(_get("LOG_FILE", "app.log"))
         log_max_bytes = int(_get("LOG_MAX_BYTES", 5 * 1024 * 1024))
         log_backup_count = int(_get("LOG_BACKUP_COUNT", 3))
-        ratelimit_default = str(_get("RATE_LIMIT_DEFAULT", "200 per minute"))
+        ratelimit_default = _validate_rate_limit(str(_get("RATE_LIMIT_DEFAULT", "200 per minute")))
         ratelimit_storage_uri = str(_get("RATE_LIMIT_STORAGE_URI", "memory://"))
 
         def _csv(value: str, default: list[str]) -> list[str]:

@@ -280,7 +280,7 @@ def create_app(
 
     @app.get("/healthz")
     def healthcheck() -> Dict[str, str]:
-        return {"status": "ok", "version": app.config.get("APP_VERSION", "unknown")}
+        return {"status": "ok"}
 
     return app
 

@@ -104,12 +104,12 @@ def test_request_id_header_present(client, signer):
     assert response.headers.get("X-Request-ID")
 
 
-def test_healthcheck_returns_version(client):
+def test_healthcheck_returns_status(client):
     response = client.get("/healthz")
     data = response.get_json()
     assert response.status_code == 200
     assert data["status"] == "ok"
-    assert "version" in data
+    assert "version" not in data
 
 
 def test_missing_credentials_denied(client):

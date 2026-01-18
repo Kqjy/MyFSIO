@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import secrets
@@ -149,7 +150,7 @@ class IamService:
                 f"Access temporarily locked. Try again in {seconds} seconds."
             )
         record = self._users.get(access_key)
-        if not record or record["secret_key"] != secret_key:
+        if not record or not hmac.compare_digest(record["secret_key"], secret_key):
             self._record_failed_attempt(access_key)
             raise IamError("Invalid credentials")
         self._clear_failed_attempts(access_key)
