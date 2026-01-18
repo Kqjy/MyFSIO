@@ -375,11 +375,8 @@ curl -X PUT {{ api_base }}/demo/notes.txt \
   -H "X-Secret-Key: &lt;secret_key&gt;" \
   --data-binary @notes.txt
 
-curl -X POST {{ api_base }}/presign/demo/notes.txt \
-  -H "Content-Type: application/json" \
-  -H "X-Access-Key: &lt;access_key&gt;" \
-  -H "X-Secret-Key: &lt;secret_key&gt;" \
-  -d '{"method":"GET", "expires_in": 900}'
+# Presigned URLs are generated via the UI
+# Use the "Presign" button in the object browser
 </code></pre>
         </div>
       </div>
@@ -437,13 +434,8 @@ curl -X POST {{ api_base }}/presign/demo/notes.txt \
               </tr>
               <tr>
                 <td>GET/PUT/DELETE</td>
-                <td><code>/bucket-policy/&lt;bucket&gt;</code></td>
-                <td>Fetch, upsert, or remove a bucket policy.</td>
-              </tr>
-              <tr>
-                <td>POST</td>
-                <td><code>/presign/&lt;bucket&gt;/&lt;key&gt;</code></td>
-                <td>Generate SigV4 URLs for GET/PUT/DELETE with custom expiry.</td>
+                <td><code>/&lt;bucket&gt;?policy</code></td>
+                <td>Fetch, upsert, or remove a bucket policy (S3-compatible).</td>
               </tr>
             </tbody>
           </table>
@@ -542,17 +534,16 @@ s3.complete_multipart_upload(
 )</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Presigned URLs for Sharing</h3>
-<pre class="mb-0"><code class="language-bash"># Generate a download link valid for 15 minutes
-curl -X POST "{{ api_base }}/presign/mybucket/photo.jpg" \
-  -H "Content-Type: application/json" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"method": "GET", "expires_in": 900}'
+<pre class="mb-0"><code class="language-text"># Generate presigned URLs via the UI:
+# 1. Navigate to your bucket in the object browser
+# 2. Select the object you want to share
+# 3. Click the "Presign" button
+# 4. Choose method (GET/PUT/DELETE) and expiration time
+# 5. Copy the generated URL
 
-# Generate an upload link (PUT) valid for 1 hour
-curl -X POST "{{ api_base }}/presign/mybucket/upload.bin" \
-  -H "Content-Type: application/json" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"method": "PUT", "expires_in": 3600}'</code></pre>
+# Supported options:
+# - Method: GET (download), PUT (upload), DELETE (remove)
+# - Expiration: 1 second to 7 days (604800 seconds)</code></pre>
       </div>
     </article>
     <article id="replication" class="card shadow-sm docs-section">

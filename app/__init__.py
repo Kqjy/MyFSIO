@@ -278,7 +278,7 @@ def create_app(
                 return render_template("404.html"), 404
         return error
 
-    @app.get("/healthz")
+    @app.get("/myfsio/health")
     def healthcheck() -> Dict[str, str]:
         return {"status": "ok"}
 

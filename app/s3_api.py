@@ -590,6 +590,7 @@ def _generate_presigned_url(
     bucket_name: str,
     object_key: str,
     expires_in: int,
+    api_base_url: str | None = None,
 ) -> str:
     region = current_app.config["AWS_REGION"]
     service = current_app.config["AWS_SERVICE"]
@@ -610,7 +611,7 @@ def _generate_presigned_url(
     }
     canonical_query = _encode_query_params(query_params)
 
-    api_base = current_app.config.get("API_BASE_URL")
+    api_base = api_base_url or current_app.config.get("API_BASE_URL")
     if api_base:
         parsed = urlparse(api_base)
         host = parsed.netloc
@@ -940,6 +941,7 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "notification": _bucket_notification_handler,
         "logging": _bucket_logging_handler,
         "uploads": _bucket_uploads_handler,
+        "policy": _bucket_policy_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -2642,9 +2644,9 @@ def _list_parts(bucket_name: str, object_key: str) -> Response:
     return _xml_response(root)
 
 
-@s3_api_bp.route("/bucket-policy/<bucket_name>", methods=["GET", "PUT", "DELETE"])
-@limiter.limit("30 per minute")
-def bucket_policy_handler(bucket_name: str) -> Response:
+def _bucket_policy_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
     principal, error = _require_principal()
     if error:
         return error
@@ -2674,51 +2676,6 @@ def bucket_policy_handler(bucket_name: str) -> Response:
     except ValueError as exc:
         return _error_response("MalformedPolicy", str(exc), 400)
     return Response(status=204)
-
-
-@s3_api_bp.post("/presign/<bucket_name>/<path:object_key>")
-@limiter.limit("45 per minute")
-def presign_object(bucket_name: str, object_key: str):
-    payload = request.get_json(silent=True) or {}
-    method = str(payload.get("method", "GET")).upper()
-    allowed_methods = {"GET", "PUT", "DELETE"}
-    if method not in allowed_methods:
-        return _error_response("InvalidRequest", "Method must be GET, PUT, or DELETE", 400)
-    try:
-        expires = int(payload.get("expires_in", 900))
-    except (TypeError, ValueError):
-        return _error_response("InvalidRequest", "expires_in must be an integer", 400)
-    expires = max(1, min(expires, 7 * 24 * 3600))
-    action = "read" if method == "GET" else ("delete" if method == "DELETE" else "write")
-    principal, error = _require_principal()
-    if error:
-        return error
-    try:
-        _authorize_action(principal, bucket_name, action, object_key=object_key)
-    except IamError as exc:
-        return _error_response("AccessDenied", str(exc), 403)
-    storage = _storage()
-    if not storage.bucket_exists(bucket_name):
-        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
-    if action != "write":
-        try:
-            storage.get_object_path(bucket_name, object_key)
-        except StorageError:
-            return _error_response("NoSuchKey", "Object not found", 404)
-    secret = _iam().secret_for_key(principal.access_key)
-    url = _generate_presigned_url(
-        principal=principal,
-        secret_key=secret,
-        method=method,
-        bucket_name=bucket_name,
-        object_key=object_key,
-        expires_in=expires,
-    )
-    current_app.logger.info(
-        "Presigned URL generated",
-        extra={"bucket": bucket_name, "key": object_key, "method": method},
-    )
-    return jsonify({"url": url, "method": method, "expires_in": expires})
 
 
 @s3_api_bp.route("/<bucket_name>", methods=["HEAD"])

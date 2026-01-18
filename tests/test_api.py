@@ -1,6 +1,3 @@
-from urllib.parse import urlsplit
-
-
 def test_bucket_and_object_lifecycle(client, signer):
     headers = signer("PUT", "/photos")
     response = client.put("/photos", headers=headers)
@@ -105,7 +102,7 @@ def test_request_id_header_present(client, signer):
 
 
 def test_healthcheck_returns_status(client):
-    response = client.get("/healthz")
+    response = client.get("/myfsio/health")
     data = response.get_json()
     assert response.status_code == 200
     assert data["status"] == "ok"
@@ -117,36 +114,20 @@ def test_missing_credentials_denied(client):
     assert response.status_code == 403
 
 
-def test_presign_and_bucket_policies(client, signer):
-    # Create bucket and object
+def test_bucket_policies_deny_reads(client, signer):
+    import json
+
     headers = signer("PUT", "/docs")
     assert client.put("/docs", headers=headers).status_code == 200
-    
+
     headers = signer("PUT", "/docs/readme.txt", body=b"content")
     assert client.put("/docs/readme.txt", headers=headers, data=b"content").status_code == 200
 
-    # Generate presigned GET URL and follow it
-    json_body = {"method": "GET", "expires_in": 120}
-    # Flask test client json parameter automatically sets Content-Type and serializes body
-    # But for signing we need the body bytes.
-    import json
-    body_bytes = json.dumps(json_body).encode("utf-8")
-    headers = signer("POST", "/presign/docs/readme.txt", headers={"Content-Type": "application/json"}, body=body_bytes)
-    
-    response = client.post(
-        "/presign/docs/readme.txt",
-        headers=headers,
-        json=json_body,
-    )
+    headers = signer("GET", "/docs/readme.txt")
+    response = client.get("/docs/readme.txt", headers=headers)
     assert response.status_code == 200
-    presigned_url = response.get_json()["url"]
-    parts = urlsplit(presigned_url)
-    presigned_path = f"{parts.path}?{parts.query}"
-    download = client.get(presigned_path)
-    assert download.status_code == 200
-    assert download.data == b"content"
+    assert response.data == b"content"
 
-    # Attach a deny policy for GETs
     policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -160,29 +141,26 @@ def test_presign_and_bucket_policies(client, signer):
         ],
     }
     policy_bytes = json.dumps(policy).encode("utf-8")
-    headers = signer("PUT", "/bucket-policy/docs", headers={"Content-Type": "application/json"}, body=policy_bytes)
-    assert client.put("/bucket-policy/docs", headers=headers, json=policy).status_code == 204
-    
-    headers = signer("GET", "/bucket-policy/docs")
-    fetched = client.get("/bucket-policy/docs", headers=headers)
+    headers = signer("PUT", "/docs?policy", headers={"Content-Type": "application/json"}, body=policy_bytes)
+    assert client.put("/docs?policy", headers=headers, json=policy).status_code == 204
+
+    headers = signer("GET", "/docs?policy")
+    fetched = client.get("/docs?policy", headers=headers)
     assert fetched.status_code == 200
     assert fetched.get_json()["Version"] == "2012-10-17"
 
-    # Reads are now denied by bucket policy
     headers = signer("GET", "/docs/readme.txt")
     denied = client.get("/docs/readme.txt", headers=headers)
     assert denied.status_code == 403
 
-    # Presign attempts are also denied
-    json_body = {"method": "GET", "expires_in": 60}
-    body_bytes = json.dumps(json_body).encode("utf-8")
-    headers = signer("POST", "/presign/docs/readme.txt", headers={"Content-Type": "application/json"}, body=body_bytes)
-    response = client.post(
-        "/presign/docs/readme.txt",
-        headers=headers,
-        json=json_body,
-    )
-    assert response.status_code == 403
+    headers = signer("DELETE", "/docs?policy")
+    assert client.delete("/docs?policy", headers=headers).status_code == 204
+
+    headers = signer("DELETE", "/docs/readme.txt")
+    assert client.delete("/docs/readme.txt", headers=headers).status_code == 204
+
+    headers = signer("DELETE", "/docs")
+    assert client.delete("/docs", headers=headers).status_code == 204
 
 
 def test_trailing_slash_returns_xml(client):
@@ -193,9 +171,11 @@ def test_trailing_slash_returns_xml(client):
 
 
 def test_public_policy_allows_anonymous_list_and_read(client, signer):
+    import json
+
     headers = signer("PUT", "/public")
     assert client.put("/public", headers=headers).status_code == 200
-    
+
     headers = signer("PUT", "/public/hello.txt", body=b"hi")
     assert client.put("/public/hello.txt", headers=headers, data=b"hi").status_code == 200
 
@@ -221,10 +201,9 @@ def test_public_policy_allows_anonymous_list_and_read(client, signer):
             },
         ],
     }
-    import json
     policy_bytes = json.dumps(policy).encode("utf-8")
-    headers = signer("PUT", "/bucket-policy/public", headers={"Content-Type": "application/json"}, body=policy_bytes)
-    assert client.put("/bucket-policy/public", headers=headers, json=policy).status_code == 204
+    headers = signer("PUT", "/public?policy", headers={"Content-Type": "application/json"}, body=policy_bytes)
+    assert client.put("/public?policy", headers=headers, json=policy).status_code == 204
 
     list_response = client.get("/public")
     assert list_response.status_code == 200
@@ -236,18 +215,20 @@ def test_public_policy_allows_anonymous_list_and_read(client, signer):
 
     headers = signer("DELETE", "/public/hello.txt")
     assert client.delete("/public/hello.txt", headers=headers).status_code == 204
-    
-    headers = signer("DELETE", "/bucket-policy/public")
-    assert client.delete("/bucket-policy/public", headers=headers).status_code == 204
-    
+
+    headers = signer("DELETE", "/public?policy")
+    assert client.delete("/public?policy", headers=headers).status_code == 204
+
     headers = signer("DELETE", "/public")
     assert client.delete("/public", headers=headers).status_code == 204
 
 
 def test_principal_dict_with_object_get_only(client, signer):
+    import json
+
     headers = signer("PUT", "/mixed")
     assert client.put("/mixed", headers=headers).status_code == 200
-    
+
     headers = signer("PUT", "/mixed/only.txt", body=b"ok")
     assert client.put("/mixed/only.txt", headers=headers, data=b"ok").status_code == 200
 
@@ -270,10 +251,9 @@ def test_principal_dict_with_object_get_only(client, signer):
             },
         ],
     }
-    import json
     policy_bytes = json.dumps(policy).encode("utf-8")
-    headers = signer("PUT", "/bucket-policy/mixed", headers={"Content-Type": "application/json"}, body=policy_bytes)
-    assert client.put("/bucket-policy/mixed", headers=headers, json=policy).status_code == 204
+    headers = signer("PUT", "/mixed?policy", headers={"Content-Type": "application/json"}, body=policy_bytes)
+    assert client.put("/mixed?policy", headers=headers, json=policy).status_code == 204
 
     assert client.get("/mixed").status_code == 403
     allowed = client.get("/mixed/only.txt")
@@ -282,18 +262,20 @@ def test_principal_dict_with_object_get_only(client, signer):
 
     headers = signer("DELETE", "/mixed/only.txt")
     assert client.delete("/mixed/only.txt", headers=headers).status_code == 204
-    
-    headers = signer("DELETE", "/bucket-policy/mixed")
-    assert client.delete("/bucket-policy/mixed", headers=headers).status_code == 204
-    
+
+    headers = signer("DELETE", "/mixed?policy")
+    assert client.delete("/mixed?policy", headers=headers).status_code == 204
+
     headers = signer("DELETE", "/mixed")
     assert client.delete("/mixed", headers=headers).status_code == 204
 
 
 def test_bucket_policy_wildcard_resource_allows_object_get(client, signer):
+    import json
+
     headers = signer("PUT", "/test")
     assert client.put("/test", headers=headers).status_code == 200
-    
+
     headers = signer("PUT", "/test/vid.mp4", body=b"video")
     assert client.put("/test/vid.mp4", headers=headers, data=b"video").status_code == 200
 
@@ -314,10 +296,9 @@ def test_bucket_policy_wildcard_resource_allows_object_get(client, signer):
             },
         ],
     }
-    import json
     policy_bytes = json.dumps(policy).encode("utf-8")
-    headers = signer("PUT", "/bucket-policy/test", headers={"Content-Type": "application/json"}, body=policy_bytes)
-    assert client.put("/bucket-policy/test", headers=headers, json=policy).status_code == 204
+    headers = signer("PUT", "/test?policy", headers={"Content-Type": "application/json"}, body=policy_bytes)
+    assert client.put("/test?policy", headers=headers, json=policy).status_code == 204
 
     listing = client.get("/test")
     assert listing.status_code == 403
@@ -327,10 +308,10 @@ def test_bucket_policy_wildcard_resource_allows_object_get(client, signer):
 
     headers = signer("DELETE", "/test/vid.mp4")
     assert client.delete("/test/vid.mp4", headers=headers).status_code == 204
-    
-    headers = signer("DELETE", "/bucket-policy/test")
-    assert client.delete("/bucket-policy/test", headers=headers).status_code == 204
-    
+
+    headers = signer("DELETE", "/test?policy")
+    assert client.delete("/test?policy", headers=headers).status_code == 204
+
     headers = signer("DELETE", "/test")
     assert client.delete("/test", headers=headers).status_code == 204
 

@@ -122,7 +122,7 @@ With these volumes attached you can rebuild/restart the container without losing
 
 ### Versioning
 
-The repo now tracks a human-friendly release string inside `app/version.py` (see the `APP_VERSION` constant). Edit that value whenever you cut a release. The constant flows into Flask as `APP_VERSION` and is exposed via `GET /healthz`, so you can monitor deployments or surface it in UIs.
+The repo now tracks a human-friendly release string inside `app/version.py` (see the `APP_VERSION` constant). Edit that value whenever you cut a release. The constant flows into Flask as `APP_VERSION` and is exposed via `GET /myfsio/health`, so you can monitor deployments or surface it in UIs.
 
 ## 3. Configuration Reference
 
@@ -277,14 +277,14 @@ The application automatically trusts these headers to generate correct presigned
 ### Version Checking
 
 The application version is tracked in `app/version.py` and exposed via:
-- **Health endpoint:** `GET /healthz` returns JSON with `version` field
+- **Health endpoint:** `GET /myfsio/health` returns JSON with `version` field
 - **Metrics dashboard:** Navigate to `/ui/metrics` to see the running version in the System Status card
 
 To check your current version:
 
 ```bash
 # API health endpoint
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 
 # Or inspect version.py directly
 cat app/version.py | grep APP_VERSION
@@ -377,7 +377,7 @@ docker run -d \
   myfsio:latest
 
 # 5. Verify health
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 ```
 
 ### Version Compatibility Checks
@@ -502,7 +502,7 @@ docker run -d \
   myfsio:0.1.3  # specify previous version tag
 
 # 3. Verify
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 ```
 
 #### Emergency Config Restore
@@ -528,7 +528,7 @@ For production environments requiring zero downtime:
 APP_PORT=5001 UI_PORT=5101 python run.py &
 
 # 2. Health check new instance
-curl http://localhost:5001/healthz
+curl http://localhost:5001/myfsio/health
 
 # 3. Update load balancer to route to new ports
 
@@ -544,7 +544,7 @@ After any update, verify functionality:
 
 ```bash
 # 1. Health check
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 
 # 2. Login to UI
 open http://localhost:5100/ui
@@ -588,7 +588,7 @@ APP_PID=$!
 
 # Wait and health check
 sleep 5
-if curl -f http://localhost:5000/healthz; then
+if curl -f http://localhost:5000/myfsio/health; then
   echo "Update successful!"
 else
   echo "Health check failed, rolling back..."
@@ -860,7 +860,7 @@ A request is allowed only if:
 ### Editing via CLI
 
 ```bash
-curl -X PUT http://127.0.0.1:5000/bucket-policy/test \
+curl -X PUT "http://127.0.0.1:5000/test?policy" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
   -d '{
@@ -923,9 +923,8 @@ Drag files directly onto the objects table to upload them to the current bucket 
 ## 6. Presigned URLs
 
 - Trigger from the UI using the **Presign** button after selecting an object.
-- Or call `POST /presign/<bucket>/<key>` with JSON `{ "method": "GET", "expires_in": 900 }`.
 - Supported methods: `GET`, `PUT`, `DELETE`; expiration must be `1..604800` seconds.
-- The service signs requests using the caller’s IAM credentials and enforces bucket policies both when issuing and when the presigned URL is used.
+- The service signs requests using the caller's IAM credentials and enforces bucket policies both when issuing and when the presigned URL is used.
 - Legacy share links have been removed; presigned URLs now handle both private and public workflows.
 
 ### Multipart Upload Example
@@ -1314,10 +1313,9 @@ GET    /<bucket>                        # List objects
 PUT    /<bucket>/<key>                  # Upload object
 GET    /<bucket>/<key>                  # Download object
 DELETE /<bucket>/<key>                  # Delete object
-POST   /presign/<bucket>/<key>          # Generate SigV4 URL
-GET    /bucket-policy/<bucket>          # Fetch policy
-PUT    /bucket-policy/<bucket>          # Upsert policy
-DELETE /bucket-policy/<bucket>          # Delete policy
+GET    /<bucket>?policy                 # Fetch policy
+PUT    /<bucket>?policy                 # Upsert policy
+DELETE /<bucket>?policy                 # Delete policy
 GET    /<bucket>?quota                  # Get bucket quota
 PUT    /<bucket>?quota                  # Set bucket quota (admin only)
 ```

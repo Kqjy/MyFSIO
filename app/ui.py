@@ -36,6 +36,7 @@ from .extensions import limiter, csrf
 from .iam import IamError
 from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
+from .s3_api import _generate_presigned_url
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage, StorageError
 
@@ -1135,42 +1136,43 @@ def object_presign(bucket_name: str, object_key: str):
     principal = _current_principal()
     payload = request.get_json(silent=True) or {}
     method = str(payload.get("method", "GET")).upper()
+    allowed_methods = {"GET", "PUT", "DELETE"}
+    if method not in allowed_methods:
+        return jsonify({"error": "Method must be GET, PUT, or DELETE"}), 400
     action = "read" if method == "GET" else ("delete" if method == "DELETE" else "write")
     try:
         _authorize_ui(principal, bucket_name, action, object_key=object_key)
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
-    
+    try:
+        expires = int(payload.get("expires_in", 900))
+    except (TypeError, ValueError):
+        return jsonify({"error": "expires_in must be an integer"}), 400
+    expires = max(1, min(expires, 7 * 24 * 3600))
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+    if action != "write":
+        try:
+            storage.get_object_path(bucket_name, object_key)
+        except StorageError:
+            return jsonify({"error": "Object not found"}), 404
+    secret = _iam().secret_for_key(principal.access_key)
     api_base = current_app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
-    api_base = api_base.rstrip("/")
-    encoded_key = quote(object_key, safe="/")
-    url = f"{api_base}/presign/{bucket_name}/{encoded_key}"
-    
-    parsed_api = urlparse(api_base)
-    headers = _api_headers()
-    headers["X-Forwarded-Host"] = parsed_api.netloc or "127.0.0.1:5000"
-    headers["X-Forwarded-Proto"] = parsed_api.scheme or "http"
-    headers["X-Forwarded-For"] = request.remote_addr or "127.0.0.1"
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=5)
-    except requests.RequestException as exc:
-        return jsonify({"error": f"API unavailable: {exc}"}), 502
-    try:
-        body = response.json()
-    except ValueError:
-        text = response.text or ""
-        if text.strip().startswith("<"):
-            import xml.etree.ElementTree as ET
-            try:
-                root = ET.fromstring(text)
-                message = root.findtext(".//Message") or root.findtext(".//Code") or "Unknown S3 error"
-                body = {"error": message}
-            except ET.ParseError:
-                body = {"error": text or "API returned an empty response"}
-        else:
-            body = {"error": text or "API returned an empty response"}
-    return jsonify(body), response.status_code
+    url = _generate_presigned_url(
+        principal=principal,
+        secret_key=secret,
+        method=method,
+        bucket_name=bucket_name,
+        object_key=object_key,
+        expires_in=expires,
+        api_base_url=api_base,
+    )
+    current_app.logger.info(
+        "Presigned URL generated",
+        extra={"bucket": bucket_name, "key": object_key, "method": method},
+    )
+    return jsonify({"url": url, "method": method, "expires_in": expires})
 
 
 @ui_bp.get("/buckets/<bucket_name>/objects/<path:object_key>/metadata")
