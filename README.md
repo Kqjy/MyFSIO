@@ -149,19 +149,13 @@ All endpoints require AWS Signature Version 4 authentication unless using presig
 | `POST` | `/<bucket>/<key>?uploadId=X` | Complete multipart upload |
 | `DELETE` | `/<bucket>/<key>?uploadId=X` | Abort multipart upload |
 
-### Presigned URLs
+### Bucket Policies (S3-compatible)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/presign/<bucket>/<key>` | Generate presigned URL |
-
-### Bucket Policies
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/bucket-policy/<bucket>` | Get bucket policy |
-| `PUT` | `/bucket-policy/<bucket>` | Set bucket policy |
-| `DELETE` | `/bucket-policy/<bucket>` | Delete bucket policy |
+| `GET` | `/<bucket>?policy` | Get bucket policy |
+| `PUT` | `/<bucket>?policy` | Set bucket policy |
+| `DELETE` | `/<bucket>?policy` | Delete bucket policy |
 
 ### Versioning
 
@@ -175,7 +169,7 @@ All endpoints require AWS Signature Version 4 authentication unless using presig
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/healthz` | Health check endpoint |
+| `GET` | `/myfsio/health` | Health check endpoint |
 
 ## IAM & Access Control
 

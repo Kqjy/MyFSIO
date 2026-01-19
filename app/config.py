@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -8,6 +9,13 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+
+def _validate_rate_limit(value: str) -> str:
+    pattern = r"^\d+\s+per\s+(second|minute|hour|day)$"
+    if not re.match(pattern, value):
+        raise ValueError(f"Invalid rate limit format: {value}. Expected format: '200 per minute'")
+    return value
 
 if getattr(sys, "frozen", False):
     # Running in a PyInstaller bundle
@@ -76,6 +84,12 @@ class AppConfig:
     display_timezone: str
     lifecycle_enabled: bool
     lifecycle_interval_seconds: int
+    metrics_history_enabled: bool
+    metrics_history_retention_hours: int
+    metrics_history_interval_minutes: int
+    operation_metrics_enabled: bool
+    operation_metrics_interval_minutes: int
+    operation_metrics_retention_hours: int
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -148,7 +162,7 @@ class AppConfig:
         log_path = log_dir / str(_get("LOG_FILE", "app.log"))
         log_max_bytes = int(_get("LOG_MAX_BYTES", 5 * 1024 * 1024))
         log_backup_count = int(_get("LOG_BACKUP_COUNT", 3))
-        ratelimit_default = str(_get("RATE_LIMIT_DEFAULT", "200 per minute"))
+        ratelimit_default = _validate_rate_limit(str(_get("RATE_LIMIT_DEFAULT", "200 per minute")))
         ratelimit_storage_uri = str(_get("RATE_LIMIT_STORAGE_URI", "memory://"))
 
         def _csv(value: str, default: list[str]) -> list[str]:
@@ -172,6 +186,12 @@ class AppConfig:
         kms_keys_path = Path(_get("KMS_KEYS_PATH", encryption_keys_dir / "kms_keys.json")).resolve()
         default_encryption_algorithm = str(_get("DEFAULT_ENCRYPTION_ALGORITHM", "AES256"))
         display_timezone = str(_get("DISPLAY_TIMEZONE", "UTC"))
+        metrics_history_enabled = str(_get("METRICS_HISTORY_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        metrics_history_retention_hours = int(_get("METRICS_HISTORY_RETENTION_HOURS", 24))
+        metrics_history_interval_minutes = int(_get("METRICS_HISTORY_INTERVAL_MINUTES", 5))
+        operation_metrics_enabled = str(_get("OPERATION_METRICS_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        operation_metrics_interval_minutes = int(_get("OPERATION_METRICS_INTERVAL_MINUTES", 5))
+        operation_metrics_retention_hours = int(_get("OPERATION_METRICS_RETENTION_HOURS", 24))
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -210,7 +230,13 @@ class AppConfig:
                    default_encryption_algorithm=default_encryption_algorithm,
                    display_timezone=display_timezone,
                    lifecycle_enabled=lifecycle_enabled,
-                   lifecycle_interval_seconds=lifecycle_interval_seconds)
+                   lifecycle_interval_seconds=lifecycle_interval_seconds,
+                   metrics_history_enabled=metrics_history_enabled,
+                   metrics_history_retention_hours=metrics_history_retention_hours,
+                   metrics_history_interval_minutes=metrics_history_interval_minutes,
+                   operation_metrics_enabled=operation_metrics_enabled,
+                   operation_metrics_interval_minutes=operation_metrics_interval_minutes,
+                   operation_metrics_retention_hours=operation_metrics_retention_hours)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -337,4 +363,12 @@ class AppConfig:
             "KMS_KEYS_PATH": str(self.kms_keys_path),
             "DEFAULT_ENCRYPTION_ALGORITHM": self.default_encryption_algorithm,
             "DISPLAY_TIMEZONE": self.display_timezone,
+            "LIFECYCLE_ENABLED": self.lifecycle_enabled,
+            "LIFECYCLE_INTERVAL_SECONDS": self.lifecycle_interval_seconds,
+            "METRICS_HISTORY_ENABLED": self.metrics_history_enabled,
+            "METRICS_HISTORY_RETENTION_HOURS": self.metrics_history_retention_hours,
+            "METRICS_HISTORY_INTERVAL_MINUTES": self.metrics_history_interval_minutes,
+            "OPERATION_METRICS_ENABLED": self.operation_metrics_enabled,
+            "OPERATION_METRICS_INTERVAL_MINUTES": self.operation_metrics_interval_minutes,
+            "OPERATION_METRICS_RETENTION_HOURS": self.operation_metrics_retention_hours,
         }

@@ -774,7 +774,7 @@ class ObjectStorage:
                 continue
             payload.setdefault("version_id", meta_file.stem)
             versions.append(payload)
-        versions.sort(key=lambda item: item.get("archived_at", ""), reverse=True)
+        versions.sort(key=lambda item: item.get("archived_at") or "1970-01-01T00:00:00Z", reverse=True)
         return versions
 
     def restore_object_version(self, bucket_name: str, object_key: str, version_id: str) -> ObjectMeta:
@@ -866,7 +866,7 @@ class ObjectStorage:
                 except (OSError, json.JSONDecodeError):
                     payload = {}
                 version_id = payload.get("version_id") or meta_file.stem
-                archived_at = payload.get("archived_at") or ""
+                archived_at = payload.get("archived_at") or "1970-01-01T00:00:00Z"
                 size = int(payload.get("size") or 0)
                 reason = payload.get("reason") or "update"
                 record = aggregated.setdefault(
@@ -1773,11 +1773,9 @@ class ObjectStorage:
             raise StorageError("Object key contains null bytes")
         if object_key.startswith(("/", "\\")):
             raise StorageError("Object key cannot start with a slash")
-        normalized = unicodedata.normalize("NFC", object_key)
-        if normalized != object_key:
-            raise StorageError("Object key must use normalized Unicode")
-        
-        candidate = Path(normalized)
+        object_key = unicodedata.normalize("NFC", object_key)
+
+        candidate = Path(object_key)
         if ".." in candidate.parts:
             raise StorageError("Object key contains parent directory references")
         

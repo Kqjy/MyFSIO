@@ -122,7 +122,7 @@ With these volumes attached you can rebuild/restart the container without losing
 
 ### Versioning
 
-The repo now tracks a human-friendly release string inside `app/version.py` (see the `APP_VERSION` constant). Edit that value whenever you cut a release. The constant flows into Flask as `APP_VERSION` and is exposed via `GET /healthz`, so you can monitor deployments or surface it in UIs.
+The repo now tracks a human-friendly release string inside `app/version.py` (see the `APP_VERSION` constant). Edit that value whenever you cut a release. The constant flows into Flask as `APP_VERSION` and is exposed via `GET /myfsio/health`, so you can monitor deployments or surface it in UIs.
 
 ## 3. Configuration Reference
 
@@ -277,14 +277,14 @@ The application automatically trusts these headers to generate correct presigned
 ### Version Checking
 
 The application version is tracked in `app/version.py` and exposed via:
-- **Health endpoint:** `GET /healthz` returns JSON with `version` field
+- **Health endpoint:** `GET /myfsio/health` returns JSON with `version` field
 - **Metrics dashboard:** Navigate to `/ui/metrics` to see the running version in the System Status card
 
 To check your current version:
 
 ```bash
 # API health endpoint
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 
 # Or inspect version.py directly
 cat app/version.py | grep APP_VERSION
@@ -377,7 +377,7 @@ docker run -d \
   myfsio:latest
 
 # 5. Verify health
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 ```
 
 ### Version Compatibility Checks
@@ -502,7 +502,7 @@ docker run -d \
   myfsio:0.1.3  # specify previous version tag
 
 # 3. Verify
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 ```
 
 #### Emergency Config Restore
@@ -528,7 +528,7 @@ For production environments requiring zero downtime:
 APP_PORT=5001 UI_PORT=5101 python run.py &
 
 # 2. Health check new instance
-curl http://localhost:5001/healthz
+curl http://localhost:5001/myfsio/health
 
 # 3. Update load balancer to route to new ports
 
@@ -544,7 +544,7 @@ After any update, verify functionality:
 
 ```bash
 # 1. Health check
-curl http://localhost:5000/healthz
+curl http://localhost:5000/myfsio/health
 
 # 2. Login to UI
 open http://localhost:5100/ui
@@ -588,7 +588,7 @@ APP_PID=$!
 
 # Wait and health check
 sleep 5
-if curl -f http://localhost:5000/healthz; then
+if curl -f http://localhost:5000/myfsio/health; then
   echo "Update successful!"
 else
   echo "Health check failed, rolling back..."
@@ -602,6 +602,10 @@ fi
 
 ## 4. Authentication & IAM
 
+MyFSIO implements a comprehensive Identity and Access Management (IAM) system that controls who can access your buckets and what operations they can perform. The system supports both simple action-based permissions and AWS-compatible policy syntax.
+
+### Getting Started
+
 1. On first boot, `data/.myfsio.sys/config/iam.json` is seeded with `localadmin / localadmin` that has wildcard access.
 2. Sign into the UI using those credentials, then open **IAM**:
    - **Create user**: supply a display name and optional JSON inline policy array.
@@ -609,47 +613,240 @@ fi
    - **Policy editor**: select a user, paste an array of objects (`{"bucket": "*", "actions": ["list", "read"]}`), and submit. Alias support includes AWS-style verbs (e.g., `s3:GetObject`).
 3. Wildcard action `iam:*` is supported for admin user definitions.
 
-The API expects every request to include `X-Access-Key` and `X-Secret-Key` headers. The UI persists them in the Flask session after login.
+### Authentication
+
+The API expects every request to include authentication headers. The UI persists them in the Flask session after login.
+
+| Header | Description |
+| --- | --- |
+| `X-Access-Key` | The user's access key identifier |
+| `X-Secret-Key` | The user's secret key for signing |
+
+**Security Features:**
+- **Lockout Protection**: After `AUTH_MAX_ATTEMPTS` (default: 5) failed login attempts, the account is locked for `AUTH_LOCKOUT_MINUTES` (default: 15 minutes).
+- **Session Management**: UI sessions remain valid for `SESSION_LIFETIME_DAYS` (default: 30 days).
+- **Hot Reload**: IAM configuration changes take effect immediately without restart.
+
+### Permission Model
+
+MyFSIO uses a two-layer permission model:
+
+1. **IAM User Policies** – Define what a user can do across the system (stored in `iam.json`)
+2. **Bucket Policies** – Define who can access a specific bucket (stored in `bucket_policies.json`)
+
+Both layers are evaluated for each request. A user must have permission in their IAM policy AND the bucket policy must allow the action (or have no explicit deny).
 
 ### Available IAM Actions
+
+#### S3 Actions (Bucket/Object Operations)
 
 | Action | Description | AWS Aliases |
 | --- | --- | --- |
 | `list` | List buckets and objects | `s3:ListBucket`, `s3:ListAllMyBuckets`, `s3:ListBucketVersions`, `s3:ListMultipartUploads`, `s3:ListParts` |
-| `read` | Download objects | `s3:GetObject`, `s3:GetObjectVersion`, `s3:GetObjectTagging`, `s3:HeadObject`, `s3:HeadBucket` |
-| `write` | Upload objects, create buckets | `s3:PutObject`, `s3:CreateBucket`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload`, `s3:CopyObject` |
-| `delete` | Remove objects and buckets | `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteBucket` |
-| `share` | Manage ACLs | `s3:PutObjectAcl`, `s3:PutBucketAcl`, `s3:GetBucketAcl` |
+| `read` | Download objects, get metadata | `s3:GetObject`, `s3:GetObjectVersion`, `s3:GetObjectTagging`, `s3:GetObjectVersionTagging`, `s3:GetObjectAcl`, `s3:GetBucketVersioning`, `s3:HeadObject`, `s3:HeadBucket` |
+| `write` | Upload objects, create buckets, manage tags | `s3:PutObject`, `s3:CreateBucket`, `s3:PutObjectTagging`, `s3:PutBucketVersioning`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload`, `s3:CopyObject` |
+| `delete` | Remove objects, versions, and buckets | `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteBucket`, `s3:DeleteObjectTagging` |
+| `share` | Manage Access Control Lists (ACLs) | `s3:PutObjectAcl`, `s3:PutBucketAcl`, `s3:GetBucketAcl` |
 | `policy` | Manage bucket policies | `s3:PutBucketPolicy`, `s3:GetBucketPolicy`, `s3:DeleteBucketPolicy` |
-| `replication` | Configure and manage replication | `s3:GetReplicationConfiguration`, `s3:PutReplicationConfiguration`, `s3:ReplicateObject`, `s3:ReplicateTags`, `s3:ReplicateDelete` |
-| `iam:list_users` | View IAM users | `iam:ListUsers` |
-| `iam:create_user` | Create IAM users | `iam:CreateUser` |
+| `lifecycle` | Manage lifecycle rules | `s3:GetLifecycleConfiguration`, `s3:PutLifecycleConfiguration`, `s3:DeleteLifecycleConfiguration`, `s3:GetBucketLifecycle`, `s3:PutBucketLifecycle` |
+| `cors` | Manage CORS configuration | `s3:GetBucketCors`, `s3:PutBucketCors`, `s3:DeleteBucketCors` |
+| `replication` | Configure and manage replication | `s3:GetReplicationConfiguration`, `s3:PutReplicationConfiguration`, `s3:DeleteReplicationConfiguration`, `s3:ReplicateObject`, `s3:ReplicateTags`, `s3:ReplicateDelete` |
+
+#### IAM Actions (User Management)
+
+| Action | Description | AWS Aliases |
+| --- | --- | --- |
+| `iam:list_users` | View all IAM users and their policies | `iam:ListUsers` |
+| `iam:create_user` | Create new IAM users | `iam:CreateUser` |
 | `iam:delete_user` | Delete IAM users | `iam:DeleteUser` |
-| `iam:rotate_key` | Rotate user secrets | `iam:RotateAccessKey` |
+| `iam:rotate_key` | Rotate user secret keys | `iam:RotateAccessKey` |
 | `iam:update_policy` | Modify user policies | `iam:PutUserPolicy` |
-| `iam:*` | All IAM actions (admin wildcard) | — |
+| `iam:*` | **Admin wildcard** – grants all IAM actions | — |
 
-### Example Policies
+#### Wildcards
 
-**Full Control (admin):**
+| Wildcard | Scope | Description |
+| --- | --- | --- |
+| `*` (in actions) | All S3 actions | Grants `list`, `read`, `write`, `delete`, `share`, `policy`, `lifecycle`, `cors`, `replication` |
+| `iam:*` | All IAM actions | Grants all `iam:*` actions for user management |
+| `*` (in bucket) | All buckets | Policy applies to every bucket |
+
+### IAM Policy Structure
+
+User policies are stored as a JSON array of policy objects. Each object specifies a bucket and the allowed actions:
+
 ```json
-[{"bucket": "*", "actions": ["list", "read", "write", "delete", "share", "policy", "replication", "iam:*"]}]
+[
+  {
+    "bucket": "<bucket-name-or-wildcard>",
+    "actions": ["<action1>", "<action2>", ...]
+  }
+]
 ```
 
-**Read-Only:**
+**Fields:**
+- `bucket`: The bucket name (case-insensitive) or `*` for all buckets
+- `actions`: Array of action strings (simple names or AWS aliases)
+
+### Example User Policies
+
+**Full Administrator (complete system access):**
+```json
+[{"bucket": "*", "actions": ["list", "read", "write", "delete", "share", "policy", "lifecycle", "cors", "replication", "iam:*"]}]
+```
+
+**Read-Only User (browse and download only):**
 ```json
 [{"bucket": "*", "actions": ["list", "read"]}]
 ```
 
-**Single Bucket Access (no listing other buckets):**
+**Single Bucket Full Access (no access to other buckets):**
 ```json
-[{"bucket": "user-bucket", "actions": ["read", "write", "delete"]}]
+[{"bucket": "user-bucket", "actions": ["list", "read", "write", "delete"]}]
 ```
 
-**Bucket Access with Replication:**
+**Multiple Bucket Access (different permissions per bucket):**
 ```json
-[{"bucket": "my-bucket", "actions": ["list", "read", "write", "delete", "replication"]}]
+[
+  {"bucket": "public-data", "actions": ["list", "read"]},
+  {"bucket": "my-uploads", "actions": ["list", "read", "write", "delete"]},
+  {"bucket": "team-shared", "actions": ["list", "read", "write"]}
+]
 ```
+
+**IAM Manager (manage users but no data access):**
+```json
+[{"bucket": "*", "actions": ["iam:list_users", "iam:create_user", "iam:delete_user", "iam:rotate_key", "iam:update_policy"]}]
+```
+
+**Replication Operator (manage replication only):**
+```json
+[{"bucket": "*", "actions": ["list", "read", "replication"]}]
+```
+
+**Lifecycle Manager (configure object expiration):**
+```json
+[{"bucket": "*", "actions": ["list", "lifecycle"]}]
+```
+
+**CORS Administrator (configure cross-origin access):**
+```json
+[{"bucket": "*", "actions": ["cors"]}]
+```
+
+**Bucket Administrator (full bucket config, no IAM access):**
+```json
+[{"bucket": "my-bucket", "actions": ["list", "read", "write", "delete", "policy", "lifecycle", "cors"]}]
+```
+
+**Upload-Only User (write but cannot read back):**
+```json
+[{"bucket": "drop-box", "actions": ["write"]}]
+```
+
+**Backup Operator (read, list, and replicate):**
+```json
+[{"bucket": "*", "actions": ["list", "read", "replication"]}]
+```
+
+### Using AWS-Style Action Names
+
+You can use AWS S3 action names instead of simple names. They are automatically normalized:
+
+```json
+[
+  {
+    "bucket": "my-bucket",
+    "actions": [
+      "s3:ListBucket",
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject"
+    ]
+  }
+]
+```
+
+This is equivalent to:
+```json
+[{"bucket": "my-bucket", "actions": ["list", "read", "write", "delete"]}]
+```
+
+### Managing Users via API
+
+```bash
+# List all users (requires iam:list_users)
+curl http://localhost:5000/iam/users \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Create a new user (requires iam:create_user)
+curl -X POST http://localhost:5000/iam/users \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "display_name": "New User",
+    "policies": [{"bucket": "*", "actions": ["list", "read"]}]
+  }'
+
+# Rotate user secret (requires iam:rotate_key)
+curl -X POST http://localhost:5000/iam/users/<access-key>/rotate \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Update user policies (requires iam:update_policy)
+curl -X PUT http://localhost:5000/iam/users/<access-key>/policies \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '[{"bucket": "*", "actions": ["list", "read", "write"]}]'
+
+# Delete a user (requires iam:delete_user)
+curl -X DELETE http://localhost:5000/iam/users/<access-key> \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### Permission Precedence
+
+When a request is made, permissions are evaluated in this order:
+
+1. **Authentication** – Verify the access key and secret key are valid
+2. **Lockout Check** – Ensure the account is not locked due to failed attempts
+3. **IAM Policy Check** – Verify the user has the required action for the target bucket
+4. **Bucket Policy Check** – If a bucket policy exists, verify it allows the action
+
+A request is allowed only if:
+- The IAM policy grants the action, AND
+- The bucket policy allows the action (or no bucket policy exists)
+
+### Common Permission Scenarios
+
+| Scenario | Required Actions |
+| --- | --- |
+| Browse bucket contents | `list` |
+| Download a file | `read` |
+| Upload a file | `write` |
+| Delete a file | `delete` |
+| Generate presigned URL (GET) | `read` |
+| Generate presigned URL (PUT) | `write` |
+| Generate presigned URL (DELETE) | `delete` |
+| Enable versioning | `write` (includes `s3:PutBucketVersioning`) |
+| View bucket policy | `policy` |
+| Modify bucket policy | `policy` |
+| Configure lifecycle rules | `lifecycle` |
+| View lifecycle rules | `lifecycle` |
+| Configure CORS | `cors` |
+| View CORS rules | `cors` |
+| Configure replication | `replication` (admin-only for creation) |
+| Pause/resume replication | `replication` |
+| Manage other users | `iam:*` or specific `iam:` actions |
+| Set bucket quotas | `iam:*` or `iam:list_users` (admin feature) |
+
+### Security Best Practices
+
+1. **Principle of Least Privilege** – Grant only the permissions users need
+2. **Avoid Wildcards** – Use specific bucket names instead of `*` when possible
+3. **Rotate Secrets Regularly** – Use the rotate key feature periodically
+4. **Separate Admin Accounts** – Don't use admin accounts for daily operations
+5. **Monitor Failed Logins** – Check logs for repeated authentication failures
+6. **Use Bucket Policies for Fine-Grained Control** – Combine with IAM for defense in depth
 
 ## 5. Bucket Policies & Presets
 
@@ -663,7 +860,7 @@ The API expects every request to include `X-Access-Key` and `X-Secret-Key` heade
 ### Editing via CLI
 
 ```bash
-curl -X PUT http://127.0.0.1:5000/bucket-policy/test \
+curl -X PUT "http://127.0.0.1:5000/test?policy" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
   -d '{
@@ -726,9 +923,8 @@ Drag files directly onto the objects table to upload them to the current bucket 
 ## 6. Presigned URLs
 
 - Trigger from the UI using the **Presign** button after selecting an object.
-- Or call `POST /presign/<bucket>/<key>` with JSON `{ "method": "GET", "expires_in": 900 }`.
 - Supported methods: `GET`, `PUT`, `DELETE`; expiration must be `1..604800` seconds.
-- The service signs requests using the caller’s IAM credentials and enforces bucket policies both when issuing and when the presigned URL is used.
+- The service signs requests using the caller's IAM credentials and enforces bucket policies both when issuing and when the presigned URL is used.
 - Legacy share links have been removed; presigned URLs now handle both private and public workflows.
 
 ### Multipart Upload Example
@@ -951,7 +1147,84 @@ curl -X PUT "http://localhost:5000/bucket/<bucket>?quota" \
 </Error>
 ```
 
-## 9. Site Replication
+## 9. Operation Metrics
+
+Operation metrics provide real-time visibility into API request statistics, including request counts, latency, error rates, and bandwidth usage.
+
+### Enabling Operation Metrics
+
+By default, operation metrics are disabled. Enable by setting the environment variable:
+
+```bash
+OPERATION_METRICS_ENABLED=true python run.py
+```
+
+Or in your `myfsio.env` file:
+```
+OPERATION_METRICS_ENABLED=true
+OPERATION_METRICS_INTERVAL_MINUTES=5
+OPERATION_METRICS_RETENTION_HOURS=24
+```
+
+### Configuration Options
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPERATION_METRICS_ENABLED` | `false` | Enable/disable operation metrics |
+| `OPERATION_METRICS_INTERVAL_MINUTES` | `5` | Snapshot interval (minutes) |
+| `OPERATION_METRICS_RETENTION_HOURS` | `24` | History retention period (hours) |
+
+### What's Tracked
+
+**Request Statistics:**
+- Request counts by HTTP method (GET, PUT, POST, DELETE, HEAD, OPTIONS)
+- Response status codes grouped by class (2xx, 3xx, 4xx, 5xx)
+- Latency statistics (min, max, average)
+- Bytes transferred in/out
+
+**Endpoint Breakdown:**
+- `object` - Object operations (GET/PUT/DELETE objects)
+- `bucket` - Bucket operations (list, create, delete buckets)
+- `ui` - Web UI requests
+- `service` - Health checks, internal endpoints
+- `kms` - KMS API operations
+
+**S3 Error Codes:**
+Tracks API-specific error codes like `NoSuchKey`, `AccessDenied`, `BucketNotFound`. Note: These are separate from HTTP status codes - a 404 from the UI won't appear here, only S3 API errors.
+
+### API Endpoints
+
+```bash
+# Get current operation metrics
+curl http://localhost:5100/ui/metrics/operations \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Get operation metrics history
+curl http://localhost:5100/ui/metrics/operations/history \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Filter history by time range
+curl "http://localhost:5100/ui/metrics/operations/history?hours=6" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### Storage Location
+
+Operation metrics data is stored at:
+```
+data/.myfsio.sys/config/operation_metrics.json
+```
+
+### UI Dashboard
+
+When enabled, the Metrics page (`/ui/metrics`) shows an "API Operations" section with:
+- Summary cards: Requests, Success Rate, Errors, Latency, Bytes In, Bytes Out
+- Charts: Requests by Method (doughnut), Requests by Status (bar), Requests by Endpoint (horizontal bar)
+- S3 Error Codes table with distribution
+
+Data refreshes every 5 seconds.
+
+## 10. Site Replication
 
 ### Permission Model
 
@@ -1088,7 +1361,7 @@ To set up two-way replication (Server A ↔ Server B):
 
 **Note**: Deleting a bucket will automatically remove its associated replication configuration.
 
-## 11. Running Tests
+## 12. Running Tests
 
 ```bash
 pytest -q
@@ -1098,7 +1371,7 @@ The suite now includes a boto3 integration test that spins up a live HTTP server
 
 The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, and regression tests for anonymous reads when a Public policy is attached.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 | --- | --- | --- |
@@ -1107,7 +1380,7 @@ The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, an
 | Presign modal errors with 403 | IAM user lacks `read/write/delete` for target bucket or bucket policy denies | Update IAM inline policies or remove conflicting deny statements. |
 | Large upload rejected immediately | File exceeds `MAX_UPLOAD_SIZE` | Increase env var or shrink object. |
 
-## 13. API Matrix
+## 14. API Matrix
 
 ```
 GET    /                               # List buckets
@@ -1117,10 +1390,9 @@ GET    /<bucket>                        # List objects
 PUT    /<bucket>/<key>                  # Upload object
 GET    /<bucket>/<key>                  # Download object
 DELETE /<bucket>/<key>                  # Delete object
-POST   /presign/<bucket>/<key>          # Generate SigV4 URL
-GET    /bucket-policy/<bucket>          # Fetch policy
-PUT    /bucket-policy/<bucket>          # Upsert policy
-DELETE /bucket-policy/<bucket>          # Delete policy
+GET    /<bucket>?policy                 # Fetch policy
+PUT    /<bucket>?policy                 # Upsert policy
+DELETE /<bucket>?policy                 # Delete policy
 GET    /<bucket>?quota                  # Get bucket quota
 PUT    /<bucket>?quota                  # Set bucket quota (admin only)
 ```

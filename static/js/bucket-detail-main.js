@@ -1,4 +1,4 @@
-(function() {
+(function () {
   'use strict';
 
   const { formatBytes, escapeHtml, fallbackCopy, setupJsonAutoIndent } = window.BucketDetailUtils || {
@@ -23,10 +23,61 @@
         .replace(/'/g, '&#039;');
     },
     fallbackCopy: () => false,
-    setupJsonAutoIndent: () => {}
+    setupJsonAutoIndent: () => { }
   };
 
   setupJsonAutoIndent(document.getElementById('policyDocument'));
+
+  const getFileTypeIcon = (key) => {
+    const ext = (key.split('.').pop() || '').toLowerCase();
+    const iconMap = {
+      image: ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'ico', 'bmp', 'tiff', 'tif'],
+      document: ['pdf', 'doc', 'docx', 'txt', 'rtf', 'odt', 'pages'],
+      spreadsheet: ['xls', 'xlsx', 'csv', 'ods', 'numbers'],
+      archive: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'],
+      code: ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'cpp', 'c', 'h', 'hpp', 'cs', 'go', 'rs', 'rb', 'php', 'html', 'htm', 'css', 'scss', 'sass', 'less', 'json', 'xml', 'yaml', 'yml', 'md', 'sh', 'bat', 'ps1', 'sql'],
+      audio: ['mp3', 'wav', 'flac', 'ogg', 'aac', 'm4a', 'wma', 'aiff'],
+      video: ['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'm4v', 'mpeg', 'mpg'],
+    };
+    const icons = {
+      image: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-success flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+        <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
+      </svg>`,
+      document: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-danger flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+        <path d="M4.5 12.5A.5.5 0 0 1 5 12h3a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 10h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 8h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0-2A.5.5 0 0 1 5 6h6a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5z"/>
+      </svg>`,
+      spreadsheet: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-success flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2zM9.5 3A1.5 1.5 0 0 0 11 4.5h2V9H3V2a1 1 0 0 1 1-1h5.5v2zM3 12v-2h2v2H3zm0 1h2v2H4a1 1 0 0 1-1-1v-1zm3 2v-2h3v2H6zm4 0v-2h3v1a1 1 0 0 1-1 1h-2zm3-3h-3v-2h3v2zm-7 0v-2h3v2H6z"/>
+      </svg>`,
+      archive: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-secondary flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M6.5 7.5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v.938l.4 1.599a1 1 0 0 1-.416 1.074l-.93.62a1 1 0 0 1-1.109 0l-.93-.62a1 1 0 0 1-.415-1.074l.4-1.599V7.5z"/>
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1h-2v1h-1v1h1v1h-1v1h1v1H6V5H5V4h1V3H5V2h1V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+      </svg>`,
+      code: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-info flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+        <path d="M8.646 6.646a.5.5 0 0 1 .708 0l2 2a.5.5 0 0 1 0 .708l-2 2a.5.5 0 0 1-.708-.708L10.293 9 8.646 7.354a.5.5 0 0 1 0-.708zm-1.292 0a.5.5 0 0 0-.708 0l-2 2a.5.5 0 0 0 0 .708l2 2a.5.5 0 0 0 .708-.708L5.707 9l1.647-1.646a.5.5 0 0 0 0-.708z"/>
+      </svg>`,
+      audio: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M6 13c0 1.105-1.12 2-2.5 2S1 14.105 1 13c0-1.104 1.12-2 2.5-2s2.5.896 2.5 2zm9-2c0 1.105-1.12 2-2.5 2s-2.5-.895-2.5-2 1.12-2 2.5-2 2.5.895 2.5 2z"/>
+        <path fill-rule="evenodd" d="M14 11V2h1v9h-1zM6 3v10H5V3h1z"/>
+        <path d="M5 2.905a1 1 0 0 1 .9-.995l8-.8a1 1 0 0 1 1.1.995V3L5 4V2.905z"/>
+      </svg>`,
+      video: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-danger flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M0 12V4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2zm6.79-6.907A.5.5 0 0 0 6 5.5v5a.5.5 0 0 0 .79.407l3.5-2.5a.5.5 0 0 0 0-.814l-3.5-2.5z"/>
+      </svg>`,
+      default: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-muted flex-shrink-0" viewBox="0 0 16 16">
+        <path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/>
+      </svg>`,
+    };
+    for (const [type, extensions] of Object.entries(iconMap)) {
+      if (extensions.includes(ext)) {
+        return icons[type];
+      }
+    }
+    return icons.default;
+  };
 
   const selectAllCheckbox = document.querySelector('[data-select-all]');
   const bulkDeleteButton = document.querySelector('[data-bulk-delete-trigger]');
@@ -49,6 +100,7 @@
   const previewPlaceholder = document.getElementById('preview-placeholder');
   const previewImage = document.getElementById('preview-image');
   const previewVideo = document.getElementById('preview-video');
+  const previewAudio = document.getElementById('preview-audio');
   const previewIframe = document.getElementById('preview-iframe');
   const downloadButton = document.getElementById('downloadButton');
   const presignButton = document.getElementById('presignButton');
@@ -135,18 +187,20 @@
     tr.dataset.objectRow = '';
     tr.dataset.key = obj.key;
     tr.dataset.size = obj.size;
-    tr.dataset.lastModified = obj.lastModified || obj.last_modified;
-    tr.dataset.etag = obj.etag;
-    tr.dataset.previewUrl = obj.previewUrl || obj.preview_url;
-    tr.dataset.downloadUrl = obj.downloadUrl || obj.download_url;
-    tr.dataset.presignEndpoint = obj.presignEndpoint || obj.presign_endpoint;
-    tr.dataset.deleteEndpoint = obj.deleteEndpoint || obj.delete_endpoint;
-    tr.dataset.metadata = typeof obj.metadata === 'string' ? obj.metadata : JSON.stringify(obj.metadata || {});
-    tr.dataset.versionsEndpoint = obj.versionsEndpoint || obj.versions_endpoint;
-    tr.dataset.restoreTemplate = obj.restoreTemplate || obj.restore_template;
-    tr.dataset.tagsUrl = obj.tagsUrl || obj.tags_url;
-    tr.dataset.copyUrl = obj.copyUrl || obj.copy_url;
-    tr.dataset.moveUrl = obj.moveUrl || obj.move_url;
+    tr.dataset.lastModified = obj.lastModified ?? obj.last_modified ?? '';
+    tr.dataset.lastModifiedDisplay = obj.lastModifiedDisplay ?? obj.last_modified_display ?? new Date(obj.lastModified || obj.last_modified).toLocaleString();
+    tr.dataset.lastModifiedIso = obj.lastModifiedIso ?? obj.last_modified_iso ?? obj.lastModified ?? obj.last_modified ?? '';
+    tr.dataset.etag = obj.etag ?? '';
+    tr.dataset.previewUrl = obj.previewUrl ?? obj.preview_url ?? '';
+    tr.dataset.downloadUrl = obj.downloadUrl ?? obj.download_url ?? '';
+    tr.dataset.presignEndpoint = obj.presignEndpoint ?? obj.presign_endpoint ?? '';
+    tr.dataset.deleteEndpoint = obj.deleteEndpoint ?? obj.delete_endpoint ?? '';
+    tr.dataset.metadataUrl = obj.metadataUrl ?? obj.metadata_url ?? '';
+    tr.dataset.versionsEndpoint = obj.versionsEndpoint ?? obj.versions_endpoint ?? '';
+    tr.dataset.restoreTemplate = obj.restoreTemplate ?? obj.restore_template ?? '';
+    tr.dataset.tagsUrl = obj.tagsUrl ?? obj.tags_url ?? '';
+    tr.dataset.copyUrl = obj.copyUrl ?? obj.copy_url ?? '';
+    tr.dataset.moveUrl = obj.moveUrl ?? obj.move_url ?? '';
 
     const keyToShow = displayKey || obj.key;
     const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleDateString();
@@ -156,8 +210,11 @@
         <input class="form-check-input" type="checkbox" data-object-select aria-label="Select ${escapeHtml(obj.key)}" />
       </td>
       <td class="object-key text-break" title="${escapeHtml(obj.key)}">
-        <div class="fw-medium">${escapeHtml(keyToShow)}</div>
-        <div class="text-muted small">Modified ${escapeHtml(lastModDisplay)}</div>
+        <div class="fw-medium d-flex align-items-center gap-2">
+          ${getFileTypeIcon(obj.key)}
+          <span>${escapeHtml(keyToShow)}</span>
+        </div>
+        <div class="text-muted small ms-4 ps-2">Modified ${escapeHtml(lastModDisplay)}</div>
       </td>
       <td class="text-end text-nowrap">
         <span class="text-muted small">${formatBytes(obj.size)}</span>
@@ -323,7 +380,7 @@
       const bKey = b.type === 'folder' ? b.path : b.data.key;
       return aKey.localeCompare(bKey);
     });
-    
+
     return items;
   };
 
@@ -400,14 +457,14 @@
     } else {
       renderVirtualRows();
     }
-    
+
     updateFolderViewStatus();
   };
-  
+
   const updateFolderViewStatus = () => {
     const folderViewStatusEl = document.getElementById('folder-view-status');
     if (!folderViewStatusEl) return;
-    
+
     if (currentPrefix) {
       const folderCount = visibleItems.filter(i => i.type === 'folder').length;
       const fileCount = visibleItems.filter(i => i.type === 'file').length;
@@ -425,12 +482,13 @@
       size: obj.size,
       lastModified: obj.last_modified,
       lastModifiedDisplay: obj.last_modified_display,
+      lastModifiedIso: obj.last_modified_iso,
       etag: obj.etag,
       previewUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.preview, key) : '',
       downloadUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.download, key) : '',
       presignEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.presign, key) : '',
       deleteEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.delete, key) : '',
-      metadata: '{}',
+      metadataUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.metadata, key) : '',
       versionsEndpoint: urlTemplates ? buildUrlFromTemplate(urlTemplates.versions, key) : '',
       restoreTemplate: urlTemplates ? urlTemplates.restore.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/')) : '',
       tagsUrl: urlTemplates ? buildUrlFromTemplate(urlTemplates.tags, key) : '',
@@ -548,7 +606,7 @@
           } else if (msg.type === 'done') {
             streamingComplete = true;
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       flushPendingStreamObjects();
@@ -558,9 +616,6 @@
 
       if (loadMoreStatus) {
         loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
-      }
-      if (typeof updateLoadMoreButton === 'function') {
-        updateLoadMoreButton();
       }
       refreshVirtualList();
       renderBreadcrumb(currentPrefix);
@@ -640,10 +695,6 @@
         }
       }
 
-      if (typeof updateLoadMoreButton === 'function') {
-        updateLoadMoreButton();
-      }
-
       refreshVirtualList();
       renderBreadcrumb(currentPrefix);
 
@@ -694,20 +745,20 @@
       selectCheckbox?.addEventListener('change', () => {
         toggleRowSelection(row, selectCheckbox.checked);
       });
-      
+
       if (selectedRows.has(row.dataset.key)) {
         selectCheckbox.checked = true;
         row.classList.add('table-active');
       }
     });
-    
+
     const folderRows = document.querySelectorAll('.folder-row');
     folderRows.forEach(row => {
       if (row.dataset.handlersAttached) return;
       row.dataset.handlersAttached = 'true';
-      
+
       const folderPath = row.dataset.folderPath;
-      
+
       const checkbox = row.querySelector('[data-folder-select]');
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
@@ -727,7 +778,7 @@
         e.stopPropagation();
         navigateToFolder(folderPath);
       });
-      
+
       row.addEventListener('click', (e) => {
         if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
         navigateToFolder(folderPath);
@@ -739,22 +790,9 @@
 
   const scrollSentinel = document.getElementById('scroll-sentinel');
   const scrollContainer = document.querySelector('.objects-table-container');
-  const loadMoreBtn = document.getElementById('load-more-btn');
 
   if (scrollContainer) {
     scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
-  }
-
-  loadMoreBtn?.addEventListener('click', () => {
-    if (hasMoreObjects && !isLoadingObjects) {
-      loadObjects(true);
-    }
-  });
-
-  function updateLoadMoreButton() {
-    if (loadMoreBtn) {
-      loadMoreBtn.classList.toggle('d-none', !hasMoreObjects);
-    }
   }
 
   if (scrollSentinel && scrollContainer) {
@@ -770,7 +808,7 @@
       threshold: 0
     });
     containerObserver.observe(scrollSentinel);
-    
+
     const viewportObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
@@ -785,10 +823,6 @@
     viewportObserver.observe(scrollSentinel);
   }
 
-  const pageSizeSelect = document.getElementById('page-size-select');
-  pageSizeSelect?.addEventListener('change', (e) => {
-    pageSize = parseInt(e.target.value, 10);
-  });
 
   if (objectsApiUrl) {
     loadObjects();
@@ -805,7 +839,7 @@
       if (e.target.closest('[data-delete-object]') || e.target.closest('[data-object-select]') || e.target.closest('a')) {
         return;
       }
-      
+
       selectRow(row);
     });
   }
@@ -815,14 +849,14 @@
   const getFoldersAtPrefix = (prefix) => {
     const folders = new Set();
     const files = [];
-    
+
     allObjects.forEach(obj => {
       const key = obj.key;
       if (!key.startsWith(prefix)) return;
-      
+
       const remainder = key.slice(prefix.length);
       const slashIndex = remainder.indexOf('/');
-      
+
       if (slashIndex === -1) {
 
         files.push(obj);
@@ -832,7 +866,7 @@
         folders.add(prefix + folderName);
       }
     });
-    
+
     return { folders: Array.from(folders).sort(), files };
   };
 
@@ -843,12 +877,12 @@
 
   const renderBreadcrumb = (prefix) => {
     if (!folderBreadcrumb) return;
-    
+
     if (!prefix && !hasFolders()) {
       folderBreadcrumb.classList.add('d-none');
       return;
     }
-    
+
     folderBreadcrumb.classList.remove('d-none');
     const ol = folderBreadcrumb.querySelector('ol');
     ol.innerHTML = '';
@@ -883,7 +917,7 @@
         accumulated += part + '/';
         const li = document.createElement('li');
         li.className = 'breadcrumb-item';
-        
+
         if (index === parts.length - 1) {
           li.classList.add('active');
           li.setAttribute('aria-current', 'page');
@@ -916,12 +950,12 @@
     const folderName = displayName || folderPath.slice(currentPrefix.length).replace(/\/$/, '');
     const { count: objectCount, mayHaveMore } = countObjectsInFolder(folderPath);
     const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
-    
+
     const tr = document.createElement('tr');
     tr.className = 'folder-row';
     tr.dataset.folderPath = folderPath;
     tr.style.cursor = 'pointer';
-    
+
     tr.innerHTML = `
       <td class="text-center align-middle" onclick="event.stopPropagation();">
         <input class="form-check-input" type="checkbox" data-folder-select="${escapeHtml(folderPath)}" aria-label="Select folder" />
@@ -946,7 +980,7 @@
         </button>
       </td>
     `;
-    
+
     return tr;
   };
 
@@ -971,7 +1005,7 @@
 
   const renderObjectsView = () => {
     if (!objectsTableBody) return;
-    
+
     const { folders, files } = getFoldersAtPrefix(currentPrefix);
 
     objectsTableBody.innerHTML = '';
@@ -1378,15 +1412,30 @@
     }
   };
 
+  const INTERNAL_METADATA_KEYS = new Set([
+    '__etag__',
+    '__size__',
+    '__content_type__',
+    '__last_modified__',
+    '__storage_class__',
+  ]);
+
+  const isInternalKey = (key) => INTERNAL_METADATA_KEYS.has(key.toLowerCase());
+
   const renderMetadata = (metadata) => {
     if (!previewMetadata || !previewMetadataList) return;
     previewMetadataList.innerHTML = '';
-    if (!metadata || Object.keys(metadata).length === 0) {
+    if (!metadata) {
+      previewMetadata.classList.add('d-none');
+      return;
+    }
+    const userMetadata = Object.entries(metadata).filter(([key]) => !isInternalKey(key));
+    if (userMetadata.length === 0) {
       previewMetadata.classList.add('d-none');
       return;
     }
     previewMetadata.classList.remove('d-none');
-    Object.entries(metadata).forEach(([key, value]) => {
+    userMetadata.forEach(([key, value]) => {
       const wrapper = document.createElement('div');
       wrapper.className = 'metadata-entry';
       const label = document.createElement('div');
@@ -1421,11 +1470,11 @@
     const metadata = version.metadata && typeof version.metadata === 'object' ? Object.entries(version.metadata) : [];
     const metadataHtml = metadata.length
       ? `<div class="mt-3"><div class="fw-semibold text-uppercase small">Metadata</div><hr class="my-2"><div class="metadata-stack small">${metadata
-          .map(
-            ([key, value]) =>
-              `<div class="metadata-entry"><div class="metadata-key small">${escapeHtml(key)}</div><div class="metadata-value text-break">${escapeHtml(value)}</div></div>`
-          )
-          .join('')}</div></div>`
+        .map(
+          ([key, value]) =>
+            `<div class="metadata-entry"><div class="metadata-key small">${escapeHtml(key)}</div><div class="metadata-value text-break">${escapeHtml(value)}</div></div>`
+        )
+        .join('')}</div></div>`
       : '';
     const summaryHtml = `
       <div class="small">
@@ -1697,7 +1746,7 @@
     if (!endpoint) {
       versionPanel.classList.add('d-none');
       return;
-       }
+    }
     versionPanel.classList.remove('d-none');
     if (!force && versionsCache.has(endpoint)) {
       renderVersionEntries(versionsCache.get(endpoint), row);
@@ -1778,9 +1827,10 @@
   }
 
   const resetPreviewMedia = () => {
-    [previewImage, previewVideo, previewIframe].forEach((el) => {
+    [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
+      if (!el) return;
       el.classList.add('d-none');
-      if (el.tagName === 'VIDEO') {
+      if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') {
         el.pause();
         el.removeAttribute('src');
       }
@@ -1791,32 +1841,31 @@
     previewPlaceholder.classList.remove('d-none');
   };
 
-  function metadataFromRow(row) {
-    if (!row || !row.dataset.metadata) {
-      return null;
-    }
+  async function fetchMetadata(metadataUrl) {
+    if (!metadataUrl) return null;
     try {
-      const parsed = JSON.parse(row.dataset.metadata);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed;
+      const resp = await fetch(metadataUrl);
+      if (resp.ok) {
+        const data = await resp.json();
+        return data.metadata || {};
       }
-    } catch (err) {
-      console.warn('Failed to parse metadata for row', err);
+    } catch (e) {
+      console.warn('Failed to load metadata', e);
     }
     return null;
   }
 
-  function selectRow(row) {
+  async function selectRow(row) {
     document.querySelectorAll('[data-object-row]').forEach((r) => r.classList.remove('table-active'));
     row.classList.add('table-active');
     previewEmpty.classList.add('d-none');
     previewPanel.classList.remove('d-none');
     activeRow = row;
-    renderMetadata(metadataFromRow(row));
+    renderMetadata(null);
 
     previewKey.textContent = row.dataset.key;
     previewSize.textContent = formatBytes(Number(row.dataset.size));
-    previewModified.textContent = row.dataset.lastModified;
+    previewModified.textContent = row.dataset.lastModifiedIso || row.dataset.lastModified;
     previewEtag.textContent = row.dataset.etag;
     downloadButton.href = row.dataset.downloadUrl;
     downloadButton.classList.remove('disabled');
@@ -1835,18 +1884,36 @@
     resetPreviewMedia();
     const previewUrl = row.dataset.previewUrl;
     const lower = row.dataset.key.toLowerCase();
-    if (lower.match(/\.(png|jpg|jpeg|gif|webp|svg)$/)) {
+    if (previewUrl && lower.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp)$/)) {
       previewImage.src = previewUrl;
       previewImage.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
-    } else if (lower.match(/\.(mp4|webm|ogg)$/)) {
+    } else if (previewUrl && lower.match(/\.(mp4|webm|ogv|mov|avi|mkv)$/)) {
       previewVideo.src = previewUrl;
       previewVideo.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
-    } else if (lower.match(/\.(txt|log|json|md|csv)$/)) {
+    } else if (previewUrl && lower.match(/\.(mp3|wav|flac|ogg|aac|m4a|wma)$/)) {
+      previewAudio.src = previewUrl;
+      previewAudio.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    } else if (previewUrl && lower.match(/\.(pdf)$/)) {
       previewIframe.src = previewUrl;
+      previewIframe.style.minHeight = '500px';
       previewIframe.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
+    } else if (previewUrl && lower.match(/\.(txt|log|json|md|csv|xml|html|htm|js|ts|py|java|c|cpp|h|css|scss|yaml|yml|toml|ini|cfg|conf|sh|bat)$/)) {
+      previewIframe.src = previewUrl;
+      previewIframe.style.minHeight = '200px';
+      previewIframe.classList.remove('d-none');
+      previewPlaceholder.classList.add('d-none');
+    }
+
+    const metadataUrl = row.dataset.metadataUrl;
+    if (metadataUrl) {
+      const metadata = await fetchMetadata(metadataUrl);
+      if (activeRow === row) {
+        renderMetadata(metadata);
+      }
     }
   }
 
@@ -1937,7 +2004,7 @@
       textArea.remove();
       return success;
     };
-    
+
     let copied = false;
 
     if (navigator.clipboard && window.isSecureContext) {
@@ -1952,7 +2019,7 @@
     if (!copied) {
       copied = fallbackCopy(presignLink.value);
     }
-    
+
     if (copied) {
       copyPresignLink.textContent = 'Copied!';
       window.setTimeout(() => {
@@ -2064,7 +2131,7 @@
       uploadCancelled = true;
 
       activeXHRs.forEach(xhr => {
-        try { xhr.abort(); } catch {}
+        try { xhr.abort(); } catch { }
       });
       activeXHRs = [];
 
@@ -2073,7 +2140,7 @@
         const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
         try {
           await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
-        } catch {}
+        } catch { }
         activeMultipartUpload = null;
       }
 
@@ -2299,7 +2366,7 @@
         if (!uploadCancelled) {
           try {
             await fetch(abortUrl, { method: 'DELETE', headers: { 'X-CSRFToken': csrfToken || '' } });
-          } catch {}
+          } catch { }
         }
         activeMultipartUpload = null;
         throw err;
@@ -2612,7 +2679,7 @@
     uploadForm.addEventListener('submit', async (event) => {
       const files = uploadFileInput.files;
       if (!files || files.length === 0) return;
-      
+
       const keyPrefix = (uploadKeyPrefix?.value || '').trim();
 
       if (files.length === 1 && !keyPrefix) {
@@ -2633,7 +2700,7 @@
         uploadSubmitBtn.disabled = true;
         if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
       }
-      
+
       await performBulkUpload(Array.from(files));
     });
 
@@ -2834,7 +2901,7 @@
             }
           }
           if (statusAlert) statusAlert.classList.add('d-none');
-          
+
           // Update status badge to show "Paused" with warning styling
           if (statusBadge) {
             statusBadge.className = 'badge bg-warning-subtle text-warning px-3 py-2';
@@ -2844,14 +2911,14 @@
               </svg>
               <span>Paused (Endpoint Unavailable)</span>`;
           }
-          
+
           // Hide the pause button since replication is effectively already paused
           if (pauseForm) pauseForm.classList.add('d-none');
         } else {
           // Hide warning and show success alert
           if (endpointWarning) endpointWarning.classList.add('d-none');
           if (statusAlert) statusAlert.classList.remove('d-none');
-          
+
           // Restore status badge to show "Enabled"
           if (statusBadge) {
             statusBadge.className = 'badge bg-success-subtle text-success px-3 py-2';
@@ -2861,7 +2928,7 @@
               </svg>
               <span>Enabled</span>`;
           }
-          
+
           // Show the pause button
           if (pauseForm) pauseForm.classList.remove('d-none');
         }
@@ -3098,7 +3165,7 @@
 
   const targetBucketInput = document.getElementById('target_bucket');
   const targetBucketFeedback = document.getElementById('target_bucket_feedback');
-  
+
   const validateBucketName = (name) => {
     if (!name) return { valid: false, error: 'Bucket name is required' };
     if (name.length < 3) return { valid: false, error: 'Bucket name must be at least 3 characters' };
@@ -3201,7 +3268,7 @@
 
   const loadLifecycleRules = async () => {
     if (!lifecycleUrl || !lifecycleRulesBody) return;
-    lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
+    lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4"><div class="spinner-border spinner-border-sm me-2" role="status"></div>Loading...</td></tr>';
     try {
       const resp = await fetch(lifecycleUrl);
       const data = await resp.json();
@@ -3209,19 +3276,20 @@
       lifecycleRules = data.rules || [];
       renderLifecycleRules();
     } catch (err) {
-      lifecycleRulesBody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
+      lifecycleRulesBody.innerHTML = `<tr><td colspan="7" class="text-center text-danger py-4">${escapeHtml(err.message)}</td></tr>`;
     }
   };
 
   const renderLifecycleRules = () => {
     if (!lifecycleRulesBody) return;
     if (lifecycleRules.length === 0) {
-      lifecycleRulesBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No lifecycle rules configured</td></tr>';
+      lifecycleRulesBody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No lifecycle rules configured</td></tr>';
       return;
     }
     lifecycleRulesBody.innerHTML = lifecycleRules.map((rule, idx) => {
       const expiration = rule.Expiration?.Days ? `${rule.Expiration.Days}d` : '-';
       const noncurrent = rule.NoncurrentVersionExpiration?.NoncurrentDays ? `${rule.NoncurrentVersionExpiration.NoncurrentDays}d` : '-';
+      const abortMpu = rule.AbortIncompleteMultipartUpload?.DaysAfterInitiation ? `${rule.AbortIncompleteMultipartUpload.DaysAfterInitiation}d` : '-';
       const statusClass = rule.Status === 'Enabled' ? 'bg-success' : 'bg-secondary';
       return `<tr>
         <td><code class="small">${escapeHtml(rule.ID || '')}</code></td>
@@ -3229,6 +3297,7 @@
         <td><span class="badge ${statusClass}">${escapeHtml(rule.Status)}</span></td>
         <td class="small">${expiration}</td>
         <td class="small">${noncurrent}</td>
+        <td class="small">${abortMpu}</td>
         <td class="text-end">
           <div class="btn-group btn-group-sm">
             <button class="btn btn-outline-secondary" onclick="editLifecycleRule(${idx})" title="Edit rule">
@@ -3514,7 +3583,7 @@
     });
   });
 
-  document.getElementById('objects-table')?.addEventListener('show.bs.dropdown', function(e) {
+  document.getElementById('objects-table')?.addEventListener('show.bs.dropdown', function (e) {
     const dropdown = e.target.closest('.dropdown');
     const menu = dropdown?.querySelector('.dropdown-menu');
     const btn = e.target;
@@ -3706,8 +3775,8 @@
   });
 
   const originalSelectRow = selectRow;
-  selectRow = (row) => {
-    originalSelectRow(row);
+  selectRow = async (row) => {
+    await originalSelectRow(row);
     loadObjectTags(row);
   };
 
@@ -3813,18 +3882,18 @@
     var form = document.getElementById(formId);
     if (!form) return;
 
-    form.addEventListener('submit', function(e) {
+    form.addEventListener('submit', function (e) {
       e.preventDefault();
       window.UICore.submitFormAjax(form, {
         successMessage: options.successMessage || 'Operation completed',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           if (options.onSuccess) options.onSuccess(data);
           if (options.closeModal) {
             var modal = bootstrap.Modal.getInstance(document.getElementById(options.closeModal));
             if (modal) modal.hide();
           }
           if (options.reload) {
-            setTimeout(function() { location.reload(); }, 500);
+            setTimeout(function () { location.reload(); }, 500);
           }
         }
       });
@@ -3879,11 +3948,11 @@
       var newForm = document.getElementById('enableVersioningForm');
       if (newForm) {
         newForm.setAttribute('action', window.BucketDetailConfig?.endpoints?.versioning || '');
-        newForm.addEventListener('submit', function(e) {
+        newForm.addEventListener('submit', function (e) {
           e.preventDefault();
           window.UICore.submitFormAjax(newForm, {
             successMessage: 'Versioning enabled',
-            onSuccess: function() {
+            onSuccess: function () {
               updateVersioningBadge(true);
               updateVersioningCard(true);
             }
@@ -3973,7 +4042,7 @@
           '<p class="mb-0 small">No bucket policy is attached. Access is controlled by IAM policies only.</p></div>';
       }
     }
-    document.querySelectorAll('.preset-btn').forEach(function(btn) {
+    document.querySelectorAll('.preset-btn').forEach(function (btn) {
       btn.classList.remove('active');
       if (btn.dataset.preset === preset) btn.classList.add('active');
     });
@@ -3987,7 +4056,7 @@
 
   interceptForm('enableVersioningForm', {
     successMessage: 'Versioning enabled',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateVersioningBadge(true);
       updateVersioningCard(true);
     }
@@ -3996,7 +4065,7 @@
   interceptForm('suspendVersioningForm', {
     successMessage: 'Versioning suspended',
     closeModal: 'suspendVersioningModal',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateVersioningBadge(false);
       updateVersioningCard(false);
     }
@@ -4004,36 +4073,36 @@
 
   interceptForm('encryptionForm', {
     successMessage: 'Encryption settings saved',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateEncryptionCard(data.enabled !== false, data.algorithm || 'AES256');
     }
   });
 
   interceptForm('quotaForm', {
     successMessage: 'Quota settings saved',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       updateQuotaCard(data.has_quota, data.max_bytes, data.max_objects);
     }
   });
 
   interceptForm('bucketPolicyForm', {
     successMessage: 'Bucket policy saved',
-    onSuccess: function(data) {
+    onSuccess: function (data) {
       var policyModeEl = document.getElementById('policyMode');
       var policyPresetEl = document.getElementById('policyPreset');
       var preset = policyModeEl && policyModeEl.value === 'delete' ? 'private' :
-                   (policyPresetEl?.value || 'custom');
+        (policyPresetEl?.value || 'custom');
       updatePolicyCard(preset !== 'private', preset);
     }
   });
 
   var deletePolicyForm = document.getElementById('deletePolicyForm');
   if (deletePolicyForm) {
-    deletePolicyForm.addEventListener('submit', function(e) {
+    deletePolicyForm.addEventListener('submit', function (e) {
       e.preventDefault();
       window.UICore.submitFormAjax(deletePolicyForm, {
         successMessage: 'Bucket policy deleted',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           var modal = bootstrap.Modal.getInstance(document.getElementById('deletePolicyModal'));
           if (modal) modal.hide();
           updatePolicyCard(false, 'private');
@@ -4046,13 +4115,13 @@
 
   var disableEncBtn = document.getElementById('disableEncryptionBtn');
   if (disableEncBtn) {
-    disableEncBtn.addEventListener('click', function() {
+    disableEncBtn.addEventListener('click', function () {
       var form = document.getElementById('encryptionForm');
       if (!form) return;
       document.getElementById('encryptionAction').value = 'disable';
       window.UICore.submitFormAjax(form, {
         successMessage: 'Encryption disabled',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           document.getElementById('encryptionAction').value = 'enable';
           updateEncryptionCard(false, null);
         }
@@ -4062,13 +4131,13 @@
 
   var removeQuotaBtn = document.getElementById('removeQuotaBtn');
   if (removeQuotaBtn) {
-    removeQuotaBtn.addEventListener('click', function() {
+    removeQuotaBtn.addEventListener('click', function () {
       var form = document.getElementById('quotaForm');
       if (!form) return;
       document.getElementById('quotaAction').value = 'remove';
       window.UICore.submitFormAjax(form, {
         successMessage: 'Quota removed',
-        onSuccess: function(data) {
+        onSuccess: function (data) {
           document.getElementById('quotaAction').value = 'set';
           updateQuotaCard(false, null, null);
         }
@@ -4082,39 +4151,39 @@
     fetch(window.location.pathname + '?tab=replication', {
       headers: { 'X-Requested-With': 'XMLHttpRequest' }
     })
-    .then(function(resp) { return resp.text(); })
-    .then(function(html) {
-      var parser = new DOMParser();
-      var doc = parser.parseFromString(html, 'text/html');
-      var newPane = doc.getElementById('replication-pane');
-      if (newPane) {
-        replicationPane.innerHTML = newPane.innerHTML;
-        initReplicationForms();
-        initReplicationStats();
-      }
-    })
-    .catch(function(err) {
-      console.error('Failed to reload replication pane:', err);
-    });
+      .then(function (resp) { return resp.text(); })
+      .then(function (html) {
+        var parser = new DOMParser();
+        var doc = parser.parseFromString(html, 'text/html');
+        var newPane = doc.getElementById('replication-pane');
+        if (newPane) {
+          replicationPane.innerHTML = newPane.innerHTML;
+          initReplicationForms();
+          initReplicationStats();
+        }
+      })
+      .catch(function (err) {
+        console.error('Failed to reload replication pane:', err);
+      });
   }
 
   function initReplicationForms() {
-    document.querySelectorAll('form[action*="replication"]').forEach(function(form) {
+    document.querySelectorAll('form[action*="replication"]').forEach(function (form) {
       if (form.dataset.ajaxBound) return;
       form.dataset.ajaxBound = 'true';
       var actionInput = form.querySelector('input[name="action"]');
       if (!actionInput) return;
       var action = actionInput.value;
 
-      form.addEventListener('submit', function(e) {
+      form.addEventListener('submit', function (e) {
         e.preventDefault();
         var msg = action === 'pause' ? 'Replication paused' :
-                  action === 'resume' ? 'Replication resumed' :
-                  action === 'delete' ? 'Replication disabled' :
-                  action === 'create' ? 'Replication configured' : 'Operation completed';
+          action === 'resume' ? 'Replication resumed' :
+            action === 'delete' ? 'Replication disabled' :
+              action === 'create' ? 'Replication configured' : 'Operation completed';
         window.UICore.submitFormAjax(form, {
           successMessage: msg,
-          onSuccess: function(data) {
+          onSuccess: function (data) {
             var modal = bootstrap.Modal.getInstance(document.getElementById('disableReplicationModal'));
             if (modal) modal.hide();
             reloadReplicationPane();
@@ -4136,14 +4205,14 @@
     var bytesEl = statsContainer.querySelector('[data-stat="bytes"]');
 
     fetch(statusEndpoint)
-      .then(function(resp) { return resp.json(); })
-      .then(function(data) {
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
         if (syncedEl) syncedEl.textContent = data.objects_synced || 0;
         if (pendingEl) pendingEl.textContent = data.objects_pending || 0;
         if (orphanedEl) orphanedEl.textContent = data.objects_orphaned || 0;
         if (bytesEl) bytesEl.textContent = formatBytes(data.bytes_synced || 0);
       })
-      .catch(function(err) {
+      .catch(function (err) {
         console.error('Failed to load replication stats:', err);
       });
   }
@@ -4153,10 +4222,10 @@
 
   var deleteBucketForm = document.getElementById('deleteBucketForm');
   if (deleteBucketForm) {
-    deleteBucketForm.addEventListener('submit', function(e) {
+    deleteBucketForm.addEventListener('submit', function (e) {
       e.preventDefault();
       window.UICore.submitFormAjax(deleteBucketForm, {
-        onSuccess: function() {
+        onSuccess: function () {
           sessionStorage.setItem('flashMessage', JSON.stringify({ title: 'Bucket deleted', variant: 'success' }));
           window.location.href = window.BucketDetailConfig?.endpoints?.bucketsOverview || '/ui/buckets';
         }

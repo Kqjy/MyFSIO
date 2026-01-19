@@ -28,6 +28,7 @@ def _make_app(tmp_path: Path):
     flask_app = create_app(
         {
             "TESTING": True,
+            "SECRET_KEY": "testing",
             "WTF_CSRF_ENABLED": False,
             "STORAGE_ROOT": storage_root,
             "IAM_CONFIG": iam_config,

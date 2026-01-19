@@ -15,6 +15,7 @@ def kms_client(tmp_path):
     
     app = create_app({
         "TESTING": True,
+        "SECRET_KEY": "testing",
         "STORAGE_ROOT": str(tmp_path / "storage"),
         "IAM_CONFIG": str(tmp_path / "iam.json"),
         "BUCKET_POLICY_PATH": str(tmp_path / "policies.json"),

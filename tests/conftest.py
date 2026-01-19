@@ -35,6 +35,7 @@ def app(tmp_path: Path):
     flask_app = create_api_app(
         {
             "TESTING": True,
+            "SECRET_KEY": "testing",
             "STORAGE_ROOT": storage_root,
             "IAM_CONFIG": iam_config,
             "BUCKET_POLICY_PATH": bucket_policies,

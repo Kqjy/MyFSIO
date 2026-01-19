@@ -5,8 +5,11 @@ import json
 import uuid
 import psutil
 import shutil
+from datetime import datetime, timezone as dt_timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
+from zoneinfo import ZoneInfo
 
 import boto3
 import requests
@@ -33,10 +36,54 @@ from .extensions import limiter, csrf
 from .iam import IamError
 from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
+from .s3_api import _generate_presigned_url
 from .secret_store import EphemeralSecretStore
 from .storage import ObjectStorage, StorageError
 
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
+
+
+def _convert_to_display_tz(dt: datetime, display_tz: str | None = None) -> datetime:
+    """Convert a datetime to the configured display timezone.
+    
+    Args:
+        dt: The datetime to convert
+        display_tz: Optional timezone string. If not provided, reads from current_app.config.
+    """
+    if display_tz is None:
+        display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
+    if display_tz and display_tz != "UTC":
+        try:
+            tz = ZoneInfo(display_tz)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=dt_timezone.utc)
+            dt = dt.astimezone(tz)
+        except (KeyError, ValueError):
+            pass
+    return dt
+
+
+def _format_datetime_display(dt: datetime, display_tz: str | None = None) -> str:
+    """Format a datetime for display using the configured timezone.
+
+    Args:
+        dt: The datetime to format
+        display_tz: Optional timezone string. If not provided, reads from current_app.config.
+    """
+    dt = _convert_to_display_tz(dt, display_tz)
+    tz_abbr = dt.strftime("%Z") or "UTC"
+    return f"{dt.strftime('%b %d, %Y %H:%M')} ({tz_abbr})"
+
+
+def _format_datetime_iso(dt: datetime, display_tz: str | None = None) -> str:
+    """Format a datetime as ISO format using the configured timezone.
+    
+    Args:
+        dt: The datetime to format
+        display_tz: Optional timezone string. If not provided, reads from current_app.config.
+    """
+    dt = _convert_to_display_tz(dt, display_tz)
+    return dt.isoformat()
 
 
 
@@ -62,6 +109,20 @@ def _bucket_policies() -> BucketPolicyStore:
     return store
 
 
+def _build_policy_context() -> dict[str, Any]:
+    ctx: dict[str, Any] = {}
+    if request.headers.get("Referer"):
+        ctx["aws:Referer"] = request.headers.get("Referer")
+    if request.access_route:
+        ctx["aws:SourceIp"] = request.access_route[0]
+    elif request.remote_addr:
+        ctx["aws:SourceIp"] = request.remote_addr
+    ctx["aws:SecureTransport"] = str(request.is_secure).lower()
+    if request.headers.get("User-Agent"):
+        ctx["aws:UserAgent"] = request.headers.get("User-Agent")
+    return ctx
+
+
 def _connections() -> ConnectionStore:
     return current_app.extensions["connections"]
 
@@ -80,6 +141,10 @@ def _acl() -> AclService:
     return current_app.extensions["acl"]
 
 
+def _operation_metrics():
+    return current_app.extensions.get("operation_metrics")
+
+
 def _format_bytes(num: int) -> str:
     step = 1024
     units = ["B", "KB", "MB", "GB", "TB", "PB"]
@@ -91,6 +156,69 @@ def _format_bytes(num: int) -> str:
             return f"{value:.1f} {unit}"
         value /= step
     return f"{value:.1f} PB"
+
+
+_metrics_last_save_time: float = 0.0
+
+
+def _get_metrics_history_path() -> Path:
+    storage_root = Path(current_app.config["STORAGE_ROOT"])
+    return storage_root / ".myfsio.sys" / "config" / "metrics_history.json"
+
+
+def _load_metrics_history() -> dict:
+    path = _get_metrics_history_path()
+    if not path.exists():
+        return {"history": []}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"history": []}
+
+
+def _save_metrics_snapshot(cpu_percent: float, memory_percent: float, disk_percent: float, storage_bytes: int) -> None:
+    global _metrics_last_save_time
+
+    if not current_app.config.get("METRICS_HISTORY_ENABLED", False):
+        return
+
+    import time
+    from datetime import datetime, timezone
+
+    interval_minutes = current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5)
+    now_ts = time.time()
+    if now_ts - _metrics_last_save_time < interval_minutes * 60:
+        return
+
+    path = _get_metrics_history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = _load_metrics_history()
+    history = data.get("history", [])
+    retention_hours = current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24)
+
+    now = datetime.now(timezone.utc)
+    snapshot = {
+        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cpu_percent": round(cpu_percent, 2),
+        "memory_percent": round(memory_percent, 2),
+        "disk_percent": round(disk_percent, 2),
+        "storage_bytes": storage_bytes,
+    }
+    history.append(snapshot)
+
+    cutoff = now.timestamp() - (retention_hours * 3600)
+    history = [
+        h for h in history
+        if datetime.fromisoformat(h["timestamp"].replace("Z", "+00:00")).timestamp() > cutoff
+    ]
+
+    data["history"] = history
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        _metrics_last_save_time = now_ts
+    except OSError:
+        pass
 
 
 def _friendly_error_message(exc: Exception) -> str:
@@ -172,7 +300,8 @@ def _authorize_ui(principal, bucket_name: str | None, action: str, *, object_key
     enforce_bucket_policies = current_app.config.get("UI_ENFORCE_BUCKET_POLICIES", True)
     if bucket_name and enforce_bucket_policies:
         access_key = principal.access_key if principal else None
-        decision = _bucket_policies().evaluate(access_key, bucket_name, object_key, action)
+        policy_context = _build_policy_context()
+        decision = _bucket_policies().evaluate(access_key, bucket_name, object_key, action, policy_context)
         if decision == "deny":
             raise IamError("Access denied by bucket policy")
     if not iam_allowed and decision != "allow":
@@ -350,6 +479,23 @@ def bucket_detail(bucket_name: str):
             can_edit_policy = True
         except IamError:
             can_edit_policy = False
+
+    can_manage_lifecycle = False
+    if principal:
+        try:
+            _iam().authorize(principal, bucket_name, "lifecycle")
+            can_manage_lifecycle = True
+        except IamError:
+            can_manage_lifecycle = False
+
+    can_manage_cors = False
+    if principal:
+        try:
+            _iam().authorize(principal, bucket_name, "cors")
+            can_manage_cors = True
+        except IamError:
+            can_manage_cors = False
+
     try:
         versioning_enabled = storage.is_versioning_enabled(bucket_name)
     except StorageError:
@@ -421,6 +567,8 @@ def bucket_detail(bucket_name: str):
         bucket_policy_text=policy_text,
         bucket_policy=bucket_policy,
         can_edit_policy=can_edit_policy,
+        can_manage_lifecycle=can_manage_lifecycle,
+        can_manage_cors=can_manage_cors,
         can_manage_versioning=can_manage_versioning,
         can_manage_replication=can_manage_replication,
         can_manage_encryption=can_manage_encryption,
@@ -477,6 +625,7 @@ def list_bucket_objects(bucket_name: str):
     tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    metadata_template = url_for("ui.object_metadata", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
 
     objects_data = []
     for obj in result.objects:
@@ -484,7 +633,8 @@ def list_bucket_objects(bucket_name: str):
             "key": obj.key,
             "size": obj.size,
             "last_modified": obj.last_modified.isoformat(),
-            "last_modified_display": obj.last_modified.strftime("%b %d, %Y %H:%M"),
+            "last_modified_display": _format_datetime_display(obj.last_modified),
+            "last_modified_iso": _format_datetime_iso(obj.last_modified),
             "etag": obj.etag,
         })
 
@@ -504,6 +654,7 @@ def list_bucket_objects(bucket_name: str):
             "tags": tags_template,
             "copy": copy_template,
             "move": move_template,
+            "metadata": metadata_template,
         },
     })
 
@@ -537,6 +688,8 @@ def stream_bucket_objects(bucket_name: str):
     tags_template = url_for("ui.object_tags", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     copy_template = url_for("ui.copy_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
     move_template = url_for("ui.move_object", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    metadata_template = url_for("ui.object_metadata", bucket_name=bucket_name, object_key="KEY_PLACEHOLDER")
+    display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
 
     def generate():
         meta_line = json.dumps({
@@ -552,6 +705,7 @@ def stream_bucket_objects(bucket_name: str):
                 "tags": tags_template,
                 "copy": copy_template,
                 "move": move_template,
+                "metadata": metadata_template,
             },
         }) + "\n"
         yield meta_line
@@ -582,7 +736,8 @@ def stream_bucket_objects(bucket_name: str):
                     "key": obj.key,
                     "size": obj.size,
                     "last_modified": obj.last_modified.isoformat(),
-                    "last_modified_display": obj.last_modified.strftime("%b %d, %Y %H:%M"),
+                    "last_modified_display": _format_datetime_display(obj.last_modified, display_tz),
+                    "last_modified_iso": _format_datetime_iso(obj.last_modified, display_tz),
                     "etag": obj.etag,
                 }) + "\n"
 
@@ -985,42 +1140,57 @@ def object_presign(bucket_name: str, object_key: str):
     principal = _current_principal()
     payload = request.get_json(silent=True) or {}
     method = str(payload.get("method", "GET")).upper()
+    allowed_methods = {"GET", "PUT", "DELETE"}
+    if method not in allowed_methods:
+        return jsonify({"error": "Method must be GET, PUT, or DELETE"}), 400
     action = "read" if method == "GET" else ("delete" if method == "DELETE" else "write")
     try:
         _authorize_ui(principal, bucket_name, action, object_key=object_key)
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
-    
+    try:
+        expires = int(payload.get("expires_in", 900))
+    except (TypeError, ValueError):
+        return jsonify({"error": "expires_in must be an integer"}), 400
+    expires = max(1, min(expires, 7 * 24 * 3600))
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return jsonify({"error": "Bucket does not exist"}), 404
+    if action != "write":
+        try:
+            storage.get_object_path(bucket_name, object_key)
+        except StorageError:
+            return jsonify({"error": "Object not found"}), 404
+    secret = _iam().secret_for_key(principal.access_key)
     api_base = current_app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
-    api_base = api_base.rstrip("/")
-    encoded_key = quote(object_key, safe="/")
-    url = f"{api_base}/presign/{bucket_name}/{encoded_key}"
-    
-    parsed_api = urlparse(api_base)
-    headers = _api_headers()
-    headers["X-Forwarded-Host"] = parsed_api.netloc or "127.0.0.1:5000"
-    headers["X-Forwarded-Proto"] = parsed_api.scheme or "http"
-    headers["X-Forwarded-For"] = request.remote_addr or "127.0.0.1"
-    
+    url = _generate_presigned_url(
+        principal=principal,
+        secret_key=secret,
+        method=method,
+        bucket_name=bucket_name,
+        object_key=object_key,
+        expires_in=expires,
+        api_base_url=api_base,
+    )
+    current_app.logger.info(
+        "Presigned URL generated",
+        extra={"bucket": bucket_name, "key": object_key, "method": method},
+    )
+    return jsonify({"url": url, "method": method, "expires_in": expires})
+
+
+@ui_bp.get("/buckets/<bucket_name>/objects/<path:object_key>/metadata")
+def object_metadata(bucket_name: str, object_key: str):
+    principal = _current_principal()
+    storage = _storage()
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=5)
-    except requests.RequestException as exc:
-        return jsonify({"error": f"API unavailable: {exc}"}), 502
-    try:
-        body = response.json()
-    except ValueError:
-        text = response.text or ""
-        if text.strip().startswith("<"):
-            import xml.etree.ElementTree as ET
-            try:
-                root = ET.fromstring(text)
-                message = root.findtext(".//Message") or root.findtext(".//Code") or "Unknown S3 error"
-                body = {"error": message}
-            except ET.ParseError:
-                body = {"error": text or "API returned an empty response"}
-        else:
-            body = {"error": text or "API returned an empty response"}
-    return jsonify(body), response.status_code
+        _authorize_ui(principal, bucket_name, "read", object_key=object_key)
+        metadata = storage.get_object_metadata(bucket_name, object_key)
+        return jsonify({"metadata": metadata})
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 404
 
 
 @ui_bp.get("/buckets/<bucket_name>/objects/<path:object_key>/versions")
@@ -2007,18 +2177,18 @@ def metrics_dashboard():
     return render_template(
         "metrics.html",
         principal=principal,
-        cpu_percent=cpu_percent,
+        cpu_percent=round(cpu_percent, 2),
         memory={
             "total": _format_bytes(memory.total),
             "available": _format_bytes(memory.available),
             "used": _format_bytes(memory.used),
-            "percent": memory.percent,
+            "percent": round(memory.percent, 2),
         },
         disk={
             "total": _format_bytes(disk.total),
             "free": _format_bytes(disk.free),
             "used": _format_bytes(disk.used),
-            "percent": disk.percent,
+            "percent": round(disk.percent, 2),
         },
         app={
             "buckets": total_buckets,
@@ -2028,7 +2198,9 @@ def metrics_dashboard():
             "storage_raw": total_bytes_used,
             "version": APP_VERSION,
             "uptime_days": uptime_days,
-        }
+        },
+        metrics_history_enabled=current_app.config.get("METRICS_HISTORY_ENABLED", False),
+        operation_metrics_enabled=current_app.config.get("OPERATION_METRICS_ENABLED", False),
     )
 
 
@@ -2068,19 +2240,21 @@ def metrics_api():
     uptime_seconds = time.time() - boot_time
     uptime_days = int(uptime_seconds / 86400)
 
+    _save_metrics_snapshot(cpu_percent, memory.percent, disk.percent, total_bytes_used)
+
     return jsonify({
-        "cpu_percent": cpu_percent,
+        "cpu_percent": round(cpu_percent, 2),
         "memory": {
             "total": _format_bytes(memory.total),
             "available": _format_bytes(memory.available),
             "used": _format_bytes(memory.used),
-            "percent": memory.percent,
+            "percent": round(memory.percent, 2),
         },
         "disk": {
             "total": _format_bytes(disk.total),
             "free": _format_bytes(disk.free),
             "used": _format_bytes(disk.used),
-            "percent": disk.percent,
+            "percent": round(disk.percent, 2),
         },
         "app": {
             "buckets": total_buckets,
@@ -2093,11 +2267,124 @@ def metrics_api():
     })
 
 
+@ui_bp.route("/metrics/history")
+def metrics_history():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    if not current_app.config.get("METRICS_HISTORY_ENABLED", False):
+        return jsonify({"enabled": False, "history": []})
+
+    hours = request.args.get("hours", type=int)
+    if hours is None:
+        hours = current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24)
+
+    data = _load_metrics_history()
+    history = data.get("history", [])
+
+    if hours:
+        from datetime import datetime, timezone
+        cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+        history = [
+            h for h in history
+            if datetime.fromisoformat(h["timestamp"].replace("Z", "+00:00")).timestamp() > cutoff
+        ]
+
+    return jsonify({
+        "enabled": True,
+        "retention_hours": current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+        "interval_minutes": current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+        "history": history,
+    })
+
+
+@ui_bp.route("/metrics/settings", methods=["GET", "PUT"])
+def metrics_settings():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    if request.method == "GET":
+        return jsonify({
+            "enabled": current_app.config.get("METRICS_HISTORY_ENABLED", False),
+            "retention_hours": current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+            "interval_minutes": current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+        })
+
+    data = request.get_json() or {}
+
+    if "enabled" in data:
+        current_app.config["METRICS_HISTORY_ENABLED"] = bool(data["enabled"])
+    if "retention_hours" in data:
+        current_app.config["METRICS_HISTORY_RETENTION_HOURS"] = max(1, int(data["retention_hours"]))
+    if "interval_minutes" in data:
+        current_app.config["METRICS_HISTORY_INTERVAL_MINUTES"] = max(1, int(data["interval_minutes"]))
+
+    return jsonify({
+        "enabled": current_app.config.get("METRICS_HISTORY_ENABLED", False),
+        "retention_hours": current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+        "interval_minutes": current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+    })
+
+
+@ui_bp.get("/metrics/operations")
+def metrics_operations():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    collector = _operation_metrics()
+    if not collector:
+        return jsonify({
+            "enabled": False,
+            "stats": None,
+        })
+
+    return jsonify({
+        "enabled": True,
+        "stats": collector.get_current_stats(),
+    })
+
+
+@ui_bp.get("/metrics/operations/history")
+def metrics_operations_history():
+    principal = _current_principal()
+
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    collector = _operation_metrics()
+    if not collector:
+        return jsonify({
+            "enabled": False,
+            "history": [],
+        })
+
+    hours = request.args.get("hours", type=int)
+    return jsonify({
+        "enabled": True,
+        "history": collector.get_history(hours),
+        "interval_minutes": current_app.config.get("OPERATION_METRICS_INTERVAL_MINUTES", 5),
+    })
+
+
 @ui_bp.route("/buckets/<bucket_name>/lifecycle", methods=["GET", "POST", "DELETE"])
 def bucket_lifecycle(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "policy")
+        _authorize_ui(principal, bucket_name, "lifecycle")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
@@ -2150,7 +2437,7 @@ def bucket_lifecycle(bucket_name: str):
 def get_lifecycle_history(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "policy")
+        _authorize_ui(principal, bucket_name, "lifecycle")
     except IamError:
         return jsonify({"error": "Access denied"}), 403
 
@@ -2181,7 +2468,7 @@ def get_lifecycle_history(bucket_name: str):
 def bucket_cors(bucket_name: str):
     principal = _current_principal()
     try:
-        _authorize_ui(principal, bucket_name, "policy")
+        _authorize_ui(principal, bucket_name, "cors")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 

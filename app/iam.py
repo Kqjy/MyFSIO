@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import secrets
@@ -15,7 +16,7 @@ class IamError(RuntimeError):
     """Raised when authentication or authorization fails."""
 
 
-S3_ACTIONS = {"list", "read", "write", "delete", "share", "policy", "replication"}
+S3_ACTIONS = {"list", "read", "write", "delete", "share", "policy", "replication", "lifecycle", "cors"}
 IAM_ACTIONS = {
     "iam:list_users",
     "iam:create_user",
@@ -71,6 +72,16 @@ ACTION_ALIASES = {
     "s3:replicateobject": "replication",
     "s3:replicatetags": "replication",
     "s3:replicatedelete": "replication",
+    "lifecycle": "lifecycle",
+    "s3:getlifecycleconfiguration": "lifecycle",
+    "s3:putlifecycleconfiguration": "lifecycle",
+    "s3:deletelifecycleconfiguration": "lifecycle",
+    "s3:getbucketlifecycle": "lifecycle",
+    "s3:putbucketlifecycle": "lifecycle",
+    "cors": "cors",
+    "s3:getbucketcors": "cors",
+    "s3:putbucketcors": "cors",
+    "s3:deletebucketcors": "cors",
     "iam:listusers": "iam:list_users",
     "iam:createuser": "iam:create_user",
     "iam:deleteuser": "iam:delete_user",
@@ -139,7 +150,7 @@ class IamService:
                 f"Access temporarily locked. Try again in {seconds} seconds."
             )
         record = self._users.get(access_key)
-        if not record or record["secret_key"] != secret_key:
+        if not record or not hmac.compare_digest(record["secret_key"], secret_key):
             self._record_failed_attempt(access_key)
             raise IamError("Invalid credentials")
         self._clear_failed_attempts(access_key)

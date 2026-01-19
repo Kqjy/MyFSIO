@@ -67,12 +67,14 @@
       </button>
     </li>
     {% endif %}
-    {% if can_edit_policy %}
+    {% if can_manage_lifecycle %}
     <li class="nav-item" role="presentation">
       <button class="nav-link {{ 'active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-tab" data-bs-toggle="tab" data-bs-target="#lifecycle-pane" type="button" role="tab" aria-controls="lifecycle-pane" aria-selected="{{ 'true' if active_tab == 'lifecycle' else 'false' }}">
         Lifecycle
       </button>
     </li>
+    {% endif %}
+    {% if can_manage_cors %}
     <li class="nav-item" role="presentation">
       <button class="nav-link {{ 'active' if active_tab == 'cors' else '' }}" id="cors-tab" data-bs-toggle="tab" data-bs-target="#cors-pane" type="button" role="tab" aria-controls="cors-pane" aria-selected="{{ 'true' if active_tab == 'cors' else 'false' }}">
         CORS
@@ -187,20 +189,6 @@
           </div>
           <span id="load-more-status" class="text-muted"></span>
           <span id="folder-view-status" class="text-muted d-none"></span>
-          <button id="load-more-btn" class="btn btn-link btn-sm p-0 d-none" style="font-size: 0.75rem;">Load more</button>
-        </div>
-        <div class="d-flex align-items-center gap-1">
-          <span class="text-muted">Batch</span>
-          <select id="page-size-select" class="form-select form-select-sm py-0" style="width: auto; font-size: 0.75rem;" title="Number of objects to load per batch">
-            <option value="1000">1K</option>
-            <option value="5000" selected>5K</option>
-            <option value="10000">10K</option>
-            <option value="25000">25K</option>
-            <option value="50000">50K</option>
-            <option value="75000">75K</option>
-            <option value="100000">100K</option>
-          </select>
-          <span class="text-muted">per batch</span>
         </div>
       </div>
     </div>
@@ -332,6 +320,7 @@
             </div>
             <img id="preview-image" class="img-fluid d-none w-100" alt="Object preview" style="display: block;" />
             <video id="preview-video" class="w-100 d-none" controls style="display: block;"></video>
+            <audio id="preview-audio" class="w-100 d-none" controls style="display: block;"></audio>
             <iframe id="preview-iframe" class="w-100 d-none" loading="lazy" style="min-height: 200px;"></iframe>
           </div>
         </div>
@@ -1532,7 +1521,7 @@
     </div>
     {% endif %}
 
-    {% if can_edit_policy %}
+    {% if can_manage_lifecycle %}
     <div class="tab-pane fade {{ 'show active' if active_tab == 'lifecycle' else '' }}" id="lifecycle-pane" role="tabpanel" aria-labelledby="lifecycle-tab" tabindex="0">
       {% if not lifecycle_enabled %}
       <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
@@ -1574,12 +1563,13 @@
                       <th>Status</th>
                       <th>Expiration</th>
                       <th>Noncurrent</th>
+                      <th>Abort MPU</th>
                       <th class="text-end">Actions</th>
                     </tr>
                   </thead>
                   <tbody id="lifecycle-rules-body">
                     <tr>
-                      <td colspan="6" class="text-center text-muted py-4">
+                      <td colspan="7" class="text-center text-muted py-4">
                         <div class="spinner-border spinner-border-sm me-2" role="status"></div>
                         Loading...
                       </td>
@@ -1690,7 +1680,9 @@
         </div>
       </div>
     </div>
+    {% endif %}
 
+    {% if can_manage_cors %}
     <div class="tab-pane fade {{ 'show active' if active_tab == 'cors' else '' }}" id="cors-pane" role="tabpanel" aria-labelledby="cors-tab" tabindex="0">
       <div class="row g-4">
         <div class="col-lg-8">

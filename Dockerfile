@@ -32,6 +32,6 @@ ENV APP_HOST=0.0.0.0 \
     FLASK_DEBUG=0
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:5000/healthz', timeout=2)"
+    CMD python -c "import requests; requests.get('http://localhost:5000/myfsio/health', timeout=2)"
 
 CMD ["./docker-entrypoint.sh"]
