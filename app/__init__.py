@@ -197,6 +197,17 @@ def create_app(
         )
     app.extensions["operation_metrics"] = operation_metrics_collector
 
+    system_metrics_collector = None
+    if app.config.get("METRICS_HISTORY_ENABLED", False):
+        from .system_metrics import SystemMetricsCollector
+        system_metrics_collector = SystemMetricsCollector(
+            storage_root,
+            interval_minutes=app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+            retention_hours=app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+        )
+        system_metrics_collector.set_storage(storage)
+    app.extensions["system_metrics"] = system_metrics_collector
+
     @app.errorhandler(500)
     def internal_error(error):
         return render_template('500.html'), 500
