@@ -1147,7 +1147,84 @@ curl -X PUT "http://localhost:5000/bucket/<bucket>?quota" \
 </Error>
 ```
 
-## 9. Site Replication
+## 9. Operation Metrics
+
+Operation metrics provide real-time visibility into API request statistics, including request counts, latency, error rates, and bandwidth usage.
+
+### Enabling Operation Metrics
+
+By default, operation metrics are disabled. Enable by setting the environment variable:
+
+```bash
+OPERATION_METRICS_ENABLED=true python run.py
+```
+
+Or in your `myfsio.env` file:
+```
+OPERATION_METRICS_ENABLED=true
+OPERATION_METRICS_INTERVAL_MINUTES=5
+OPERATION_METRICS_RETENTION_HOURS=24
+```
+
+### Configuration Options
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPERATION_METRICS_ENABLED` | `false` | Enable/disable operation metrics |
+| `OPERATION_METRICS_INTERVAL_MINUTES` | `5` | Snapshot interval (minutes) |
+| `OPERATION_METRICS_RETENTION_HOURS` | `24` | History retention period (hours) |
+
+### What's Tracked
+
+**Request Statistics:**
+- Request counts by HTTP method (GET, PUT, POST, DELETE, HEAD, OPTIONS)
+- Response status codes grouped by class (2xx, 3xx, 4xx, 5xx)
+- Latency statistics (min, max, average)
+- Bytes transferred in/out
+
+**Endpoint Breakdown:**
+- `object` - Object operations (GET/PUT/DELETE objects)
+- `bucket` - Bucket operations (list, create, delete buckets)
+- `ui` - Web UI requests
+- `service` - Health checks, internal endpoints
+- `kms` - KMS API operations
+
+**S3 Error Codes:**
+Tracks API-specific error codes like `NoSuchKey`, `AccessDenied`, `BucketNotFound`. Note: These are separate from HTTP status codes - a 404 from the UI won't appear here, only S3 API errors.
+
+### API Endpoints
+
+```bash
+# Get current operation metrics
+curl http://localhost:5100/ui/metrics/operations \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Get operation metrics history
+curl http://localhost:5100/ui/metrics/operations/history \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Filter history by time range
+curl "http://localhost:5100/ui/metrics/operations/history?hours=6" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### Storage Location
+
+Operation metrics data is stored at:
+```
+data/.myfsio.sys/config/operation_metrics.json
+```
+
+### UI Dashboard
+
+When enabled, the Metrics page (`/ui/metrics`) shows an "API Operations" section with:
+- Summary cards: Requests, Success Rate, Errors, Latency, Bytes In, Bytes Out
+- Charts: Requests by Method (doughnut), Requests by Status (bar), Requests by Endpoint (horizontal bar)
+- S3 Error Codes table with distribution
+
+Data refreshes every 5 seconds.
+
+## 10. Site Replication
 
 ### Permission Model
 
@@ -1284,7 +1361,7 @@ To set up two-way replication (Server A ↔ Server B):
 
 **Note**: Deleting a bucket will automatically remove its associated replication configuration.
 
-## 11. Running Tests
+## 12. Running Tests
 
 ```bash
 pytest -q
@@ -1294,7 +1371,7 @@ The suite now includes a boto3 integration test that spins up a live HTTP server
 
 The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, and regression tests for anonymous reads when a Public policy is attached.
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 | --- | --- | --- |
@@ -1303,7 +1380,7 @@ The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, an
 | Presign modal errors with 403 | IAM user lacks `read/write/delete` for target bucket or bucket policy denies | Update IAM inline policies or remove conflicting deny statements. |
 | Large upload rejected immediately | File exceeds `MAX_UPLOAD_SIZE` | Increase env var or shrink object. |
 
-## 13. API Matrix
+## 14. API Matrix
 
 ```
 GET    /                               # List buckets

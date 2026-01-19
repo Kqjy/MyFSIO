@@ -40,6 +40,7 @@
             <li><a href="#encryption">Encryption</a></li>
             <li><a href="#lifecycle">Lifecycle Rules</a></li>
             <li><a href="#metrics">Metrics History</a></li>
+            <li><a href="#operation-metrics">Operation Metrics</a></li>
             <li><a href="#troubleshooting">Troubleshooting</a></li>
           </ul>
         </div>
@@ -1070,10 +1071,117 @@ curl -X PUT "{{ api_base | replace('/api', '/ui') }}/metrics/settings" \
         </div>
       </div>
     </article>
-    <article id="troubleshooting" class="card shadow-sm docs-section">
+    <article id="operation-metrics" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">14</span>
+          <h2 class="h4 mb-0">Operation Metrics</h2>
+        </div>
+        <p class="text-muted">Track API request statistics including request counts, latency, error rates, and bandwidth usage. Provides real-time visibility into API operations.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Enabling Operation Metrics</h3>
+        <p class="small text-muted">Set the environment variable to opt-in:</p>
+<pre class="mb-3"><code class="language-bash"># PowerShell
+$env:OPERATION_METRICS_ENABLED = "true"
+python run.py
+
+# Bash
+export OPERATION_METRICS_ENABLED=true
+python run.py</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Configuration Options</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Variable</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>OPERATION_METRICS_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable/disable operation metrics collection</td>
+              </tr>
+              <tr>
+                <td><code>OPERATION_METRICS_INTERVAL_MINUTES</code></td>
+                <td><code>5</code></td>
+                <td>Interval between snapshots (minutes)</td>
+              </tr>
+              <tr>
+                <td><code>OPERATION_METRICS_RETENTION_HOURS</code></td>
+                <td><code>24</code></td>
+                <td>How long to keep history data (hours)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">What's Tracked</h3>
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
+            <div class="bg-light rounded p-3 h-100">
+              <h6 class="small fw-bold mb-2">Request Statistics</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li>Request counts by HTTP method (GET, PUT, POST, DELETE)</li>
+                <li>Response status codes (2xx, 3xx, 4xx, 5xx)</li>
+                <li>Average, min, max latency</li>
+                <li>Bytes transferred in/out</li>
+              </ul>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="bg-light rounded p-3 h-100">
+              <h6 class="small fw-bold mb-2">Endpoint Breakdown</h6>
+              <ul class="small text-muted mb-0 ps-3">
+                <li><code>object</code> - Object operations (GET/PUT/DELETE)</li>
+                <li><code>bucket</code> - Bucket operations</li>
+                <li><code>ui</code> - Web UI requests</li>
+                <li><code>service</code> - Health checks, etc.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">S3 Error Codes</h3>
+        <p class="small text-muted">The dashboard tracks S3 API-specific error codes like <code>NoSuchKey</code>, <code>AccessDenied</code>, <code>BucketNotFound</code>. These are separate from HTTP status codes &ndash; a 404 from the UI won't appear here, only S3 API errors.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">API Endpoints</h3>
+<pre class="mb-3"><code class="language-bash"># Get current operation metrics
+curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Get operation metrics history
+curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Filter history by time range
+curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
+        <p class="small text-muted mb-3">Operation metrics data is stored at:</p>
+        <code class="d-block mb-3">data/.myfsio.sys/config/operation_metrics.json</code>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>UI Dashboard:</strong> When enabled, the Metrics page shows an "API Operations" section with summary cards, charts for requests by method/status/endpoint, and an S3 error codes table. Data refreshes every 5 seconds.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="troubleshooting" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">15</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -1140,6 +1248,7 @@ curl -X PUT "{{ api_base | replace('/api', '/ui') }}/metrics/settings" \
           <li><a href="#encryption">Encryption</a></li>
           <li><a href="#lifecycle">Lifecycle Rules</a></li>
           <li><a href="#metrics">Metrics History</a></li>
+          <li><a href="#operation-metrics">Operation Metrics</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>
         </ul>
         <div class="docs-sidebar-callouts">
