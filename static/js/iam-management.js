@@ -16,7 +16,7 @@ window.IAMManagement = (function() {
   var currentDeleteKey = null;
 
   var policyTemplates = {
-    full: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'iam:list_users', 'iam:*'] }],
+    full: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'lifecycle', 'cors', 'iam:*'] }],
     readonly: [{ bucket: '*', actions: ['list', 'read'] }],
     writer: [{ bucket: '*', actions: ['list', 'read', 'write'] }]
   };
