@@ -18,6 +18,8 @@ for _env_file in [
     if _env_file.exists():
         load_dotenv(_env_file, override=True)
 
+from typing import Optional
+
 from app import create_api_app, create_ui_app
 from app.config import AppConfig
 
@@ -36,11 +38,23 @@ def _is_frozen() -> bool:
     return getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
 
-def serve_api(port: int, prod: bool = False) -> None:
+def serve_api(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
     app = create_api_app()
     if prod:
         from waitress import serve
-        serve(app, host=_server_host(), port=port, ident="MyFSIO")
+        if config:
+            serve(
+                app,
+                host=_server_host(),
+                port=port,
+                ident="MyFSIO",
+                threads=config.server_threads,
+                connection_limit=config.server_connection_limit,
+                backlog=config.server_backlog,
+                channel_timeout=config.server_channel_timeout,
+            )
+        else:
+            serve(app, host=_server_host(), port=port, ident="MyFSIO")
     else:
         debug = _is_debug_enabled()
         if debug:
@@ -48,11 +62,23 @@ def serve_api(port: int, prod: bool = False) -> None:
         app.run(host=_server_host(), port=port, debug=debug)
 
 
-def serve_ui(port: int, prod: bool = False) -> None:
+def serve_ui(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
     app = create_ui_app()
     if prod:
         from waitress import serve
-        serve(app, host=_server_host(), port=port, ident="MyFSIO")
+        if config:
+            serve(
+                app,
+                host=_server_host(),
+                port=port,
+                ident="MyFSIO",
+                threads=config.server_threads,
+                connection_limit=config.server_connection_limit,
+                backlog=config.server_backlog,
+                channel_timeout=config.server_channel_timeout,
+            )
+        else:
+            serve(app, host=_server_host(), port=port, ident="MyFSIO")
     else:
         debug = _is_debug_enabled()
         if debug:
@@ -71,7 +97,6 @@ if __name__ == "__main__":
     parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
     args = parser.parse_args()
 
-    # Handle config check/show modes
     if args.check_config or args.show_config:
         config = AppConfig.from_env()
         config.print_startup_summary()
@@ -81,49 +106,50 @@ if __name__ == "__main__":
             sys.exit(1 if critical else 0)
         sys.exit(0)
 
-    # Default to production mode when running as compiled binary
-    # unless --dev is explicitly passed
     prod_mode = args.prod or (_is_frozen() and not args.dev)
     
-    # Validate configuration before starting
     config = AppConfig.from_env()
     
-    # Show startup summary only on first run (when marker file doesn't exist)
     first_run_marker = config.storage_root / ".myfsio.sys" / ".initialized"
     is_first_run = not first_run_marker.exists()
     
     if is_first_run:
         config.print_startup_summary()
         
-        # Check for critical issues that should prevent startup
         issues = config.validate_and_report()
         critical_issues = [i for i in issues if i.startswith("CRITICAL:")]
         if critical_issues:
-            print("ABORTING: Critical configuration issues detected. Fix them before starting.")
+            print("ABORTING: Critical configuration issues detected. Please fix them before starting.")
             sys.exit(1)
         
-        # Create the marker file to indicate successful first run
         try:
             first_run_marker.parent.mkdir(parents=True, exist_ok=True)
             first_run_marker.write_text(f"Initialized on {__import__('datetime').datetime.now().isoformat()}\n")
         except OSError:
-            pass  # Non-critical, just skip marker creation
+            pass
     
     if prod_mode:
         print("Running in production mode (Waitress)")
+        issues = config.validate_and_report()
+        critical_issues = [i for i in issues if i.startswith("CRITICAL:")]
+        if critical_issues:
+            for issue in critical_issues:
+                print(f"  {issue}")
+            print("ABORTING: Critical configuration issues detected. Please fix them before starting.")
+            sys.exit(1)
     else:
         print("Running in development mode (Flask dev server)")
 
     if args.mode in {"api", "both"}:
         print(f"Starting API server on port {args.api_port}...")
-        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode), daemon=True)
+        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode, config), daemon=True)
         api_proc.start()
     else:
         api_proc = None
 
     if args.mode in {"ui", "both"}:
         print(f"Starting UI server on port {args.ui_port}...")
-        serve_ui(args.ui_port, prod_mode)
+        serve_ui(args.ui_port, prod_mode, config)
     elif api_proc:
         try:
             api_proc.join()
