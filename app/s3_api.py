@@ -2446,7 +2446,8 @@ def object_handler(bucket_name: str, object_key: str):
             operation="Put",
         )
 
-        if "S3ReplicationAgent" not in request.headers.get("User-Agent", ""):
+        user_agent = request.headers.get("User-Agent", "")
+        if "S3ReplicationAgent" not in user_agent and "SiteSyncAgent" not in user_agent:
             _replication_manager().trigger_replication(bucket_name, object_key, action="write")
 
         return response
@@ -2592,7 +2593,7 @@ def object_handler(bucket_name: str, object_key: str):
     )
 
     user_agent = request.headers.get("User-Agent", "")
-    if "S3ReplicationAgent" not in user_agent:
+    if "S3ReplicationAgent" not in user_agent and "SiteSyncAgent" not in user_agent:
         _replication_manager().trigger_replication(bucket_name, object_key, action="delete")
 
     return Response(status=204)
@@ -2826,9 +2827,9 @@ def _copy_object(dest_bucket: str, dest_key: str, copy_source: str) -> Response:
     )
     
     user_agent = request.headers.get("User-Agent", "")
-    if "S3ReplicationAgent" not in user_agent:
+    if "S3ReplicationAgent" not in user_agent and "SiteSyncAgent" not in user_agent:
         _replication_manager().trigger_replication(dest_bucket, dest_key, action="write")
-    
+
     root = Element("CopyObjectResult")
     SubElement(root, "LastModified").text = meta.last_modified.isoformat()
     if meta.etag:
@@ -3040,7 +3041,7 @@ def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
         return _error_response("InvalidPart", str(exc), 400)
 
     user_agent = request.headers.get("User-Agent", "")
-    if "S3ReplicationAgent" not in user_agent:
+    if "S3ReplicationAgent" not in user_agent and "SiteSyncAgent" not in user_agent:
         _replication_manager().trigger_replication(bucket_name, object_key, action="write")
 
     root = Element("CompleteMultipartUploadResult")

@@ -94,6 +94,9 @@ class AppConfig:
     server_connection_limit: int
     server_backlog: int
     server_channel_timeout: int
+    site_sync_enabled: bool
+    site_sync_interval_seconds: int
+    site_sync_batch_size: int
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -201,6 +204,9 @@ class AppConfig:
         server_connection_limit = int(_get("SERVER_CONNECTION_LIMIT", 100))
         server_backlog = int(_get("SERVER_BACKLOG", 1024))
         server_channel_timeout = int(_get("SERVER_CHANNEL_TIMEOUT", 120))
+        site_sync_enabled = str(_get("SITE_SYNC_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        site_sync_interval_seconds = int(_get("SITE_SYNC_INTERVAL_SECONDS", 60))
+        site_sync_batch_size = int(_get("SITE_SYNC_BATCH_SIZE", 100))
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -249,7 +255,10 @@ class AppConfig:
                    server_threads=server_threads,
                    server_connection_limit=server_connection_limit,
                    server_backlog=server_backlog,
-                   server_channel_timeout=server_channel_timeout)
+                   server_channel_timeout=server_channel_timeout,
+                   site_sync_enabled=site_sync_enabled,
+                   site_sync_interval_seconds=site_sync_interval_seconds,
+                   site_sync_batch_size=site_sync_batch_size)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -420,4 +429,7 @@ class AppConfig:
             "SERVER_CONNECTION_LIMIT": self.server_connection_limit,
             "SERVER_BACKLOG": self.server_backlog,
             "SERVER_CHANNEL_TIMEOUT": self.server_channel_timeout,
+            "SITE_SYNC_ENABLED": self.site_sync_enabled,
+            "SITE_SYNC_INTERVAL_SECONDS": self.site_sync_interval_seconds,
+            "SITE_SYNC_BATCH_SIZE": self.site_sync_batch_size,
         }
