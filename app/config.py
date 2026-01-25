@@ -90,6 +90,13 @@ class AppConfig:
     operation_metrics_enabled: bool
     operation_metrics_interval_minutes: int
     operation_metrics_retention_hours: int
+    server_threads: int
+    server_connection_limit: int
+    server_backlog: int
+    server_channel_timeout: int
+    site_sync_enabled: bool
+    site_sync_interval_seconds: int
+    site_sync_batch_size: int
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -193,6 +200,14 @@ class AppConfig:
         operation_metrics_interval_minutes = int(_get("OPERATION_METRICS_INTERVAL_MINUTES", 5))
         operation_metrics_retention_hours = int(_get("OPERATION_METRICS_RETENTION_HOURS", 24))
 
+        server_threads = int(_get("SERVER_THREADS", 4))
+        server_connection_limit = int(_get("SERVER_CONNECTION_LIMIT", 100))
+        server_backlog = int(_get("SERVER_BACKLOG", 1024))
+        server_channel_timeout = int(_get("SERVER_CHANNEL_TIMEOUT", 120))
+        site_sync_enabled = str(_get("SITE_SYNC_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        site_sync_interval_seconds = int(_get("SITE_SYNC_INTERVAL_SECONDS", 60))
+        site_sync_batch_size = int(_get("SITE_SYNC_BATCH_SIZE", 100))
+
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
                    ui_page_size=ui_page_size,
@@ -236,7 +251,14 @@ class AppConfig:
                    metrics_history_interval_minutes=metrics_history_interval_minutes,
                    operation_metrics_enabled=operation_metrics_enabled,
                    operation_metrics_interval_minutes=operation_metrics_interval_minutes,
-                   operation_metrics_retention_hours=operation_metrics_retention_hours)
+                   operation_metrics_retention_hours=operation_metrics_retention_hours,
+                   server_threads=server_threads,
+                   server_connection_limit=server_connection_limit,
+                   server_backlog=server_backlog,
+                   server_channel_timeout=server_channel_timeout,
+                   site_sync_enabled=site_sync_enabled,
+                   site_sync_interval_seconds=site_sync_interval_seconds,
+                   site_sync_batch_size=site_sync_batch_size)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -296,7 +318,35 @@ class AppConfig:
         
         if "*" in self.cors_origins:
             issues.append("INFO: CORS_ORIGINS is set to '*'. Consider restricting to specific domains in production.")
-        
+
+        if not (1 <= self.server_threads <= 64):
+            issues.append(f"CRITICAL: SERVER_THREADS={self.server_threads} is outside valid range (1-64). Server cannot start.")
+        if not (10 <= self.server_connection_limit <= 1000):
+            issues.append(f"CRITICAL: SERVER_CONNECTION_LIMIT={self.server_connection_limit} is outside valid range (10-1000). Server cannot start.")
+        if not (64 <= self.server_backlog <= 4096):
+            issues.append(f"CRITICAL: SERVER_BACKLOG={self.server_backlog} is outside valid range (64-4096). Server cannot start.")
+        if not (10 <= self.server_channel_timeout <= 300):
+            issues.append(f"CRITICAL: SERVER_CHANNEL_TIMEOUT={self.server_channel_timeout} is outside valid range (10-300). Server cannot start.")
+
+        if sys.platform != "win32":
+            try:
+                import resource
+                soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+                threshold = int(soft_limit * 0.8)
+                if self.server_connection_limit > threshold:
+                    issues.append(f"WARNING: SERVER_CONNECTION_LIMIT={self.server_connection_limit} exceeds 80% of system file descriptor limit (soft={soft_limit}). Consider running 'ulimit -n {self.server_connection_limit + 100}'.")
+            except (ImportError, OSError):
+                pass
+
+        try:
+            import psutil
+            available_mb = psutil.virtual_memory().available / (1024 * 1024)
+            estimated_mb = self.server_threads * 50
+            if estimated_mb > available_mb * 0.5:
+                issues.append(f"WARNING: SERVER_THREADS={self.server_threads} may require ~{estimated_mb}MB memory, exceeding 50% of available RAM ({int(available_mb)}MB).")
+        except ImportError:
+            pass
+
         return issues
 
     def print_startup_summary(self) -> None:
@@ -314,6 +364,10 @@ class AppConfig:
             print(f"  ENCRYPTION:       Enabled (Master key: {self.encryption_master_key_path})")
         if self.kms_enabled:
             print(f"  KMS:              Enabled (Keys: {self.kms_keys_path})")
+        print(f"  SERVER_THREADS:   {self.server_threads}")
+        print(f"  CONNECTION_LIMIT: {self.server_connection_limit}")
+        print(f"  BACKLOG:          {self.server_backlog}")
+        print(f"  CHANNEL_TIMEOUT:  {self.server_channel_timeout}s")
         print("=" * 60)
         
         issues = self.validate_and_report()
@@ -371,4 +425,11 @@ class AppConfig:
             "OPERATION_METRICS_ENABLED": self.operation_metrics_enabled,
             "OPERATION_METRICS_INTERVAL_MINUTES": self.operation_metrics_interval_minutes,
             "OPERATION_METRICS_RETENTION_HOURS": self.operation_metrics_retention_hours,
+            "SERVER_THREADS": self.server_threads,
+            "SERVER_CONNECTION_LIMIT": self.server_connection_limit,
+            "SERVER_BACKLOG": self.server_backlog,
+            "SERVER_CHANNEL_TIMEOUT": self.server_channel_timeout,
+            "SITE_SYNC_ENABLED": self.site_sync_enabled,
+            "SITE_SYNC_INTERVAL_SECONDS": self.site_sync_interval_seconds,
+            "SITE_SYNC_BATCH_SIZE": self.site_sync_batch_size,
         }

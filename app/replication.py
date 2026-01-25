@@ -27,6 +27,7 @@ STREAMING_THRESHOLD_BYTES = 10 * 1024 * 1024
 
 REPLICATION_MODE_NEW_ONLY = "new_only"
 REPLICATION_MODE_ALL = "all"
+REPLICATION_MODE_BIDIRECTIONAL = "bidirectional"
 
 
 def _create_s3_client(connection: RemoteConnection, *, health_check: bool = False) -> Any:
@@ -127,10 +128,12 @@ class ReplicationRule:
     target_connection_id: str
     target_bucket: str
     enabled: bool = True
-    mode: str = REPLICATION_MODE_NEW_ONLY 
+    mode: str = REPLICATION_MODE_NEW_ONLY
     created_at: Optional[float] = None
     stats: ReplicationStats = field(default_factory=ReplicationStats)
-    
+    sync_deletions: bool = True
+    last_pull_at: Optional[float] = None
+
     def to_dict(self) -> dict:
         return {
             "bucket_name": self.bucket_name,
@@ -140,8 +143,10 @@ class ReplicationRule:
             "mode": self.mode,
             "created_at": self.created_at,
             "stats": self.stats.to_dict(),
+            "sync_deletions": self.sync_deletions,
+            "last_pull_at": self.last_pull_at,
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "ReplicationRule":
         stats_data = data.pop("stats", {})
@@ -149,6 +154,10 @@ class ReplicationRule:
             data["mode"] = REPLICATION_MODE_NEW_ONLY
         if "created_at" not in data:
             data["created_at"] = None
+        if "sync_deletions" not in data:
+            data["sync_deletions"] = True
+        if "last_pull_at" not in data:
+            data["last_pull_at"] = None
         rule = cls(**data)
         rule.stats = ReplicationStats.from_dict(stats_data) if stats_data else ReplicationStats()
         return rule

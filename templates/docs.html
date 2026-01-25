@@ -34,7 +34,7 @@
             <li><a href="#automation">Automation / CLI</a></li>
             <li><a href="#api">REST endpoints</a></li>
             <li><a href="#examples">API Examples</a></li>
-            <li><a href="#replication">Site Replication</a></li>
+            <li><a href="#replication">Site Replication &amp; Sync</a></li>
             <li><a href="#versioning">Object Versioning</a></li>
             <li><a href="#quotas">Bucket Quotas</a></li>
             <li><a href="#encryption">Encryption</a></li>
@@ -158,6 +158,29 @@ python run.py --mode ui
                 <td>Default API rate limit.</td>
               </tr>
               <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Server Settings</td>
+              </tr>
+              <tr>
+                <td><code>SERVER_THREADS</code></td>
+                <td><code>4</code></td>
+                <td>Waitress worker threads (1-64).</td>
+              </tr>
+              <tr>
+                <td><code>SERVER_CONNECTION_LIMIT</code></td>
+                <td><code>100</code></td>
+                <td>Max concurrent connections (10-1000).</td>
+              </tr>
+              <tr>
+                <td><code>SERVER_BACKLOG</code></td>
+                <td><code>1024</code></td>
+                <td>TCP listen backlog (64-4096).</td>
+              </tr>
+              <tr>
+                <td><code>SERVER_CHANNEL_TIMEOUT</code></td>
+                <td><code>120</code></td>
+                <td>Idle connection timeout in seconds (10-300).</td>
+              </tr>
+              <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Encryption Settings</td>
               </tr>
               <tr>
@@ -200,6 +223,24 @@ python run.py --mode ui
                 <td><code>METRICS_HISTORY_INTERVAL_MINUTES</code></td>
                 <td><code>5</code></td>
                 <td>Interval between history snapshots.</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Site Sync Settings (Bidirectional Replication)</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable bi-directional site sync background worker.</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_INTERVAL_SECONDS</code></td>
+                <td><code>60</code></td>
+                <td>Interval between sync cycles (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_BATCH_SIZE</code></td>
+                <td><code>100</code></td>
+                <td>Max objects to pull per sync cycle.</td>
               </tr>
             </tbody>
           </table>
@@ -551,9 +592,9 @@ s3.complete_multipart_upload(
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">08</span>
-          <h2 class="h4 mb-0">Site Replication</h2>
+          <h2 class="h4 mb-0">Site Replication &amp; Sync</h2>
         </div>
-        <p class="text-muted">Automatically copy new objects to another MyFSIO instance or S3-compatible service for backup or disaster recovery.</p>
+        <p class="text-muted">Replicate objects to another MyFSIO instance or S3-compatible service. Supports one-way replication for backup and bi-directional sync for geo-distributed deployments.</p>
         
         <h3 class="h6 text-uppercase text-muted mt-4">Setup Guide</h3>
         <ol class="docs-steps mb-3">
@@ -612,17 +653,147 @@ except Exception as e:
             </div>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Bidirectional Replication (Active-Active)</h3>
-        <p class="small text-muted">To set up two-way replication (Server A ↔ Server B):</p>
-        <ol class="docs-steps mb-3">
-            <li>Follow the steps above to replicate <strong>A → B</strong>.</li>
-            <li>Repeat the process on Server B to replicate <strong>B → A</strong> (create a connection to A, enable rule).</li>
-        </ol>
-        <p class="small text-muted mb-3">
-            <strong>Loop Prevention:</strong> The system automatically detects replication traffic using a custom User-Agent (<code>S3ReplicationAgent</code>). This prevents infinite loops where an object replicated from A to B is immediately replicated back to A.
-            <br>
-            <strong>Deletes:</strong> Deleting an object on one server will propagate the deletion to the other server.
-        </p>
+        <h3 class="h6 text-uppercase text-muted mt-4">Replication Modes</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Mode</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>new_only</code></td>
+                <td>Only replicate new/modified objects (default, one-way)</td>
+              </tr>
+              <tr>
+                <td><code>all</code></td>
+                <td>Sync all existing objects when rule is enabled (one-way)</td>
+              </tr>
+              <tr>
+                <td><strong><code>bidirectional</code></strong></td>
+                <td>Two-way sync with Last-Write-Wins conflict resolution</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Bidirectional Site Replication</h3>
+        <p class="small text-muted">For true two-way synchronization with automatic conflict resolution, use the <code>bidirectional</code> mode. Both sites must be configured to sync with each other.</p>
+
+        <div class="alert alert-info border small mb-3">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-info mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Both sites need configuration.</strong> Each site pushes its changes and pulls from the other. You must set up connections and replication rules on both ends.
+            </div>
+          </div>
+        </div>
+
+        <h4 class="h6 mt-4 mb-2">Step 1: Enable Site Sync on Both Sites</h4>
+        <p class="small text-muted">Set these environment variables on <strong>both</strong> Site A and Site B:</p>
+<pre class="mb-3"><code class="language-bash">SITE_SYNC_ENABLED=true
+SITE_SYNC_INTERVAL_SECONDS=60   # How often to pull changes
+SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
+
+        <h4 class="h6 mt-4 mb-2">Step 2: Create IAM Users for Cross-Site Access</h4>
+        <p class="small text-muted">On each site, create an IAM user that the other site will use to connect:</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Site</th>
+                <th>Create User For</th>
+                <th>Required Permissions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Site A</td>
+                <td>Site B to connect</td>
+                <td><code>read</code>, <code>write</code>, <code>list</code>, <code>delete</code> on target bucket</td>
+              </tr>
+              <tr>
+                <td>Site B</td>
+                <td>Site A to connect</td>
+                <td><code>read</code>, <code>write</code>, <code>list</code>, <code>delete</code> on target bucket</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="h6 mt-4 mb-2">Step 3: Create Connections</h4>
+        <p class="small text-muted">On each site, add a connection pointing to the other:</p>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">On Site A</strong></div>
+              <div class="card-body small">
+                <p class="mb-1">Go to <strong>Connections</strong> and add:</p>
+                <ul class="mb-0 ps-3">
+                  <li>Endpoint: <code>https://site-b.example.com</code></li>
+                  <li>Credentials: Site B's IAM user</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">On Site B</strong></div>
+              <div class="card-body small">
+                <p class="mb-1">Go to <strong>Connections</strong> and add:</p>
+                <ul class="mb-0 ps-3">
+                  <li>Endpoint: <code>https://site-a.example.com</code></li>
+                  <li>Credentials: Site A's IAM user</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h4 class="h6 mt-4 mb-2">Step 4: Enable Bidirectional Replication</h4>
+        <p class="small text-muted">On each site, go to the bucket's <strong>Replication</strong> tab and enable with mode <code>bidirectional</code>:</p>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">On Site A</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Source bucket: <code>my-bucket</code></li>
+                  <li>Target: Site B connection</li>
+                  <li>Target bucket: <code>my-bucket</code></li>
+                  <li>Mode: <strong>Bidirectional sync</strong></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">On Site B</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Source bucket: <code>my-bucket</code></li>
+                  <li>Target: Site A connection</li>
+                  <li>Target bucket: <code>my-bucket</code></li>
+                  <li>Mode: <strong>Bidirectional sync</strong></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h4 class="h6 mt-4 mb-2">How It Works</h4>
+        <ul class="small text-muted mb-3">
+            <li><strong>PUSH:</strong> Local changes replicate to remote immediately on write/delete</li>
+            <li><strong>PULL:</strong> Background worker fetches remote changes every <code>SITE_SYNC_INTERVAL_SECONDS</code></li>
+            <li><strong>Conflict Resolution:</strong> Last-Write-Wins based on <code>last_modified</code> timestamps (1-second clock skew tolerance)</li>
+            <li><strong>Deletion Sync:</strong> Remote deletions propagate locally only for objects originally synced from remote</li>
+            <li><strong>Loop Prevention:</strong> <code>S3ReplicationAgent</code> and <code>SiteSyncAgent</code> User-Agents prevent infinite sync loops</li>
+        </ul>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Error Handling &amp; Rate Limits</h3>
         <p class="small text-muted mb-3">The replication system handles transient failures automatically:</p>
@@ -1242,7 +1413,7 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
           <li><a href="#automation">Automation / CLI</a></li>
           <li><a href="#api">REST endpoints</a></li>
           <li><a href="#examples">API Examples</a></li>
-          <li><a href="#replication">Site Replication</a></li>
+          <li><a href="#replication">Site Replication &amp; Sync</a></li>
           <li><a href="#versioning">Object Versioning</a></li>
           <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>

@@ -197,6 +197,31 @@ def create_app(
         )
     app.extensions["operation_metrics"] = operation_metrics_collector
 
+    system_metrics_collector = None
+    if app.config.get("METRICS_HISTORY_ENABLED", False):
+        from .system_metrics import SystemMetricsCollector
+        system_metrics_collector = SystemMetricsCollector(
+            storage_root,
+            interval_minutes=app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5),
+            retention_hours=app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24),
+        )
+        system_metrics_collector.set_storage(storage)
+    app.extensions["system_metrics"] = system_metrics_collector
+
+    site_sync_worker = None
+    if app.config.get("SITE_SYNC_ENABLED", False):
+        from .site_sync import SiteSyncWorker
+        site_sync_worker = SiteSyncWorker(
+            storage=storage,
+            connections=connections,
+            replication_manager=replication,
+            storage_root=storage_root,
+            interval_seconds=app.config.get("SITE_SYNC_INTERVAL_SECONDS", 60),
+            batch_size=app.config.get("SITE_SYNC_BATCH_SIZE", 100),
+        )
+        site_sync_worker.start()
+    app.extensions["site_sync"] = site_sync_worker
+
     @app.errorhandler(500)
     def internal_error(error):
         return render_template('500.html'), 500

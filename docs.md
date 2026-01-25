@@ -168,6 +168,15 @@ All configuration is done via environment variables. The table below lists every
 | `RATE_LIMIT_DEFAULT` | `200 per minute` | Default rate limit for API endpoints. |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Storage backend for rate limits. Use `redis://host:port` for distributed setups. |
 
+### Server Configuration
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SERVER_THREADS` | `4` | Waitress worker threads (1-64). More threads handle more concurrent requests but use more memory. |
+| `SERVER_CONNECTION_LIMIT` | `100` | Maximum concurrent connections (10-1000). Ensure OS file descriptor limits support this value. |
+| `SERVER_BACKLOG` | `1024` | TCP listen backlog (64-4096). Connections queue here when all threads are busy. |
+| `SERVER_CHANNEL_TIMEOUT` | `120` | Seconds before idle connections are closed (10-300). |
+
 ### Logging
 
 | Variable | Default | Notes |
@@ -1239,12 +1248,22 @@ Replication uses a two-tier permission system:
 
 This separation allows administrators to pre-configure where data should replicate, while allowing authorized users to toggle replication on/off without accessing connection credentials.
 
+### Replication Modes
+
+| Mode | Behavior |
+|------|----------|
+| `new_only` | Only replicate new/modified objects (default) |
+| `all` | Sync all existing objects when rule is enabled |
+| `bidirectional` | Two-way sync with Last-Write-Wins conflict resolution |
+
 ### Architecture
 
 - **Source Instance**: The MyFSIO instance where you upload files. It runs the replication worker.
 - **Target Instance**: Another MyFSIO instance (or any S3-compatible service like AWS S3, MinIO) that receives the copies.
 
-Replication is **asynchronous** (happens in the background) and **one-way** (Source -> Target).
+For `new_only` and `all` modes, replication is **asynchronous** (happens in the background) and **one-way** (Source -> Target).
+
+For `bidirectional` mode, replication is **two-way** with automatic conflict resolution.
 
 ### Setup Guide
 
@@ -1346,16 +1365,117 @@ When paused, new objects uploaded to the source will not replicate until replica
 
 > **Note:** Only admins can create new replication rules, change the target connection/bucket, or delete rules entirely.
 
-### Bidirectional Replication (Active-Active)
+### Bidirectional Site Replication
 
-To set up two-way replication (Server A ↔ Server B):
+For true two-way synchronization with automatic conflict resolution, use the `bidirectional` replication mode. This enables a background sync worker that periodically pulls changes from the remote site.
+
+> **Important:** Both sites must be configured to sync with each other. Each site pushes its changes and pulls from the other. You must set up connections and replication rules on both ends.
+
+#### Step 1: Enable Site Sync on Both Sites
+
+Set these environment variables on **both** Site A and Site B:
+
+```bash
+SITE_SYNC_ENABLED=true
+SITE_SYNC_INTERVAL_SECONDS=60   # How often to pull changes (default: 60)
+SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle (default: 100)
+```
+
+#### Step 2: Create IAM Users for Cross-Site Access
+
+On each site, create an IAM user that the other site will use to connect:
+
+| Site | Create User For | Required Permissions |
+|------|-----------------|---------------------|
+| Site A | Site B to connect | `read`, `write`, `list`, `delete` on target bucket |
+| Site B | Site A to connect | `read`, `write`, `list`, `delete` on target bucket |
+
+Example policy for the replication user:
+```json
+[{"bucket": "my-bucket", "actions": ["read", "write", "list", "delete"]}]
+```
+
+#### Step 3: Create Connections
+
+On each site, add a connection pointing to the other:
+
+**On Site A:**
+- Go to **Connections** and add a connection to Site B
+- Endpoint: `https://site-b.example.com`
+- Credentials: Site B's IAM user (created in Step 2)
+
+**On Site B:**
+- Go to **Connections** and add a connection to Site A
+- Endpoint: `https://site-a.example.com`
+- Credentials: Site A's IAM user (created in Step 2)
+
+#### Step 4: Enable Bidirectional Replication
+
+On each site, go to the bucket's **Replication** tab and enable with mode `bidirectional`:
+
+**On Site A:**
+- Source bucket: `my-bucket`
+- Target connection: Site B connection
+- Target bucket: `my-bucket`
+- Mode: **Bidirectional sync**
+
+**On Site B:**
+- Source bucket: `my-bucket`
+- Target connection: Site A connection
+- Target bucket: `my-bucket`
+- Mode: **Bidirectional sync**
+
+#### How It Works
+
+- **PUSH**: Local changes replicate to remote immediately on write/delete
+- **PULL**: Background worker fetches remote changes every `SITE_SYNC_INTERVAL_SECONDS`
+- **Loop Prevention**: `S3ReplicationAgent` and `SiteSyncAgent` User-Agents prevent infinite sync loops
+
+#### Conflict Resolution (Last-Write-Wins)
+
+When the same object exists on both sites, the system uses Last-Write-Wins (LWW) based on `last_modified` timestamps:
+
+- **Remote newer**: Pull the remote version
+- **Local newer**: Keep the local version
+- **Same timestamp**: Use ETag as tiebreaker (higher ETag wins)
+
+A 1-second clock skew tolerance prevents false conflicts from minor time differences.
+
+#### Deletion Synchronization
+
+When `sync_deletions=true` (default), remote deletions propagate locally only if:
+1. The object was previously synced FROM remote (tracked in sync state)
+2. The local version hasn't been modified since last sync
+
+This prevents accidental deletion of local-only objects.
+
+#### Sync State Storage
+
+Sync state is stored at: `data/.myfsio.sys/buckets/<bucket>/site_sync_state.json`
+
+```json
+{
+  "synced_objects": {
+    "path/to/file.txt": {
+      "last_synced_at": 1706100000.0,
+      "remote_etag": "abc123",
+      "source": "remote"
+    }
+  },
+  "last_full_sync": 1706100000.0
+}
+```
+
+### Legacy Bidirectional Setup (Manual)
+
+For simpler use cases without the site sync worker, you can manually configure two one-way rules:
 
 1.  Follow the steps above to replicate **A → B**.
 2.  Repeat the process on Server B to replicate **B → A**:
     - Create a connection on Server B pointing to Server A.
     - Enable replication on the target bucket on Server B.
 
-**Loop Prevention**: The system automatically detects replication traffic using a custom User-Agent (`S3ReplicationAgent`). This prevents infinite loops where an object replicated from A to B is immediately replicated back to A.
+**Loop Prevention**: The system automatically detects replication traffic using custom User-Agents (`S3ReplicationAgent` and `SiteSyncAgent`). This prevents infinite loops where an object replicated from A to B is immediately replicated back to A.
 
 **Deletes**: Deleting an object on one server will propagate the deletion to the other server.
 

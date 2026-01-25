@@ -158,69 +158,6 @@ def _format_bytes(num: int) -> str:
     return f"{value:.1f} PB"
 
 
-_metrics_last_save_time: float = 0.0
-
-
-def _get_metrics_history_path() -> Path:
-    storage_root = Path(current_app.config["STORAGE_ROOT"])
-    return storage_root / ".myfsio.sys" / "config" / "metrics_history.json"
-
-
-def _load_metrics_history() -> dict:
-    path = _get_metrics_history_path()
-    if not path.exists():
-        return {"history": []}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"history": []}
-
-
-def _save_metrics_snapshot(cpu_percent: float, memory_percent: float, disk_percent: float, storage_bytes: int) -> None:
-    global _metrics_last_save_time
-
-    if not current_app.config.get("METRICS_HISTORY_ENABLED", False):
-        return
-
-    import time
-    from datetime import datetime, timezone
-
-    interval_minutes = current_app.config.get("METRICS_HISTORY_INTERVAL_MINUTES", 5)
-    now_ts = time.time()
-    if now_ts - _metrics_last_save_time < interval_minutes * 60:
-        return
-
-    path = _get_metrics_history_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    data = _load_metrics_history()
-    history = data.get("history", [])
-    retention_hours = current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24)
-
-    now = datetime.now(timezone.utc)
-    snapshot = {
-        "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "cpu_percent": round(cpu_percent, 2),
-        "memory_percent": round(memory_percent, 2),
-        "disk_percent": round(disk_percent, 2),
-        "storage_bytes": storage_bytes,
-    }
-    history.append(snapshot)
-
-    cutoff = now.timestamp() - (retention_hours * 3600)
-    history = [
-        h for h in history
-        if datetime.fromisoformat(h["timestamp"].replace("Z", "+00:00")).timestamp() > cutoff
-    ]
-
-    data["history"] = history
-    try:
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        _metrics_last_save_time = now_ts
-    except OSError:
-        pass
-
-
 def _friendly_error_message(exc: Exception) -> str:
     message = str(exc) or "An unexpected error occurred"
     if isinstance(exc, IamError):
@@ -533,6 +470,7 @@ def bucket_detail(bucket_name: str):
     kms_enabled = current_app.config.get("KMS_ENABLED", False)
     encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
     lifecycle_enabled = current_app.config.get("LIFECYCLE_ENABLED", False)
+    site_sync_enabled = current_app.config.get("SITE_SYNC_ENABLED", False)
     can_manage_encryption = can_manage_versioning
 
     bucket_quota = storage.get_bucket_quota(bucket_name)
@@ -585,6 +523,7 @@ def bucket_detail(bucket_name: str):
         bucket_quota=bucket_quota,
         bucket_stats=bucket_stats,
         can_manage_quota=can_manage_quota,
+        site_sync_enabled=site_sync_enabled,
     )
 
 
@@ -2240,8 +2179,6 @@ def metrics_api():
     uptime_seconds = time.time() - boot_time
     uptime_days = int(uptime_seconds / 86400)
 
-    _save_metrics_snapshot(cpu_percent, memory.percent, disk.percent, total_bytes_used)
-
     return jsonify({
         "cpu_percent": round(cpu_percent, 2),
         "memory": {
@@ -2276,23 +2213,15 @@ def metrics_history():
     except IamError:
         return jsonify({"error": "Access denied"}), 403
 
-    if not current_app.config.get("METRICS_HISTORY_ENABLED", False):
+    system_metrics = current_app.extensions.get("system_metrics")
+    if not system_metrics:
         return jsonify({"enabled": False, "history": []})
 
     hours = request.args.get("hours", type=int)
     if hours is None:
         hours = current_app.config.get("METRICS_HISTORY_RETENTION_HOURS", 24)
 
-    data = _load_metrics_history()
-    history = data.get("history", [])
-
-    if hours:
-        from datetime import datetime, timezone
-        cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
-        history = [
-            h for h in history
-            if datetime.fromisoformat(h["timestamp"].replace("Z", "+00:00")).timestamp() > cutoff
-        ]
+    history = system_metrics.get_history(hours=hours)
 
     return jsonify({
         "enabled": True,
