@@ -82,6 +82,22 @@ def _access_logging() -> AccessLoggingService:
     return current_app.extensions["access_logging"]
 
 
+def _get_list_buckets_limit() -> str:
+    return current_app.config.get("RATELIMIT_LIST_BUCKETS", "60 per minute")
+
+
+def _get_bucket_ops_limit() -> str:
+    return current_app.config.get("RATELIMIT_BUCKET_OPS", "120 per minute")
+
+
+def _get_object_ops_limit() -> str:
+    return current_app.config.get("RATELIMIT_OBJECT_OPS", "240 per minute")
+
+
+def _get_head_ops_limit() -> str:
+    return current_app.config.get("RATELIMIT_HEAD_OPS", "100 per minute")
+
+
 def _xml_response(element: Element, status: int = 200) -> Response:
     xml_bytes = tostring(element, encoding="utf-8")
     return Response(xml_bytes, status=status, mimetype="application/xml")
@@ -2143,7 +2159,7 @@ def _bulk_delete_handler(bucket_name: str) -> Response:
 
 
 @s3_api_bp.get("/")
-@limiter.limit("60 per minute")
+@limiter.limit(_get_list_buckets_limit)
 def list_buckets() -> Response:
     principal, error = _require_principal()
     if error:
@@ -2171,7 +2187,7 @@ def list_buckets() -> Response:
 
 
 @s3_api_bp.route("/<bucket_name>", methods=["PUT", "DELETE", "GET", "POST"], strict_slashes=False)
-@limiter.limit("120 per minute")
+@limiter.limit(_get_bucket_ops_limit)
 def bucket_handler(bucket_name: str) -> Response:
     storage = _storage()
     subresource_response = _maybe_handle_bucket_subresource(bucket_name)
@@ -2363,7 +2379,7 @@ def bucket_handler(bucket_name: str) -> Response:
 
 
 @s3_api_bp.route("/<bucket_name>/<path:object_key>", methods=["PUT", "GET", "DELETE", "HEAD", "POST"], strict_slashes=False)
-@limiter.limit("240 per minute")
+@limiter.limit(_get_object_ops_limit)
 def object_handler(bucket_name: str, object_key: str):
     storage = _storage()
 
@@ -2681,7 +2697,7 @@ def _bucket_policy_handler(bucket_name: str) -> Response:
 
 
 @s3_api_bp.route("/<bucket_name>", methods=["HEAD"])
-@limiter.limit("100 per minute")
+@limiter.limit(_get_head_ops_limit)
 def head_bucket(bucket_name: str) -> Response:
     principal, error = _require_principal()
     if error:
@@ -2696,7 +2712,7 @@ def head_bucket(bucket_name: str) -> Response:
 
 
 @s3_api_bp.route("/<bucket_name>/<path:object_key>", methods=["HEAD"])
-@limiter.limit("100 per minute")
+@limiter.limit(_get_head_ops_limit)
 def head_object(bucket_name: str, object_key: str) -> Response:
     principal, error = _require_principal()
     if error:

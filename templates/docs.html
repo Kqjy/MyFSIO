@@ -157,23 +157,43 @@ python run.py --mode ui
                 <td><code>200 per minute</code></td>
                 <td>Default API rate limit.</td>
               </tr>
+              <tr>
+                <td><code>RATE_LIMIT_LIST_BUCKETS</code></td>
+                <td><code>60 per minute</code></td>
+                <td>Rate limit for listing buckets.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_BUCKET_OPS</code></td>
+                <td><code>120 per minute</code></td>
+                <td>Rate limit for bucket operations.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_OBJECT_OPS</code></td>
+                <td><code>240 per minute</code></td>
+                <td>Rate limit for object operations.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_HEAD_OPS</code></td>
+                <td><code>100 per minute</code></td>
+                <td>Rate limit for HEAD requests.</td>
+              </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Server Settings</td>
               </tr>
               <tr>
                 <td><code>SERVER_THREADS</code></td>
-                <td><code>4</code></td>
-                <td>Waitress worker threads (1-64).</td>
+                <td><code>0</code> (auto)</td>
+                <td>Waitress worker threads (1-64). 0 = auto (CPU cores × 2).</td>
               </tr>
               <tr>
                 <td><code>SERVER_CONNECTION_LIMIT</code></td>
-                <td><code>100</code></td>
-                <td>Max concurrent connections (10-1000).</td>
+                <td><code>0</code> (auto)</td>
+                <td>Max concurrent connections (10-1000). 0 = auto (RAM-based).</td>
               </tr>
               <tr>
                 <td><code>SERVER_BACKLOG</code></td>
-                <td><code>1024</code></td>
-                <td>TCP listen backlog (64-4096).</td>
+                <td><code>0</code> (auto)</td>
+                <td>TCP listen backlog (64-4096). 0 = auto (conn_limit × 2).</td>
               </tr>
               <tr>
                 <td><code>SERVER_CHANNEL_TIMEOUT</code></td>

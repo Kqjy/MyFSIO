@@ -166,15 +166,19 @@ All configuration is done via environment variables. The table below lists every
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `RATE_LIMIT_DEFAULT` | `200 per minute` | Default rate limit for API endpoints. |
+| `RATE_LIMIT_LIST_BUCKETS` | `60 per minute` | Rate limit for listing buckets (`GET /`). |
+| `RATE_LIMIT_BUCKET_OPS` | `120 per minute` | Rate limit for bucket operations (PUT/DELETE/GET/POST on `/<bucket>`). |
+| `RATE_LIMIT_OBJECT_OPS` | `240 per minute` | Rate limit for object operations (PUT/GET/DELETE/POST on `/<bucket>/<key>`). |
+| `RATE_LIMIT_HEAD_OPS` | `100 per minute` | Rate limit for HEAD requests (bucket and object). |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Storage backend for rate limits. Use `redis://host:port` for distributed setups. |
 
 ### Server Configuration
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SERVER_THREADS` | `4` | Waitress worker threads (1-64). More threads handle more concurrent requests but use more memory. |
-| `SERVER_CONNECTION_LIMIT` | `100` | Maximum concurrent connections (10-1000). Ensure OS file descriptor limits support this value. |
-| `SERVER_BACKLOG` | `1024` | TCP listen backlog (64-4096). Connections queue here when all threads are busy. |
+| `SERVER_THREADS` | `0` (auto) | Waitress worker threads (1-64). Set to `0` for auto-calculation based on CPU cores (×2). |
+| `SERVER_CONNECTION_LIMIT` | `0` (auto) | Maximum concurrent connections (10-1000). Set to `0` for auto-calculation based on available RAM. |
+| `SERVER_BACKLOG` | `0` (auto) | TCP listen backlog (64-4096). Set to `0` for auto-calculation (connection_limit × 2). |
 | `SERVER_CHANNEL_TIMEOUT` | `120` | Seconds before idle connections are closed (10-300). |
 
 ### Logging
