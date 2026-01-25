@@ -108,9 +108,17 @@ class KMSManager:
     Keys are stored encrypted on disk.
     """
     
-    def __init__(self, keys_path: Path, master_key_path: Path):
+    def __init__(
+        self,
+        keys_path: Path,
+        master_key_path: Path,
+        generate_data_key_min_bytes: int = 1,
+        generate_data_key_max_bytes: int = 1024,
+    ):
         self.keys_path = keys_path
         self.master_key_path = master_key_path
+        self.generate_data_key_min_bytes = generate_data_key_min_bytes
+        self.generate_data_key_max_bytes = generate_data_key_max_bytes
         self._keys: Dict[str, KMSKey] = {}
         self._master_key: bytes | None = None
         self._loaded = False
@@ -358,6 +366,8 @@ class KMSManager:
     
     def generate_random(self, num_bytes: int = 32) -> bytes:
         """Generate cryptographically secure random bytes."""
-        if num_bytes < 1 or num_bytes > 1024:
-            raise EncryptionError("Number of bytes must be between 1 and 1024")
+        if num_bytes < self.generate_data_key_min_bytes or num_bytes > self.generate_data_key_max_bytes:
+            raise EncryptionError(
+                f"Number of bytes must be between {self.generate_data_key_min_bytes} and {self.generate_data_key_max_bytes}"
+            )
         return secrets.token_bytes(num_bytes)

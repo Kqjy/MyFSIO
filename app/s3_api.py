@@ -239,7 +239,8 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
 
     now = datetime.now(timezone.utc)
     time_diff = abs((now - request_time).total_seconds())
-    if time_diff > 900:
+    tolerance = current_app.config.get("SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 900)
+    if time_diff > tolerance:
         raise IamError("Request timestamp too old or too far in the future")
 
     required_headers = {'host', 'x-amz-date'}
@@ -501,8 +502,10 @@ def _validate_presigned_request(action: str, bucket_name: str, object_key: str) 
         expiry = int(expires)
     except ValueError as exc:
         raise IamError("Invalid expiration") from exc
-    if expiry < 1 or expiry > 7 * 24 * 3600:
-        raise IamError("Expiration must be between 1 second and 7 days")
+    min_expiry = current_app.config.get("PRESIGNED_URL_MIN_EXPIRY_SECONDS", 1)
+    max_expiry = current_app.config.get("PRESIGNED_URL_MAX_EXPIRY_SECONDS", 604800)
+    if expiry < min_expiry or expiry > max_expiry:
+        raise IamError(f"Expiration must be between {min_expiry} second(s) and {max_expiry} seconds")
 
     try:
         request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
@@ -1055,8 +1058,9 @@ def _bucket_tagging_handler(bucket_name: str) -> Response:
         tags = _parse_tagging_document(payload)
     except ValueError as exc:
         return _error_response("MalformedXML", str(exc), 400)
-    if len(tags) > 50:
-        return _error_response("InvalidTag", "A maximum of 50 tags is supported", 400)
+    tag_limit = current_app.config.get("OBJECT_TAG_LIMIT", 50)
+    if len(tags) > tag_limit:
+        return _error_response("InvalidTag", f"A maximum of {tag_limit} tags is supported", 400)
     try:
         storage.set_bucket_tags(bucket_name, tags)
     except StorageError as exc:

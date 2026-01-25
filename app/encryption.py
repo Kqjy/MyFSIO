@@ -310,7 +310,8 @@ class EncryptionManager:
     
     def get_streaming_encryptor(self) -> StreamingEncryptor:
         if self._streaming_encryptor is None:
-            self._streaming_encryptor = StreamingEncryptor(self.get_local_provider())
+            chunk_size = self.config.get("encryption_chunk_size_bytes", 64 * 1024)
+            self._streaming_encryptor = StreamingEncryptor(self.get_local_provider(), chunk_size=chunk_size)
         return self._streaming_encryptor
     
     def encrypt_object(self, data: bytes, algorithm: str = "AES256",

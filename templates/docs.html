@@ -262,6 +262,115 @@ python run.py --mode ui
                 <td><code>100</code></td>
                 <td>Max objects to pull per sync cycle.</td>
               </tr>
+              <tr>
+                <td><code>SITE_SYNC_CONNECT_TIMEOUT_SECONDS</code></td>
+                <td><code>10</code></td>
+                <td>Connection timeout for site sync (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_READ_TIMEOUT_SECONDS</code></td>
+                <td><code>120</code></td>
+                <td>Read timeout for site sync (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_MAX_RETRIES</code></td>
+                <td><code>2</code></td>
+                <td>Max retry attempts for site sync operations.</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS</code></td>
+                <td><code>1.0</code></td>
+                <td>Clock skew tolerance for conflict resolution.</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Replication Settings</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code></td>
+                <td><code>5</code></td>
+                <td>Connection timeout for replication (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_READ_TIMEOUT_SECONDS</code></td>
+                <td><code>30</code></td>
+                <td>Read timeout for replication (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_MAX_RETRIES</code></td>
+                <td><code>2</code></td>
+                <td>Max retry attempts for replication operations.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_STREAMING_THRESHOLD_BYTES</code></td>
+                <td><code>10485760</code></td>
+                <td>Objects larger than this use streaming upload (10 MB).</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_MAX_FAILURES_PER_BUCKET</code></td>
+                <td><code>50</code></td>
+                <td>Max failure records to keep per bucket.</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Security & Auth Settings</td>
+              </tr>
+              <tr>
+                <td><code>SIGV4_TIMESTAMP_TOLERANCE_SECONDS</code></td>
+                <td><code>900</code></td>
+                <td>Max time skew for SigV4 requests (15 minutes).</td>
+              </tr>
+              <tr>
+                <td><code>PRESIGNED_URL_MIN_EXPIRY_SECONDS</code></td>
+                <td><code>1</code></td>
+                <td>Minimum presigned URL expiry time.</td>
+              </tr>
+              <tr>
+                <td><code>PRESIGNED_URL_MAX_EXPIRY_SECONDS</code></td>
+                <td><code>604800</code></td>
+                <td>Maximum presigned URL expiry time (7 days).</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Storage Limits</td>
+              </tr>
+              <tr>
+                <td><code>OBJECT_KEY_MAX_LENGTH_BYTES</code></td>
+                <td><code>1024</code></td>
+                <td>Maximum object key length in bytes.</td>
+              </tr>
+              <tr>
+                <td><code>OBJECT_CACHE_MAX_SIZE</code></td>
+                <td><code>100</code></td>
+                <td>Maximum number of objects in cache.</td>
+              </tr>
+              <tr>
+                <td><code>BUCKET_CONFIG_CACHE_TTL_SECONDS</code></td>
+                <td><code>30</code></td>
+                <td>Bucket config cache TTL in seconds.</td>
+              </tr>
+              <tr>
+                <td><code>OBJECT_TAG_LIMIT</code></td>
+                <td><code>50</code></td>
+                <td>Maximum number of tags per object.</td>
+              </tr>
+              <tr>
+                <td><code>LIFECYCLE_MAX_HISTORY_PER_BUCKET</code></td>
+                <td><code>50</code></td>
+                <td>Max lifecycle history records per bucket.</td>
+              </tr>
+              <tr>
+                <td><code>ENCRYPTION_CHUNK_SIZE_BYTES</code></td>
+                <td><code>65536</code></td>
+                <td>Chunk size for streaming encryption (64 KB).</td>
+              </tr>
+              <tr>
+                <td><code>KMS_GENERATE_DATA_KEY_MIN_BYTES</code></td>
+                <td><code>1</code></td>
+                <td>Minimum data key size for KMS generation.</td>
+              </tr>
+              <tr>
+                <td><code>KMS_GENERATE_DATA_KEY_MAX_BYTES</code></td>
+                <td><code>1024</code></td>
+                <td>Maximum data key size for KMS generation.</td>
+              </tr>
             </tbody>
           </table>
         </div>

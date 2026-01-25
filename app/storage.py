@@ -137,10 +137,15 @@ class ObjectStorage:
     BUCKET_VERSIONS_DIR = "versions"
     MULTIPART_MANIFEST = "manifest.json"
     BUCKET_CONFIG_FILE = ".bucket.json"
-    DEFAULT_CACHE_TTL = 5
-    OBJECT_CACHE_MAX_SIZE = 100
 
-    def __init__(self, root: Path, cache_ttl: int = DEFAULT_CACHE_TTL) -> None:
+    def __init__(
+        self,
+        root: Path,
+        cache_ttl: int = 5,
+        object_cache_max_size: int = 100,
+        bucket_config_cache_ttl: float = 30.0,
+        object_key_max_length_bytes: int = 1024,
+    ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
@@ -149,8 +154,10 @@ class ObjectStorage:
         self._bucket_locks: Dict[str, threading.Lock] = {}
         self._cache_version: Dict[str, int] = {}
         self._bucket_config_cache: Dict[str, tuple[dict[str, Any], float]] = {}
-        self._bucket_config_cache_ttl = 30.0
+        self._bucket_config_cache_ttl = bucket_config_cache_ttl
         self._cache_ttl = cache_ttl
+        self._object_cache_max_size = object_cache_max_size
+        self._object_key_max_length_bytes = object_key_max_length_bytes
 
     def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
         """Get or create a lock for a specific bucket. Reduces global lock contention."""
@@ -364,7 +371,7 @@ class ObjectStorage:
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
 
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         destination = bucket_path / safe_key
         destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -439,7 +446,7 @@ class ObjectStorage:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             return {}
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         return self._read_metadata(bucket_path.name, safe_key) or {}
 
     def _cleanup_empty_parents(self, path: Path, stop_at: Path) -> None:
@@ -487,7 +494,7 @@ class ObjectStorage:
             self._safe_unlink(target)
             self._delete_metadata(bucket_id, rel)
         else:
-            rel = self._sanitize_object_key(object_key)
+            rel = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
             self._delete_metadata(bucket_id, rel)
         version_dir = self._version_dir(bucket_id, rel)
         if version_dir.exists():
@@ -696,7 +703,7 @@ class ObjectStorage:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         object_path = bucket_path / safe_key
         if not object_path.exists():
             raise ObjectNotFoundError("Object does not exist")
@@ -719,7 +726,7 @@ class ObjectStorage:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         object_path = bucket_path / safe_key
         if not object_path.exists():
             raise ObjectNotFoundError("Object does not exist")
@@ -758,7 +765,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         version_dir = self._version_dir(bucket_id, safe_key)
         if not version_dir.exists():
             version_dir = self._legacy_version_dir(bucket_id, safe_key)
@@ -782,7 +789,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         version_dir = self._version_dir(bucket_id, safe_key)
         data_path = version_dir / f"{version_id}.bin"
         meta_path = version_dir / f"{version_id}.json"
@@ -819,7 +826,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         version_dir = self._version_dir(bucket_id, safe_key)
         data_path = version_dir / f"{version_id}.bin"
         meta_path = version_dir / f"{version_id}.json"
@@ -910,7 +917,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         upload_id = uuid.uuid4().hex
         upload_root = self._multipart_dir(bucket_id, upload_id)
         upload_root.mkdir(parents=True, exist_ok=False)
@@ -1034,7 +1041,7 @@ class ObjectStorage:
             total_size += record.get("size", 0)
         validated.sort(key=lambda entry: entry[0])
 
-        safe_key = self._sanitize_object_key(manifest["object_key"])
+        safe_key = self._sanitize_object_key(manifest["object_key"], self._object_key_max_length_bytes)
         destination = bucket_path / safe_key
         
         is_overwrite = destination.exists()
@@ -1213,7 +1220,7 @@ class ObjectStorage:
 
     def _object_path(self, bucket_name: str, object_key: str) -> Path:
         bucket_path = self._bucket_path(bucket_name)
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         return bucket_path / safe_key
 
     def _system_root_path(self) -> Path:
@@ -1429,7 +1436,7 @@ class ObjectStorage:
                 current_version = self._cache_version.get(bucket_id, 0)
                 if current_version != cache_version:
                     objects = self._build_object_cache(bucket_path)
-                while len(self._object_cache) >= self.OBJECT_CACHE_MAX_SIZE:
+                while len(self._object_cache) >= self._object_cache_max_size:
                     self._object_cache.popitem(last=False)
 
                 self._object_cache[bucket_id] = (objects, time.time())
@@ -1764,11 +1771,11 @@ class ObjectStorage:
         return name
 
     @staticmethod
-    def _sanitize_object_key(object_key: str) -> Path:
+    def _sanitize_object_key(object_key: str, max_length_bytes: int = 1024) -> Path:
         if not object_key:
             raise StorageError("Object key required")
-        if len(object_key.encode("utf-8")) > 1024:
-            raise StorageError("Object key exceeds maximum length of 1024 bytes")
+        if len(object_key.encode("utf-8")) > max_length_bytes:
+            raise StorageError(f"Object key exceeds maximum length of {max_length_bytes} bytes")
         if "\x00" in object_key:
             raise StorageError("Object key contains null bytes")
         if object_key.startswith(("/", "\\")):

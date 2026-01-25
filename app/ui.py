@@ -1091,7 +1091,9 @@ def object_presign(bucket_name: str, object_key: str):
         expires = int(payload.get("expires_in", 900))
     except (TypeError, ValueError):
         return jsonify({"error": "expires_in must be an integer"}), 400
-    expires = max(1, min(expires, 7 * 24 * 3600))
+    min_expiry = current_app.config.get("PRESIGNED_URL_MIN_EXPIRY_SECONDS", 1)
+    max_expiry = current_app.config.get("PRESIGNED_URL_MAX_EXPIRY_SECONDS", 604800)
+    expires = max(min_expiry, min(expires, max_expiry))
     storage = _storage()
     if not storage.bucket_exists(bucket_name):
         return jsonify({"error": "Bucket does not exist"}), 404

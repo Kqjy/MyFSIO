@@ -121,6 +121,26 @@ class AppConfig:
     site_sync_enabled: bool
     site_sync_interval_seconds: int
     site_sync_batch_size: int
+    sigv4_timestamp_tolerance_seconds: int
+    presigned_url_min_expiry_seconds: int
+    presigned_url_max_expiry_seconds: int
+    replication_connect_timeout_seconds: int
+    replication_read_timeout_seconds: int
+    replication_max_retries: int
+    replication_streaming_threshold_bytes: int
+    replication_max_failures_per_bucket: int
+    site_sync_connect_timeout_seconds: int
+    site_sync_read_timeout_seconds: int
+    site_sync_max_retries: int
+    site_sync_clock_skew_tolerance_seconds: float
+    object_key_max_length_bytes: int
+    object_cache_max_size: int
+    bucket_config_cache_ttl_seconds: float
+    object_tag_limit: int
+    encryption_chunk_size_bytes: int
+    kms_generate_data_key_min_bytes: int
+    kms_generate_data_key_max_bytes: int
+    lifecycle_max_history_per_bucket: int
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -257,6 +277,27 @@ class AppConfig:
         site_sync_interval_seconds = int(_get("SITE_SYNC_INTERVAL_SECONDS", 60))
         site_sync_batch_size = int(_get("SITE_SYNC_BATCH_SIZE", 100))
 
+        sigv4_timestamp_tolerance_seconds = int(_get("SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 900))
+        presigned_url_min_expiry_seconds = int(_get("PRESIGNED_URL_MIN_EXPIRY_SECONDS", 1))
+        presigned_url_max_expiry_seconds = int(_get("PRESIGNED_URL_MAX_EXPIRY_SECONDS", 604800))
+        replication_connect_timeout_seconds = int(_get("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5))
+        replication_read_timeout_seconds = int(_get("REPLICATION_READ_TIMEOUT_SECONDS", 30))
+        replication_max_retries = int(_get("REPLICATION_MAX_RETRIES", 2))
+        replication_streaming_threshold_bytes = int(_get("REPLICATION_STREAMING_THRESHOLD_BYTES", 10 * 1024 * 1024))
+        replication_max_failures_per_bucket = int(_get("REPLICATION_MAX_FAILURES_PER_BUCKET", 50))
+        site_sync_connect_timeout_seconds = int(_get("SITE_SYNC_CONNECT_TIMEOUT_SECONDS", 10))
+        site_sync_read_timeout_seconds = int(_get("SITE_SYNC_READ_TIMEOUT_SECONDS", 120))
+        site_sync_max_retries = int(_get("SITE_SYNC_MAX_RETRIES", 2))
+        site_sync_clock_skew_tolerance_seconds = float(_get("SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS", 1.0))
+        object_key_max_length_bytes = int(_get("OBJECT_KEY_MAX_LENGTH_BYTES", 1024))
+        object_cache_max_size = int(_get("OBJECT_CACHE_MAX_SIZE", 100))
+        bucket_config_cache_ttl_seconds = float(_get("BUCKET_CONFIG_CACHE_TTL_SECONDS", 30.0))
+        object_tag_limit = int(_get("OBJECT_TAG_LIMIT", 50))
+        encryption_chunk_size_bytes = int(_get("ENCRYPTION_CHUNK_SIZE_BYTES", 64 * 1024))
+        kms_generate_data_key_min_bytes = int(_get("KMS_GENERATE_DATA_KEY_MIN_BYTES", 1))
+        kms_generate_data_key_max_bytes = int(_get("KMS_GENERATE_DATA_KEY_MAX_BYTES", 1024))
+        lifecycle_max_history_per_bucket = int(_get("LIFECYCLE_MAX_HISTORY_PER_BUCKET", 50))
+
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
                    ui_page_size=ui_page_size,
@@ -314,7 +355,27 @@ class AppConfig:
                    server_backlog_auto=server_backlog_auto,
                    site_sync_enabled=site_sync_enabled,
                    site_sync_interval_seconds=site_sync_interval_seconds,
-                   site_sync_batch_size=site_sync_batch_size)
+                   site_sync_batch_size=site_sync_batch_size,
+                   sigv4_timestamp_tolerance_seconds=sigv4_timestamp_tolerance_seconds,
+                   presigned_url_min_expiry_seconds=presigned_url_min_expiry_seconds,
+                   presigned_url_max_expiry_seconds=presigned_url_max_expiry_seconds,
+                   replication_connect_timeout_seconds=replication_connect_timeout_seconds,
+                   replication_read_timeout_seconds=replication_read_timeout_seconds,
+                   replication_max_retries=replication_max_retries,
+                   replication_streaming_threshold_bytes=replication_streaming_threshold_bytes,
+                   replication_max_failures_per_bucket=replication_max_failures_per_bucket,
+                   site_sync_connect_timeout_seconds=site_sync_connect_timeout_seconds,
+                   site_sync_read_timeout_seconds=site_sync_read_timeout_seconds,
+                   site_sync_max_retries=site_sync_max_retries,
+                   site_sync_clock_skew_tolerance_seconds=site_sync_clock_skew_tolerance_seconds,
+                   object_key_max_length_bytes=object_key_max_length_bytes,
+                   object_cache_max_size=object_cache_max_size,
+                   bucket_config_cache_ttl_seconds=bucket_config_cache_ttl_seconds,
+                   object_tag_limit=object_tag_limit,
+                   encryption_chunk_size_bytes=encryption_chunk_size_bytes,
+                   kms_generate_data_key_min_bytes=kms_generate_data_key_min_bytes,
+                   kms_generate_data_key_max_bytes=kms_generate_data_key_max_bytes,
+                   lifecycle_max_history_per_bucket=lifecycle_max_history_per_bucket)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -494,4 +555,24 @@ class AppConfig:
             "SITE_SYNC_ENABLED": self.site_sync_enabled,
             "SITE_SYNC_INTERVAL_SECONDS": self.site_sync_interval_seconds,
             "SITE_SYNC_BATCH_SIZE": self.site_sync_batch_size,
+            "SIGV4_TIMESTAMP_TOLERANCE_SECONDS": self.sigv4_timestamp_tolerance_seconds,
+            "PRESIGNED_URL_MIN_EXPIRY_SECONDS": self.presigned_url_min_expiry_seconds,
+            "PRESIGNED_URL_MAX_EXPIRY_SECONDS": self.presigned_url_max_expiry_seconds,
+            "REPLICATION_CONNECT_TIMEOUT_SECONDS": self.replication_connect_timeout_seconds,
+            "REPLICATION_READ_TIMEOUT_SECONDS": self.replication_read_timeout_seconds,
+            "REPLICATION_MAX_RETRIES": self.replication_max_retries,
+            "REPLICATION_STREAMING_THRESHOLD_BYTES": self.replication_streaming_threshold_bytes,
+            "REPLICATION_MAX_FAILURES_PER_BUCKET": self.replication_max_failures_per_bucket,
+            "SITE_SYNC_CONNECT_TIMEOUT_SECONDS": self.site_sync_connect_timeout_seconds,
+            "SITE_SYNC_READ_TIMEOUT_SECONDS": self.site_sync_read_timeout_seconds,
+            "SITE_SYNC_MAX_RETRIES": self.site_sync_max_retries,
+            "SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS": self.site_sync_clock_skew_tolerance_seconds,
+            "OBJECT_KEY_MAX_LENGTH_BYTES": self.object_key_max_length_bytes,
+            "OBJECT_CACHE_MAX_SIZE": self.object_cache_max_size,
+            "BUCKET_CONFIG_CACHE_TTL_SECONDS": self.bucket_config_cache_ttl_seconds,
+            "OBJECT_TAG_LIMIT": self.object_tag_limit,
+            "ENCRYPTION_CHUNK_SIZE_BYTES": self.encryption_chunk_size_bytes,
+            "KMS_GENERATE_DATA_KEY_MIN_BYTES": self.kms_generate_data_key_min_bytes,
+            "KMS_GENERATE_DATA_KEY_MAX_BYTES": self.kms_generate_data_key_max_bytes,
+            "LIFECYCLE_MAX_HISTORY_PER_BUCKET": self.lifecycle_max_history_per_bucket,
         }

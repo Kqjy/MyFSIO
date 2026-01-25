@@ -102,6 +102,11 @@ python run.py --mode ui    # UI only (port 5100)
 | `ENCRYPTION_ENABLED` | `false` | Enable server-side encryption |
 | `KMS_ENABLED` | `false` | Enable Key Management Service |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
+| `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Max time skew for SigV4 requests |
+| `PRESIGNED_URL_MAX_EXPIRY_SECONDS` | `604800` | Max presigned URL expiry (7 days) |
+| `REPLICATION_CONNECT_TIMEOUT_SECONDS` | `5` | Replication connection timeout |
+| `SITE_SYNC_ENABLED` | `false` | Enable bi-directional site sync |
+| `OBJECT_TAG_LIMIT` | `50` | Maximum tags per object |
 
 ## Data Layout
 

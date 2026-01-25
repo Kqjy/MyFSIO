@@ -20,7 +20,6 @@ from app.site_sync import (
     SyncedObjectInfo,
     SiteSyncStats,
     RemoteObjectMeta,
-    CLOCK_SKEW_TOLERANCE_SECONDS,
 )
 from app.storage import ObjectStorage
 
