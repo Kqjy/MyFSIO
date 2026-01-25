@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 from flask import Response, jsonify, request, flash, redirect, url_for, g
+from flask_limiter import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -172,10 +173,22 @@ def handle_app_error(error: AppError) -> Response:
         return error.to_xml_response()
 
 
+def handle_rate_limit_exceeded(e: RateLimitExceeded) -> Response:
+    g.s3_error_code = "SlowDown"
+    error = Element("Error")
+    SubElement(error, "Code").text = "SlowDown"
+    SubElement(error, "Message").text = "Please reduce your request rate."
+    SubElement(error, "Resource").text = request.path
+    SubElement(error, "RequestId").text = getattr(g, "request_id", "")
+    xml_bytes = tostring(error, encoding="utf-8")
+    return Response(xml_bytes, status=429, mimetype="application/xml")
+
+
 def register_error_handlers(app):
     """Register error handlers with a Flask app."""
     app.register_error_handler(AppError, handle_app_error)
-    
+    app.register_error_handler(RateLimitExceeded, handle_rate_limit_exceeded)
+
     for error_class in [
         BucketNotFoundError, BucketAlreadyExistsError, BucketNotEmptyError,
         ObjectNotFoundError, InvalidObjectKeyError,
