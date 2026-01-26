@@ -31,6 +31,7 @@ from .notifications import NotificationService
 from .object_lock import ObjectLockService
 from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
+from .site_registry import SiteRegistry, SiteInfo
 from .storage import ObjectStorage
 from .version import get_version
 
@@ -151,7 +152,17 @@ def create_app(
         streaming_threshold_bytes=app.config.get("REPLICATION_STREAMING_THRESHOLD_BYTES", 10 * 1024 * 1024),
         max_failures_per_bucket=app.config.get("REPLICATION_MAX_FAILURES_PER_BUCKET", 50),
     )
-    
+
+    site_registry_path = config_dir / "site_registry.json"
+    site_registry = SiteRegistry(site_registry_path)
+    if app.config.get("SITE_ID") and not site_registry.get_local_site():
+        site_registry.set_local_site(SiteInfo(
+            site_id=app.config["SITE_ID"],
+            endpoint=app.config.get("SITE_ENDPOINT") or "",
+            region=app.config.get("SITE_REGION", "us-east-1"),
+            priority=app.config.get("SITE_PRIORITY", 100),
+        ))
+
     encryption_config = {
         "encryption_enabled": app.config.get("ENCRYPTION_ENABLED", False),
         "encryption_master_key_path": app.config.get("ENCRYPTION_MASTER_KEY_PATH"),
@@ -207,6 +218,7 @@ def create_app(
     app.extensions["object_lock"] = object_lock_service
     app.extensions["notifications"] = notification_service
     app.extensions["access_logging"] = access_logging_service
+    app.extensions["site_registry"] = site_registry
 
     operation_metrics_collector = None
     if app.config.get("OPERATION_METRICS_ENABLED", False):
@@ -313,11 +325,14 @@ def create_app(
     if include_api:
         from .s3_api import s3_api_bp
         from .kms_api import kms_api_bp
+        from .admin_api import admin_api_bp
 
         app.register_blueprint(s3_api_bp)
         app.register_blueprint(kms_api_bp)
+        app.register_blueprint(admin_api_bp)
         csrf.exempt(s3_api_bp)
         csrf.exempt(kms_api_bp)
+        csrf.exempt(admin_api_bp)
 
     if include_ui:
         from .ui import ui_bp

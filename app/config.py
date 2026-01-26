@@ -141,6 +141,11 @@ class AppConfig:
     kms_generate_data_key_min_bytes: int
     kms_generate_data_key_max_bytes: int
     lifecycle_max_history_per_bucket: int
+    site_id: Optional[str]
+    site_endpoint: Optional[str]
+    site_region: str
+    site_priority: int
+    ratelimit_admin: str
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -298,6 +303,14 @@ class AppConfig:
         kms_generate_data_key_max_bytes = int(_get("KMS_GENERATE_DATA_KEY_MAX_BYTES", 1024))
         lifecycle_max_history_per_bucket = int(_get("LIFECYCLE_MAX_HISTORY_PER_BUCKET", 50))
 
+        site_id_raw = _get("SITE_ID", None)
+        site_id = str(site_id_raw).strip() if site_id_raw else None
+        site_endpoint_raw = _get("SITE_ENDPOINT", None)
+        site_endpoint = str(site_endpoint_raw).strip() if site_endpoint_raw else None
+        site_region = str(_get("SITE_REGION", "us-east-1"))
+        site_priority = int(_get("SITE_PRIORITY", 100))
+        ratelimit_admin = _validate_rate_limit(str(_get("RATE_LIMIT_ADMIN", "60 per minute")))
+
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
                    ui_page_size=ui_page_size,
@@ -375,7 +388,12 @@ class AppConfig:
                    encryption_chunk_size_bytes=encryption_chunk_size_bytes,
                    kms_generate_data_key_min_bytes=kms_generate_data_key_min_bytes,
                    kms_generate_data_key_max_bytes=kms_generate_data_key_max_bytes,
-                   lifecycle_max_history_per_bucket=lifecycle_max_history_per_bucket)
+                   lifecycle_max_history_per_bucket=lifecycle_max_history_per_bucket,
+                   site_id=site_id,
+                   site_endpoint=site_endpoint,
+                   site_region=site_region,
+                   site_priority=site_priority,
+                   ratelimit_admin=ratelimit_admin)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -575,4 +593,9 @@ class AppConfig:
             "KMS_GENERATE_DATA_KEY_MIN_BYTES": self.kms_generate_data_key_min_bytes,
             "KMS_GENERATE_DATA_KEY_MAX_BYTES": self.kms_generate_data_key_max_bytes,
             "LIFECYCLE_MAX_HISTORY_PER_BUCKET": self.lifecycle_max_history_per_bucket,
+            "SITE_ID": self.site_id,
+            "SITE_ENDPOINT": self.site_endpoint,
+            "SITE_REGION": self.site_region,
+            "SITE_PRIORITY": self.site_priority,
+            "RATE_LIMIT_ADMIN": self.ratelimit_admin,
         }

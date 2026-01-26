@@ -38,6 +38,7 @@ from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
 from .s3_api import _generate_presigned_url
 from .secret_store import EphemeralSecretStore
+from .site_registry import SiteRegistry, SiteInfo, PeerSite
 from .storage import ObjectStorage, StorageError
 
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
@@ -143,6 +144,10 @@ def _acl() -> AclService:
 
 def _operation_metrics():
     return current_app.extensions.get("operation_metrics")
+
+
+def _site_registry() -> SiteRegistry:
+    return current_app.extensions["site_registry"]
 
 
 def _format_bytes(num: int) -> str:
@@ -2661,6 +2666,229 @@ def list_buckets_for_copy(bucket_name: str):
         except IamError:
             pass
     return jsonify({"buckets": allowed})
+
+
+@ui_bp.get("/sites")
+def sites_dashboard():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied: Site management requires admin permissions", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+
+    registry = _site_registry()
+    local_site = registry.get_local_site()
+    peers = registry.list_peers()
+    connections = _connections().list()
+
+    return render_template(
+        "sites.html",
+        principal=principal,
+        local_site=local_site,
+        peers=peers,
+        connections=connections,
+        config_site_id=current_app.config.get("SITE_ID"),
+        config_site_endpoint=current_app.config.get("SITE_ENDPOINT"),
+        config_site_region=current_app.config.get("SITE_REGION", "us-east-1"),
+    )
+
+
+@ui_bp.post("/sites/local")
+def update_local_site():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    site_id = request.form.get("site_id", "").strip()
+    endpoint = request.form.get("endpoint", "").strip()
+    region = request.form.get("region", "us-east-1").strip()
+    priority = request.form.get("priority", "100")
+    display_name = request.form.get("display_name", "").strip()
+
+    if not site_id:
+        flash("Site ID is required", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    try:
+        priority_int = int(priority)
+    except ValueError:
+        priority_int = 100
+
+    registry = _site_registry()
+    existing = registry.get_local_site()
+
+    site = SiteInfo(
+        site_id=site_id,
+        endpoint=endpoint,
+        region=region,
+        priority=priority_int,
+        display_name=display_name or site_id,
+        created_at=existing.created_at if existing else None,
+    )
+    registry.set_local_site(site)
+
+    flash("Local site configuration updated", "success")
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.post("/sites/peers")
+def add_peer_site():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    site_id = request.form.get("site_id", "").strip()
+    endpoint = request.form.get("endpoint", "").strip()
+    region = request.form.get("region", "us-east-1").strip()
+    priority = request.form.get("priority", "100")
+    display_name = request.form.get("display_name", "").strip()
+    connection_id = request.form.get("connection_id", "").strip() or None
+
+    if not site_id:
+        flash("Site ID is required", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+    if not endpoint:
+        flash("Endpoint is required", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    try:
+        priority_int = int(priority)
+    except ValueError:
+        priority_int = 100
+
+    registry = _site_registry()
+
+    if registry.get_peer(site_id):
+        flash(f"Peer site '{site_id}' already exists", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    if connection_id and not _connections().get(connection_id):
+        flash(f"Connection '{connection_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    peer = PeerSite(
+        site_id=site_id,
+        endpoint=endpoint,
+        region=region,
+        priority=priority_int,
+        display_name=display_name or site_id,
+        connection_id=connection_id,
+    )
+    registry.add_peer(peer)
+
+    flash(f"Peer site '{site_id}' added", "success")
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.post("/sites/peers/<site_id>/update")
+def update_peer_site(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    registry = _site_registry()
+    existing = registry.get_peer(site_id)
+
+    if not existing:
+        flash(f"Peer site '{site_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    endpoint = request.form.get("endpoint", existing.endpoint).strip()
+    region = request.form.get("region", existing.region).strip()
+    priority = request.form.get("priority", str(existing.priority))
+    display_name = request.form.get("display_name", existing.display_name).strip()
+    connection_id = request.form.get("connection_id", "").strip() or existing.connection_id
+
+    try:
+        priority_int = int(priority)
+    except ValueError:
+        priority_int = existing.priority
+
+    if connection_id and not _connections().get(connection_id):
+        flash(f"Connection '{connection_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    peer = PeerSite(
+        site_id=site_id,
+        endpoint=endpoint,
+        region=region,
+        priority=priority_int,
+        display_name=display_name or site_id,
+        connection_id=connection_id,
+        created_at=existing.created_at,
+        is_healthy=existing.is_healthy,
+        last_health_check=existing.last_health_check,
+    )
+    registry.update_peer(peer)
+
+    flash(f"Peer site '{site_id}' updated", "success")
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.post("/sites/peers/<site_id>/delete")
+def delete_peer_site(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    registry = _site_registry()
+    if registry.delete_peer(site_id):
+        flash(f"Peer site '{site_id}' deleted", "success")
+    else:
+        flash(f"Peer site '{site_id}' not found", "danger")
+
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.get("/sites/peers/<site_id>/health")
+def check_peer_site_health(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    registry = _site_registry()
+    peer = registry.get_peer(site_id)
+
+    if not peer:
+        return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
+
+    is_healthy = False
+    error_message = None
+
+    if peer.connection_id:
+        connection = _connections().get(peer.connection_id)
+        if connection:
+            is_healthy = _replication().check_endpoint_health(connection)
+        else:
+            error_message = f"Connection '{peer.connection_id}' not found"
+    else:
+        error_message = "No connection configured for this peer"
+
+    registry.update_health(site_id, is_healthy)
+
+    result = {
+        "site_id": site_id,
+        "is_healthy": is_healthy,
+    }
+    if error_message:
+        result["error"] = error_message
+
+    return jsonify(result)
 
 
 @ui_bp.app_errorhandler(404)

@@ -35,6 +35,7 @@
             <li><a href="#api">REST endpoints</a></li>
             <li><a href="#examples">API Examples</a></li>
             <li><a href="#replication">Site Replication &amp; Sync</a></li>
+            <li><a href="#site-registry">Site Registry</a></li>
             <li><a href="#versioning">Object Versioning</a></li>
             <li><a href="#quotas">Bucket Quotas</a></li>
             <li><a href="#encryption">Encryption</a></li>
@@ -963,10 +964,174 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
         </div>
       </div>
     </article>
-    <article id="versioning" class="card shadow-sm docs-section">
+    <article id="site-registry" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">09</span>
+          <h2 class="h4 mb-0">Site Registry</h2>
+        </div>
+        <p class="text-muted">Track cluster membership and site identity for geo-distributed deployments. The site registry stores local site identity and peer site information.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Connections vs Sites</h3>
+        <p class="small text-muted mb-3">Understanding the difference between Connections and Sites is key to configuring geo-distribution:</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th style="width: 20%;">Aspect</th>
+                <th style="width: 40%;">Connections</th>
+                <th style="width: 40%;">Sites</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Purpose</strong></td>
+                <td>Store credentials to authenticate with remote S3 endpoints</td>
+                <td>Track cluster membership and site identity</td>
+              </tr>
+              <tr>
+                <td><strong>Contains</strong></td>
+                <td>Endpoint URL, access key, secret key, region</td>
+                <td>Site ID, endpoint, region, priority, display name</td>
+              </tr>
+              <tr>
+                <td><strong>Used by</strong></td>
+                <td>Replication rules, site sync workers</td>
+                <td>Geo-distribution awareness, cluster topology</td>
+              </tr>
+              <tr>
+                <td><strong>Analogy</strong></td>
+                <td><em>"How do I log in to that server?"</em></td>
+                <td><em>"Who are the members of my cluster?"</em></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small text-muted">Sites can optionally link to a Connection (via <code>connection_id</code>) to perform health checks against peer sites.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
+        <p class="small text-muted">Set environment variables to bootstrap local site identity on startup:</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Variable</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>SITE_ID</code></td>
+                <td><code>None</code></td>
+                <td>Unique identifier for this site (e.g., <code>us-west-1</code>)</td>
+              </tr>
+              <tr>
+                <td><code>SITE_ENDPOINT</code></td>
+                <td><code>None</code></td>
+                <td>Public URL for this site (e.g., <code>https://s3.us-west-1.example.com</code>)</td>
+              </tr>
+              <tr>
+                <td><code>SITE_REGION</code></td>
+                <td><code>us-east-1</code></td>
+                <td>AWS-style region identifier</td>
+              </tr>
+              <tr>
+                <td><code>SITE_PRIORITY</code></td>
+                <td><code>100</code></td>
+                <td>Routing priority (lower = preferred)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+<pre class="mb-3"><code class="language-bash"># Example: Configure site identity
+export SITE_ID=us-west-1
+export SITE_ENDPOINT=https://s3.us-west-1.example.com
+export SITE_REGION=us-west-1
+export SITE_PRIORITY=100
+python run.py</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Using the Sites UI</h3>
+        <p class="small text-muted">Navigate to <a href="{{ url_for('ui.sites_dashboard') }}">Sites</a> in the sidebar to manage site configuration:</p>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">Local Site Identity</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Configure this site's ID, endpoint, region, and priority</li>
+                  <li>Display name for easier identification</li>
+                  <li>Changes persist to <code>site_registry.json</code></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">Peer Sites</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Register remote sites in your cluster</li>
+                  <li>Link to a Connection for health checks</li>
+                  <li>View health status (green/red/unknown)</li>
+                  <li>Edit or delete peers as needed</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Admin API Endpoints</h3>
+        <p class="small text-muted">The <code>/admin</code> API provides programmatic access to site registry:</p>
+<pre class="mb-3"><code class="language-bash"># Get local site configuration
+curl {{ api_base }}/admin/site \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Update local site
+curl -X PUT {{ api_base }}/admin/site \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"site_id": "us-west-1", "endpoint": "https://s3.example.com", "region": "us-west-1"}'
+
+# List all peer sites
+curl {{ api_base }}/admin/sites \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Add a peer site
+curl -X POST {{ api_base }}/admin/sites \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"site_id": "us-east-1", "endpoint": "https://s3.us-east-1.example.com"}'
+
+# Check peer health
+curl {{ api_base }}/admin/sites/us-east-1/health \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Get cluster topology
+curl {{ api_base }}/admin/topology \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
+        <p class="small text-muted mb-3">Site registry data is stored at:</p>
+        <code class="d-block mb-3">data/.myfsio.sys/config/site_registry.json</code>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Planned:</strong> The site registry lays the groundwork for features like automatic failover, intelligent routing, and multi-site consistency. Currently it provides cluster awareness and health monitoring.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="versioning" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">10</span>
           <h2 class="h4 mb-0">Object Versioning</h2>
         </div>
         <p class="text-muted">Keep multiple versions of objects to protect against accidental deletions and overwrites. Restore previous versions at any time.</p>
@@ -1046,7 +1211,7 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
     <article id="quotas" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">10</span>
+          <span class="docs-section-kicker">11</span>
           <h2 class="h4 mb-0">Bucket Quotas</h2>
         </div>
         <p class="text-muted">Limit how much data a bucket can hold using storage quotas. Quotas are enforced on uploads and multipart completions.</p>
@@ -1114,7 +1279,7 @@ curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
     <article id="encryption" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">11</span>
+          <span class="docs-section-kicker">12</span>
           <h2 class="h4 mb-0">Encryption</h2>
         </div>
         <p class="text-muted">Protect data at rest with server-side encryption using AES-256-GCM. Objects are encrypted before being written to disk and decrypted transparently on read.</p>
@@ -1208,7 +1373,7 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
     <article id="lifecycle" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">12</span>
+          <span class="docs-section-kicker">13</span>
           <h2 class="h4 mb-0">Lifecycle Rules</h2>
         </div>
         <p class="text-muted">Automatically delete expired objects, clean up old versions, and abort incomplete multipart uploads using time-based lifecycle rules.</p>
@@ -1290,7 +1455,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
     <article id="metrics" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">13</span>
+          <span class="docs-section-kicker">14</span>
           <h2 class="h4 mb-0">Metrics History</h2>
         </div>
         <p class="text-muted">Track CPU, memory, and disk usage over time with optional metrics history. Disabled by default to minimize overhead.</p>
@@ -1374,7 +1539,7 @@ curl -X PUT "{{ api_base | replace('/api', '/ui') }}/metrics/settings" \
     <article id="operation-metrics" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">14</span>
+          <span class="docs-section-kicker">15</span>
           <h2 class="h4 mb-0">Operation Metrics</h2>
         </div>
         <p class="text-muted">Track API request statistics including request counts, latency, error rates, and bandwidth usage. Provides real-time visibility into API operations.</p>
@@ -1481,7 +1646,7 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
     <article id="troubleshooting" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">15</span>
+          <span class="docs-section-kicker">16</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -1543,6 +1708,7 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
           <li><a href="#api">REST endpoints</a></li>
           <li><a href="#examples">API Examples</a></li>
           <li><a href="#replication">Site Replication &amp; Sync</a></li>
+          <li><a href="#site-registry">Site Registry</a></li>
           <li><a href="#versioning">Object Versioning</a></li>
           <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>
