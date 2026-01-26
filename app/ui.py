@@ -2688,14 +2688,18 @@ def sites_dashboard():
     peers_with_stats = []
     for peer in peers:
         buckets_syncing = 0
+        has_bidirectional = False
         if peer.connection_id:
             for rule in all_rules:
                 if rule.target_connection_id == peer.connection_id:
                     buckets_syncing += 1
+                    if rule.mode == "bidirectional":
+                        has_bidirectional = True
         peers_with_stats.append({
             "peer": peer,
             "buckets_syncing": buckets_syncing,
             "has_connection": bool(peer.connection_id),
+            "has_bidirectional": has_bidirectional,
         })
 
     return render_template(
@@ -2952,12 +2956,15 @@ def replication_wizard(site_id: str):
             "existing_target": existing_rule.target_bucket if has_rule_for_peer else None,
         })
 
+    local_site = registry.get_local_site()
+
     return render_template(
         "replication_wizard.html",
         principal=principal,
         peer=peer,
         connection=connection,
         buckets=bucket_info,
+        local_site=local_site,
         csrf_token=generate_csrf,
     )
 
