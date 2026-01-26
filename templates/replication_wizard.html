@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+
+{% block title %}Set Up Replication - S3 Compatible Storage{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb mb-1">
+                <li class="breadcrumb-item"><a href="{{ url_for('ui.sites_dashboard') }}">Sites</a></li>
+                <li class="breadcrumb-item active" aria-current="page">Replication Wizard</li>
+            </ol>
+        </nav>
+        <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                <path d="M8 4a.5.5 0 0 1 .5.5V6a.5.5 0 0 1-1 0V4.5A.5.5 0 0 1 8 4zM3.732 5.732a.5.5 0 0 1 .707 0l.915.914a.5.5 0 1 1-.708.708l-.914-.915a.5.5 0 0 1 0-.707zM2 10a.5.5 0 0 1 .5-.5h1.586a.5.5 0 0 1 0 1H2.5A.5.5 0 0 1 2 10zm9.5 0a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 0 1H12a.5.5 0 0 1-.5-.5zm.754-4.246a.389.389 0 0 0-.527-.02L7.547 9.31a.91.91 0 1 0 1.302 1.258l3.434-4.297a.389.389 0 0 0-.029-.518z"/>
+                <path fill-rule="evenodd" d="M0 10a8 8 0 1 1 15.547 2.661c-.442 1.253-1.845 1.602-2.932 1.25C11.309 13.488 9.475 13 8 13c-1.474 0-3.31.488-4.615.911-1.087.352-2.49.003-2.932-1.25A7.988 7.988 0 0 1 0 10zm8-7a7 7 0 0 0-6.603 9.329c.203.575.923.876 1.68.63C4.397 12.533 6.358 12 8 12s3.604.532 4.923.96c.757.245 1.477-.056 1.68-.631A7 7 0 0 0 8 3z"/>
+            </svg>
+            Set Up Replication
+        </h1>
+        <p class="text-muted mb-0 mt-1">Configure bucket replication to <strong>{{ peer.display_name or peer.site_id }}</strong></p>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-4 col-md-5">
+        <div class="card shadow-sm border-0 mb-4" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                        <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09z"/>
+                    </svg>
+                    Peer Site
+                </h5>
+            </div>
+            <div class="card-body px-4 pb-4">
+                <dl class="mb-0">
+                    <dt class="text-muted small">Site ID</dt>
+                    <dd class="mb-2">{{ peer.site_id }}</dd>
+                    <dt class="text-muted small">Endpoint</dt>
+                    <dd class="mb-2 text-truncate" title="{{ peer.endpoint }}">{{ peer.endpoint }}</dd>
+                    <dt class="text-muted small">Region</dt>
+                    <dd class="mb-2"><span class="badge bg-primary bg-opacity-10 text-primary">{{ peer.region }}</span></dd>
+                    <dt class="text-muted small">Connection</dt>
+                    <dd class="mb-0"><span class="badge bg-secondary bg-opacity-10 text-secondary">{{ connection.name }}</span></dd>
+                </dl>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                        <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                    </svg>
+                    Replication Modes
+                </h5>
+            </div>
+            <div class="card-body px-4 pb-4 small">
+                <p class="mb-2"><strong>New Only:</strong> Only replicate new objects uploaded after the rule is created.</p>
+                <p class="mb-2"><strong>All Objects:</strong> Replicate all existing objects plus new uploads.</p>
+                <p class="mb-0"><strong>Bidirectional:</strong> Two-way sync between sites. Changes on either side are synchronized.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-8 col-md-7">
+        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                        <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+                    </svg>
+                    Select Buckets to Replicate
+                </h5>
+                <p class="text-muted small mb-0">Choose which buckets should be replicated to this peer site</p>
+            </div>
+            <div class="card-body px-4 pb-4">
+                {% if buckets %}
+                <form method="POST" action="{{ url_for('ui.create_peer_replication_rules', site_id=peer.site_id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+
+                    <div class="mb-4">
+                        <label for="mode" class="form-label fw-medium">Replication Mode</label>
+                        <select class="form-select" id="mode" name="mode">
+                            <option value="new_only">New Objects Only</option>
+                            <option value="all">All Objects (includes existing)</option>
+                            <option value="bidirectional">Bidirectional Sync</option>
+                        </select>
+                    </div>
+
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th scope="col" style="width: 40px;">
+                                        <input type="checkbox" class="form-check-input" id="selectAll">
+                                    </th>
+                                    <th scope="col">Local Bucket</th>
+                                    <th scope="col">Target Bucket Name</th>
+                                    <th scope="col">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for bucket in buckets %}
+                                <tr>
+                                    <td>
+                                        <input type="checkbox" class="form-check-input bucket-checkbox"
+                                            name="buckets" value="{{ bucket.name }}"
+                                            {% if bucket.has_rule %}disabled{% endif %}>
+                                    </td>
+                                    <td>
+                                        <div class="d-flex align-items-center gap-2">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                                                <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+                                            </svg>
+                                            <span class="fw-medium">{{ bucket.name }}</span>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <input type="text" class="form-control form-control-sm"
+                                            name="target_{{ bucket.name }}"
+                                            value="{{ bucket.existing_target or bucket.name }}"
+                                            placeholder="{{ bucket.name }}"
+                                            {% if bucket.has_rule %}disabled{% endif %}>
+                                    </td>
+                                    <td>
+                                        {% if bucket.has_rule %}
+                                        <span class="badge bg-info bg-opacity-10 text-info">
+                                            Already configured ({{ bucket.existing_mode }})
+                                        </span>
+                                        {% else %}
+                                        <span class="badge bg-secondary bg-opacity-10 text-secondary">
+                                            Not configured
+                                        </span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="d-flex gap-2 mt-4 pt-3 border-top">
+                        <button type="submit" class="btn btn-primary" id="submitBtn" disabled>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                            </svg>
+                            Create Replication Rules
+                        </button>
+                        <a href="{{ url_for('ui.sites_dashboard') }}" class="btn btn-outline-secondary">
+                            Skip for Now
+                        </a>
+                    </div>
+                </form>
+                {% else %}
+                <div class="empty-state text-center py-5">
+                    <div class="empty-state-icon mx-auto mb-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+                        </svg>
+                    </div>
+                    <h5 class="fw-semibold mb-2">No buckets yet</h5>
+                    <p class="text-muted mb-3">Create some buckets first, then come back to set up replication.</p>
+                    <a href="{{ url_for('ui.buckets_overview') }}" class="btn btn-primary">
+                        Go to Buckets
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const selectAllCheckbox = document.getElementById('selectAll');
+    const bucketCheckboxes = document.querySelectorAll('.bucket-checkbox:not(:disabled)');
+    const submitBtn = document.getElementById('submitBtn');
+
+    function updateSubmitButton() {
+        const checkedCount = document.querySelectorAll('.bucket-checkbox:checked').length;
+        if (submitBtn) {
+            submitBtn.disabled = checkedCount === 0;
+            const text = checkedCount > 0
+                ? `Create ${checkedCount} Replication Rule${checkedCount > 1 ? 's' : ''}`
+                : 'Create Replication Rules';
+            submitBtn.innerHTML = `
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                </svg>
+                ${text}
+            `;
+        }
+    }
+
+    function updateSelectAll() {
+        if (selectAllCheckbox && bucketCheckboxes.length > 0) {
+            const allChecked = Array.from(bucketCheckboxes).every(cb => cb.checked);
+            const someChecked = Array.from(bucketCheckboxes).some(cb => cb.checked);
+            selectAllCheckbox.checked = allChecked;
+            selectAllCheckbox.indeterminate = someChecked && !allChecked;
+        }
+    }
+
+    if (selectAllCheckbox) {
+        selectAllCheckbox.addEventListener('change', function() {
+            bucketCheckboxes.forEach(cb => {
+                cb.checked = this.checked;
+            });
+            updateSubmitButton();
+        });
+    }
+
+    bucketCheckboxes.forEach(cb => {
+        cb.addEventListener('change', function() {
+            updateSelectAll();
+            updateSubmitButton();
+        });
+    });
+
+    updateSelectAll();
+    updateSubmitButton();
+})();
+</script>
+{% endblock %}

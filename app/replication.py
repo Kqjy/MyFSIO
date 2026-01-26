@@ -318,6 +318,9 @@ class ReplicationManager:
     def get_rule(self, bucket_name: str) -> Optional[ReplicationRule]:
         return self._rules.get(bucket_name)
 
+    def list_rules(self) -> List[ReplicationRule]:
+        return list(self._rules.values())
+
     def set_rule(self, rule: ReplicationRule) -> None:
         old_rule = self._rules.get(rule.bucket_name)
         was_all_mode = old_rule and old_rule.mode == REPLICATION_MODE_ALL if old_rule else False
