@@ -1131,6 +1131,33 @@ def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
     return Response(status=204)
 
 
+def _validate_cors_origin(origin: str) -> bool:
+    """Validate a CORS origin pattern."""
+    import re
+    origin = origin.strip()
+    if not origin:
+        return False
+    if origin == "*":
+        return True
+    if origin.startswith("*."):
+        domain = origin[2:]
+        if not domain or ".." in domain:
+            return False
+        return bool(re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$', domain))
+    if origin.startswith(("http://", "https://")):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(origin)
+            if not parsed.netloc:
+                return False
+            if parsed.path and parsed.path != "/":
+                return False
+            return True
+        except Exception:
+            return False
+    return False
+
+
 def _sanitize_cors_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sanitized: list[dict[str, Any]] = []
     for rule in rules:
@@ -1140,6 +1167,13 @@ def _sanitize_cors_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         expose_headers = [header.strip() for header in rule.get("ExposeHeaders", []) if header and header.strip()]
         if not allowed_origins or not allowed_methods:
             raise ValueError("Each CORSRule must include AllowedOrigin and AllowedMethod entries")
+        for origin in allowed_origins:
+            if not _validate_cors_origin(origin):
+                raise ValueError(f"Invalid CORS origin: {origin}")
+        valid_methods = {"GET", "PUT", "POST", "DELETE", "HEAD"}
+        for method in allowed_methods:
+            if method not in valid_methods:
+                raise ValueError(f"Invalid CORS method: {method}")
         sanitized_rule: dict[str, Any] = {
             "AllowedOrigins": allowed_origins,
             "AllowedMethods": allowed_methods,
@@ -2259,15 +2293,13 @@ def bucket_handler(bucket_name: str) -> Response:
     continuation_token = request.args.get("continuation-token", "")  # ListObjectsV2
     start_after = request.args.get("start-after", "")  # ListObjectsV2
     
-    # For ListObjectsV2, continuation-token takes precedence, then start-after
-    # For ListObjects v1, use marker
     effective_start = ""
     if list_type == "2":
         if continuation_token:
             try:
                 effective_start = base64.urlsafe_b64decode(continuation_token.encode()).decode("utf-8")
             except (ValueError, UnicodeDecodeError):
-                effective_start = continuation_token
+                return _error_response("InvalidArgument", "Invalid continuation token", 400)
         elif start_after:
             effective_start = start_after
     else:

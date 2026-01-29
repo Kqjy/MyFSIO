@@ -320,18 +320,15 @@ class ObjectStorage:
         total_count = len(all_keys)
         start_index = 0
         if continuation_token:
-            try:
-                import bisect
-                start_index = bisect.bisect_right(all_keys, continuation_token)
-                if start_index >= total_count:
-                    return ListObjectsResult(
-                        objects=[],
-                        is_truncated=False,
-                        next_continuation_token=None,
-                        total_count=total_count,
-                    )
-            except Exception:
-                pass  
+            import bisect
+            start_index = bisect.bisect_right(all_keys, continuation_token)
+            if start_index >= total_count:
+                return ListObjectsResult(
+                    objects=[],
+                    is_truncated=False,
+                    next_continuation_token=None,
+                    total_count=total_count,
+                )  
         
         end_index = start_index + max_keys
         keys_slice = all_keys[start_index:end_index]

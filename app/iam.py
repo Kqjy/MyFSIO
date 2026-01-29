@@ -119,7 +119,7 @@ class IamService:
         self._failed_attempts: Dict[str, Deque[datetime]] = {}
         self._last_load_time = 0.0
         self._credential_cache: Dict[str, Tuple[str, Principal, float]] = {}
-        self._cache_ttl = 60.0 
+        self._cache_ttl = 10.0 
         self._last_stat_check = 0.0
         self._stat_check_interval = 1.0
         self._sessions: Dict[str, Dict[str, Any]] = {}
@@ -150,7 +150,8 @@ class IamService:
                 f"Access temporarily locked. Try again in {seconds} seconds."
             )
         record = self._users.get(access_key)
-        if not record or not hmac.compare_digest(record["secret_key"], secret_key):
+        stored_secret = record["secret_key"] if record else secrets.token_urlsafe(24)
+        if not record or not hmac.compare_digest(stored_secret, secret_key):
             self._record_failed_attempt(access_key)
             raise IamError("Invalid credentials")
         self._clear_failed_attempts(access_key)
@@ -212,8 +213,9 @@ class IamService:
         """Validate a session token for an access key."""
         session = self._sessions.get(session_token)
         if not session:
+            hmac.compare_digest(access_key, secrets.token_urlsafe(16))
             return False
-        if session["access_key"] != access_key:
+        if not hmac.compare_digest(session["access_key"], access_key):
             return False
         if time.time() > session["expires_at"]:
             del self._sessions[session_token]

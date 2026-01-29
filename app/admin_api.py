@@ -421,18 +421,38 @@ def check_bidirectional_status(site_id: str):
         )
 
         if resp.status_code == 200:
-            remote_data = resp.json()
+            try:
+                remote_data = resp.json()
+                if not isinstance(remote_data, dict):
+                    raise ValueError("Expected JSON object")
+                remote_local = remote_data.get("local")
+                if remote_local is not None and not isinstance(remote_local, dict):
+                    raise ValueError("Expected 'local' to be an object")
+                remote_peers = remote_data.get("peers", [])
+                if not isinstance(remote_peers, list):
+                    raise ValueError("Expected 'peers' to be a list")
+            except (ValueError, json.JSONDecodeError) as e:
+                logger.warning("Invalid JSON from remote admin API: %s", e)
+                result["remote_status"] = {"reachable": True, "invalid_response": True}
+                result["issues"].append({
+                    "code": "REMOTE_INVALID_RESPONSE",
+                    "message": "Remote admin API returned invalid JSON",
+                    "severity": "warning",
+                })
+                return jsonify(result)
+
             result["remote_status"] = {
                 "reachable": True,
-                "local_site": remote_data.get("local"),
+                "local_site": remote_local,
                 "site_sync_enabled": None,
                 "has_peer_for_us": False,
                 "peer_connection_configured": False,
                 "has_bidirectional_rules_for_us": False,
             }
 
-            remote_peers = remote_data.get("peers", [])
             for rp in remote_peers:
+                if not isinstance(rp, dict):
+                    continue
                 if local_site and (
                     rp.get("site_id") == local_site.site_id or
                     rp.get("endpoint") == local_site.endpoint

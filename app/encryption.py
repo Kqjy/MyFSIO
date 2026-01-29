@@ -4,12 +4,16 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import secrets
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Generator, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
 
 
 class EncryptionError(Exception):
@@ -110,6 +114,8 @@ class LocalKeyEncryption(EncryptionProvider):
         try:
             self.master_key_path.parent.mkdir(parents=True, exist_ok=True)
             self.master_key_path.write_text(base64.b64encode(key).decode())
+            if sys.platform != "win32":
+                os.chmod(self.master_key_path, 0o600)
         except OSError as exc:
             raise EncryptionError(f"Failed to save master key: {exc}") from exc
         return key
@@ -142,11 +148,12 @@ class LocalKeyEncryption(EncryptionProvider):
     def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
         """Encrypt data using envelope encryption."""
         data_key, encrypted_data_key = self.generate_data_key()
-        
+
         aesgcm = AESGCM(data_key)
         nonce = secrets.token_bytes(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-        
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
+        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
+
         return EncryptionResult(
             ciphertext=ciphertext,
             nonce=nonce,
@@ -159,10 +166,11 @@ class LocalKeyEncryption(EncryptionProvider):
         """Decrypt data using envelope encryption."""
         data_key = self._decrypt_data_key(encrypted_data_key)
         aesgcm = AESGCM(data_key)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
+            return aesgcm.decrypt(nonce, ciphertext, aad)
         except Exception as exc:
-            raise EncryptionError(f"Failed to decrypt data: {exc}") from exc
+            raise EncryptionError("Failed to decrypt data") from exc
 
 
 class StreamingEncryptor:
@@ -180,12 +188,14 @@ class StreamingEncryptor:
         self.chunk_size = chunk_size
     
     def _derive_chunk_nonce(self, base_nonce: bytes, chunk_index: int) -> bytes:
-        """Derive a unique nonce for each chunk.
-
-        Performance: Use direct byte manipulation instead of full int conversion.
-        """
-        # Performance: Only modify last 4 bytes instead of full 12-byte conversion
-        return base_nonce[:8] + (chunk_index ^ int.from_bytes(base_nonce[8:], "big")).to_bytes(4, "big")
+        """Derive a unique nonce for each chunk using HKDF."""
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=12,
+            salt=base_nonce,
+            info=chunk_index.to_bytes(4, "big"),
+        )
+        return hkdf.derive(b"chunk_nonce")
 
     def encrypt_stream(self, stream: BinaryIO,
                        context: Dict[str, str] | None = None) -> tuple[BinaryIO, EncryptionMetadata]:
@@ -404,7 +414,8 @@ class SSECEncryption(EncryptionProvider):
     def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
         aesgcm = AESGCM(self.customer_key)
         nonce = secrets.token_bytes(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
+        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
 
         return EncryptionResult(
             ciphertext=ciphertext,
@@ -416,10 +427,11 @@ class SSECEncryption(EncryptionProvider):
     def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
                 key_id: str, context: Dict[str, str] | None = None) -> bytes:
         aesgcm = AESGCM(self.customer_key)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
+            return aesgcm.decrypt(nonce, ciphertext, aad)
         except Exception as exc:
-            raise EncryptionError(f"SSE-C decryption failed: {exc}") from exc
+            raise EncryptionError("SSE-C decryption failed") from exc
 
     def generate_data_key(self) -> tuple[bytes, bytes]:
         return self.customer_key, b""
@@ -473,34 +485,36 @@ class ClientEncryptionHelper:
         }
     
     @staticmethod
-    def encrypt_with_key(plaintext: bytes, key_b64: str) -> Dict[str, str]:
+    def encrypt_with_key(plaintext: bytes, key_b64: str, context: Dict[str, str] | None = None) -> Dict[str, str]:
         """Encrypt data with a client-provided key."""
         key = base64.b64decode(key_b64)
         if len(key) != 32:
             raise EncryptionError("Key must be 256 bits (32 bytes)")
-        
+
         aesgcm = AESGCM(key)
         nonce = secrets.token_bytes(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-        
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
+        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
+
         return {
             "ciphertext": base64.b64encode(ciphertext).decode(),
             "nonce": base64.b64encode(nonce).decode(),
             "algorithm": "AES-256-GCM",
         }
-    
+
     @staticmethod
-    def decrypt_with_key(ciphertext_b64: str, nonce_b64: str, key_b64: str) -> bytes:
+    def decrypt_with_key(ciphertext_b64: str, nonce_b64: str, key_b64: str, context: Dict[str, str] | None = None) -> bytes:
         """Decrypt data with a client-provided key."""
         key = base64.b64decode(key_b64)
         nonce = base64.b64decode(nonce_b64)
         ciphertext = base64.b64decode(ciphertext_b64)
-        
+
         if len(key) != 32:
             raise EncryptionError("Key must be 256 bits (32 bytes)")
-        
+
         aesgcm = AESGCM(key)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
+            return aesgcm.decrypt(nonce, ciphertext, aad)
         except Exception as exc:
-            raise EncryptionError(f"Decryption failed: {exc}") from exc
+            raise EncryptionError("Decryption failed") from exc
