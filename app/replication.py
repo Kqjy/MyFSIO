@@ -137,6 +137,7 @@ class ReplicationRule:
     stats: ReplicationStats = field(default_factory=ReplicationStats)
     sync_deletions: bool = True
     last_pull_at: Optional[float] = None
+    filter_prefix: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -149,6 +150,7 @@ class ReplicationRule:
             "stats": self.stats.to_dict(),
             "sync_deletions": self.sync_deletions,
             "last_pull_at": self.last_pull_at,
+            "filter_prefix": self.filter_prefix,
         }
 
     @classmethod
@@ -162,6 +164,8 @@ class ReplicationRule:
             data["sync_deletions"] = True
         if "last_pull_at" not in data:
             data["last_pull_at"] = None
+        if "filter_prefix" not in data:
+            data["filter_prefix"] = None
         rule = cls(**data)
         rule.stats = ReplicationStats.from_dict(stats_data) if stats_data else ReplicationStats()
         return rule

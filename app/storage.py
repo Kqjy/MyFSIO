@@ -999,6 +999,102 @@ class ObjectStorage:
 
         return record["etag"]
 
+    def upload_part_copy(
+        self,
+        bucket_name: str,
+        upload_id: str,
+        part_number: int,
+        source_bucket: str,
+        source_key: str,
+        start_byte: Optional[int] = None,
+        end_byte: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Copy a range from an existing object as a multipart part."""
+        if part_number < 1 or part_number > 10000:
+            raise StorageError("part_number must be between 1 and 10000")
+
+        source_path = self.get_object_path(source_bucket, source_key)
+        source_size = source_path.stat().st_size
+
+        if start_byte is None:
+            start_byte = 0
+        if end_byte is None:
+            end_byte = source_size - 1
+
+        if start_byte < 0 or end_byte >= source_size or start_byte > end_byte:
+            raise StorageError("Invalid byte range")
+
+        bucket_path = self._bucket_path(bucket_name)
+        upload_root = self._multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            upload_root = self._legacy_multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            raise StorageError("Multipart upload not found")
+
+        checksum = hashlib.md5()
+        part_filename = f"part-{part_number:05d}.part"
+        part_path = upload_root / part_filename
+        temp_path = upload_root / f".{part_filename}.tmp"
+
+        try:
+            with source_path.open("rb") as src:
+                src.seek(start_byte)
+                bytes_to_copy = end_byte - start_byte + 1
+                with temp_path.open("wb") as target:
+                    remaining = bytes_to_copy
+                    while remaining > 0:
+                        chunk_size = min(65536, remaining)
+                        chunk = src.read(chunk_size)
+                        if not chunk:
+                            break
+                        checksum.update(chunk)
+                        target.write(chunk)
+                        remaining -= len(chunk)
+            temp_path.replace(part_path)
+        except OSError:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+        record = {
+            "etag": checksum.hexdigest(),
+            "size": part_path.stat().st_size,
+            "filename": part_filename,
+        }
+
+        manifest_path = upload_root / self.MULTIPART_MANIFEST
+        lock_path = upload_root / ".manifest.lock"
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with lock_path.open("w") as lock_file:
+                    with _file_lock(lock_file):
+                        try:
+                            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError) as exc:
+                            if attempt < max_retries - 1:
+                                time.sleep(0.1 * (attempt + 1))
+                                continue
+                            raise StorageError("Multipart manifest unreadable") from exc
+
+                        parts = manifest.setdefault("parts", {})
+                        parts[str(part_number)] = record
+                        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                break
+            except OSError as exc:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise StorageError(f"Failed to update multipart manifest: {exc}") from exc
+
+        return {
+            "etag": record["etag"],
+            "last_modified": datetime.fromtimestamp(part_path.stat().st_mtime, timezone.utc),
+        }
+
     def complete_multipart_upload(
         self,
         bucket_name: str,
