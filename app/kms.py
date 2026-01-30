@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -16,7 +17,27 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .encryption import EncryptionError, EncryptionProvider, EncryptionResult
 
+if sys.platform != "win32":
+    import fcntl
+
 logger = logging.getLogger(__name__)
+
+
+def _set_secure_file_permissions(file_path: Path) -> None:
+    """Set restrictive file permissions (owner read/write only)."""
+    if sys.platform == "win32":
+        try:
+            username = os.environ.get("USERNAME", "")
+            if username:
+                subprocess.run(
+                    ["icacls", str(file_path), "/inheritance:r",
+                     "/grant:r", f"{username}:F"],
+                    check=True, capture_output=True
+                )
+        except (subprocess.SubprocessError, OSError):
+            pass
+    else:
+        os.chmod(file_path, 0o600)
 
 
 @dataclass
@@ -132,20 +153,33 @@ class KMSManager:
     
     @property
     def master_key(self) -> bytes:
-        """Load or create the master key for encrypting KMS keys."""
+        """Load or create the master key for encrypting KMS keys (with file locking)."""
         if self._master_key is None:
-            if self.master_key_path.exists():
-                self._master_key = base64.b64decode(
-                    self.master_key_path.read_text().strip()
-                )
-            else:
-                self._master_key = secrets.token_bytes(32)
-                self.master_key_path.parent.mkdir(parents=True, exist_ok=True)
-                self.master_key_path.write_text(
-                    base64.b64encode(self._master_key).decode()
-                )
-                if sys.platform != "win32":
-                    os.chmod(self.master_key_path, 0o600)
+            lock_path = self.master_key_path.with_suffix(".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    if self.master_key_path.exists():
+                        self._master_key = base64.b64decode(
+                            self.master_key_path.read_text().strip()
+                        )
+                    else:
+                        self._master_key = secrets.token_bytes(32)
+                        self.master_key_path.write_text(
+                            base64.b64encode(self._master_key).decode()
+                        )
+                        _set_secure_file_permissions(self.master_key_path)
+                finally:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         return self._master_key
     
     def _load_keys(self) -> None:
@@ -177,12 +211,13 @@ class KMSManager:
             encrypted = self._encrypt_key_material(key.key_material)
             data["EncryptedKeyMaterial"] = base64.b64encode(encrypted).decode()
             keys_data.append(data)
-        
+
         self.keys_path.parent.mkdir(parents=True, exist_ok=True)
         self.keys_path.write_text(
             json.dumps({"keys": keys_data}, indent=2),
             encoding="utf-8"
         )
+        _set_secure_file_permissions(self.keys_path)
     
     def _encrypt_key_material(self, key_material: bytes) -> bytes:
         """Encrypt key material with the master key."""

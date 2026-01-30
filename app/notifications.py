@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import queue
+import socket
 import threading
 import time
 import uuid
@@ -13,6 +15,36 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check if a URL is safe to make requests to (not internal/private)."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        blocked_hosts = {
+            "localhost",
+            "127.0.0.1",
+            "0.0.0.0",
+            "::1",
+            "[::1]",
+            "metadata.google.internal",
+            "169.254.169.254",
+        }
+        if hostname.lower() in blocked_hosts:
+            return False
+        try:
+            resolved_ip = socket.gethostbyname(hostname)
+            ip = ipaddress.ip_address(resolved_ip)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except (socket.gaierror, ValueError):
+            return False
+        return True
+    except Exception:
+        return False
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +331,8 @@ class NotificationService:
                 self._queue.task_done()
 
     def _send_notification(self, event: NotificationEvent, destination: WebhookDestination) -> None:
+        if not _is_safe_url(destination.url):
+            raise RuntimeError(f"Blocked request to internal/private URL: {destination.url}")
         payload = event.to_s3_event()
         headers = {"Content-Type": "application/json", **destination.headers}
 

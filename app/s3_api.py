@@ -60,10 +60,13 @@ def _build_policy_context() -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
     if request.headers.get("Referer"):
         ctx["aws:Referer"] = request.headers.get("Referer")
-    if request.access_route:
-        ctx["aws:SourceIp"] = request.access_route[0]
+    num_proxies = current_app.config.get("NUM_TRUSTED_PROXIES", 0)
+    if num_proxies > 0 and request.access_route and len(request.access_route) > num_proxies:
+        ctx["aws:SourceIp"] = request.access_route[-num_proxies]
     elif request.remote_addr:
         ctx["aws:SourceIp"] = request.remote_addr
+    elif request.access_route:
+        ctx["aws:SourceIp"] = request.access_route[0]
     ctx["aws:SecureTransport"] = str(request.is_secure).lower()
     if request.headers.get("User-Agent"):
         ctx["aws:UserAgent"] = request.headers.get("User-Agent")
@@ -2242,6 +2245,17 @@ def _post_object(bucket_name: str) -> Response:
     expected_signature = hmac.new(signing_key, policy_b64.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected_signature, signature):
         return _error_response("SignatureDoesNotMatch", "Signature verification failed", 403)
+    principal = _iam().get_principal(access_key)
+    if not principal:
+        return _error_response("AccessDenied", "Invalid access key", 403)
+    if "${filename}" in object_key:
+        temp_key = object_key.replace("${filename}", request.files.get("file").filename if request.files.get("file") else "upload")
+    else:
+        temp_key = object_key
+    try:
+        _authorize_action(principal, bucket_name, "write", object_key=temp_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
     file = request.files.get("file")
     if not file:
         return _error_response("InvalidArgument", "Missing file field", 400)
@@ -2263,6 +2277,12 @@ def _post_object(bucket_name: str) -> Response:
     success_action_status = request.form.get("success_action_status", "204")
     success_action_redirect = request.form.get("success_action_redirect")
     if success_action_redirect:
+        allowed_hosts = current_app.config.get("ALLOWED_REDIRECT_HOSTS", [])
+        parsed = urlparse(success_action_redirect)
+        if parsed.scheme not in ("http", "https"):
+            return _error_response("InvalidArgument", "Redirect URL must use http or https", 400)
+        if allowed_hosts and parsed.netloc not in allowed_hosts:
+            return _error_response("InvalidArgument", "Redirect URL host not allowed", 400)
         redirect_url = f"{success_action_redirect}?bucket={bucket_name}&key={quote(object_key)}&etag={meta.etag}"
         return Response(status=303, headers={"Location": redirect_url})
     if success_action_status == "200":

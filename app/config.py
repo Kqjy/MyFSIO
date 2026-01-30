@@ -146,6 +146,8 @@ class AppConfig:
     site_region: str
     site_priority: int
     ratelimit_admin: str
+    num_trusted_proxies: int
+    allowed_redirect_hosts: list[str]
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -310,6 +312,9 @@ class AppConfig:
         site_region = str(_get("SITE_REGION", "us-east-1"))
         site_priority = int(_get("SITE_PRIORITY", 100))
         ratelimit_admin = _validate_rate_limit(str(_get("RATE_LIMIT_ADMIN", "60 per minute")))
+        num_trusted_proxies = int(_get("NUM_TRUSTED_PROXIES", 0))
+        allowed_redirect_hosts_raw = _get("ALLOWED_REDIRECT_HOSTS", "")
+        allowed_redirect_hosts = [h.strip() for h in str(allowed_redirect_hosts_raw).split(",") if h.strip()]
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -393,7 +398,9 @@ class AppConfig:
                    site_endpoint=site_endpoint,
                    site_region=site_region,
                    site_priority=site_priority,
-                   ratelimit_admin=ratelimit_admin)
+                   ratelimit_admin=ratelimit_admin,
+                   num_trusted_proxies=num_trusted_proxies,
+                   allowed_redirect_hosts=allowed_redirect_hosts)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -598,4 +605,6 @@ class AppConfig:
             "SITE_REGION": self.site_region,
             "SITE_PRIORITY": self.site_priority,
             "RATE_LIMIT_ADMIN": self.ratelimit_admin,
+            "NUM_TRUSTED_PROXIES": self.num_trusted_proxies,
+            "ALLOWED_REDIRECT_HOSTS": self.allowed_redirect_hosts,
         }

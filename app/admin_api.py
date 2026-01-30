@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
+import socket
 import time
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from flask import Blueprint, Response, current_app, jsonify, request
@@ -12,6 +16,67 @@ from .extensions import limiter
 from .iam import IamError, Principal
 from .replication import ReplicationManager
 from .site_registry import PeerSite, SiteInfo, SiteRegistry
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check if a URL is safe to make requests to (not internal/private)."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        blocked_hosts = {
+            "localhost",
+            "127.0.0.1",
+            "0.0.0.0",
+            "::1",
+            "[::1]",
+            "metadata.google.internal",
+            "169.254.169.254",
+        }
+        if hostname.lower() in blocked_hosts:
+            return False
+        try:
+            resolved_ip = socket.gethostbyname(hostname)
+            ip = ipaddress.ip_address(resolved_ip)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        except (socket.gaierror, ValueError):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _validate_endpoint(endpoint: str) -> Optional[str]:
+    """Validate endpoint URL format. Returns error message or None."""
+    try:
+        parsed = urlparse(endpoint)
+        if not parsed.scheme or parsed.scheme not in ("http", "https"):
+            return "Endpoint must be http or https URL"
+        if not parsed.netloc:
+            return "Endpoint must have a host"
+        return None
+    except Exception:
+        return "Invalid endpoint URL"
+
+
+def _validate_priority(priority: Any) -> Optional[str]:
+    """Validate priority value. Returns error message or None."""
+    try:
+        p = int(priority)
+        if p < 0 or p > 1000:
+            return "Priority must be between 0 and 1000"
+        return None
+    except (TypeError, ValueError):
+        return "Priority must be an integer"
+
+
+def _validate_region(region: str) -> Optional[str]:
+    """Validate region format. Returns error message or None."""
+    if not re.match(r"^[a-z]{2,}-[a-z]+-\d+$", region):
+        return "Region must match format like us-east-1"
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +223,20 @@ def register_peer_site():
     if not endpoint:
         return _json_error("ValidationError", "endpoint is required", 400)
 
+    endpoint_error = _validate_endpoint(endpoint)
+    if endpoint_error:
+        return _json_error("ValidationError", endpoint_error, 400)
+
+    region = payload.get("region", "us-east-1")
+    region_error = _validate_region(region)
+    if region_error:
+        return _json_error("ValidationError", region_error, 400)
+
+    priority = payload.get("priority", 100)
+    priority_error = _validate_priority(priority)
+    if priority_error:
+        return _json_error("ValidationError", priority_error, 400)
+
     registry = _site_registry()
 
     if registry.get_peer(site_id):
@@ -171,8 +250,8 @@ def register_peer_site():
     peer = PeerSite(
         site_id=site_id,
         endpoint=endpoint,
-        region=payload.get("region", "us-east-1"),
-        priority=payload.get("priority", 100),
+        region=region,
+        priority=int(priority),
         display_name=payload.get("display_name", site_id),
         connection_id=connection_id,
     )
@@ -411,6 +490,14 @@ def check_bidirectional_status(site_id: str):
         })
         return jsonify(result)
 
+    if not _is_safe_url(peer.endpoint):
+        result["issues"].append({
+            "code": "ENDPOINT_NOT_ALLOWED",
+            "message": "Peer endpoint points to internal or private address",
+            "severity": "error",
+        })
+        return jsonify(result)
+
     try:
         admin_url = peer.endpoint.rstrip("/") + "/admin/sites"
         resp = requests.get(
@@ -494,20 +581,21 @@ def check_bidirectional_status(site_id: str):
                 "severity": "warning",
             })
     except requests.RequestException as e:
+        logger.warning("Remote admin API unreachable: %s", e)
         result["remote_status"] = {
             "reachable": False,
-            "error": str(e),
+            "error": "Connection failed",
         }
         result["issues"].append({
             "code": "REMOTE_ADMIN_UNREACHABLE",
-            "message": f"Could not reach remote admin API: {e}",
+            "message": "Could not reach remote admin API",
             "severity": "warning",
         })
     except Exception as e:
-        logger.warning(f"Error checking remote bidirectional status: {e}")
+        logger.warning("Error checking remote bidirectional status: %s", e, exc_info=True)
         result["issues"].append({
             "code": "VERIFICATION_ERROR",
-            "message": f"Error during verification: {e}",
+            "message": "Internal error during verification",
             "severity": "warning",
         })
 
