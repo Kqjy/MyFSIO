@@ -568,7 +568,7 @@
             wizardLink.classList.add('d-none');
             modal.show();
 
-            fetch('/admin/sites/' + encodeURIComponent(siteId) + '/bidirectional-status')
+            fetch('/ui/sites/peers/' + encodeURIComponent(siteId) + '/bidirectional-status')
                 .then(response => response.json())
                 .then(data => {
                     let html = '';

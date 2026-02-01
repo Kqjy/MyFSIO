@@ -2915,6 +2915,226 @@ def check_peer_site_health(site_id: str):
     return jsonify(result)
 
 
+@ui_bp.get("/sites/peers/<site_id>/bidirectional-status")
+def check_peer_bidirectional_status(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    registry = _site_registry()
+    peer = registry.get_peer(site_id)
+
+    if not peer:
+        return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
+
+    local_site = registry.get_local_site()
+    replication = _replication()
+    local_rules = replication.list_rules()
+
+    local_bidir_rules = []
+    for rule in local_rules:
+        if rule.target_connection_id == peer.connection_id and rule.mode == "bidirectional":
+            local_bidir_rules.append({
+                "bucket_name": rule.bucket_name,
+                "target_bucket": rule.target_bucket,
+                "enabled": rule.enabled,
+            })
+
+    result = {
+        "site_id": site_id,
+        "local_site_id": local_site.site_id if local_site else None,
+        "local_endpoint": local_site.endpoint if local_site else None,
+        "local_bidirectional_rules": local_bidir_rules,
+        "local_site_sync_enabled": current_app.config.get("SITE_SYNC_ENABLED", False),
+        "remote_status": None,
+        "issues": [],
+        "is_fully_configured": False,
+    }
+
+    if not local_site or not local_site.site_id:
+        result["issues"].append({
+            "code": "NO_LOCAL_SITE_ID",
+            "message": "Local site identity not configured",
+            "severity": "error",
+        })
+
+    if not local_site or not local_site.endpoint:
+        result["issues"].append({
+            "code": "NO_LOCAL_ENDPOINT",
+            "message": "Local site endpoint not configured (remote site cannot reach back)",
+            "severity": "error",
+        })
+
+    if not peer.connection_id:
+        result["issues"].append({
+            "code": "NO_CONNECTION",
+            "message": "No connection configured for this peer",
+            "severity": "error",
+        })
+        return jsonify(result)
+
+    connection = _connections().get(peer.connection_id)
+    if not connection:
+        result["issues"].append({
+            "code": "CONNECTION_NOT_FOUND",
+            "message": f"Connection '{peer.connection_id}' not found",
+            "severity": "error",
+        })
+        return jsonify(result)
+
+    if not local_bidir_rules:
+        result["issues"].append({
+            "code": "NO_LOCAL_BIDIRECTIONAL_RULES",
+            "message": "No bidirectional replication rules configured on this site",
+            "severity": "warning",
+        })
+
+    if not result["local_site_sync_enabled"]:
+        result["issues"].append({
+            "code": "SITE_SYNC_DISABLED",
+            "message": "Site sync worker is disabled (SITE_SYNC_ENABLED=false). Pull operations will not work.",
+            "severity": "warning",
+        })
+
+    if not replication.check_endpoint_health(connection):
+        result["issues"].append({
+            "code": "REMOTE_UNREACHABLE",
+            "message": "Remote endpoint is not reachable",
+            "severity": "error",
+        })
+        return jsonify(result)
+
+    try:
+        parsed = urlparse(peer.endpoint)
+        hostname = parsed.hostname or ""
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                result["issues"].append({
+                    "code": "ENDPOINT_NOT_ALLOWED",
+                    "message": "Peer endpoint points to internal or private address",
+                    "severity": "error",
+                })
+                return jsonify(result)
+        except ValueError:
+            blocked_patterns = ["localhost", "127.", "10.", "192.168.", "172.16.", "169.254."]
+            if any(hostname.startswith(p) or hostname == p.rstrip(".") for p in blocked_patterns):
+                result["issues"].append({
+                    "code": "ENDPOINT_NOT_ALLOWED",
+                    "message": "Peer endpoint points to internal or private address",
+                    "severity": "error",
+                })
+                return jsonify(result)
+    except Exception:
+        pass
+
+    try:
+        admin_url = peer.endpoint.rstrip("/") + "/admin/sites"
+        resp = requests.get(
+            admin_url,
+            auth=(connection.access_key, connection.secret_key),
+            timeout=10,
+            headers={"Accept": "application/json"},
+        )
+
+        if resp.status_code == 200:
+            try:
+                remote_data = resp.json()
+                if not isinstance(remote_data, dict):
+                    raise ValueError("Expected JSON object")
+                remote_local = remote_data.get("local")
+                if remote_local is not None and not isinstance(remote_local, dict):
+                    raise ValueError("Expected 'local' to be an object")
+                remote_peers = remote_data.get("peers", [])
+                if not isinstance(remote_peers, list):
+                    raise ValueError("Expected 'peers' to be a list")
+            except (ValueError, json.JSONDecodeError) as e:
+                result["remote_status"] = {"reachable": True, "invalid_response": True}
+                result["issues"].append({
+                    "code": "REMOTE_INVALID_RESPONSE",
+                    "message": "Remote admin API returned invalid JSON",
+                    "severity": "warning",
+                })
+                return jsonify(result)
+
+            result["remote_status"] = {
+                "reachable": True,
+                "local_site": remote_local,
+                "site_sync_enabled": None,
+                "has_peer_for_us": False,
+                "peer_connection_configured": False,
+                "has_bidirectional_rules_for_us": False,
+            }
+
+            for rp in remote_peers:
+                if not isinstance(rp, dict):
+                    continue
+                if local_site and (
+                    rp.get("site_id") == local_site.site_id or
+                    rp.get("endpoint") == local_site.endpoint
+                ):
+                    result["remote_status"]["has_peer_for_us"] = True
+                    result["remote_status"]["peer_connection_configured"] = bool(rp.get("connection_id"))
+                    break
+
+            if not result["remote_status"]["has_peer_for_us"]:
+                result["issues"].append({
+                    "code": "REMOTE_NO_PEER_FOR_US",
+                    "message": "Remote site does not have this site registered as a peer",
+                    "severity": "error",
+                })
+            elif not result["remote_status"]["peer_connection_configured"]:
+                result["issues"].append({
+                    "code": "REMOTE_NO_CONNECTION_FOR_US",
+                    "message": "Remote site has us as peer but no connection configured (cannot push back)",
+                    "severity": "error",
+                })
+        elif resp.status_code == 401 or resp.status_code == 403:
+            result["remote_status"] = {
+                "reachable": True,
+                "admin_access_denied": True,
+            }
+            result["issues"].append({
+                "code": "REMOTE_ADMIN_ACCESS_DENIED",
+                "message": "Cannot verify remote configuration (admin access denied)",
+                "severity": "warning",
+            })
+        else:
+            result["remote_status"] = {
+                "reachable": True,
+                "admin_api_error": resp.status_code,
+            }
+            result["issues"].append({
+                "code": "REMOTE_ADMIN_API_ERROR",
+                "message": f"Remote admin API returned status {resp.status_code}",
+                "severity": "warning",
+            })
+    except requests.RequestException:
+        result["remote_status"] = {
+            "reachable": False,
+            "error": "Connection failed",
+        }
+        result["issues"].append({
+            "code": "REMOTE_ADMIN_UNREACHABLE",
+            "message": "Could not reach remote admin API",
+            "severity": "warning",
+        })
+    except Exception:
+        result["issues"].append({
+            "code": "VERIFICATION_ERROR",
+            "message": "Internal error during verification",
+            "severity": "warning",
+        })
+
+    error_issues = [i for i in result["issues"] if i["severity"] == "error"]
+    result["is_fully_configured"] = len(error_issues) == 0 and len(local_bidir_rules) > 0
+
+    return jsonify(result)
+
+
 @ui_bp.get("/sites/peers/<site_id>/replication-wizard")
 def replication_wizard(site_id: str):
     principal = _current_principal()

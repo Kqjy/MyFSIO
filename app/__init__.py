@@ -339,11 +339,6 @@ def create_app(
 
         app.register_blueprint(ui_bp)
         if not include_api:
-            from .admin_api import admin_api_bp
-
-            app.register_blueprint(admin_api_bp)
-            csrf.exempt(admin_api_bp)
-
             @app.get("/")
             def ui_root_redirect():
                 return redirect(url_for("ui.buckets_overview"))
