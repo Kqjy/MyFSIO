@@ -189,7 +189,10 @@ def create_app(
 
     acl_service = AclService(storage_root)
     object_lock_service = ObjectLockService(storage_root)
-    notification_service = NotificationService(storage_root)
+    notification_service = NotificationService(
+        storage_root,
+        allow_internal_endpoints=app.config.get("ALLOW_INTERNAL_ENDPOINTS", False),
+    )
     access_logging_service = AccessLoggingService(storage_root)
     access_logging_service.set_storage(storage)
 

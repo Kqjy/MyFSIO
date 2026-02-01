@@ -3010,24 +3010,34 @@ def check_peer_bidirectional_status(site_id: str):
         parsed = urlparse(peer.endpoint)
         hostname = parsed.hostname or ""
         import ipaddress
-        try:
-            ip = ipaddress.ip_address(hostname)
-            if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
-                result["issues"].append({
-                    "code": "ENDPOINT_NOT_ALLOWED",
-                    "message": "Peer endpoint points to internal or private address",
-                    "severity": "error",
-                })
-                return jsonify(result)
-        except ValueError:
-            blocked_patterns = ["localhost", "127.", "10.", "192.168.", "172.16.", "169.254."]
-            if any(hostname.startswith(p) or hostname == p.rstrip(".") for p in blocked_patterns):
-                result["issues"].append({
-                    "code": "ENDPOINT_NOT_ALLOWED",
-                    "message": "Peer endpoint points to internal or private address",
-                    "severity": "error",
-                })
-                return jsonify(result)
+        cloud_metadata_hosts = {"metadata.google.internal", "169.254.169.254"}
+        if hostname.lower() in cloud_metadata_hosts:
+            result["issues"].append({
+                "code": "ENDPOINT_NOT_ALLOWED",
+                "message": "Peer endpoint points to cloud metadata service (SSRF protection)",
+                "severity": "error",
+            })
+            return jsonify(result)
+        allow_internal = current_app.config.get("ALLOW_INTERNAL_ENDPOINTS", False)
+        if not allow_internal:
+            try:
+                ip = ipaddress.ip_address(hostname)
+                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                    result["issues"].append({
+                        "code": "ENDPOINT_NOT_ALLOWED",
+                        "message": "Peer endpoint points to internal or private address (set ALLOW_INTERNAL_ENDPOINTS=true for self-hosted deployments)",
+                        "severity": "error",
+                    })
+                    return jsonify(result)
+            except ValueError:
+                blocked_patterns = ["localhost", "127.", "10.", "192.168.", "172.16."]
+                if any(hostname.startswith(p) or hostname == p.rstrip(".") for p in blocked_patterns):
+                    result["issues"].append({
+                        "code": "ENDPOINT_NOT_ALLOWED",
+                        "message": "Peer endpoint points to internal or private address (set ALLOW_INTERNAL_ENDPOINTS=true for self-hosted deployments)",
+                        "severity": "error",
+                    })
+                    return jsonify(result)
     except Exception:
         pass
 

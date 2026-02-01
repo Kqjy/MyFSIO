@@ -18,21 +18,33 @@ from .replication import ReplicationManager
 from .site_registry import PeerSite, SiteInfo, SiteRegistry
 
 
-def _is_safe_url(url: str) -> bool:
-    """Check if a URL is safe to make requests to (not internal/private)."""
+def _is_safe_url(url: str, allow_internal: bool = False) -> bool:
+    """Check if a URL is safe to make requests to (not internal/private).
+
+    Args:
+        url: The URL to check.
+        allow_internal: If True, allows internal/private IP addresses.
+                       Use for self-hosted deployments on internal networks.
+    """
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname
         if not hostname:
             return False
+        cloud_metadata_hosts = {
+            "metadata.google.internal",
+            "169.254.169.254",
+        }
+        if hostname.lower() in cloud_metadata_hosts:
+            return False
+        if allow_internal:
+            return True
         blocked_hosts = {
             "localhost",
             "127.0.0.1",
             "0.0.0.0",
             "::1",
             "[::1]",
-            "metadata.google.internal",
-            "169.254.169.254",
         }
         if hostname.lower() in blocked_hosts:
             return False
@@ -539,10 +551,11 @@ def check_bidirectional_status(site_id: str):
         })
         return jsonify(result)
 
-    if not _is_safe_url(peer.endpoint):
+    allow_internal = current_app.config.get("ALLOW_INTERNAL_ENDPOINTS", False)
+    if not _is_safe_url(peer.endpoint, allow_internal=allow_internal):
         result["issues"].append({
             "code": "ENDPOINT_NOT_ALLOWED",
-            "message": "Peer endpoint points to internal or private address",
+            "message": "Peer endpoint points to cloud metadata service (SSRF protection)",
             "severity": "error",
         })
         return jsonify(result)

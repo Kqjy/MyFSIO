@@ -148,6 +148,7 @@ class AppConfig:
     ratelimit_admin: str
     num_trusted_proxies: int
     allowed_redirect_hosts: list[str]
+    allow_internal_endpoints: bool
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -315,6 +316,7 @@ class AppConfig:
         num_trusted_proxies = int(_get("NUM_TRUSTED_PROXIES", 0))
         allowed_redirect_hosts_raw = _get("ALLOWED_REDIRECT_HOSTS", "")
         allowed_redirect_hosts = [h.strip() for h in str(allowed_redirect_hosts_raw).split(",") if h.strip()]
+        allow_internal_endpoints = str(_get("ALLOW_INTERNAL_ENDPOINTS", "0")).lower() in {"1", "true", "yes", "on"}
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -400,7 +402,8 @@ class AppConfig:
                    site_priority=site_priority,
                    ratelimit_admin=ratelimit_admin,
                    num_trusted_proxies=num_trusted_proxies,
-                   allowed_redirect_hosts=allowed_redirect_hosts)
+                   allowed_redirect_hosts=allowed_redirect_hosts,
+                   allow_internal_endpoints=allow_internal_endpoints)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -607,4 +610,5 @@ class AppConfig:
             "RATE_LIMIT_ADMIN": self.ratelimit_admin,
             "NUM_TRUSTED_PROXIES": self.num_trusted_proxies,
             "ALLOWED_REDIRECT_HOSTS": self.allowed_redirect_hosts,
+            "ALLOW_INTERNAL_ENDPOINTS": self.allow_internal_endpoints,
         }
