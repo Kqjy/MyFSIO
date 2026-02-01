@@ -1507,16 +1507,723 @@ The suite covers bucket CRUD, presigned downloads, bucket policy enforcement, an
 ## 14. API Matrix
 
 ```
+# Service Endpoints
+GET    /myfsio/health                   # Health check
+
+# Bucket Operations
 GET    /                               # List buckets
 PUT    /<bucket>                        # Create bucket
 DELETE /<bucket>                        # Remove bucket
-GET    /<bucket>                        # List objects
-PUT    /<bucket>/<key>                  # Upload object
-GET    /<bucket>/<key>                  # Download object
-DELETE /<bucket>/<key>                  # Delete object
-GET    /<bucket>?policy                 # Fetch policy
-PUT    /<bucket>?policy                 # Upsert policy
-DELETE /<bucket>?policy                 # Delete policy
+GET    /<bucket>                        # List objects (supports ?list-type=2)
+HEAD   /<bucket>                        # Check bucket exists
+POST   /<bucket>                        # POST object upload (HTML form)
+POST   /<bucket>?delete                 # Bulk delete objects
+
+# Bucket Configuration
+GET    /<bucket>?policy                 # Fetch bucket policy
+PUT    /<bucket>?policy                 # Upsert bucket policy
+DELETE /<bucket>?policy                 # Delete bucket policy
 GET    /<bucket>?quota                  # Get bucket quota
 PUT    /<bucket>?quota                  # Set bucket quota (admin only)
+GET    /<bucket>?versioning             # Get versioning status
+PUT    /<bucket>?versioning             # Enable/disable versioning
+GET    /<bucket>?lifecycle              # Get lifecycle rules
+PUT    /<bucket>?lifecycle              # Set lifecycle rules
+DELETE /<bucket>?lifecycle              # Delete lifecycle rules
+GET    /<bucket>?cors                   # Get CORS configuration
+PUT    /<bucket>?cors                   # Set CORS configuration
+DELETE /<bucket>?cors                   # Delete CORS configuration
+GET    /<bucket>?encryption             # Get encryption configuration
+PUT    /<bucket>?encryption             # Set default encryption
+DELETE /<bucket>?encryption             # Delete encryption configuration
+GET    /<bucket>?acl                    # Get bucket ACL
+PUT    /<bucket>?acl                    # Set bucket ACL
+GET    /<bucket>?tagging                # Get bucket tags
+PUT    /<bucket>?tagging                # Set bucket tags
+DELETE /<bucket>?tagging                # Delete bucket tags
+GET    /<bucket>?replication            # Get replication configuration
+PUT    /<bucket>?replication            # Set replication rules
+DELETE /<bucket>?replication            # Delete replication configuration
+GET    /<bucket>?logging                # Get access logging configuration
+PUT    /<bucket>?logging                # Set access logging
+GET    /<bucket>?notification           # Get event notifications
+PUT    /<bucket>?notification           # Set event notifications (webhooks)
+GET    /<bucket>?object-lock            # Get object lock configuration
+PUT    /<bucket>?object-lock            # Set object lock configuration
+GET    /<bucket>?uploads                # List active multipart uploads
+GET    /<bucket>?versions               # List object versions
+GET    /<bucket>?location               # Get bucket location/region
+
+# Object Operations
+PUT    /<bucket>/<key>                  # Upload object
+GET    /<bucket>/<key>                  # Download object (supports Range header)
+DELETE /<bucket>/<key>                  # Delete object
+HEAD   /<bucket>/<key>                  # Get object metadata
+POST   /<bucket>/<key>                  # POST upload with policy
+POST   /<bucket>/<key>?select           # SelectObjectContent (SQL query)
+
+# Object Configuration
+GET    /<bucket>/<key>?tagging          # Get object tags
+PUT    /<bucket>/<key>?tagging          # Set object tags
+DELETE /<bucket>/<key>?tagging          # Delete object tags
+GET    /<bucket>/<key>?acl              # Get object ACL
+PUT    /<bucket>/<key>?acl              # Set object ACL
+PUT    /<bucket>/<key>?retention        # Set object retention
+GET    /<bucket>/<key>?retention        # Get object retention
+PUT    /<bucket>/<key>?legal-hold       # Set legal hold
+GET    /<bucket>/<key>?legal-hold       # Get legal hold status
+
+# Multipart Upload
+POST   /<bucket>/<key>?uploads          # Initiate multipart upload
+PUT    /<bucket>/<key>?uploadId=X&partNumber=N  # Upload part
+PUT    /<bucket>/<key>?uploadId=X&partNumber=N (with x-amz-copy-source) # UploadPartCopy
+POST   /<bucket>/<key>?uploadId=X       # Complete multipart upload
+DELETE /<bucket>/<key>?uploadId=X       # Abort multipart upload
+GET    /<bucket>/<key>?uploadId=X       # List parts
+
+# Copy Operations
+PUT    /<bucket>/<key> (with x-amz-copy-source header) # CopyObject
+
+# Admin API
+GET    /admin/site                      # Get local site info
+PUT    /admin/site                      # Update local site
+GET    /admin/sites                     # List peer sites
+POST   /admin/sites                     # Register peer site
+GET    /admin/sites/<site_id>           # Get peer site
+PUT    /admin/sites/<site_id>           # Update peer site
+DELETE /admin/sites/<site_id>           # Unregister peer site
+GET    /admin/sites/<site_id>/health    # Check peer health
+GET    /admin/topology                  # Get cluster topology
+
+# KMS API
+GET    /kms/keys                        # List KMS keys
+POST   /kms/keys                        # Create KMS key
+GET    /kms/keys/<key_id>               # Get key details
+DELETE /kms/keys/<key_id>               # Schedule key deletion
+POST   /kms/keys/<key_id>/enable        # Enable key
+POST   /kms/keys/<key_id>/disable       # Disable key
+POST   /kms/keys/<key_id>/rotate        # Rotate key material
+POST   /kms/encrypt                     # Encrypt data
+POST   /kms/decrypt                     # Decrypt data
+POST   /kms/generate-data-key           # Generate data key
+POST   /kms/generate-random             # Generate random bytes
 ```
+
+## 15. Health Check Endpoint
+
+The API exposes a simple health check endpoint for monitoring and load balancer integration:
+
+```bash
+# Check API health
+curl http://localhost:5000/myfsio/health
+
+# Response
+{"status": "ok", "version": "0.1.7"}
+```
+
+The response includes:
+- `status`: Always `"ok"` when the server is running
+- `version`: Current application version from `app/version.py`
+
+Use this endpoint for:
+- Load balancer health checks
+- Kubernetes liveness/readiness probes
+- Monitoring system integration (Prometheus, Datadog, etc.)
+
+## 16. Object Lock & Retention
+
+Object Lock prevents objects from being deleted or overwritten for a specified retention period. MyFSIO supports both GOVERNANCE and COMPLIANCE modes.
+
+### Retention Modes
+
+| Mode | Description |
+|------|-------------|
+| **GOVERNANCE** | Objects can't be deleted by normal users, but users with `s3:BypassGovernanceRetention` permission can override |
+| **COMPLIANCE** | Objects can't be deleted or overwritten by anyone, including root, until the retention period expires |
+
+### Enabling Object Lock
+
+Object Lock must be enabled when creating a bucket:
+
+```bash
+# Create bucket with Object Lock enabled
+curl -X PUT "http://localhost:5000/my-bucket" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-bucket-object-lock-enabled: true"
+
+# Set default retention configuration
+curl -X PUT "http://localhost:5000/my-bucket?object-lock" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "ObjectLockEnabled": "Enabled",
+    "Rule": {
+      "DefaultRetention": {
+        "Mode": "GOVERNANCE",
+        "Days": 30
+      }
+    }
+  }'
+```
+
+### Per-Object Retention
+
+Set retention on individual objects:
+
+```bash
+# Set object retention
+curl -X PUT "http://localhost:5000/my-bucket/important.pdf?retention" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "Mode": "COMPLIANCE",
+    "RetainUntilDate": "2025-12-31T23:59:59Z"
+  }'
+
+# Get object retention
+curl "http://localhost:5000/my-bucket/important.pdf?retention" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### Legal Hold
+
+Legal hold provides indefinite protection independent of retention settings:
+
+```bash
+# Enable legal hold
+curl -X PUT "http://localhost:5000/my-bucket/document.pdf?legal-hold" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"Status": "ON"}'
+
+# Disable legal hold
+curl -X PUT "http://localhost:5000/my-bucket/document.pdf?legal-hold" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{"Status": "OFF"}'
+
+# Check legal hold status
+curl "http://localhost:5000/my-bucket/document.pdf?legal-hold" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+## 17. Access Logging
+
+Enable S3-style access logging to track all requests to your buckets.
+
+### Configuration
+
+```bash
+# Enable access logging
+curl -X PUT "http://localhost:5000/my-bucket?logging" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "LoggingEnabled": {
+      "TargetBucket": "log-bucket",
+      "TargetPrefix": "logs/my-bucket/"
+    }
+  }'
+
+# Get logging configuration
+curl "http://localhost:5000/my-bucket?logging" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Disable logging (empty configuration)
+curl -X PUT "http://localhost:5000/my-bucket?logging" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{}'
+```
+
+### Log Format
+
+Access logs are written in S3-compatible format with fields including:
+- Timestamp, bucket, key
+- Operation (REST.GET.OBJECT, REST.PUT.OBJECT, etc.)
+- Request ID, requester, source IP
+- HTTP status, error code, bytes sent
+- Total time, turn-around time
+- Referrer, User-Agent
+
+## 18. Bucket Notifications & Webhooks
+
+Configure event notifications to trigger webhooks when objects are created or deleted.
+
+### Supported Events
+
+| Event Type | Description |
+|-----------|-------------|
+| `s3:ObjectCreated:*` | Any object creation (PUT, POST, COPY, multipart) |
+| `s3:ObjectCreated:Put` | Object created via PUT |
+| `s3:ObjectCreated:Post` | Object created via POST |
+| `s3:ObjectCreated:Copy` | Object created via COPY |
+| `s3:ObjectCreated:CompleteMultipartUpload` | Multipart upload completed |
+| `s3:ObjectRemoved:*` | Any object deletion |
+| `s3:ObjectRemoved:Delete` | Object deleted |
+| `s3:ObjectRemoved:DeleteMarkerCreated` | Delete marker created (versioned bucket) |
+
+### Configuration
+
+```bash
+# Set notification configuration
+curl -X PUT "http://localhost:5000/my-bucket?notification" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "TopicConfigurations": [
+      {
+        "Id": "upload-notify",
+        "TopicArn": "https://webhook.example.com/s3-events",
+        "Events": ["s3:ObjectCreated:*"],
+        "Filter": {
+          "Key": {
+            "FilterRules": [
+              {"Name": "prefix", "Value": "uploads/"},
+              {"Name": "suffix", "Value": ".jpg"}
+            ]
+          }
+        }
+      }
+    ]
+  }'
+
+# Get notification configuration
+curl "http://localhost:5000/my-bucket?notification" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### Webhook Payload
+
+The webhook receives a JSON payload similar to AWS S3 event notifications:
+
+```json
+{
+  "Records": [
+    {
+      "eventVersion": "2.1",
+      "eventSource": "myfsio:s3",
+      "eventTime": "2024-01-15T10:30:00.000Z",
+      "eventName": "ObjectCreated:Put",
+      "s3": {
+        "bucket": {"name": "my-bucket"},
+        "object": {
+          "key": "uploads/photo.jpg",
+          "size": 102400,
+          "eTag": "abc123..."
+        }
+      }
+    }
+  ]
+}
+```
+
+### Security Notes
+
+- Webhook URLs are validated to prevent SSRF attacks
+- Internal/private IP ranges are blocked by default
+- Use HTTPS endpoints in production
+
+## 19. SelectObjectContent (SQL Queries)
+
+Query CSV, JSON, or Parquet files directly using SQL without downloading the entire object. Requires DuckDB to be installed.
+
+### Prerequisites
+
+```bash
+pip install duckdb
+```
+
+### Usage
+
+```bash
+# Query a CSV file
+curl -X POST "http://localhost:5000/my-bucket/data.csv?select" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "Expression": "SELECT name, age FROM s3object WHERE age > 25",
+    "ExpressionType": "SQL",
+    "InputSerialization": {
+      "CSV": {
+        "FileHeaderInfo": "USE",
+        "FieldDelimiter": ","
+      }
+    },
+    "OutputSerialization": {
+      "JSON": {}
+    }
+  }'
+
+# Query a JSON file
+curl -X POST "http://localhost:5000/my-bucket/data.json?select" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "Expression": "SELECT * FROM s3object s WHERE s.status = '\"active'\"",
+    "ExpressionType": "SQL",
+    "InputSerialization": {"JSON": {"Type": "LINES"}},
+    "OutputSerialization": {"JSON": {}}
+  }'
+```
+
+### Supported Input Formats
+
+| Format | Options |
+|--------|---------|
+| **CSV** | `FileHeaderInfo` (USE, IGNORE, NONE), `FieldDelimiter`, `QuoteCharacter`, `RecordDelimiter` |
+| **JSON** | `Type` (DOCUMENT, LINES) |
+| **Parquet** | Automatic schema detection |
+
+### Output Formats
+
+- **JSON**: Returns results as JSON records
+- **CSV**: Returns results as CSV
+
+## 20. PostObject (HTML Form Upload)
+
+Upload objects using HTML forms with policy-based authorization. Useful for browser-based direct uploads.
+
+### Form Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `key` | Yes | Object key (can include `${filename}` placeholder) |
+| `file` | Yes | The file to upload |
+| `policy` | No | Base64-encoded policy document |
+| `x-amz-signature` | No | Policy signature |
+| `x-amz-credential` | No | Credential scope |
+| `x-amz-algorithm` | No | Signing algorithm (AWS4-HMAC-SHA256) |
+| `x-amz-date` | No | Request timestamp |
+| `Content-Type` | No | MIME type of the file |
+| `x-amz-meta-*` | No | Custom metadata |
+
+### Example HTML Form
+
+```html
+<form action="http://localhost:5000/my-bucket" method="post" enctype="multipart/form-data">
+  <input type="hidden" name="key" value="uploads/${filename}">
+  <input type="hidden" name="Content-Type" value="image/jpeg">
+  <input type="hidden" name="x-amz-meta-user" value="john">
+  <input type="file" name="file">
+  <button type="submit">Upload</button>
+</form>
+```
+
+### With Policy (Signed Upload)
+
+For authenticated uploads, include a policy document:
+
+```bash
+# Generate policy and signature using boto3 or similar
+# Then include in form:
+# - policy: base64(policy_document)
+# - x-amz-signature: HMAC-SHA256(policy, signing_key)
+# - x-amz-credential: access_key/date/region/s3/aws4_request
+# - x-amz-algorithm: AWS4-HMAC-SHA256
+# - x-amz-date: YYYYMMDDTHHMMSSZ
+```
+
+## 21. Advanced S3 Operations
+
+### CopyObject
+
+Copy objects within or between buckets:
+
+```bash
+# Copy within same bucket
+curl -X PUT "http://localhost:5000/my-bucket/copy-of-file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-copy-source: /my-bucket/original-file.txt"
+
+# Copy to different bucket
+curl -X PUT "http://localhost:5000/other-bucket/file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-copy-source: /my-bucket/original-file.txt"
+
+# Copy with metadata replacement
+curl -X PUT "http://localhost:5000/my-bucket/file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-copy-source: /my-bucket/file.txt" \
+  -H "x-amz-metadata-directive: REPLACE" \
+  -H "x-amz-meta-newkey: newvalue"
+```
+
+### UploadPartCopy
+
+Copy data from an existing object into a multipart upload part:
+
+```bash
+# Initiate multipart upload
+UPLOAD_ID=$(curl -X POST "http://localhost:5000/my-bucket/large-file.bin?uploads" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." | jq -r '.UploadId')
+
+# Copy bytes 0-10485759 from source as part 1
+curl -X PUT "http://localhost:5000/my-bucket/large-file.bin?uploadId=$UPLOAD_ID&partNumber=1" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-copy-source: /source-bucket/source-file.bin" \
+  -H "x-amz-copy-source-range: bytes=0-10485759"
+
+# Copy bytes 10485760-20971519 as part 2
+curl -X PUT "http://localhost:5000/my-bucket/large-file.bin?uploadId=$UPLOAD_ID&partNumber=2" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-copy-source: /source-bucket/source-file.bin" \
+  -H "x-amz-copy-source-range: bytes=10485760-20971519"
+```
+
+### Range Requests
+
+Download partial content using the Range header:
+
+```bash
+# Get first 1000 bytes
+curl "http://localhost:5000/my-bucket/large-file.bin" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "Range: bytes=0-999"
+
+# Get bytes 1000-1999
+curl "http://localhost:5000/my-bucket/large-file.bin" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "Range: bytes=1000-1999"
+
+# Get last 500 bytes
+curl "http://localhost:5000/my-bucket/large-file.bin" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "Range: bytes=-500"
+
+# Get from byte 5000 to end
+curl "http://localhost:5000/my-bucket/large-file.bin" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "Range: bytes=5000-"
+```
+
+Range responses include:
+- HTTP 206 Partial Content status
+- `Content-Range` header showing the byte range
+- `Accept-Ranges: bytes` header
+
+### Conditional Requests
+
+Use conditional headers for cache validation:
+
+```bash
+# Only download if modified since
+curl "http://localhost:5000/my-bucket/file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "If-Modified-Since: Wed, 15 Jan 2025 10:00:00 GMT"
+
+# Only download if ETag doesn't match (changed)
+curl "http://localhost:5000/my-bucket/file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "If-None-Match: \"abc123...\""
+
+# Only download if ETag matches
+curl "http://localhost:5000/my-bucket/file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "If-Match: \"abc123...\""
+```
+
+## 22. Access Control Lists (ACLs)
+
+ACLs provide legacy-style permission management for buckets and objects.
+
+### Canned ACLs
+
+| ACL | Description |
+|-----|-------------|
+| `private` | Owner gets FULL_CONTROL (default) |
+| `public-read` | Owner FULL_CONTROL, public READ |
+| `public-read-write` | Owner FULL_CONTROL, public READ and WRITE |
+| `authenticated-read` | Owner FULL_CONTROL, authenticated users READ |
+
+### Setting ACLs
+
+```bash
+# Set bucket ACL using canned ACL
+curl -X PUT "http://localhost:5000/my-bucket?acl" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-acl: public-read"
+
+# Set object ACL
+curl -X PUT "http://localhost:5000/my-bucket/file.txt?acl" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-acl: private"
+
+# Set ACL during upload
+curl -X PUT "http://localhost:5000/my-bucket/file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-acl: public-read" \
+  --data-binary @file.txt
+
+# Get bucket ACL
+curl "http://localhost:5000/my-bucket?acl" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Get object ACL
+curl "http://localhost:5000/my-bucket/file.txt?acl" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### ACL vs Bucket Policies
+
+- **ACLs**: Simple, limited options, legacy approach
+- **Bucket Policies**: Powerful, flexible, recommended for new deployments
+
+For most use cases, prefer bucket policies over ACLs.
+
+## 23. Object & Bucket Tagging
+
+Add metadata tags to buckets and objects for organization, cost allocation, or lifecycle rule filtering.
+
+### Bucket Tagging
+
+```bash
+# Set bucket tags
+curl -X PUT "http://localhost:5000/my-bucket?tagging" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "TagSet": [
+      {"Key": "Environment", "Value": "Production"},
+      {"Key": "Team", "Value": "Engineering"}
+    ]
+  }'
+
+# Get bucket tags
+curl "http://localhost:5000/my-bucket?tagging" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Delete bucket tags
+curl -X DELETE "http://localhost:5000/my-bucket?tagging" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### Object Tagging
+
+```bash
+# Set object tags
+curl -X PUT "http://localhost:5000/my-bucket/file.txt?tagging" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "TagSet": [
+      {"Key": "Classification", "Value": "Confidential"},
+      {"Key": "Owner", "Value": "john@example.com"}
+    ]
+  }'
+
+# Get object tags
+curl "http://localhost:5000/my-bucket/file.txt?tagging" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Delete object tags
+curl -X DELETE "http://localhost:5000/my-bucket/file.txt?tagging" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Set tags during upload
+curl -X PUT "http://localhost:5000/my-bucket/file.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-tagging: Environment=Staging&Team=QA" \
+  --data-binary @file.txt
+```
+
+### Tagging Limits
+
+- Maximum 50 tags per object (configurable via `OBJECT_TAG_LIMIT`)
+- Tag key: 1-128 Unicode characters
+- Tag value: 0-256 Unicode characters
+
+### Use Cases
+
+- **Lifecycle Rules**: Filter objects for expiration by tag
+- **Access Control**: Use tag conditions in bucket policies
+- **Cost Tracking**: Group objects by project or department
+- **Automation**: Trigger actions based on object tags
+
+## 24. CORS Configuration
+
+Configure Cross-Origin Resource Sharing for browser-based applications.
+
+### Setting CORS Rules
+
+```bash
+# Set CORS configuration
+curl -X PUT "http://localhost:5000/my-bucket?cors" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d '{
+    "CORSRules": [
+      {
+        "AllowedOrigins": ["https://example.com", "https://app.example.com"],
+        "AllowedMethods": ["GET", "PUT", "POST", "DELETE"],
+        "AllowedHeaders": ["*"],
+        "ExposeHeaders": ["ETag", "x-amz-meta-*"],
+        "MaxAgeSeconds": 3600
+      }
+    ]
+  }'
+
+# Get CORS configuration
+curl "http://localhost:5000/my-bucket?cors" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Delete CORS configuration
+curl -X DELETE "http://localhost:5000/my-bucket?cors" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### CORS Rule Fields
+
+| Field | Description |
+|-------|-------------|
+| `AllowedOrigins` | Origins allowed to access the bucket (required) |
+| `AllowedMethods` | HTTP methods allowed (GET, PUT, POST, DELETE, HEAD) |
+| `AllowedHeaders` | Request headers allowed in preflight |
+| `ExposeHeaders` | Response headers visible to browser |
+| `MaxAgeSeconds` | How long browser can cache preflight response |
+
+## 25. List Objects API v2
+
+MyFSIO supports both ListBucketResult v1 and v2 APIs.
+
+### Using v2 API
+
+```bash
+# List with v2 (supports continuation tokens)
+curl "http://localhost:5000/my-bucket?list-type=2" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# With prefix and delimiter (folder-like listing)
+curl "http://localhost:5000/my-bucket?list-type=2&prefix=photos/&delimiter=/" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Pagination with continuation token
+curl "http://localhost:5000/my-bucket?list-type=2&max-keys=100&continuation-token=TOKEN" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Start after specific key
+curl "http://localhost:5000/my-bucket?list-type=2&start-after=photos/2024/" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+```
+
+### v1 vs v2 Differences
+
+| Feature | v1 | v2 |
+|---------|----|----|
+| Pagination | `marker` | `continuation-token` |
+| Start position | `marker` | `start-after` |
+| Fetch owner info | Always included | Use `fetch-owner=true` |
+| Max keys | 1000 | 1000 |
+
+### Query Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `list-type` | Set to `2` for v2 API |
+| `prefix` | Filter objects by key prefix |
+| `delimiter` | Group objects (typically `/`) |
+| `max-keys` | Maximum results (1-1000, default 1000) |
+| `continuation-token` | Token from previous response |
+| `start-after` | Start listing after this key |
+| `fetch-owner` | Include owner info in response |
+| `encoding-type` | Set to `url` for URL-encoded keys
