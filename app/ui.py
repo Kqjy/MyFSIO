@@ -3035,9 +3035,12 @@ def check_peer_bidirectional_status(site_id: str):
         admin_url = peer.endpoint.rstrip("/") + "/admin/sites"
         resp = requests.get(
             admin_url,
-            auth=(connection.access_key, connection.secret_key),
             timeout=10,
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "X-Access-Key": connection.access_key,
+                "X-Secret-Key": connection.secret_key,
+            },
         )
 
         if resp.status_code == 200:

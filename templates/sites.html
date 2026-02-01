@@ -718,8 +718,12 @@
                                 </ol>
                             </div>
                         `;
-                        wizardLink.href = '/ui/sites/replication-wizard/' + encodeURIComponent(siteId);
-                        wizardLink.classList.remove('d-none');
+                        const blockingErrors = ['NO_CONNECTION', 'CONNECTION_NOT_FOUND', 'REMOTE_UNREACHABLE', 'ENDPOINT_NOT_ALLOWED'];
+                        const hasBlockingError = data.issues && data.issues.some(i => blockingErrors.includes(i.code));
+                        if (!hasBlockingError) {
+                            wizardLink.href = '/ui/sites/peers/' + encodeURIComponent(siteId) + '/replication-wizard';
+                            wizardLink.classList.remove('d-none');
+                        }
                     }
 
                     contentDiv.innerHTML = html;
