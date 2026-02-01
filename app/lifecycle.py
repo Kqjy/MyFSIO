@@ -71,10 +71,9 @@ class LifecycleExecutionRecord:
 
 
 class LifecycleHistoryStore:
-    MAX_HISTORY_PER_BUCKET = 50
-
-    def __init__(self, storage_root: Path) -> None:
+    def __init__(self, storage_root: Path, max_history_per_bucket: int = 50) -> None:
         self.storage_root = storage_root
+        self.max_history_per_bucket = max_history_per_bucket
         self._lock = threading.Lock()
 
     def _get_history_path(self, bucket_name: str) -> Path:
@@ -95,7 +94,7 @@ class LifecycleHistoryStore:
     def save_history(self, bucket_name: str, records: List[LifecycleExecutionRecord]) -> None:
         path = self._get_history_path(bucket_name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"executions": [r.to_dict() for r in records[:self.MAX_HISTORY_PER_BUCKET]]}
+        data = {"executions": [r.to_dict() for r in records[:self.max_history_per_bucket]]}
         try:
             with open(path, "w") as f:
                 json.dump(data, f, indent=2)
@@ -114,14 +113,20 @@ class LifecycleHistoryStore:
 
 
 class LifecycleManager:
-    def __init__(self, storage: ObjectStorage, interval_seconds: int = 3600, storage_root: Optional[Path] = None):
+    def __init__(
+        self,
+        storage: ObjectStorage,
+        interval_seconds: int = 3600,
+        storage_root: Optional[Path] = None,
+        max_history_per_bucket: int = 50,
+    ):
         self.storage = storage
         self.interval_seconds = interval_seconds
         self.storage_root = storage_root
         self._timer: Optional[threading.Timer] = None
         self._shutdown = False
         self._lock = threading.Lock()
-        self.history_store = LifecycleHistoryStore(storage_root) if storage_root else None
+        self.history_store = LifecycleHistoryStore(storage_root, max_history_per_bucket) if storage_root else None
 
     def start(self) -> None:
         if self._timer is not None:

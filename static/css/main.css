@@ -1081,11 +1081,17 @@ html.sidebar-will-collapse .sidebar-user {
 	letter-spacing: 0.08em;
 }
 
+.main-content:has(.docs-sidebar) {
+	overflow-x: visible;
+}
+
 .docs-sidebar {
 	position: sticky;
 	top: 1.5rem;
 	border-radius: 1rem;
 	border: 1px solid var(--myfsio-card-border);
+	max-height: calc(100vh - 3rem);
+	overflow-y: auto;
 }
 
 .docs-sidebar-callouts {

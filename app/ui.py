@@ -38,6 +38,7 @@ from .kms import KMSManager
 from .replication import ReplicationManager, ReplicationRule
 from .s3_api import _generate_presigned_url
 from .secret_store import EphemeralSecretStore
+from .site_registry import SiteRegistry, SiteInfo, PeerSite
 from .storage import ObjectStorage, StorageError
 
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
@@ -143,6 +144,10 @@ def _acl() -> AclService:
 
 def _operation_metrics():
     return current_app.extensions.get("operation_metrics")
+
+
+def _site_registry() -> SiteRegistry:
+    return current_app.extensions["site_registry"]
 
 
 def _format_bytes(num: int) -> str:
@@ -1091,7 +1096,9 @@ def object_presign(bucket_name: str, object_key: str):
         expires = int(payload.get("expires_in", 900))
     except (TypeError, ValueError):
         return jsonify({"error": "expires_in must be an integer"}), 400
-    expires = max(1, min(expires, 7 * 24 * 3600))
+    min_expiry = current_app.config.get("PRESIGNED_URL_MIN_EXPIRY_SECONDS", 1)
+    max_expiry = current_app.config.get("PRESIGNED_URL_MAX_EXPIRY_SECONDS", 604800)
+    expires = max(min_expiry, min(expires, max_expiry))
     storage = _storage()
     if not storage.bucket_exists(bucket_name):
         return jsonify({"error": "Bucket does not exist"}), 404
@@ -2659,6 +2666,664 @@ def list_buckets_for_copy(bucket_name: str):
         except IamError:
             pass
     return jsonify({"buckets": allowed})
+
+
+@ui_bp.get("/sites")
+def sites_dashboard():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied: Site management requires admin permissions", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+
+    registry = _site_registry()
+    local_site = registry.get_local_site()
+    peers = registry.list_peers()
+    connections = _connections().list()
+
+    replication = _replication()
+    all_rules = replication.list_rules()
+
+    peers_with_stats = []
+    for peer in peers:
+        buckets_syncing = 0
+        has_bidirectional = False
+        if peer.connection_id:
+            for rule in all_rules:
+                if rule.target_connection_id == peer.connection_id:
+                    buckets_syncing += 1
+                    if rule.mode == "bidirectional":
+                        has_bidirectional = True
+        peers_with_stats.append({
+            "peer": peer,
+            "buckets_syncing": buckets_syncing,
+            "has_connection": bool(peer.connection_id),
+            "has_bidirectional": has_bidirectional,
+        })
+
+    return render_template(
+        "sites.html",
+        principal=principal,
+        local_site=local_site,
+        peers=peers,
+        peers_with_stats=peers_with_stats,
+        connections=connections,
+        config_site_id=current_app.config.get("SITE_ID"),
+        config_site_endpoint=current_app.config.get("SITE_ENDPOINT"),
+        config_site_region=current_app.config.get("SITE_REGION", "us-east-1"),
+    )
+
+
+@ui_bp.post("/sites/local")
+def update_local_site():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    site_id = request.form.get("site_id", "").strip()
+    endpoint = request.form.get("endpoint", "").strip()
+    region = request.form.get("region", "us-east-1").strip()
+    priority = request.form.get("priority", "100")
+    display_name = request.form.get("display_name", "").strip()
+
+    if not site_id:
+        flash("Site ID is required", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    try:
+        priority_int = int(priority)
+    except ValueError:
+        priority_int = 100
+
+    registry = _site_registry()
+    existing = registry.get_local_site()
+
+    site = SiteInfo(
+        site_id=site_id,
+        endpoint=endpoint,
+        region=region,
+        priority=priority_int,
+        display_name=display_name or site_id,
+        created_at=existing.created_at if existing else None,
+    )
+    registry.set_local_site(site)
+
+    flash("Local site configuration updated", "success")
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.post("/sites/peers")
+def add_peer_site():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    site_id = request.form.get("site_id", "").strip()
+    endpoint = request.form.get("endpoint", "").strip()
+    region = request.form.get("region", "us-east-1").strip()
+    priority = request.form.get("priority", "100")
+    display_name = request.form.get("display_name", "").strip()
+    connection_id = request.form.get("connection_id", "").strip() or None
+
+    if not site_id:
+        flash("Site ID is required", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+    if not endpoint:
+        flash("Endpoint is required", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    try:
+        priority_int = int(priority)
+    except ValueError:
+        priority_int = 100
+
+    registry = _site_registry()
+
+    if registry.get_peer(site_id):
+        flash(f"Peer site '{site_id}' already exists", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    if connection_id and not _connections().get(connection_id):
+        flash(f"Connection '{connection_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    peer = PeerSite(
+        site_id=site_id,
+        endpoint=endpoint,
+        region=region,
+        priority=priority_int,
+        display_name=display_name or site_id,
+        connection_id=connection_id,
+    )
+    registry.add_peer(peer)
+
+    flash(f"Peer site '{site_id}' added", "success")
+
+    if connection_id:
+        return redirect(url_for("ui.replication_wizard", site_id=site_id))
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.post("/sites/peers/<site_id>/update")
+def update_peer_site(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    registry = _site_registry()
+    existing = registry.get_peer(site_id)
+
+    if not existing:
+        flash(f"Peer site '{site_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    endpoint = request.form.get("endpoint", existing.endpoint).strip()
+    region = request.form.get("region", existing.region).strip()
+    priority = request.form.get("priority", str(existing.priority))
+    display_name = request.form.get("display_name", existing.display_name).strip()
+    connection_id = request.form.get("connection_id", "").strip() or existing.connection_id
+
+    try:
+        priority_int = int(priority)
+    except ValueError:
+        priority_int = existing.priority
+
+    if connection_id and not _connections().get(connection_id):
+        flash(f"Connection '{connection_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    peer = PeerSite(
+        site_id=site_id,
+        endpoint=endpoint,
+        region=region,
+        priority=priority_int,
+        display_name=display_name or site_id,
+        connection_id=connection_id,
+        created_at=existing.created_at,
+        is_healthy=existing.is_healthy,
+        last_health_check=existing.last_health_check,
+    )
+    registry.update_peer(peer)
+
+    flash(f"Peer site '{site_id}' updated", "success")
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.post("/sites/peers/<site_id>/delete")
+def delete_peer_site(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    registry = _site_registry()
+    if registry.delete_peer(site_id):
+        flash(f"Peer site '{site_id}' deleted", "success")
+    else:
+        flash(f"Peer site '{site_id}' not found", "danger")
+
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.get("/sites/peers/<site_id>/health")
+def check_peer_site_health(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    registry = _site_registry()
+    peer = registry.get_peer(site_id)
+
+    if not peer:
+        return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
+
+    is_healthy = False
+    error_message = None
+
+    if peer.connection_id:
+        connection = _connections().get(peer.connection_id)
+        if connection:
+            is_healthy = _replication().check_endpoint_health(connection)
+        else:
+            error_message = f"Connection '{peer.connection_id}' not found"
+    else:
+        error_message = "No connection configured for this peer"
+
+    registry.update_health(site_id, is_healthy)
+
+    result = {
+        "site_id": site_id,
+        "is_healthy": is_healthy,
+    }
+    if error_message:
+        result["error"] = error_message
+
+    return jsonify(result)
+
+
+@ui_bp.get("/sites/peers/<site_id>/bidirectional-status")
+def check_peer_bidirectional_status(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    registry = _site_registry()
+    peer = registry.get_peer(site_id)
+
+    if not peer:
+        return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
+
+    local_site = registry.get_local_site()
+    replication = _replication()
+    local_rules = replication.list_rules()
+
+    local_bidir_rules = []
+    for rule in local_rules:
+        if rule.target_connection_id == peer.connection_id and rule.mode == "bidirectional":
+            local_bidir_rules.append({
+                "bucket_name": rule.bucket_name,
+                "target_bucket": rule.target_bucket,
+                "enabled": rule.enabled,
+            })
+
+    result = {
+        "site_id": site_id,
+        "local_site_id": local_site.site_id if local_site else None,
+        "local_endpoint": local_site.endpoint if local_site else None,
+        "local_bidirectional_rules": local_bidir_rules,
+        "local_site_sync_enabled": current_app.config.get("SITE_SYNC_ENABLED", False),
+        "remote_status": None,
+        "issues": [],
+        "is_fully_configured": False,
+    }
+
+    if not local_site or not local_site.site_id:
+        result["issues"].append({
+            "code": "NO_LOCAL_SITE_ID",
+            "message": "Local site identity not configured",
+            "severity": "error",
+        })
+
+    if not local_site or not local_site.endpoint:
+        result["issues"].append({
+            "code": "NO_LOCAL_ENDPOINT",
+            "message": "Local site endpoint not configured (remote site cannot reach back)",
+            "severity": "error",
+        })
+
+    if not peer.connection_id:
+        result["issues"].append({
+            "code": "NO_CONNECTION",
+            "message": "No connection configured for this peer",
+            "severity": "error",
+        })
+        return jsonify(result)
+
+    connection = _connections().get(peer.connection_id)
+    if not connection:
+        result["issues"].append({
+            "code": "CONNECTION_NOT_FOUND",
+            "message": f"Connection '{peer.connection_id}' not found",
+            "severity": "error",
+        })
+        return jsonify(result)
+
+    if not local_bidir_rules:
+        result["issues"].append({
+            "code": "NO_LOCAL_BIDIRECTIONAL_RULES",
+            "message": "No bidirectional replication rules configured on this site",
+            "severity": "warning",
+        })
+
+    if not result["local_site_sync_enabled"]:
+        result["issues"].append({
+            "code": "SITE_SYNC_DISABLED",
+            "message": "Site sync worker is disabled (SITE_SYNC_ENABLED=false). Pull operations will not work.",
+            "severity": "warning",
+        })
+
+    if not replication.check_endpoint_health(connection):
+        result["issues"].append({
+            "code": "REMOTE_UNREACHABLE",
+            "message": "Remote endpoint is not reachable",
+            "severity": "error",
+        })
+        return jsonify(result)
+
+    try:
+        parsed = urlparse(peer.endpoint)
+        hostname = parsed.hostname or ""
+        import ipaddress
+        cloud_metadata_hosts = {"metadata.google.internal", "169.254.169.254"}
+        if hostname.lower() in cloud_metadata_hosts:
+            result["issues"].append({
+                "code": "ENDPOINT_NOT_ALLOWED",
+                "message": "Peer endpoint points to cloud metadata service (SSRF protection)",
+                "severity": "error",
+            })
+            return jsonify(result)
+        allow_internal = current_app.config.get("ALLOW_INTERNAL_ENDPOINTS", False)
+        if not allow_internal:
+            try:
+                ip = ipaddress.ip_address(hostname)
+                if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+                    result["issues"].append({
+                        "code": "ENDPOINT_NOT_ALLOWED",
+                        "message": "Peer endpoint points to internal or private address (set ALLOW_INTERNAL_ENDPOINTS=true for self-hosted deployments)",
+                        "severity": "error",
+                    })
+                    return jsonify(result)
+            except ValueError:
+                blocked_patterns = ["localhost", "127.", "10.", "192.168.", "172.16."]
+                if any(hostname.startswith(p) or hostname == p.rstrip(".") for p in blocked_patterns):
+                    result["issues"].append({
+                        "code": "ENDPOINT_NOT_ALLOWED",
+                        "message": "Peer endpoint points to internal or private address (set ALLOW_INTERNAL_ENDPOINTS=true for self-hosted deployments)",
+                        "severity": "error",
+                    })
+                    return jsonify(result)
+    except Exception:
+        pass
+
+    try:
+        admin_url = peer.endpoint.rstrip("/") + "/admin/sites"
+        resp = requests.get(
+            admin_url,
+            timeout=10,
+            headers={
+                "Accept": "application/json",
+                "X-Access-Key": connection.access_key,
+                "X-Secret-Key": connection.secret_key,
+            },
+        )
+
+        if resp.status_code == 200:
+            try:
+                remote_data = resp.json()
+                if not isinstance(remote_data, dict):
+                    raise ValueError("Expected JSON object")
+                remote_local = remote_data.get("local")
+                if remote_local is not None and not isinstance(remote_local, dict):
+                    raise ValueError("Expected 'local' to be an object")
+                remote_peers = remote_data.get("peers", [])
+                if not isinstance(remote_peers, list):
+                    raise ValueError("Expected 'peers' to be a list")
+            except (ValueError, json.JSONDecodeError) as e:
+                result["remote_status"] = {"reachable": True, "invalid_response": True}
+                result["issues"].append({
+                    "code": "REMOTE_INVALID_RESPONSE",
+                    "message": "Remote admin API returned invalid JSON",
+                    "severity": "warning",
+                })
+                return jsonify(result)
+
+            result["remote_status"] = {
+                "reachable": True,
+                "local_site": remote_local,
+                "site_sync_enabled": None,
+                "has_peer_for_us": False,
+                "peer_connection_configured": False,
+                "has_bidirectional_rules_for_us": False,
+            }
+
+            for rp in remote_peers:
+                if not isinstance(rp, dict):
+                    continue
+                if local_site and (
+                    rp.get("site_id") == local_site.site_id or
+                    rp.get("endpoint") == local_site.endpoint
+                ):
+                    result["remote_status"]["has_peer_for_us"] = True
+                    result["remote_status"]["peer_connection_configured"] = bool(rp.get("connection_id"))
+                    break
+
+            if not result["remote_status"]["has_peer_for_us"]:
+                result["issues"].append({
+                    "code": "REMOTE_NO_PEER_FOR_US",
+                    "message": "Remote site does not have this site registered as a peer",
+                    "severity": "error",
+                })
+            elif not result["remote_status"]["peer_connection_configured"]:
+                result["issues"].append({
+                    "code": "REMOTE_NO_CONNECTION_FOR_US",
+                    "message": "Remote site has us as peer but no connection configured (cannot push back)",
+                    "severity": "error",
+                })
+        elif resp.status_code == 401 or resp.status_code == 403:
+            result["remote_status"] = {
+                "reachable": True,
+                "admin_access_denied": True,
+            }
+            result["issues"].append({
+                "code": "REMOTE_ADMIN_ACCESS_DENIED",
+                "message": "Cannot verify remote configuration (admin access denied)",
+                "severity": "warning",
+            })
+        else:
+            result["remote_status"] = {
+                "reachable": True,
+                "admin_api_error": resp.status_code,
+            }
+            result["issues"].append({
+                "code": "REMOTE_ADMIN_API_ERROR",
+                "message": f"Remote admin API returned status {resp.status_code}",
+                "severity": "warning",
+            })
+    except requests.RequestException:
+        result["remote_status"] = {
+            "reachable": False,
+            "error": "Connection failed",
+        }
+        result["issues"].append({
+            "code": "REMOTE_ADMIN_UNREACHABLE",
+            "message": "Could not reach remote admin API",
+            "severity": "warning",
+        })
+    except Exception:
+        result["issues"].append({
+            "code": "VERIFICATION_ERROR",
+            "message": "Internal error during verification",
+            "severity": "warning",
+        })
+
+    error_issues = [i for i in result["issues"] if i["severity"] == "error"]
+    result["is_fully_configured"] = len(error_issues) == 0 and len(local_bidir_rules) > 0
+
+    return jsonify(result)
+
+
+@ui_bp.get("/sites/peers/<site_id>/replication-wizard")
+def replication_wizard(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    registry = _site_registry()
+    peer = registry.get_peer(site_id)
+    if not peer:
+        flash(f"Peer site '{site_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    if not peer.connection_id:
+        flash("This peer has no connection configured. Add a connection first to set up replication.", "warning")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    connection = _connections().get(peer.connection_id)
+    if not connection:
+        flash(f"Connection '{peer.connection_id}' not found", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    buckets = _storage().list_buckets()
+    replication = _replication()
+
+    bucket_info = []
+    for bucket in buckets:
+        existing_rule = replication.get_rule(bucket.name)
+        has_rule_for_peer = (
+            existing_rule and
+            existing_rule.target_connection_id == peer.connection_id
+        )
+        bucket_info.append({
+            "name": bucket.name,
+            "has_rule": has_rule_for_peer,
+            "existing_mode": existing_rule.mode if has_rule_for_peer else None,
+            "existing_target": existing_rule.target_bucket if has_rule_for_peer else None,
+        })
+
+    local_site = registry.get_local_site()
+
+    return render_template(
+        "replication_wizard.html",
+        principal=principal,
+        peer=peer,
+        connection=connection,
+        buckets=bucket_info,
+        local_site=local_site,
+        csrf_token=generate_csrf,
+    )
+
+
+@ui_bp.post("/sites/peers/<site_id>/replication-rules")
+def create_peer_replication_rules(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    registry = _site_registry()
+    peer = registry.get_peer(site_id)
+    if not peer or not peer.connection_id:
+        flash("Invalid peer site or no connection configured", "danger")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    from .replication import REPLICATION_MODE_NEW_ONLY, REPLICATION_MODE_ALL
+    import time as time_module
+
+    selected_buckets = request.form.getlist("buckets")
+    mode = request.form.get("mode", REPLICATION_MODE_NEW_ONLY)
+
+    if not selected_buckets:
+        flash("No buckets selected", "warning")
+        return redirect(url_for("ui.sites_dashboard"))
+
+    created = 0
+    failed = 0
+    replication = _replication()
+
+    for bucket_name in selected_buckets:
+        target_bucket = request.form.get(f"target_{bucket_name}", bucket_name).strip()
+        if not target_bucket:
+            target_bucket = bucket_name
+
+        try:
+            rule = ReplicationRule(
+                bucket_name=bucket_name,
+                target_connection_id=peer.connection_id,
+                target_bucket=target_bucket,
+                enabled=True,
+                mode=mode,
+                created_at=time_module.time(),
+            )
+            replication.set_rule(rule)
+
+            if mode == REPLICATION_MODE_ALL:
+                replication.replicate_existing_objects(bucket_name)
+
+            created += 1
+        except Exception:
+            failed += 1
+
+    if created > 0:
+        flash(f"Created {created} replication rule(s) for {peer.display_name or peer.site_id}", "success")
+    if failed > 0:
+        flash(f"Failed to create {failed} rule(s)", "danger")
+
+    return redirect(url_for("ui.sites_dashboard"))
+
+
+@ui_bp.get("/sites/peers/<site_id>/sync-stats")
+def get_peer_sync_stats(site_id: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    registry = _site_registry()
+    peer = registry.get_peer(site_id)
+    if not peer:
+        return jsonify({"error": "Peer not found"}), 404
+
+    if not peer.connection_id:
+        return jsonify({"error": "No connection configured"}), 400
+
+    replication = _replication()
+    all_rules = replication.list_rules()
+
+    stats = {
+        "buckets_syncing": 0,
+        "objects_synced": 0,
+        "objects_pending": 0,
+        "objects_failed": 0,
+        "bytes_synced": 0,
+        "last_sync_at": None,
+        "buckets": [],
+    }
+
+    for rule in all_rules:
+        if rule.target_connection_id != peer.connection_id:
+            continue
+
+        stats["buckets_syncing"] += 1
+
+        bucket_stats = {
+            "bucket_name": rule.bucket_name,
+            "target_bucket": rule.target_bucket,
+            "mode": rule.mode,
+            "enabled": rule.enabled,
+        }
+
+        if rule.stats:
+            stats["objects_synced"] += rule.stats.objects_synced
+            stats["objects_pending"] += rule.stats.objects_pending
+            stats["bytes_synced"] += rule.stats.bytes_synced
+
+            if rule.stats.last_sync_at:
+                if not stats["last_sync_at"] or rule.stats.last_sync_at > stats["last_sync_at"]:
+                    stats["last_sync_at"] = rule.stats.last_sync_at
+
+            bucket_stats["last_sync_at"] = rule.stats.last_sync_at
+            bucket_stats["objects_synced"] = rule.stats.objects_synced
+            bucket_stats["objects_pending"] = rule.stats.objects_pending
+
+        failure_count = replication.get_failure_count(rule.bucket_name)
+        stats["objects_failed"] += failure_count
+        bucket_stats["failures"] = failure_count
+
+        stats["buckets"].append(bucket_stats)
+
+    return jsonify(stats)
 
 
 @ui_bp.app_errorhandler(404)

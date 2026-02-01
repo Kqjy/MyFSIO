@@ -22,9 +22,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SITE_SYNC_USER_AGENT = "SiteSyncAgent/1.0"
-SITE_SYNC_CONNECT_TIMEOUT = 10
-SITE_SYNC_READ_TIMEOUT = 120
-CLOCK_SKEW_TOLERANCE_SECONDS = 1.0
 
 
 @dataclass
@@ -108,12 +105,18 @@ class RemoteObjectMeta:
         )
 
 
-def _create_sync_client(connection: "RemoteConnection") -> Any:
+def _create_sync_client(
+    connection: "RemoteConnection",
+    *,
+    connect_timeout: int = 10,
+    read_timeout: int = 120,
+    max_retries: int = 2,
+) -> Any:
     config = Config(
         user_agent_extra=SITE_SYNC_USER_AGENT,
-        connect_timeout=SITE_SYNC_CONNECT_TIMEOUT,
-        read_timeout=SITE_SYNC_READ_TIMEOUT,
-        retries={"max_attempts": 2},
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        retries={"max_attempts": max_retries},
         signature_version="s3v4",
         s3={"addressing_style": "path"},
         request_checksum_calculation="when_required",
@@ -138,6 +141,10 @@ class SiteSyncWorker:
         storage_root: Path,
         interval_seconds: int = 60,
         batch_size: int = 100,
+        connect_timeout: int = 10,
+        read_timeout: int = 120,
+        max_retries: int = 2,
+        clock_skew_tolerance_seconds: float = 1.0,
     ):
         self.storage = storage
         self.connections = connections
@@ -145,10 +152,23 @@ class SiteSyncWorker:
         self.storage_root = storage_root
         self.interval_seconds = interval_seconds
         self.batch_size = batch_size
+        self.connect_timeout = connect_timeout
+        self.read_timeout = read_timeout
+        self.max_retries = max_retries
+        self.clock_skew_tolerance_seconds = clock_skew_tolerance_seconds
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
         self._sync_thread: Optional[threading.Thread] = None
         self._bucket_stats: Dict[str, SiteSyncStats] = {}
+
+    def _create_client(self, connection: "RemoteConnection") -> Any:
+        """Create an S3 client with the worker's configured timeouts."""
+        return _create_sync_client(
+            connection,
+            connect_timeout=self.connect_timeout,
+            read_timeout=self.read_timeout,
+            max_retries=self.max_retries,
+        )
 
     def start(self) -> None:
         if self._sync_thread is not None and self._sync_thread.is_alive():
@@ -294,7 +314,7 @@ class SiteSyncWorker:
         return {obj.key: obj for obj in objects}
 
     def _list_remote_objects(self, rule: "ReplicationRule", connection: "RemoteConnection") -> Dict[str, RemoteObjectMeta]:
-        s3 = _create_sync_client(connection)
+        s3 = self._create_client(connection)
         result: Dict[str, RemoteObjectMeta] = {}
         paginator = s3.get_paginator("list_objects_v2")
         try:
@@ -312,7 +332,7 @@ class SiteSyncWorker:
         local_ts = local_meta.last_modified.timestamp()
         remote_ts = remote_meta.last_modified.timestamp()
 
-        if abs(remote_ts - local_ts) < CLOCK_SKEW_TOLERANCE_SECONDS:
+        if abs(remote_ts - local_ts) < self.clock_skew_tolerance_seconds:
             local_etag = local_meta.etag or ""
             if remote_meta.etag == local_etag:
                 return "skip"
@@ -327,7 +347,7 @@ class SiteSyncWorker:
         connection: "RemoteConnection",
         remote_meta: RemoteObjectMeta,
     ) -> bool:
-        s3 = _create_sync_client(connection)
+        s3 = self._create_client(connection)
         tmp_path = None
         try:
             tmp_dir = self.storage_root / ".myfsio.sys" / "tmp"

@@ -35,6 +35,7 @@
             <li><a href="#api">REST endpoints</a></li>
             <li><a href="#examples">API Examples</a></li>
             <li><a href="#replication">Site Replication &amp; Sync</a></li>
+            <li><a href="#site-registry">Site Registry</a></li>
             <li><a href="#versioning">Object Versioning</a></li>
             <li><a href="#quotas">Bucket Quotas</a></li>
             <li><a href="#encryption">Encryption</a></li>
@@ -42,6 +43,14 @@
             <li><a href="#metrics">Metrics History</a></li>
             <li><a href="#operation-metrics">Operation Metrics</a></li>
             <li><a href="#troubleshooting">Troubleshooting</a></li>
+            <li><a href="#health-check">Health Check</a></li>
+            <li><a href="#object-lock">Object Lock &amp; Retention</a></li>
+            <li><a href="#access-logging">Access Logging</a></li>
+            <li><a href="#notifications">Notifications &amp; Webhooks</a></li>
+            <li><a href="#select-content">SelectObjectContent</a></li>
+            <li><a href="#advanced-ops">Advanced Operations</a></li>
+            <li><a href="#acls">Access Control Lists</a></li>
+            <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
           </ul>
         </div>
       </div>
@@ -157,23 +166,43 @@ python run.py --mode ui
                 <td><code>200 per minute</code></td>
                 <td>Default API rate limit.</td>
               </tr>
+              <tr>
+                <td><code>RATE_LIMIT_LIST_BUCKETS</code></td>
+                <td><code>60 per minute</code></td>
+                <td>Rate limit for listing buckets.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_BUCKET_OPS</code></td>
+                <td><code>120 per minute</code></td>
+                <td>Rate limit for bucket operations.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_OBJECT_OPS</code></td>
+                <td><code>240 per minute</code></td>
+                <td>Rate limit for object operations.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_HEAD_OPS</code></td>
+                <td><code>100 per minute</code></td>
+                <td>Rate limit for HEAD requests.</td>
+              </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Server Settings</td>
               </tr>
               <tr>
                 <td><code>SERVER_THREADS</code></td>
-                <td><code>4</code></td>
-                <td>Waitress worker threads (1-64).</td>
+                <td><code>0</code> (auto)</td>
+                <td>Waitress worker threads (1-64). 0 = auto (CPU cores × 2).</td>
               </tr>
               <tr>
                 <td><code>SERVER_CONNECTION_LIMIT</code></td>
-                <td><code>100</code></td>
-                <td>Max concurrent connections (10-1000).</td>
+                <td><code>0</code> (auto)</td>
+                <td>Max concurrent connections (10-1000). 0 = auto (RAM-based).</td>
               </tr>
               <tr>
                 <td><code>SERVER_BACKLOG</code></td>
-                <td><code>1024</code></td>
-                <td>TCP listen backlog (64-4096).</td>
+                <td><code>0</code> (auto)</td>
+                <td>TCP listen backlog (64-4096). 0 = auto (conn_limit × 2).</td>
               </tr>
               <tr>
                 <td><code>SERVER_CHANNEL_TIMEOUT</code></td>
@@ -241,6 +270,115 @@ python run.py --mode ui
                 <td><code>SITE_SYNC_BATCH_SIZE</code></td>
                 <td><code>100</code></td>
                 <td>Max objects to pull per sync cycle.</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_CONNECT_TIMEOUT_SECONDS</code></td>
+                <td><code>10</code></td>
+                <td>Connection timeout for site sync (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_READ_TIMEOUT_SECONDS</code></td>
+                <td><code>120</code></td>
+                <td>Read timeout for site sync (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_MAX_RETRIES</code></td>
+                <td><code>2</code></td>
+                <td>Max retry attempts for site sync operations.</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS</code></td>
+                <td><code>1.0</code></td>
+                <td>Clock skew tolerance for conflict resolution.</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Replication Settings</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code></td>
+                <td><code>5</code></td>
+                <td>Connection timeout for replication (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_READ_TIMEOUT_SECONDS</code></td>
+                <td><code>30</code></td>
+                <td>Read timeout for replication (seconds).</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_MAX_RETRIES</code></td>
+                <td><code>2</code></td>
+                <td>Max retry attempts for replication operations.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_STREAMING_THRESHOLD_BYTES</code></td>
+                <td><code>10485760</code></td>
+                <td>Objects larger than this use streaming upload (10 MB).</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_MAX_FAILURES_PER_BUCKET</code></td>
+                <td><code>50</code></td>
+                <td>Max failure records to keep per bucket.</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Security & Auth Settings</td>
+              </tr>
+              <tr>
+                <td><code>SIGV4_TIMESTAMP_TOLERANCE_SECONDS</code></td>
+                <td><code>900</code></td>
+                <td>Max time skew for SigV4 requests (15 minutes).</td>
+              </tr>
+              <tr>
+                <td><code>PRESIGNED_URL_MIN_EXPIRY_SECONDS</code></td>
+                <td><code>1</code></td>
+                <td>Minimum presigned URL expiry time.</td>
+              </tr>
+              <tr>
+                <td><code>PRESIGNED_URL_MAX_EXPIRY_SECONDS</code></td>
+                <td><code>604800</code></td>
+                <td>Maximum presigned URL expiry time (7 days).</td>
+              </tr>
+              <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Storage Limits</td>
+              </tr>
+              <tr>
+                <td><code>OBJECT_KEY_MAX_LENGTH_BYTES</code></td>
+                <td><code>1024</code></td>
+                <td>Maximum object key length in bytes.</td>
+              </tr>
+              <tr>
+                <td><code>OBJECT_CACHE_MAX_SIZE</code></td>
+                <td><code>100</code></td>
+                <td>Maximum number of objects in cache.</td>
+              </tr>
+              <tr>
+                <td><code>BUCKET_CONFIG_CACHE_TTL_SECONDS</code></td>
+                <td><code>30</code></td>
+                <td>Bucket config cache TTL in seconds.</td>
+              </tr>
+              <tr>
+                <td><code>OBJECT_TAG_LIMIT</code></td>
+                <td><code>50</code></td>
+                <td>Maximum number of tags per object.</td>
+              </tr>
+              <tr>
+                <td><code>LIFECYCLE_MAX_HISTORY_PER_BUCKET</code></td>
+                <td><code>50</code></td>
+                <td>Max lifecycle history records per bucket.</td>
+              </tr>
+              <tr>
+                <td><code>ENCRYPTION_CHUNK_SIZE_BYTES</code></td>
+                <td><code>65536</code></td>
+                <td>Chunk size for streaming encryption (64 KB).</td>
+              </tr>
+              <tr>
+                <td><code>KMS_GENERATE_DATA_KEY_MIN_BYTES</code></td>
+                <td><code>1</code></td>
+                <td>Minimum data key size for KMS generation.</td>
+              </tr>
+              <tr>
+                <td><code>KMS_GENERATE_DATA_KEY_MAX_BYTES</code></td>
+                <td><code>1024</code></td>
+                <td>Maximum data key size for KMS generation.</td>
               </tr>
             </tbody>
           </table>
@@ -834,10 +972,174 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
         </div>
       </div>
     </article>
-    <article id="versioning" class="card shadow-sm docs-section">
+    <article id="site-registry" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">09</span>
+          <h2 class="h4 mb-0">Site Registry</h2>
+        </div>
+        <p class="text-muted">Track cluster membership and site identity for geo-distributed deployments. The site registry stores local site identity and peer site information.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Connections vs Sites</h3>
+        <p class="small text-muted mb-3">Understanding the difference between Connections and Sites is key to configuring geo-distribution:</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th style="width: 20%;">Aspect</th>
+                <th style="width: 40%;">Connections</th>
+                <th style="width: 40%;">Sites</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Purpose</strong></td>
+                <td>Store credentials to authenticate with remote S3 endpoints</td>
+                <td>Track cluster membership and site identity</td>
+              </tr>
+              <tr>
+                <td><strong>Contains</strong></td>
+                <td>Endpoint URL, access key, secret key, region</td>
+                <td>Site ID, endpoint, region, priority, display name</td>
+              </tr>
+              <tr>
+                <td><strong>Used by</strong></td>
+                <td>Replication rules, site sync workers</td>
+                <td>Geo-distribution awareness, cluster topology</td>
+              </tr>
+              <tr>
+                <td><strong>Analogy</strong></td>
+                <td><em>"How do I log in to that server?"</em></td>
+                <td><em>"Who are the members of my cluster?"</em></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="small text-muted">Sites can optionally link to a Connection (via <code>connection_id</code>) to perform health checks against peer sites.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
+        <p class="small text-muted">Set environment variables to bootstrap local site identity on startup:</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Variable</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>SITE_ID</code></td>
+                <td><code>None</code></td>
+                <td>Unique identifier for this site (e.g., <code>us-west-1</code>)</td>
+              </tr>
+              <tr>
+                <td><code>SITE_ENDPOINT</code></td>
+                <td><code>None</code></td>
+                <td>Public URL for this site (e.g., <code>https://s3.us-west-1.example.com</code>)</td>
+              </tr>
+              <tr>
+                <td><code>SITE_REGION</code></td>
+                <td><code>us-east-1</code></td>
+                <td>AWS-style region identifier</td>
+              </tr>
+              <tr>
+                <td><code>SITE_PRIORITY</code></td>
+                <td><code>100</code></td>
+                <td>Routing priority (lower = preferred)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+<pre class="mb-3"><code class="language-bash"># Example: Configure site identity
+export SITE_ID=us-west-1
+export SITE_ENDPOINT=https://s3.us-west-1.example.com
+export SITE_REGION=us-west-1
+export SITE_PRIORITY=100
+python run.py</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Using the Sites UI</h3>
+        <p class="small text-muted">Navigate to <a href="{{ url_for('ui.sites_dashboard') }}">Sites</a> in the sidebar to manage site configuration:</p>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">Local Site Identity</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Configure this site's ID, endpoint, region, and priority</li>
+                  <li>Display name for easier identification</li>
+                  <li>Changes persist to <code>site_registry.json</code></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">Peer Sites</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Register remote sites in your cluster</li>
+                  <li>Link to a Connection for health checks</li>
+                  <li>View health status (green/red/unknown)</li>
+                  <li>Edit or delete peers as needed</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Admin API Endpoints</h3>
+        <p class="small text-muted">The <code>/admin</code> API provides programmatic access to site registry:</p>
+<pre class="mb-3"><code class="language-bash"># Get local site configuration
+curl {{ api_base }}/admin/site \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Update local site
+curl -X PUT {{ api_base }}/admin/site \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"site_id": "us-west-1", "endpoint": "https://s3.example.com", "region": "us-west-1"}'
+
+# List all peer sites
+curl {{ api_base }}/admin/sites \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Add a peer site
+curl -X POST {{ api_base }}/admin/sites \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"site_id": "us-east-1", "endpoint": "https://s3.us-east-1.example.com"}'
+
+# Check peer health
+curl {{ api_base }}/admin/sites/us-east-1/health \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Get cluster topology
+curl {{ api_base }}/admin/topology \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
+        <p class="small text-muted mb-3">Site registry data is stored at:</p>
+        <code class="d-block mb-3">data/.myfsio.sys/config/site_registry.json</code>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Planned:</strong> The site registry lays the groundwork for features like automatic failover, intelligent routing, and multi-site consistency. Currently it provides cluster awareness and health monitoring.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="versioning" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">10</span>
           <h2 class="h4 mb-0">Object Versioning</h2>
         </div>
         <p class="text-muted">Keep multiple versions of objects to protect against accidental deletions and overwrites. Restore previous versions at any time.</p>
@@ -917,7 +1219,7 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
     <article id="quotas" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">10</span>
+          <span class="docs-section-kicker">11</span>
           <h2 class="h4 mb-0">Bucket Quotas</h2>
         </div>
         <p class="text-muted">Limit how much data a bucket can hold using storage quotas. Quotas are enforced on uploads and multipart completions.</p>
@@ -985,7 +1287,7 @@ curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
     <article id="encryption" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">11</span>
+          <span class="docs-section-kicker">12</span>
           <h2 class="h4 mb-0">Encryption</h2>
         </div>
         <p class="text-muted">Protect data at rest with server-side encryption using AES-256-GCM. Objects are encrypted before being written to disk and decrypted transparently on read.</p>
@@ -1079,7 +1381,7 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
     <article id="lifecycle" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">12</span>
+          <span class="docs-section-kicker">13</span>
           <h2 class="h4 mb-0">Lifecycle Rules</h2>
         </div>
         <p class="text-muted">Automatically delete expired objects, clean up old versions, and abort incomplete multipart uploads using time-based lifecycle rules.</p>
@@ -1161,7 +1463,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
     <article id="metrics" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">13</span>
+          <span class="docs-section-kicker">14</span>
           <h2 class="h4 mb-0">Metrics History</h2>
         </div>
         <p class="text-muted">Track CPU, memory, and disk usage over time with optional metrics history. Disabled by default to minimize overhead.</p>
@@ -1245,7 +1547,7 @@ curl -X PUT "{{ api_base | replace('/api', '/ui') }}/metrics/settings" \
     <article id="operation-metrics" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">14</span>
+          <span class="docs-section-kicker">15</span>
           <h2 class="h4 mb-0">Operation Metrics</h2>
         </div>
         <p class="text-muted">Track API request statistics including request counts, latency, error rates, and bandwidth usage. Provides real-time visibility into API operations.</p>
@@ -1352,7 +1654,7 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
     <article id="troubleshooting" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">15</span>
+          <span class="docs-section-kicker">16</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -1400,8 +1702,405 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
         </div>
       </div>
     </article>
+    <article id="health-check" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">17</span>
+          <h2 class="h4 mb-0">Health Check Endpoint</h2>
+        </div>
+        <p class="text-muted">The API exposes a health check endpoint for monitoring and load balancer integration.</p>
+
+<pre class="mb-3"><code class="language-bash"># Check API health
+curl {{ api_base }}/myfsio/health
+
+# Response
+{"status": "ok", "version": "0.1.7"}</code></pre>
+
+        <p class="small text-muted mb-3">Use this endpoint for:</p>
+        <ul class="small text-muted mb-0">
+          <li>Load balancer health checks</li>
+          <li>Kubernetes liveness/readiness probes</li>
+          <li>Monitoring system integration (Prometheus, Datadog, etc.)</li>
+        </ul>
+      </div>
+    </article>
+    <article id="object-lock" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">18</span>
+          <h2 class="h4 mb-0">Object Lock &amp; Retention</h2>
+        </div>
+        <p class="text-muted">Object Lock prevents objects from being deleted or overwritten for a specified retention period.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Retention Modes</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Mode</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>GOVERNANCE</strong></td>
+                <td>Objects can't be deleted by normal users, but admins with bypass permission can override</td>
+              </tr>
+              <tr>
+                <td><strong>COMPLIANCE</strong></td>
+                <td>Objects can't be deleted or overwritten by anyone until the retention period expires</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
+<pre class="mb-3"><code class="language-bash"># Set object retention
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?retention" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"Mode": "GOVERNANCE", "RetainUntilDate": "2025-12-31T23:59:59Z"}'
+
+# Enable legal hold (indefinite protection)
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"Status": "ON"}'
+
+# Get legal hold status
+curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Legal Hold:</strong> Provides indefinite protection independent of retention settings. Use for litigation holds or regulatory requirements.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="access-logging" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">19</span>
+          <h2 class="h4 mb-0">Access Logging</h2>
+        </div>
+        <p class="text-muted">Enable S3-style access logging to track all requests to your buckets for audit and analysis.</p>
+
+<pre class="mb-3"><code class="language-bash"># Enable access logging
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?logging" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{
+    "LoggingEnabled": {
+      "TargetBucket": "log-bucket",
+      "TargetPrefix": "logs/my-bucket/"
+    }
+  }'
+
+# Get logging configuration
+curl "{{ api_base }}/&lt;bucket&gt;?logging" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Log Contents</h3>
+        <p class="small text-muted mb-0">Logs include: timestamp, bucket, key, operation type, request ID, requester, source IP, HTTP status, error codes, bytes transferred, timing, referrer, and User-Agent.</p>
+      </div>
+    </article>
+    <article id="notifications" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">20</span>
+          <h2 class="h4 mb-0">Notifications &amp; Webhooks</h2>
+        </div>
+        <p class="text-muted">Configure event notifications to trigger webhooks when objects are created or deleted.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Supported Events</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Event Type</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>s3:ObjectCreated:*</code></td>
+                <td>Any object creation (PUT, POST, COPY, multipart)</td>
+              </tr>
+              <tr>
+                <td><code>s3:ObjectRemoved:*</code></td>
+                <td>Any object deletion</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+<pre class="mb-3"><code class="language-bash"># Set notification configuration
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{
+    "TopicConfigurations": [{
+      "Id": "upload-notify",
+      "TopicArn": "https://webhook.example.com/s3-events",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [
+            {"Name": "prefix", "Value": "uploads/"},
+            {"Name": "suffix", "Value": ".jpg"}
+          ]
+        }
+      }
+    }]
+  }'</code></pre>
+
+        <div class="alert alert-warning border-warning bg-warning-subtle mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle mt-1" viewBox="0 0 16 16">
+              <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+              <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+            </svg>
+            <div>
+              <strong>Security:</strong> Webhook URLs are validated to prevent SSRF attacks. Internal/private IP ranges are blocked.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="select-content" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">21</span>
+          <h2 class="h4 mb-0">SelectObjectContent (SQL)</h2>
+        </div>
+        <p class="text-muted">Query CSV, JSON, or Parquet files directly using SQL without downloading the entire object.</p>
+
+        <div class="alert alert-info border small mb-3">
+          <strong>Prerequisite:</strong> Requires DuckDB to be installed (<code>pip install duckdb</code>)
+        </div>
+
+<pre class="mb-3"><code class="language-bash"># Query a CSV file
+curl -X POST "{{ api_base }}/&lt;bucket&gt;/data.csv?select" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{
+    "Expression": "SELECT name, age FROM s3object WHERE age > 25",
+    "ExpressionType": "SQL",
+    "InputSerialization": {
+      "CSV": {"FileHeaderInfo": "USE", "FieldDelimiter": ","}
+    },
+    "OutputSerialization": {"JSON": {}}
+  }'</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Supported Formats</h3>
+        <div class="row g-2 mb-0">
+          <div class="col-md-4">
+            <div class="bg-light rounded p-2 small text-center">
+              <strong>CSV</strong><br><span class="text-muted">Headers, delimiters</span>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="bg-light rounded p-2 small text-center">
+              <strong>JSON</strong><br><span class="text-muted">Document or lines</span>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="bg-light rounded p-2 small text-center">
+              <strong>Parquet</strong><br><span class="text-muted">Auto schema</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="advanced-ops" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">22</span>
+          <h2 class="h4 mb-0">Advanced S3 Operations</h2>
+        </div>
+        <p class="text-muted">Copy objects, upload part copies, and use range requests for partial downloads.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">CopyObject</h3>
+<pre class="mb-3"><code class="language-bash"># Copy within same bucket
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/copy-of-file.txt" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-copy-source: /&lt;bucket&gt;/original-file.txt"
+
+# Copy with metadata replacement
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/file.txt" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-copy-source: /&lt;bucket&gt;/file.txt" \
+  -H "x-amz-metadata-directive: REPLACE" \
+  -H "x-amz-meta-newkey: newvalue"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">UploadPartCopy</h3>
+        <p class="small text-muted">Copy data from an existing object into a multipart upload part:</p>
+<pre class="mb-3"><code class="language-bash"># Copy bytes 0-10485759 from source as part 1
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?uploadId=X&partNumber=1" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-copy-source: /source-bucket/source-file.bin" \
+  -H "x-amz-copy-source-range: bytes=0-10485759"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Range Requests</h3>
+<pre class="mb-3"><code class="language-bash"># Get first 1000 bytes
+curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "Range: bytes=0-999"
+
+# Get last 500 bytes
+curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "Range: bytes=-500"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Conditional Requests</h3>
+        <div class="table-responsive mb-0">
+          <table class="table table-sm table-bordered small mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Header</th>
+                <th>Behavior</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>If-Modified-Since</code></td>
+                <td>Only download if changed after date</td>
+              </tr>
+              <tr>
+                <td><code>If-None-Match</code></td>
+                <td>Only download if ETag differs</td>
+              </tr>
+              <tr>
+                <td><code>If-Match</code></td>
+                <td>Only download if ETag matches</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </article>
+    <article id="acls" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">23</span>
+          <h2 class="h4 mb-0">Access Control Lists (ACLs)</h2>
+        </div>
+        <p class="text-muted">ACLs provide legacy-style permission management for buckets and objects.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Canned ACLs</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>ACL</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>private</code></td>
+                <td>Owner gets FULL_CONTROL (default)</td>
+              </tr>
+              <tr>
+                <td><code>public-read</code></td>
+                <td>Owner FULL_CONTROL, public READ</td>
+              </tr>
+              <tr>
+                <td><code>public-read-write</code></td>
+                <td>Owner FULL_CONTROL, public READ and WRITE</td>
+              </tr>
+              <tr>
+                <td><code>authenticated-read</code></td>
+                <td>Owner FULL_CONTROL, authenticated users READ</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+<pre class="mb-3"><code class="language-bash"># Set bucket ACL
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?acl" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-acl: public-read"
+
+# Set object ACL during upload
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-acl: private" \
+  --data-binary @file.txt</code></pre>
+
+        <div class="alert alert-light border mb-0">
+          <strong>Recommendation:</strong> For most use cases, prefer bucket policies over ACLs for more flexible access control.
+        </div>
+      </div>
+    </article>
+    <article id="tagging" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">24</span>
+          <h2 class="h4 mb-0">Object &amp; Bucket Tagging</h2>
+        </div>
+        <p class="text-muted">Add metadata tags to buckets and objects for organization, cost allocation, or lifecycle rule filtering.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Object Tagging</h3>
+<pre class="mb-3"><code class="language-bash"># Set object tags
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?tagging" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{
+    "TagSet": [
+      {"Key": "Classification", "Value": "Confidential"},
+      {"Key": "Owner", "Value": "john@example.com"}
+    ]
+  }'
+
+# Get object tags
+curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?tagging" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Set tags during upload
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-tagging: Environment=Staging&Team=QA" \
+  --data-binary @file.txt</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Bucket Tagging</h3>
+<pre class="mb-3"><code class="language-bash"># Set bucket tags
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{
+    "TagSet": [
+      {"Key": "Environment", "Value": "Production"},
+      {"Key": "Team", "Value": "Engineering"}
+    ]
+  }'</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Use Cases</h3>
+        <div class="row g-2 mb-0">
+          <div class="col-md-6">
+            <ul class="small text-muted mb-0 ps-3">
+              <li>Filter objects for lifecycle expiration by tag</li>
+              <li>Use tag conditions in bucket policies</li>
+            </ul>
+          </div>
+          <div class="col-md-6">
+            <ul class="small text-muted mb-0 ps-3">
+              <li>Group objects by project or department</li>
+              <li>Trigger automation based on object tags</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </article>
   </div>
-  <div class="col-xl-4">
+  <div class="col-xl-4 docs-sidebar-col">
     <aside class="card shadow-sm docs-sidebar">
       <div class="card-body">
         <h3 class="h6 text-uppercase text-muted mb-3">On this page</h3>
@@ -1414,6 +2113,7 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
           <li><a href="#api">REST endpoints</a></li>
           <li><a href="#examples">API Examples</a></li>
           <li><a href="#replication">Site Replication &amp; Sync</a></li>
+          <li><a href="#site-registry">Site Registry</a></li>
           <li><a href="#versioning">Object Versioning</a></li>
           <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>
@@ -1421,6 +2121,14 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
           <li><a href="#metrics">Metrics History</a></li>
           <li><a href="#operation-metrics">Operation Metrics</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>
+          <li><a href="#health-check">Health Check</a></li>
+          <li><a href="#object-lock">Object Lock &amp; Retention</a></li>
+          <li><a href="#access-logging">Access Logging</a></li>
+          <li><a href="#notifications">Notifications &amp; Webhooks</a></li>
+          <li><a href="#select-content">SelectObjectContent</a></li>
+          <li><a href="#advanced-ops">Advanced Operations</a></li>
+          <li><a href="#acls">Access Control Lists</a></li>
+          <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
         </ul>
         <div class="docs-sidebar-callouts">
           <div>

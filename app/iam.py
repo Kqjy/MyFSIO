@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import math
 import secrets
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -118,12 +120,14 @@ class IamService:
         self._raw_config: Dict[str, Any] = {}
         self._failed_attempts: Dict[str, Deque[datetime]] = {}
         self._last_load_time = 0.0
-        self._credential_cache: Dict[str, Tuple[str, Principal, float]] = {}
-        self._cache_ttl = 60.0 
+        self._principal_cache: Dict[str, Tuple[Principal, float]] = {}
+        self._cache_ttl = 10.0
         self._last_stat_check = 0.0
         self._stat_check_interval = 1.0
         self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._session_lock = threading.Lock()
         self._load()
+        self._load_lockout_state()
 
     def _maybe_reload(self) -> None:
         """Reload configuration if the file has changed on disk."""
@@ -134,7 +138,7 @@ class IamService:
         try:
             if self.config_path.stat().st_mtime > self._last_load_time:
                 self._load()
-                self._credential_cache.clear() 
+                self._principal_cache.clear()
         except OSError:
             pass
 
@@ -150,7 +154,8 @@ class IamService:
                 f"Access temporarily locked. Try again in {seconds} seconds."
             )
         record = self._users.get(access_key)
-        if not record or not hmac.compare_digest(record["secret_key"], secret_key):
+        stored_secret = record["secret_key"] if record else secrets.token_urlsafe(24)
+        if not record or not hmac.compare_digest(stored_secret, secret_key):
             self._record_failed_attempt(access_key)
             raise IamError("Invalid credentials")
         self._clear_failed_attempts(access_key)
@@ -162,11 +167,46 @@ class IamService:
         attempts = self._failed_attempts.setdefault(access_key, deque())
         self._prune_attempts(attempts)
         attempts.append(datetime.now(timezone.utc))
+        self._save_lockout_state()
 
     def _clear_failed_attempts(self, access_key: str) -> None:
         if not access_key:
             return
-        self._failed_attempts.pop(access_key, None)
+        if self._failed_attempts.pop(access_key, None) is not None:
+            self._save_lockout_state()
+
+    def _lockout_file(self) -> Path:
+        return self.config_path.parent / "lockout_state.json"
+
+    def _load_lockout_state(self) -> None:
+        """Load lockout state from disk."""
+        try:
+            if self._lockout_file().exists():
+                data = json.loads(self._lockout_file().read_text(encoding="utf-8"))
+                cutoff = datetime.now(timezone.utc) - self.auth_lockout_window
+                for key, timestamps in data.get("failed_attempts", {}).items():
+                    valid = []
+                    for ts in timestamps:
+                        try:
+                            dt = datetime.fromisoformat(ts)
+                            if dt > cutoff:
+                                valid.append(dt)
+                        except (ValueError, TypeError):
+                            continue
+                    if valid:
+                        self._failed_attempts[key] = deque(valid)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    def _save_lockout_state(self) -> None:
+        """Persist lockout state to disk."""
+        data: Dict[str, Any] = {"failed_attempts": {}}
+        for key, attempts in self._failed_attempts.items():
+            data["failed_attempts"][key] = [ts.isoformat() for ts in attempts]
+        try:
+            self._lockout_file().write_text(json.dumps(data), encoding="utf-8")
+        except OSError:
+            pass
 
     def _prune_attempts(self, attempts: Deque[datetime]) -> None:
         cutoff = datetime.now(timezone.utc) - self.auth_lockout_window
@@ -209,16 +249,23 @@ class IamService:
         return token
 
     def validate_session_token(self, access_key: str, session_token: str) -> bool:
-        """Validate a session token for an access key."""
-        session = self._sessions.get(session_token)
-        if not session:
-            return False
-        if session["access_key"] != access_key:
-            return False
-        if time.time() > session["expires_at"]:
-            del self._sessions[session_token]
-            return False
-        return True
+        """Validate a session token for an access key (thread-safe, constant-time)."""
+        dummy_key = secrets.token_urlsafe(16)
+        dummy_token = secrets.token_urlsafe(32)
+        with self._session_lock:
+            session = self._sessions.get(session_token)
+            if not session:
+                hmac.compare_digest(access_key, dummy_key)
+                hmac.compare_digest(session_token, dummy_token)
+                return False
+            key_match = hmac.compare_digest(session["access_key"], access_key)
+            if not key_match:
+                hmac.compare_digest(session_token, dummy_token)
+                return False
+            if time.time() > session["expires_at"]:
+                self._sessions.pop(session_token, None)
+                return False
+            return True
 
     def _cleanup_expired_sessions(self) -> None:
         """Remove expired session tokens."""
@@ -229,9 +276,9 @@ class IamService:
 
     def principal_for_key(self, access_key: str) -> Principal:
         now = time.time()
-        cached = self._credential_cache.get(access_key)
+        cached = self._principal_cache.get(access_key)
         if cached:
-            secret, principal, cached_time = cached
+            principal, cached_time = cached
             if now - cached_time < self._cache_ttl:
                 return principal
 
@@ -240,23 +287,14 @@ class IamService:
         if not record:
             raise IamError("Unknown access key")
         principal = self._build_principal(access_key, record)
-        self._credential_cache[access_key] = (record["secret_key"], principal, now)
+        self._principal_cache[access_key] = (principal, now)
         return principal
 
     def secret_for_key(self, access_key: str) -> str:
-        now = time.time()
-        cached = self._credential_cache.get(access_key)
-        if cached:
-            secret, principal, cached_time = cached
-            if now - cached_time < self._cache_ttl:
-                return secret
-
         self._maybe_reload()
         record = self._users.get(access_key)
         if not record:
             raise IamError("Unknown access key")
-        principal = self._build_principal(access_key, record)
-        self._credential_cache[access_key] = (record["secret_key"], principal, now)
         return record["secret_key"]
 
     def authorize(self, principal: Principal, bucket_name: str | None, action: str) -> None:
@@ -328,6 +366,7 @@ class IamService:
         new_secret = self._generate_secret_key()
         user["secret_key"] = new_secret
         self._save()
+        self._principal_cache.pop(access_key, None)
         self._load()
         return new_secret
 
@@ -507,26 +546,17 @@ class IamService:
         raise IamError("User not found")
 
     def get_secret_key(self, access_key: str) -> str | None:
-        now = time.time()
-        cached = self._credential_cache.get(access_key)
-        if cached:
-            secret, principal, cached_time = cached
-            if now - cached_time < self._cache_ttl:
-                return secret
-
         self._maybe_reload()
         record = self._users.get(access_key)
         if record:
-            principal = self._build_principal(access_key, record)
-            self._credential_cache[access_key] = (record["secret_key"], principal, now)
             return record["secret_key"]
         return None
 
     def get_principal(self, access_key: str) -> Principal | None:
         now = time.time()
-        cached = self._credential_cache.get(access_key)
+        cached = self._principal_cache.get(access_key)
         if cached:
-            secret, principal, cached_time = cached
+            principal, cached_time = cached
             if now - cached_time < self._cache_ttl:
                 return principal
 
@@ -534,6 +564,6 @@ class IamService:
         record = self._users.get(access_key)
         if record:
             principal = self._build_principal(access_key, record)
-            self._credential_cache[access_key] = (record["secret_key"], principal, now)
+            self._principal_cache[access_key] = (principal, now)
             return principal
         return None

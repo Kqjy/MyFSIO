@@ -46,6 +46,34 @@ else:
             fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def _atomic_lock_file(lock_path: Path, max_retries: int = 10, base_delay: float = 0.1) -> Generator[None, None, None]:
+    """Atomically acquire a lock file with exponential backoff.
+
+    Uses O_EXCL to ensure atomic creation of the lock file.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    for attempt in range(max_retries):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if attempt == max_retries - 1:
+                raise BlockingIOError("Another upload to this key is in progress")
+            delay = base_delay * (2 ** attempt)
+            time.sleep(min(delay, 2.0))
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -137,10 +165,15 @@ class ObjectStorage:
     BUCKET_VERSIONS_DIR = "versions"
     MULTIPART_MANIFEST = "manifest.json"
     BUCKET_CONFIG_FILE = ".bucket.json"
-    DEFAULT_CACHE_TTL = 5
-    OBJECT_CACHE_MAX_SIZE = 100
 
-    def __init__(self, root: Path, cache_ttl: int = DEFAULT_CACHE_TTL) -> None:
+    def __init__(
+        self,
+        root: Path,
+        cache_ttl: int = 5,
+        object_cache_max_size: int = 100,
+        bucket_config_cache_ttl: float = 30.0,
+        object_key_max_length_bytes: int = 1024,
+    ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
@@ -149,8 +182,10 @@ class ObjectStorage:
         self._bucket_locks: Dict[str, threading.Lock] = {}
         self._cache_version: Dict[str, int] = {}
         self._bucket_config_cache: Dict[str, tuple[dict[str, Any], float]] = {}
-        self._bucket_config_cache_ttl = 30.0
+        self._bucket_config_cache_ttl = bucket_config_cache_ttl
         self._cache_ttl = cache_ttl
+        self._object_cache_max_size = object_cache_max_size
+        self._object_key_max_length_bytes = object_key_max_length_bytes
 
     def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
         """Get or create a lock for a specific bucket. Reduces global lock contention."""
@@ -313,18 +348,15 @@ class ObjectStorage:
         total_count = len(all_keys)
         start_index = 0
         if continuation_token:
-            try:
-                import bisect
-                start_index = bisect.bisect_right(all_keys, continuation_token)
-                if start_index >= total_count:
-                    return ListObjectsResult(
-                        objects=[],
-                        is_truncated=False,
-                        next_continuation_token=None,
-                        total_count=total_count,
-                    )
-            except Exception:
-                pass  
+            import bisect
+            start_index = bisect.bisect_right(all_keys, continuation_token)
+            if start_index >= total_count:
+                return ListObjectsResult(
+                    objects=[],
+                    is_truncated=False,
+                    next_continuation_token=None,
+                    total_count=total_count,
+                )  
         
         end_index = start_index + max_keys
         keys_slice = all_keys[start_index:end_index]
@@ -364,7 +396,7 @@ class ObjectStorage:
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
 
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         destination = bucket_path / safe_key
         destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -439,7 +471,7 @@ class ObjectStorage:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             return {}
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         return self._read_metadata(bucket_path.name, safe_key) or {}
 
     def _cleanup_empty_parents(self, path: Path, stop_at: Path) -> None:
@@ -487,7 +519,7 @@ class ObjectStorage:
             self._safe_unlink(target)
             self._delete_metadata(bucket_id, rel)
         else:
-            rel = self._sanitize_object_key(object_key)
+            rel = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
             self._delete_metadata(bucket_id, rel)
         version_dir = self._version_dir(bucket_id, rel)
         if version_dir.exists():
@@ -696,7 +728,7 @@ class ObjectStorage:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         object_path = bucket_path / safe_key
         if not object_path.exists():
             raise ObjectNotFoundError("Object does not exist")
@@ -719,7 +751,7 @@ class ObjectStorage:
         bucket_path = self._bucket_path(bucket_name)
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         object_path = bucket_path / safe_key
         if not object_path.exists():
             raise ObjectNotFoundError("Object does not exist")
@@ -758,7 +790,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         version_dir = self._version_dir(bucket_id, safe_key)
         if not version_dir.exists():
             version_dir = self._legacy_version_dir(bucket_id, safe_key)
@@ -782,7 +814,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         version_dir = self._version_dir(bucket_id, safe_key)
         data_path = version_dir / f"{version_id}.bin"
         meta_path = version_dir / f"{version_id}.json"
@@ -819,7 +851,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         version_dir = self._version_dir(bucket_id, safe_key)
         data_path = version_dir / f"{version_id}.bin"
         meta_path = version_dir / f"{version_id}.json"
@@ -910,7 +942,7 @@ class ObjectStorage:
         if not bucket_path.exists():
             raise BucketNotFoundError("Bucket does not exist")
         bucket_id = bucket_path.name
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         upload_id = uuid.uuid4().hex
         upload_root = self._multipart_dir(bucket_id, upload_id)
         upload_root.mkdir(parents=True, exist_ok=False)
@@ -995,6 +1027,102 @@ class ObjectStorage:
 
         return record["etag"]
 
+    def upload_part_copy(
+        self,
+        bucket_name: str,
+        upload_id: str,
+        part_number: int,
+        source_bucket: str,
+        source_key: str,
+        start_byte: Optional[int] = None,
+        end_byte: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Copy a range from an existing object as a multipart part."""
+        if part_number < 1 or part_number > 10000:
+            raise StorageError("part_number must be between 1 and 10000")
+
+        source_path = self.get_object_path(source_bucket, source_key)
+        source_size = source_path.stat().st_size
+
+        if start_byte is None:
+            start_byte = 0
+        if end_byte is None:
+            end_byte = source_size - 1
+
+        if start_byte < 0 or end_byte >= source_size or start_byte > end_byte:
+            raise StorageError("Invalid byte range")
+
+        bucket_path = self._bucket_path(bucket_name)
+        upload_root = self._multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            upload_root = self._legacy_multipart_dir(bucket_path.name, upload_id)
+        if not upload_root.exists():
+            raise StorageError("Multipart upload not found")
+
+        checksum = hashlib.md5()
+        part_filename = f"part-{part_number:05d}.part"
+        part_path = upload_root / part_filename
+        temp_path = upload_root / f".{part_filename}.tmp"
+
+        try:
+            with source_path.open("rb") as src:
+                src.seek(start_byte)
+                bytes_to_copy = end_byte - start_byte + 1
+                with temp_path.open("wb") as target:
+                    remaining = bytes_to_copy
+                    while remaining > 0:
+                        chunk_size = min(65536, remaining)
+                        chunk = src.read(chunk_size)
+                        if not chunk:
+                            break
+                        checksum.update(chunk)
+                        target.write(chunk)
+                        remaining -= len(chunk)
+            temp_path.replace(part_path)
+        except OSError:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+        record = {
+            "etag": checksum.hexdigest(),
+            "size": part_path.stat().st_size,
+            "filename": part_filename,
+        }
+
+        manifest_path = upload_root / self.MULTIPART_MANIFEST
+        lock_path = upload_root / ".manifest.lock"
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with lock_path.open("w") as lock_file:
+                    with _file_lock(lock_file):
+                        try:
+                            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError) as exc:
+                            if attempt < max_retries - 1:
+                                time.sleep(0.1 * (attempt + 1))
+                                continue
+                            raise StorageError("Multipart manifest unreadable") from exc
+
+                        parts = manifest.setdefault("parts", {})
+                        parts[str(part_number)] = record
+                        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                break
+            except OSError as exc:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                raise StorageError(f"Failed to update multipart manifest: {exc}") from exc
+
+        return {
+            "etag": record["etag"],
+            "last_modified": datetime.fromtimestamp(part_path.stat().st_mtime, timezone.utc),
+        }
+
     def complete_multipart_upload(
         self,
         bucket_name: str,
@@ -1034,7 +1162,7 @@ class ObjectStorage:
             total_size += record.get("size", 0)
         validated.sort(key=lambda entry: entry[0])
 
-        safe_key = self._sanitize_object_key(manifest["object_key"])
+        safe_key = self._sanitize_object_key(manifest["object_key"], self._object_key_max_length_bytes)
         destination = bucket_path / safe_key
         
         is_overwrite = destination.exists()
@@ -1057,36 +1185,28 @@ class ObjectStorage:
                 )
         
         destination.parent.mkdir(parents=True, exist_ok=True)
-        
-        lock_file_path = self._system_bucket_root(bucket_id) / "locks" / f"{safe_key.as_posix().replace('/', '_')}.lock"
-        lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            with lock_file_path.open("w") as lock_file:
-                with _file_lock(lock_file):
-                    if self._is_versioning_enabled(bucket_path) and destination.exists():
-                        self._archive_current_version(bucket_id, safe_key, reason="overwrite")
-                    checksum = hashlib.md5()
-                    with destination.open("wb") as target:
-                        for _, record in validated:
-                            part_path = upload_root / record["filename"]
-                            if not part_path.exists():
-                                raise StorageError(f"Missing part file {record['filename']}")
-                            with part_path.open("rb") as chunk:
-                                while True:
-                                    data = chunk.read(1024 * 1024)
-                                    if not data:
-                                        break
-                                    checksum.update(data)
-                                    target.write(data)
 
+        lock_file_path = self._system_bucket_root(bucket_id) / "locks" / f"{safe_key.as_posix().replace('/', '_')}.lock"
+
+        try:
+            with _atomic_lock_file(lock_file_path):
+                if self._is_versioning_enabled(bucket_path) and destination.exists():
+                    self._archive_current_version(bucket_id, safe_key, reason="overwrite")
+                checksum = hashlib.md5()
+                with destination.open("wb") as target:
+                    for _, record in validated:
+                        part_path = upload_root / record["filename"]
+                        if not part_path.exists():
+                            raise StorageError(f"Missing part file {record['filename']}")
+                        with part_path.open("rb") as chunk:
+                            while True:
+                                data = chunk.read(1024 * 1024)
+                                if not data:
+                                    break
+                                checksum.update(data)
+                                target.write(data)
         except BlockingIOError:
             raise StorageError("Another upload to this key is in progress")
-        finally:
-            try:
-                lock_file_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
         shutil.rmtree(upload_root, ignore_errors=True)
 
@@ -1213,7 +1333,7 @@ class ObjectStorage:
 
     def _object_path(self, bucket_name: str, object_key: str) -> Path:
         bucket_path = self._bucket_path(bucket_name)
-        safe_key = self._sanitize_object_key(object_key)
+        safe_key = self._sanitize_object_key(object_key, self._object_key_max_length_bytes)
         return bucket_path / safe_key
 
     def _system_root_path(self) -> Path:
@@ -1429,7 +1549,7 @@ class ObjectStorage:
                 current_version = self._cache_version.get(bucket_id, 0)
                 if current_version != cache_version:
                     objects = self._build_object_cache(bucket_path)
-                while len(self._object_cache) >= self.OBJECT_CACHE_MAX_SIZE:
+                while len(self._object_cache) >= self._object_cache_max_size:
                     self._object_cache.popitem(last=False)
 
                 self._object_cache[bucket_id] = (objects, time.time())
@@ -1764,16 +1884,16 @@ class ObjectStorage:
         return name
 
     @staticmethod
-    def _sanitize_object_key(object_key: str) -> Path:
+    def _sanitize_object_key(object_key: str, max_length_bytes: int = 1024) -> Path:
         if not object_key:
             raise StorageError("Object key required")
-        if len(object_key.encode("utf-8")) > 1024:
-            raise StorageError("Object key exceeds maximum length of 1024 bytes")
         if "\x00" in object_key:
             raise StorageError("Object key contains null bytes")
+        object_key = unicodedata.normalize("NFC", object_key)
+        if len(object_key.encode("utf-8")) > max_length_bytes:
+            raise StorageError(f"Object key exceeds maximum length of {max_length_bytes} bytes")
         if object_key.startswith(("/", "\\")):
             raise StorageError("Object key cannot start with a slash")
-        object_key = unicodedata.normalize("NFC", object_key)
 
         candidate = Path(object_key)
         if ".." in candidate.parts:

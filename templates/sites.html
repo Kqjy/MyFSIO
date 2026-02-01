@@ -1,0 +1,742 @@
+{% extends "base.html" %}
+
+{% block title %}Sites - S3 Compatible Storage{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <p class="text-uppercase text-muted small mb-1">Geo-Distribution</p>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+        <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
+      </svg>
+      Site Registry
+    </h1>
+    <p class="text-muted mb-0 mt-1">Configure this site's identity and manage peer sites for geo-distribution.</p>
+  </div>
+  <div class="d-none d-md-block">
+    <span class="badge bg-primary bg-opacity-10 text-primary fs-6 px-3 py-2">
+      {{ peers|length }} peer{{ 's' if peers|length != 1 else '' }}
+    </span>
+  </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-4 col-md-5">
+        <div class="card shadow-sm border-0 mb-4" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                        <path d="M8 16s6-5.686 6-10A6 6 0 0 0 2 6c0 4.314 6 10 6 10zm0-7a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/>
+                    </svg>
+                    Local Site Identity
+                </h5>
+                <p class="text-muted small mb-0">This site's configuration</p>
+            </div>
+            <div class="card-body px-4 pb-4">
+                <form method="POST" action="{{ url_for('ui.update_local_site') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <div class="mb-3">
+                        <label for="site_id" class="form-label fw-medium">Site ID</label>
+                        <input type="text" class="form-control" id="site_id" name="site_id" required
+                            value="{{ local_site.site_id if local_site else config_site_id or '' }}"
+                            placeholder="us-west-1">
+                        <div class="form-text">Unique identifier for this site</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="endpoint" class="form-label fw-medium">Endpoint URL</label>
+                        <input type="url" class="form-control" id="endpoint" name="endpoint"
+                            value="{{ local_site.endpoint if local_site else config_site_endpoint or '' }}"
+                            placeholder="https://s3.us-west-1.example.com">
+                        <div class="form-text">Public URL for this site</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="region" class="form-label fw-medium">Region</label>
+                        <input type="text" class="form-control" id="region" name="region"
+                            value="{{ local_site.region if local_site else config_site_region }}">
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-6">
+                            <label for="priority" class="form-label fw-medium">Priority</label>
+                            <input type="number" class="form-control" id="priority" name="priority"
+                                value="{{ local_site.priority if local_site else 100 }}" min="0">
+                            <div class="form-text">Lower = preferred</div>
+                        </div>
+                        <div class="col-6">
+                            <label for="display_name" class="form-label fw-medium">Display Name</label>
+                            <input type="text" class="form-control" id="display_name" name="display_name"
+                                value="{{ local_site.display_name if local_site else '' }}"
+                                placeholder="US West Primary">
+                        </div>
+                    </div>
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                            </svg>
+                            Save Local Site
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                        <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                    </svg>
+                    Add Peer Site
+                </h5>
+                <p class="text-muted small mb-0">Register a remote site</p>
+            </div>
+            <div class="card-body px-4 pb-4">
+                <form method="POST" action="{{ url_for('ui.add_peer_site') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <div class="mb-3">
+                        <label for="peer_site_id" class="form-label fw-medium">Site ID</label>
+                        <input type="text" class="form-control" id="peer_site_id" name="site_id" required placeholder="us-east-1">
+                    </div>
+                    <div class="mb-3">
+                        <label for="peer_endpoint" class="form-label fw-medium">Endpoint URL</label>
+                        <input type="url" class="form-control" id="peer_endpoint" name="endpoint" required placeholder="https://s3.us-east-1.example.com">
+                    </div>
+                    <div class="mb-3">
+                        <label for="peer_region" class="form-label fw-medium">Region</label>
+                        <input type="text" class="form-control" id="peer_region" name="region" value="us-east-1">
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-6">
+                            <label for="peer_priority" class="form-label fw-medium">Priority</label>
+                            <input type="number" class="form-control" id="peer_priority" name="priority" value="100" min="0">
+                        </div>
+                        <div class="col-6">
+                            <label for="peer_display_name" class="form-label fw-medium">Display Name</label>
+                            <input type="text" class="form-control" id="peer_display_name" name="display_name" placeholder="US East DR">
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="peer_connection_id" class="form-label fw-medium">Connection</label>
+                        <select class="form-select" id="peer_connection_id" name="connection_id">
+                            <option value="">No connection</option>
+                            {% for conn in connections %}
+                            <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">Link to a remote connection for health checks</div>
+                    </div>
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                            </svg>
+                            Add Peer Site
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-8 col-md-7">
+        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4 d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                            <path fill-rule="evenodd" d="M6 3.5A1.5 1.5 0 0 1 7.5 2h1A1.5 1.5 0 0 1 10 3.5v1A1.5 1.5 0 0 1 8.5 6v1H14a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-1 0V8h-5v.5a.5.5 0 0 1-1 0V8h-5v.5a.5.5 0 0 1-1 0v-1A.5.5 0 0 1 2 7h5.5V6A1.5 1.5 0 0 1 6 4.5v-1zM8.5 5a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1zM0 11.5A1.5 1.5 0 0 1 1.5 10h1A1.5 1.5 0 0 1 4 11.5v1A1.5 1.5 0 0 1 2.5 14h-1A1.5 1.5 0 0 1 0 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm4.5.5A1.5 1.5 0 0 1 7.5 10h1a1.5 1.5 0 0 1 1.5 1.5v1A1.5 1.5 0 0 1 8.5 14h-1A1.5 1.5 0 0 1 6 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm4.5.5a1.5 1.5 0 0 1 1.5-1.5h1a1.5 1.5 0 0 1 1.5 1.5v1a1.5 1.5 0 0 1-1.5 1.5h-1a1.5 1.5 0 0 1-1.5-1.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1z"/>
+                        </svg>
+                        Peer Sites
+                    </h5>
+                    <p class="text-muted small mb-0">Known remote sites in the cluster</p>
+                </div>
+            </div>
+            <div class="card-body px-4 pb-4">
+                {% if peers %}
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th scope="col" style="width: 50px;">Health</th>
+                                <th scope="col">Site ID</th>
+                                <th scope="col">Endpoint</th>
+                                <th scope="col">Region</th>
+                                <th scope="col">Priority</th>
+                                <th scope="col">Sync Status</th>
+                                <th scope="col" class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for item in peers_with_stats %}
+                            {% set peer = item.peer %}
+                            <tr data-site-id="{{ peer.site_id }}">
+                                <td class="text-center">
+                                    <span class="peer-health-status" data-site-id="{{ peer.site_id }}" title="{% if peer.is_healthy == true %}Healthy{% elif peer.is_healthy == false %}Unhealthy{% else %}Unknown{% endif %}">
+                                        {% if peer.is_healthy == true %}
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success" viewBox="0 0 16 16">
+                                            <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                                        </svg>
+                                        {% elif peer.is_healthy == false %}
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+                                            <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
+                                        </svg>
+                                        {% else %}
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                                            <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                                            <path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/>
+                                        </svg>
+                                        {% endif %}
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="peer-icon">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
+                                            </svg>
+                                        </div>
+                                        <div>
+                                            <span class="fw-medium">{{ peer.display_name or peer.site_id }}</span>
+                                            {% if peer.display_name and peer.display_name != peer.site_id %}
+                                            <br><small class="text-muted">{{ peer.site_id }}</small>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="text-muted small text-truncate d-inline-block" style="max-width: 180px;" title="{{ peer.endpoint }}">{{ peer.endpoint }}</span>
+                                </td>
+                                <td><span class="badge bg-primary bg-opacity-10 text-primary">{{ peer.region }}</span></td>
+                                <td><span class="badge bg-secondary bg-opacity-10 text-secondary">{{ peer.priority }}</span></td>
+                                <td class="sync-stats-cell" data-site-id="{{ peer.site_id }}">
+                                    {% if item.has_connection %}
+                                    <div class="d-flex align-items-center gap-2">
+                                        <span class="badge bg-primary bg-opacity-10 text-primary">{{ item.buckets_syncing }} bucket{{ 's' if item.buckets_syncing != 1 else '' }}</span>
+                                        {% if item.has_bidirectional %}
+                                        <span class="bidir-status-icon" data-site-id="{{ peer.site_id }}" title="Bidirectional sync configured - click to verify">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-info" viewBox="0 0 16 16" style="cursor: pointer;">
+                                                <path fill-rule="evenodd" d="M1 11.5a.5.5 0 0 0 .5.5h11.793l-3.147 3.146a.5.5 0 0 0 .708.708l4-4a.5.5 0 0 0 0-.708l-4-4a.5.5 0 0 0-.708.708L13.293 11H1.5a.5.5 0 0 0-.5.5zm14-7a.5.5 0 0 1-.5.5H2.707l3.147 3.146a.5.5 0 1 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 1 1 .708.708L2.707 4H14.5a.5.5 0 0 1 .5.5z"/>
+                                            </svg>
+                                        </span>
+                                        {% endif %}
+                                        {% if item.buckets_syncing > 0 %}
+                                        <button type="button" class="btn btn-sm btn-outline-secondary btn-load-stats py-0 px-1"
+                                            data-site-id="{{ peer.site_id }}" title="Load sync details">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                                                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                                                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                                            </svg>
+                                        </button>
+                                        {% endif %}
+                                    </div>
+                                    <div class="sync-stats-detail d-none mt-2 small" id="stats-{{ peer.site_id }}">
+                                        <span class="spinner-border spinner-border-sm text-muted" style="width: 12px; height: 12px;"></span>
+                                    </div>
+                                    {% else %}
+                                    <span class="text-muted small">No connection</span>
+                                    {% endif %}
+                                </td>
+                                <td class="text-end">
+                                    <div class="btn-group btn-group-sm" role="group">
+                                        <a href="{{ url_for('ui.replication_wizard', site_id=peer.site_id) }}"
+                                            class="btn btn-outline-primary {% if not item.has_connection %}disabled{% endif %}"
+                                            title="Set up replication">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
+                                                <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
+                                            </svg>
+                                        </a>
+                                        <button type="button" class="btn btn-outline-info btn-check-bidir {% if not item.has_connection %}disabled{% endif %}"
+                                            data-site-id="{{ peer.site_id }}"
+                                            data-display-name="{{ peer.display_name or peer.site_id }}"
+                                            title="Check bidirectional sync status">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                                                <path fill-rule="evenodd" d="M1 11.5a.5.5 0 0 0 .5.5h11.793l-3.147 3.146a.5.5 0 0 0 .708.708l4-4a.5.5 0 0 0 0-.708l-4-4a.5.5 0 0 0-.708.708L13.293 11H1.5a.5.5 0 0 0-.5.5zm14-7a.5.5 0 0 1-.5.5H2.707l3.147 3.146a.5.5 0 1 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 1 1 .708.708L2.707 4H14.5a.5.5 0 0 1 .5.5z"/>
+                                            </svg>
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary btn-check-health"
+                                            data-site-id="{{ peer.site_id }}"
+                                            title="Check health">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z"/>
+                                            </svg>
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#editPeerModal"
+                                            data-site-id="{{ peer.site_id }}"
+                                            data-endpoint="{{ peer.endpoint }}"
+                                            data-region="{{ peer.region }}"
+                                            data-priority="{{ peer.priority }}"
+                                            data-display-name="{{ peer.display_name }}"
+                                            data-connection-id="{{ peer.connection_id or '' }}"
+                                            title="Edit peer">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
+                                            </svg>
+                                        </button>
+                                        <button type="button" class="btn btn-outline-danger"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#deletePeerModal"
+                                            data-site-id="{{ peer.site_id }}"
+                                            data-display-name="{{ peer.display_name or peer.site_id }}"
+                                            title="Delete peer">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                                                <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="empty-state text-center py-5">
+                    <div class="empty-state-icon mx-auto mb-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472z"/>
+                        </svg>
+                    </div>
+                    <h5 class="fw-semibold mb-2">No peer sites yet</h5>
+                    <p class="text-muted mb-0">Add peer sites to enable geo-distribution and site-to-site replication.</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editPeerModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                        <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
+                    </svg>
+                    Edit Peer Site
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST" id="editPeerForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label fw-medium">Site ID</label>
+                        <input type="text" class="form-control" id="edit_site_id" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_endpoint" class="form-label fw-medium">Endpoint URL</label>
+                        <input type="url" class="form-control" id="edit_endpoint" name="endpoint" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_region" class="form-label fw-medium">Region</label>
+                        <input type="text" class="form-control" id="edit_region" name="region" required>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-6">
+                            <label for="edit_priority" class="form-label fw-medium">Priority</label>
+                            <input type="number" class="form-control" id="edit_priority" name="priority" min="0">
+                        </div>
+                        <div class="col-6">
+                            <label for="edit_display_name" class="form-label fw-medium">Display Name</label>
+                            <input type="text" class="form-control" id="edit_display_name" name="display_name">
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_connection_id" class="form-label fw-medium">Connection</label>
+                        <select class="form-select" id="edit_connection_id" name="connection_id">
+                            <option value="">No connection</option>
+                            {% for conn in connections %}
+                            <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                            <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                        </svg>
+                        Save
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="deletePeerModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+                        <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                    </svg>
+                    Delete Peer Site
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete <strong id="deletePeerName"></strong>?</p>
+                <div class="alert alert-warning d-flex align-items-start small" role="alert">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-0" viewBox="0 0 16 16">
+                        <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                    </svg>
+                    <div>This will remove the peer from the site registry. Any site sync configurations may be affected.</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form method="POST" id="deletePeerForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <button type="submit" class="btn btn-danger">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                        </svg>
+                        Delete
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="bidirStatusModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-info me-2" viewBox="0 0 16 16">
+                        <path fill-rule="evenodd" d="M1 11.5a.5.5 0 0 0 .5.5h11.793l-3.147 3.146a.5.5 0 0 0 .708.708l4-4a.5.5 0 0 0 0-.708l-4-4a.5.5 0 0 0-.708.708L13.293 11H1.5a.5.5 0 0 0-.5.5zm14-7a.5.5 0 0 1-.5.5H2.707l3.147 3.146a.5.5 0 1 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 1 1 .708.708L2.707 4H14.5a.5.5 0 0 1 .5.5z"/>
+                    </svg>
+                    Bidirectional Sync Status
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="bidirStatusContent">
+                    <div class="text-center py-4">
+                        <span class="spinner-border text-primary" role="status"></span>
+                        <p class="text-muted mt-2 mb-0">Checking configuration...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+                <a href="#" id="bidirWizardLink" class="btn btn-primary d-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                        <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1 0 .707c-.48.48-1.072.588-1.503.588-.177 0-.335-.018-.46-.039l-3.134 3.134a5.927 5.927 0 0 1 .16 1.013c.046.702-.032 1.687-.72 2.375a.5.5 0 0 1-.707 0l-2.829-2.828-3.182 3.182c-.195.195-1.219.902-1.414.707-.195-.195.512-1.22.707-1.414l3.182-3.182-2.828-2.829a.5.5 0 0 1 0-.707c.688-.688 1.673-.767 2.375-.72a5.922 5.922 0 0 1 1.013.16l3.134-3.133a2.772 2.772 0 0 1-.04-.461c0-.43.108-1.022.589-1.503a.5.5 0 0 1 .353-.146z"/>
+                    </svg>
+                    Run Setup Wizard
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    const editPeerModal = document.getElementById('editPeerModal');
+    if (editPeerModal) {
+        editPeerModal.addEventListener('show.bs.modal', function (event) {
+            const button = event.relatedTarget;
+            const siteId = button.getAttribute('data-site-id');
+            const endpoint = button.getAttribute('data-endpoint');
+            const region = button.getAttribute('data-region');
+            const priority = button.getAttribute('data-priority');
+            const displayName = button.getAttribute('data-display-name');
+            const connectionId = button.getAttribute('data-connection-id');
+
+            document.getElementById('edit_site_id').value = siteId;
+            document.getElementById('edit_endpoint').value = endpoint;
+            document.getElementById('edit_region').value = region;
+            document.getElementById('edit_priority').value = priority;
+            document.getElementById('edit_display_name').value = displayName;
+            document.getElementById('edit_connection_id').value = connectionId;
+
+            document.getElementById('editPeerForm').action = '/ui/sites/peers/' + encodeURIComponent(siteId) + '/update';
+        });
+    }
+
+    const deletePeerModal = document.getElementById('deletePeerModal');
+    if (deletePeerModal) {
+        deletePeerModal.addEventListener('show.bs.modal', function (event) {
+            const button = event.relatedTarget;
+            const siteId = button.getAttribute('data-site-id');
+            const displayName = button.getAttribute('data-display-name');
+
+            document.getElementById('deletePeerName').textContent = displayName;
+            document.getElementById('deletePeerForm').action = '/ui/sites/peers/' + encodeURIComponent(siteId) + '/delete';
+        });
+    }
+
+    document.querySelectorAll('.btn-check-health').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            const siteId = this.getAttribute('data-site-id');
+            const statusSpan = document.querySelector('.peer-health-status[data-site-id="' + siteId + '"]');
+
+            statusSpan.innerHTML = '<span class="spinner-border spinner-border-sm text-muted" role="status" style="width: 14px; height: 14px;"></span>';
+
+            fetch('/ui/sites/peers/' + encodeURIComponent(siteId) + '/health')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.is_healthy) {
+                        statusSpan.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/></svg>';
+                        statusSpan.title = 'Healthy';
+                        if (window.showToast) window.showToast('Peer site is healthy', 'Health Check', 'success');
+                    } else {
+                        statusSpan.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-danger" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/></svg>';
+                        statusSpan.title = 'Unhealthy' + (data.error ? ': ' + data.error : '');
+                        if (window.showToast) window.showToast(data.error || 'Peer site is unhealthy', 'Health Check', 'error');
+                    }
+                })
+                .catch(err => {
+                    statusSpan.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/></svg>';
+                    statusSpan.title = 'Check failed';
+                    if (window.showToast) window.showToast('Failed to check health', 'Health Check', 'error');
+                });
+        });
+    });
+
+    document.querySelectorAll('.btn-load-stats').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            const siteId = this.getAttribute('data-site-id');
+            const detailDiv = document.getElementById('stats-' + siteId);
+            if (!detailDiv) return;
+
+            detailDiv.classList.remove('d-none');
+            detailDiv.innerHTML = '<span class="spinner-border spinner-border-sm text-muted" style="width: 12px; height: 12px;"></span> Loading...';
+
+            fetch('/ui/sites/peers/' + encodeURIComponent(siteId) + '/sync-stats')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        detailDiv.innerHTML = '<span class="text-danger">' + data.error + '</span>';
+                    } else {
+                        const lastSync = data.last_sync_at
+                            ? new Date(data.last_sync_at * 1000).toLocaleString()
+                            : 'Never';
+                        detailDiv.innerHTML = `
+                            <div class="d-flex flex-wrap gap-2 mb-1">
+                                <span class="text-success"><strong>${data.objects_synced}</strong> synced</span>
+                                <span class="text-warning"><strong>${data.objects_pending}</strong> pending</span>
+                                <span class="text-danger"><strong>${data.objects_failed}</strong> failed</span>
+                            </div>
+                            <div class="text-muted" style="font-size: 0.75rem;">
+                                Last sync: ${lastSync}
+                            </div>
+                        `;
+                    }
+                })
+                .catch(err => {
+                    detailDiv.innerHTML = '<span class="text-danger">Failed to load stats</span>';
+                });
+        });
+    });
+
+    document.querySelectorAll('.bidir-status-icon').forEach(function(icon) {
+        icon.addEventListener('click', function() {
+            const siteId = this.getAttribute('data-site-id');
+            const btn = document.querySelector('.btn-check-bidir[data-site-id="' + siteId + '"]');
+            if (btn) btn.click();
+        });
+    });
+
+    document.querySelectorAll('.btn-check-bidir').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            const siteId = this.getAttribute('data-site-id');
+            const displayName = this.getAttribute('data-display-name');
+            const modal = new bootstrap.Modal(document.getElementById('bidirStatusModal'));
+            const contentDiv = document.getElementById('bidirStatusContent');
+            const wizardLink = document.getElementById('bidirWizardLink');
+
+            contentDiv.innerHTML = `
+                <div class="text-center py-4">
+                    <span class="spinner-border text-primary" role="status"></span>
+                    <p class="text-muted mt-2 mb-0">Checking bidirectional configuration with ${displayName}...</p>
+                </div>
+            `;
+            wizardLink.classList.add('d-none');
+            modal.show();
+
+            fetch('/ui/sites/peers/' + encodeURIComponent(siteId) + '/bidirectional-status')
+                .then(response => response.json())
+                .then(data => {
+                    let html = '';
+
+                    if (data.is_fully_configured) {
+                        html += `
+                            <div class="alert alert-success d-flex align-items-center mb-4" role="alert">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+                                    <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+                                </svg>
+                                <div>
+                                    <strong>Bidirectional sync is fully configured!</strong><br>
+                                    <small>Both sites are set up to sync data in both directions.</small>
+                                </div>
+                            </div>
+                        `;
+                    } else if (data.issues && data.issues.length > 0) {
+                        const errors = data.issues.filter(i => i.severity === 'error');
+                        const warnings = data.issues.filter(i => i.severity === 'warning');
+
+                        if (errors.length > 0) {
+                            html += `
+                                <div class="alert alert-danger mb-3" role="alert">
+                                    <h6 class="alert-heading fw-bold mb-2">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                            <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
+                                        </svg>
+                                        Configuration Errors
+                                    </h6>
+                                    <ul class="mb-0 ps-3">
+                            `;
+                            errors.forEach(issue => {
+                                html += `<li><strong>${issue.code}:</strong> ${issue.message}</li>`;
+                            });
+                            html += '</ul></div>';
+                        }
+
+                        if (warnings.length > 0) {
+                            html += `
+                                <div class="alert alert-warning mb-3" role="alert">
+                                    <h6 class="alert-heading fw-bold mb-2">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                                        </svg>
+                                        Warnings
+                                    </h6>
+                                    <ul class="mb-0 ps-3">
+                            `;
+                            warnings.forEach(issue => {
+                                html += `<li><strong>${issue.code}:</strong> ${issue.message}</li>`;
+                            });
+                            html += '</ul></div>';
+                        }
+                    }
+
+                    html += '<div class="row g-3">';
+
+                    html += `
+                        <div class="col-md-6">
+                            <div class="card h-100">
+                                <div class="card-header bg-light py-2">
+                                    <strong>This Site (Local)</strong>
+                                </div>
+                                <div class="card-body small">
+                                    <p class="mb-1"><strong>Site ID:</strong> ${data.local_site_id || '<span class="text-danger">Not configured</span>'}</p>
+                                    <p class="mb-1"><strong>Endpoint:</strong> ${data.local_endpoint || '<span class="text-danger">Not configured</span>'}</p>
+                                    <p class="mb-1"><strong>Site Sync Worker:</strong> ${data.local_site_sync_enabled ? '<span class="text-success">Enabled</span>' : '<span class="text-warning">Disabled</span>'}</p>
+                                    <p class="mb-0"><strong>Bidirectional Rules:</strong> ${data.local_bidirectional_rules ? data.local_bidirectional_rules.length : 0}</p>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+
+                    if (data.remote_status) {
+                        const rs = data.remote_status;
+                        html += `
+                            <div class="col-md-6">
+                                <div class="card h-100">
+                                    <div class="card-header bg-light py-2">
+                                        <strong>Remote Site (${displayName})</strong>
+                                    </div>
+                                    <div class="card-body small">
+                        `;
+                        if (rs.admin_access_denied) {
+                            html += '<p class="text-warning mb-0">Admin access denied - cannot verify remote configuration</p>';
+                        } else if (rs.reachable === false) {
+                            html += '<p class="text-danger mb-0">Could not reach remote admin API</p>';
+                        } else {
+                            html += `
+                                <p class="mb-1"><strong>Has Peer Entry for Us:</strong> ${rs.has_peer_for_us ? '<span class="text-success">Yes</span>' : '<span class="text-danger">No</span>'}</p>
+                                <p class="mb-1"><strong>Connection Configured:</strong> ${rs.peer_connection_configured ? '<span class="text-success">Yes</span>' : '<span class="text-danger">No</span>'}</p>
+                            `;
+                        }
+                        html += '</div></div></div>';
+                    } else {
+                        html += `
+                            <div class="col-md-6">
+                                <div class="card h-100">
+                                    <div class="card-header bg-light py-2">
+                                        <strong>Remote Site (${displayName})</strong>
+                                    </div>
+                                    <div class="card-body small">
+                                        <p class="text-muted mb-0">Could not check remote status</p>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    html += '</div>';
+
+                    if (data.local_bidirectional_rules && data.local_bidirectional_rules.length > 0) {
+                        html += `
+                            <div class="mt-3">
+                                <h6 class="fw-semibold">Local Bidirectional Rules</h6>
+                                <table class="table table-sm table-bordered mb-0">
+                                    <thead class="table-light">
+                                        <tr>
+                                            <th>Source Bucket</th>
+                                            <th>Target Bucket</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                        `;
+                        data.local_bidirectional_rules.forEach(rule => {
+                            html += `
+                                <tr>
+                                    <td>${rule.bucket_name}</td>
+                                    <td>${rule.target_bucket}</td>
+                                    <td>${rule.enabled ? '<span class="badge bg-success">Enabled</span>' : '<span class="badge bg-secondary">Disabled</span>'}</td>
+                                </tr>
+                            `;
+                        });
+                        html += '</tbody></table></div>';
+                    }
+
+                    if (!data.is_fully_configured) {
+                        html += `
+                            <div class="alert alert-info mt-3 mb-0" role="alert">
+                                <h6 class="alert-heading fw-bold">How to Fix</h6>
+                                <ol class="mb-0 ps-3">
+                                    <li>Ensure this site has a Site ID and Endpoint URL configured</li>
+                                    <li>On the remote site, register this site as a peer with a connection</li>
+                                    <li>Create bidirectional replication rules on both sites</li>
+                                    <li>Enable SITE_SYNC_ENABLED=true on both sites</li>
+                                </ol>
+                            </div>
+                        `;
+                        const blockingErrors = ['NO_CONNECTION', 'CONNECTION_NOT_FOUND', 'REMOTE_UNREACHABLE', 'ENDPOINT_NOT_ALLOWED'];
+                        const hasBlockingError = data.issues && data.issues.some(i => blockingErrors.includes(i.code));
+                        if (!hasBlockingError) {
+                            wizardLink.href = '/ui/sites/peers/' + encodeURIComponent(siteId) + '/replication-wizard';
+                            wizardLink.classList.remove('d-none');
+                        }
+                    }
+
+                    contentDiv.innerHTML = html;
+                })
+                .catch(err => {
+                    contentDiv.innerHTML = `
+                        <div class="alert alert-danger" role="alert">
+                            <strong>Error:</strong> Failed to check bidirectional status. ${err.message || ''}
+                        </div>
+                    `;
+                });
+        });
+    });
+})();
+</script>
+{% endblock %}

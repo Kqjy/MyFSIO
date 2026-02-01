@@ -31,6 +31,7 @@ from .notifications import NotificationService
 from .object_lock import ObjectLockService
 from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
+from .site_registry import SiteRegistry, SiteInfo
 from .storage import ObjectStorage
 from .version import get_version
 
@@ -104,6 +105,9 @@ def create_app(
     storage = ObjectStorage(
         Path(app.config["STORAGE_ROOT"]),
         cache_ttl=app.config.get("OBJECT_CACHE_TTL", 5),
+        object_cache_max_size=app.config.get("OBJECT_CACHE_MAX_SIZE", 100),
+        bucket_config_cache_ttl=app.config.get("BUCKET_CONFIG_CACHE_TTL_SECONDS", 30.0),
+        object_key_max_length_bytes=app.config.get("OBJECT_KEY_MAX_LENGTH_BYTES", 1024),
     )
 
     if app.config.get("WARM_CACHE_ON_STARTUP", True) and not app.config.get("TESTING"):
@@ -137,12 +141,33 @@ def create_app(
     )
     
     connections = ConnectionStore(connections_path)
-    replication = ReplicationManager(storage, connections, replication_rules_path, storage_root)
-    
+    replication = ReplicationManager(
+        storage,
+        connections,
+        replication_rules_path,
+        storage_root,
+        connect_timeout=app.config.get("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5),
+        read_timeout=app.config.get("REPLICATION_READ_TIMEOUT_SECONDS", 30),
+        max_retries=app.config.get("REPLICATION_MAX_RETRIES", 2),
+        streaming_threshold_bytes=app.config.get("REPLICATION_STREAMING_THRESHOLD_BYTES", 10 * 1024 * 1024),
+        max_failures_per_bucket=app.config.get("REPLICATION_MAX_FAILURES_PER_BUCKET", 50),
+    )
+
+    site_registry_path = config_dir / "site_registry.json"
+    site_registry = SiteRegistry(site_registry_path)
+    if app.config.get("SITE_ID") and not site_registry.get_local_site():
+        site_registry.set_local_site(SiteInfo(
+            site_id=app.config["SITE_ID"],
+            endpoint=app.config.get("SITE_ENDPOINT") or "",
+            region=app.config.get("SITE_REGION", "us-east-1"),
+            priority=app.config.get("SITE_PRIORITY", 100),
+        ))
+
     encryption_config = {
         "encryption_enabled": app.config.get("ENCRYPTION_ENABLED", False),
         "encryption_master_key_path": app.config.get("ENCRYPTION_MASTER_KEY_PATH"),
         "default_encryption_algorithm": app.config.get("DEFAULT_ENCRYPTION_ALGORITHM", "AES256"),
+        "encryption_chunk_size_bytes": app.config.get("ENCRYPTION_CHUNK_SIZE_BYTES", 64 * 1024),
     }
     encryption_manager = EncryptionManager(encryption_config)
     
@@ -150,7 +175,12 @@ def create_app(
     if app.config.get("KMS_ENABLED", False):
         kms_keys_path = Path(app.config.get("KMS_KEYS_PATH", ""))
         kms_master_key_path = Path(app.config.get("ENCRYPTION_MASTER_KEY_PATH", ""))
-        kms_manager = KMSManager(kms_keys_path, kms_master_key_path)
+        kms_manager = KMSManager(
+            kms_keys_path,
+            kms_master_key_path,
+            generate_data_key_min_bytes=app.config.get("KMS_GENERATE_DATA_KEY_MIN_BYTES", 1),
+            generate_data_key_max_bytes=app.config.get("KMS_GENERATE_DATA_KEY_MAX_BYTES", 1024),
+        )
         encryption_manager.set_kms_provider(kms_manager)
 
     if app.config.get("ENCRYPTION_ENABLED", False):
@@ -159,7 +189,10 @@ def create_app(
 
     acl_service = AclService(storage_root)
     object_lock_service = ObjectLockService(storage_root)
-    notification_service = NotificationService(storage_root)
+    notification_service = NotificationService(
+        storage_root,
+        allow_internal_endpoints=app.config.get("ALLOW_INTERNAL_ENDPOINTS", False),
+    )
     access_logging_service = AccessLoggingService(storage_root)
     access_logging_service.set_storage(storage)
 
@@ -170,6 +203,7 @@ def create_app(
             base_storage,
             interval_seconds=app.config.get("LIFECYCLE_INTERVAL_SECONDS", 3600),
             storage_root=storage_root,
+            max_history_per_bucket=app.config.get("LIFECYCLE_MAX_HISTORY_PER_BUCKET", 50),
         )
         lifecycle_manager.start()
 
@@ -187,6 +221,7 @@ def create_app(
     app.extensions["object_lock"] = object_lock_service
     app.extensions["notifications"] = notification_service
     app.extensions["access_logging"] = access_logging_service
+    app.extensions["site_registry"] = site_registry
 
     operation_metrics_collector = None
     if app.config.get("OPERATION_METRICS_ENABLED", False):
@@ -218,6 +253,10 @@ def create_app(
             storage_root=storage_root,
             interval_seconds=app.config.get("SITE_SYNC_INTERVAL_SECONDS", 60),
             batch_size=app.config.get("SITE_SYNC_BATCH_SIZE", 100),
+            connect_timeout=app.config.get("SITE_SYNC_CONNECT_TIMEOUT_SECONDS", 10),
+            read_timeout=app.config.get("SITE_SYNC_READ_TIMEOUT_SECONDS", 120),
+            max_retries=app.config.get("SITE_SYNC_MAX_RETRIES", 2),
+            clock_skew_tolerance_seconds=app.config.get("SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS", 1.0),
         )
         site_sync_worker.start()
     app.extensions["site_sync"] = site_sync_worker
@@ -289,11 +328,14 @@ def create_app(
     if include_api:
         from .s3_api import s3_api_bp
         from .kms_api import kms_api_bp
+        from .admin_api import admin_api_bp
 
         app.register_blueprint(s3_api_bp)
         app.register_blueprint(kms_api_bp)
+        app.register_blueprint(admin_api_bp)
         csrf.exempt(s3_api_bp)
         csrf.exempt(kms_api_bp)
+        csrf.exempt(admin_api_bp)
 
     if include_ui:
         from .ui import ui_bp

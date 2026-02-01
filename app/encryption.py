@@ -1,15 +1,44 @@
-"""Encryption providers for server-side and client-side encryption."""
 from __future__ import annotations
 
 import base64
 import io
 import json
+import logging
+import os
 import secrets
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Generator, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+
+if sys.platform != "win32":
+    import fcntl
+
+logger = logging.getLogger(__name__)
+
+
+def _set_secure_file_permissions(file_path: Path) -> None:
+    """Set restrictive file permissions (owner read/write only)."""
+    if sys.platform == "win32":
+        try:
+            username = os.environ.get("USERNAME", "")
+            if username:
+                subprocess.run(
+                    ["icacls", str(file_path), "/inheritance:r",
+                     "/grant:r", f"{username}:F"],
+                    check=True, capture_output=True
+                )
+            else:
+                logger.warning("Could not set secure permissions on %s: USERNAME not set", file_path)
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("Failed to set secure permissions on %s: %s", file_path, exc)
+    else:
+        os.chmod(file_path, 0o600)
 
 
 class EncryptionError(Exception):
@@ -59,19 +88,31 @@ class EncryptionMetadata:
 
 class EncryptionProvider:
     """Base class for encryption providers."""
-    
+
     def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
         raise NotImplementedError
-    
+
     def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
                 key_id: str, context: Dict[str, str] | None = None) -> bytes:
         raise NotImplementedError
-    
+
     def generate_data_key(self) -> tuple[bytes, bytes]:
         """Generate a data key and its encrypted form.
-        
+
         Returns:
             Tuple of (plaintext_key, encrypted_key)
+        """
+        raise NotImplementedError
+
+    def decrypt_data_key(self, encrypted_data_key: bytes, key_id: str | None = None) -> bytes:
+        """Decrypt an encrypted data key.
+
+        Args:
+            encrypted_data_key: The encrypted data key bytes
+            key_id: Optional key identifier (used by KMS providers)
+
+        Returns:
+            The decrypted data key
         """
         raise NotImplementedError
 
@@ -99,28 +140,48 @@ class LocalKeyEncryption(EncryptionProvider):
         return self._master_key
     
     def _load_or_create_master_key(self) -> bytes:
-        """Load master key from file or generate a new one."""
-        if self.master_key_path.exists():
-            try:
-                return base64.b64decode(self.master_key_path.read_text().strip())
-            except Exception as exc:
-                raise EncryptionError(f"Failed to load master key: {exc}") from exc
-        
-        key = secrets.token_bytes(32)
+        """Load master key from file or generate a new one (with file locking)."""
+        lock_path = self.master_key_path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
         try:
-            self.master_key_path.parent.mkdir(parents=True, exist_ok=True)
-            self.master_key_path.write_text(base64.b64encode(key).decode())
+            with open(lock_path, "w") as lock_file:
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    if self.master_key_path.exists():
+                        try:
+                            return base64.b64decode(self.master_key_path.read_text().strip())
+                        except Exception as exc:
+                            raise EncryptionError(f"Failed to load master key: {exc}") from exc
+                    key = secrets.token_bytes(32)
+                    try:
+                        self.master_key_path.write_text(base64.b64encode(key).decode())
+                        _set_secure_file_permissions(self.master_key_path)
+                    except OSError as exc:
+                        raise EncryptionError(f"Failed to save master key: {exc}") from exc
+                    return key
+                finally:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except OSError as exc:
-            raise EncryptionError(f"Failed to save master key: {exc}") from exc
-        return key
+            raise EncryptionError(f"Failed to acquire lock for master key: {exc}") from exc
     
+    DATA_KEY_AAD = b'{"purpose":"data_key","version":1}'
+
     def _encrypt_data_key(self, data_key: bytes) -> bytes:
         """Encrypt the data key with the master key."""
         aesgcm = AESGCM(self.master_key)
         nonce = secrets.token_bytes(12)
-        encrypted = aesgcm.encrypt(nonce, data_key, None)
+        encrypted = aesgcm.encrypt(nonce, data_key, self.DATA_KEY_AAD)
         return nonce + encrypted
-    
+
     def _decrypt_data_key(self, encrypted_data_key: bytes) -> bytes:
         """Decrypt the data key using the master key."""
         if len(encrypted_data_key) < 12 + 32 + 16:  # nonce + key + tag
@@ -129,10 +190,17 @@ class LocalKeyEncryption(EncryptionProvider):
         nonce = encrypted_data_key[:12]
         ciphertext = encrypted_data_key[12:]
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
-        except Exception as exc:
-            raise EncryptionError(f"Failed to decrypt data key: {exc}") from exc
-    
+            return aesgcm.decrypt(nonce, ciphertext, self.DATA_KEY_AAD)
+        except Exception:
+            try:
+                return aesgcm.decrypt(nonce, ciphertext, None)
+            except Exception as exc:
+                raise EncryptionError(f"Failed to decrypt data key: {exc}") from exc
+
+    def decrypt_data_key(self, encrypted_data_key: bytes, key_id: str | None = None) -> bytes:
+        """Decrypt an encrypted data key (key_id ignored for local encryption)."""
+        return self._decrypt_data_key(encrypted_data_key)
+
     def generate_data_key(self) -> tuple[bytes, bytes]:
         """Generate a data key and its encrypted form."""
         plaintext_key = secrets.token_bytes(32)
@@ -142,11 +210,12 @@ class LocalKeyEncryption(EncryptionProvider):
     def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
         """Encrypt data using envelope encryption."""
         data_key, encrypted_data_key = self.generate_data_key()
-        
+
         aesgcm = AESGCM(data_key)
         nonce = secrets.token_bytes(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-        
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
+        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
+
         return EncryptionResult(
             ciphertext=ciphertext,
             nonce=nonce,
@@ -159,10 +228,11 @@ class LocalKeyEncryption(EncryptionProvider):
         """Decrypt data using envelope encryption."""
         data_key = self._decrypt_data_key(encrypted_data_key)
         aesgcm = AESGCM(data_key)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
+            return aesgcm.decrypt(nonce, ciphertext, aad)
         except Exception as exc:
-            raise EncryptionError(f"Failed to decrypt data: {exc}") from exc
+            raise EncryptionError("Failed to decrypt data") from exc
 
 
 class StreamingEncryptor:
@@ -180,12 +250,14 @@ class StreamingEncryptor:
         self.chunk_size = chunk_size
     
     def _derive_chunk_nonce(self, base_nonce: bytes, chunk_index: int) -> bytes:
-        """Derive a unique nonce for each chunk.
-
-        Performance: Use direct byte manipulation instead of full int conversion.
-        """
-        # Performance: Only modify last 4 bytes instead of full 12-byte conversion
-        return base_nonce[:8] + (chunk_index ^ int.from_bytes(base_nonce[8:], "big")).to_bytes(4, "big")
+        """Derive a unique nonce for each chunk using HKDF."""
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=12,
+            salt=base_nonce,
+            info=chunk_index.to_bytes(4, "big"),
+        )
+        return hkdf.derive(b"chunk_nonce")
 
     def encrypt_stream(self, stream: BinaryIO,
                        context: Dict[str, str] | None = None) -> tuple[BinaryIO, EncryptionMetadata]:
@@ -234,10 +306,7 @@ class StreamingEncryptor:
 
         Performance: Writes chunks directly to output buffer instead of accumulating in list.
         """
-        if isinstance(self.provider, LocalKeyEncryption):
-            data_key = self.provider._decrypt_data_key(metadata.encrypted_data_key)
-        else:
-            raise EncryptionError("Unsupported provider for streaming decryption")
+        data_key = self.provider.decrypt_data_key(metadata.encrypted_data_key, metadata.key_id)
 
         aesgcm = AESGCM(data_key)
         base_nonce = metadata.nonce
@@ -310,7 +379,8 @@ class EncryptionManager:
     
     def get_streaming_encryptor(self) -> StreamingEncryptor:
         if self._streaming_encryptor is None:
-            self._streaming_encryptor = StreamingEncryptor(self.get_local_provider())
+            chunk_size = self.config.get("encryption_chunk_size_bytes", 64 * 1024)
+            self._streaming_encryptor = StreamingEncryptor(self.get_local_provider(), chunk_size=chunk_size)
         return self._streaming_encryptor
     
     def encrypt_object(self, data: bytes, algorithm: str = "AES256",
@@ -403,7 +473,8 @@ class SSECEncryption(EncryptionProvider):
     def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
         aesgcm = AESGCM(self.customer_key)
         nonce = secrets.token_bytes(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
+        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
 
         return EncryptionResult(
             ciphertext=ciphertext,
@@ -415,10 +486,11 @@ class SSECEncryption(EncryptionProvider):
     def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
                 key_id: str, context: Dict[str, str] | None = None) -> bytes:
         aesgcm = AESGCM(self.customer_key)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
+            return aesgcm.decrypt(nonce, ciphertext, aad)
         except Exception as exc:
-            raise EncryptionError(f"SSE-C decryption failed: {exc}") from exc
+            raise EncryptionError("SSE-C decryption failed") from exc
 
     def generate_data_key(self) -> tuple[bytes, bytes]:
         return self.customer_key, b""
@@ -472,34 +544,36 @@ class ClientEncryptionHelper:
         }
     
     @staticmethod
-    def encrypt_with_key(plaintext: bytes, key_b64: str) -> Dict[str, str]:
+    def encrypt_with_key(plaintext: bytes, key_b64: str, context: Dict[str, str] | None = None) -> Dict[str, str]:
         """Encrypt data with a client-provided key."""
         key = base64.b64decode(key_b64)
         if len(key) != 32:
             raise EncryptionError("Key must be 256 bits (32 bytes)")
-        
+
         aesgcm = AESGCM(key)
         nonce = secrets.token_bytes(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
-        
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
+        ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
+
         return {
             "ciphertext": base64.b64encode(ciphertext).decode(),
             "nonce": base64.b64encode(nonce).decode(),
             "algorithm": "AES-256-GCM",
         }
-    
+
     @staticmethod
-    def decrypt_with_key(ciphertext_b64: str, nonce_b64: str, key_b64: str) -> bytes:
+    def decrypt_with_key(ciphertext_b64: str, nonce_b64: str, key_b64: str, context: Dict[str, str] | None = None) -> bytes:
         """Decrypt data with a client-provided key."""
         key = base64.b64decode(key_b64)
         nonce = base64.b64decode(nonce_b64)
         ciphertext = base64.b64decode(ciphertext_b64)
-        
+
         if len(key) != 32:
             raise EncryptionError("Key must be 256 bits (32 bytes)")
-        
+
         aesgcm = AESGCM(key)
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
+            return aesgcm.decrypt(nonce, ciphertext, aad)
         except Exception as exc:
-            raise EncryptionError(f"Decryption failed: {exc}") from exc
+            raise EncryptionError("Decryption failed") from exc

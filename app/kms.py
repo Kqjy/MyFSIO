@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import os
 import secrets
+import subprocess
+import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -12,6 +16,30 @@ from typing import Any, Dict, List, Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .encryption import EncryptionError, EncryptionProvider, EncryptionResult
+
+if sys.platform != "win32":
+    import fcntl
+
+logger = logging.getLogger(__name__)
+
+
+def _set_secure_file_permissions(file_path: Path) -> None:
+    """Set restrictive file permissions (owner read/write only)."""
+    if sys.platform == "win32":
+        try:
+            username = os.environ.get("USERNAME", "")
+            if username:
+                subprocess.run(
+                    ["icacls", str(file_path), "/inheritance:r",
+                     "/grant:r", f"{username}:F"],
+                    check=True, capture_output=True
+                )
+            else:
+                logger.warning("Could not set secure permissions on %s: USERNAME not set", file_path)
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("Failed to set secure permissions on %s: %s", file_path, exc)
+    else:
+        os.chmod(file_path, 0o600)
 
 
 @dataclass
@@ -74,11 +102,11 @@ class KMSEncryptionProvider(EncryptionProvider):
     def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
         """Encrypt data using envelope encryption with KMS."""
         data_key, encrypted_data_key = self.generate_data_key()
-        
+
         aesgcm = AESGCM(data_key)
         nonce = secrets.token_bytes(12)
-        ciphertext = aesgcm.encrypt(nonce, plaintext, 
-                                     json.dumps(context).encode() if context else None)
+        ciphertext = aesgcm.encrypt(nonce, plaintext,
+                                     json.dumps(context, sort_keys=True).encode() if context else None)
         
         return EncryptionResult(
             ciphertext=ciphertext,
@@ -90,15 +118,26 @@ class KMSEncryptionProvider(EncryptionProvider):
     def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
                 key_id: str, context: Dict[str, str] | None = None) -> bytes:
         """Decrypt data using envelope encryption with KMS."""
-        # Note: Data key is encrypted without context (AAD), so we decrypt without context
         data_key = self.kms.decrypt_data_key(key_id, encrypted_data_key, context=None)
-        
+        if len(data_key) != 32:
+            raise EncryptionError("Invalid data key size")
+
         aesgcm = AESGCM(data_key)
         try:
             return aesgcm.decrypt(nonce, ciphertext,
-                                  json.dumps(context).encode() if context else None)
+                                  json.dumps(context, sort_keys=True).encode() if context else None)
         except Exception as exc:
-            raise EncryptionError(f"Failed to decrypt data: {exc}") from exc
+            logger.debug("KMS decryption failed: %s", exc)
+            raise EncryptionError("Failed to decrypt data") from exc
+
+    def decrypt_data_key(self, encrypted_data_key: bytes, key_id: str | None = None) -> bytes:
+        """Decrypt an encrypted data key using KMS."""
+        if key_id is None:
+            key_id = self.key_id
+        data_key = self.kms.decrypt_data_key(key_id, encrypted_data_key, context=None)
+        if len(data_key) != 32:
+            raise EncryptionError("Invalid data key size")
+        return data_key
 
 
 class KMSManager:
@@ -108,27 +147,50 @@ class KMSManager:
     Keys are stored encrypted on disk.
     """
     
-    def __init__(self, keys_path: Path, master_key_path: Path):
+    def __init__(
+        self,
+        keys_path: Path,
+        master_key_path: Path,
+        generate_data_key_min_bytes: int = 1,
+        generate_data_key_max_bytes: int = 1024,
+    ):
         self.keys_path = keys_path
         self.master_key_path = master_key_path
+        self.generate_data_key_min_bytes = generate_data_key_min_bytes
+        self.generate_data_key_max_bytes = generate_data_key_max_bytes
         self._keys: Dict[str, KMSKey] = {}
         self._master_key: bytes | None = None
         self._loaded = False
     
     @property
     def master_key(self) -> bytes:
-        """Load or create the master key for encrypting KMS keys."""
+        """Load or create the master key for encrypting KMS keys (with file locking)."""
         if self._master_key is None:
-            if self.master_key_path.exists():
-                self._master_key = base64.b64decode(
-                    self.master_key_path.read_text().strip()
-                )
-            else:
-                self._master_key = secrets.token_bytes(32)
-                self.master_key_path.parent.mkdir(parents=True, exist_ok=True)
-                self.master_key_path.write_text(
-                    base64.b64encode(self._master_key).decode()
-                )
+            lock_path = self.master_key_path.with_suffix(".lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    if self.master_key_path.exists():
+                        self._master_key = base64.b64decode(
+                            self.master_key_path.read_text().strip()
+                        )
+                    else:
+                        self._master_key = secrets.token_bytes(32)
+                        self.master_key_path.write_text(
+                            base64.b64encode(self._master_key).decode()
+                        )
+                        _set_secure_file_permissions(self.master_key_path)
+                finally:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         return self._master_key
     
     def _load_keys(self) -> None:
@@ -145,8 +207,10 @@ class KMSManager:
                         encrypted = base64.b64decode(key_data["EncryptedKeyMaterial"])
                         key.key_material = self._decrypt_key_material(encrypted)
                     self._keys[key.key_id] = key
-            except Exception:
-                pass
+            except json.JSONDecodeError as exc:
+                logger.error("Failed to parse KMS keys file: %s", exc)
+            except (ValueError, KeyError) as exc:
+                logger.error("Invalid KMS key data: %s", exc)
         
         self._loaded = True
     
@@ -158,12 +222,13 @@ class KMSManager:
             encrypted = self._encrypt_key_material(key.key_material)
             data["EncryptedKeyMaterial"] = base64.b64encode(encrypted).decode()
             keys_data.append(data)
-        
+
         self.keys_path.parent.mkdir(parents=True, exist_ok=True)
         self.keys_path.write_text(
             json.dumps({"keys": keys_data}, indent=2),
             encoding="utf-8"
         )
+        _set_secure_file_permissions(self.keys_path)
     
     def _encrypt_key_material(self, key_material: bytes) -> bytes:
         """Encrypt key material with the master key."""
@@ -269,7 +334,7 @@ class KMSManager:
         
         aesgcm = AESGCM(key.key_material)
         nonce = secrets.token_bytes(12)
-        aad = json.dumps(context).encode() if context else None
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
         
         key_id_bytes = key_id.encode("utf-8")
@@ -298,17 +363,24 @@ class KMSManager:
         encrypted = rest[12:]
         
         aesgcm = AESGCM(key.key_material)
-        aad = json.dumps(context).encode() if context else None
+        aad = json.dumps(context, sort_keys=True).encode() if context else None
         try:
             plaintext = aesgcm.decrypt(nonce, encrypted, aad)
             return plaintext, key_id
         except Exception as exc:
-            raise EncryptionError(f"Decryption failed: {exc}") from exc
+            logger.debug("KMS decrypt operation failed: %s", exc)
+            raise EncryptionError("Decryption failed") from exc
     
     def generate_data_key(self, key_id: str,
-                          context: Dict[str, str] | None = None) -> tuple[bytes, bytes]:
+                          context: Dict[str, str] | None = None,
+                          key_spec: str = "AES_256") -> tuple[bytes, bytes]:
         """Generate a data key and return both plaintext and encrypted versions.
-        
+
+        Args:
+            key_id: The KMS key ID to use for encryption
+            context: Optional encryption context
+            key_spec: Key specification - AES_128 or AES_256 (default)
+
         Returns:
             Tuple of (plaintext_key, encrypted_key)
         """
@@ -318,11 +390,12 @@ class KMSManager:
             raise EncryptionError(f"Key not found: {key_id}")
         if not key.enabled:
             raise EncryptionError(f"Key is disabled: {key_id}")
-        
-        plaintext_key = secrets.token_bytes(32)
+
+        key_bytes = 32 if key_spec == "AES_256" else 16
+        plaintext_key = secrets.token_bytes(key_bytes)
 
         encrypted_key = self.encrypt(key_id, plaintext_key, context)
-        
+
         return plaintext_key, encrypted_key
     
     def decrypt_data_key(self, key_id: str, encrypted_key: bytes,
@@ -358,6 +431,8 @@ class KMSManager:
     
     def generate_random(self, num_bytes: int = 32) -> bytes:
         """Generate cryptographically secure random bytes."""
-        if num_bytes < 1 or num_bytes > 1024:
-            raise EncryptionError("Number of bytes must be between 1 and 1024")
+        if num_bytes < self.generate_data_key_min_bytes or num_bytes > self.generate_data_key_max_bytes:
+            raise EncryptionError(
+                f"Number of bytes must be between {self.generate_data_key_min_bytes} and {self.generate_data_key_max_bytes}"
+            )
         return secrets.token_bytes(num_bytes)

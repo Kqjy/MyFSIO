@@ -1,4 +1,3 @@
-"""Flask blueprint exposing a subset of the S3 REST API."""
 from __future__ import annotations
 
 import base64
@@ -32,6 +31,24 @@ logger = logging.getLogger(__name__)
 
 S3_NS = "http://s3.amazonaws.com/doc/2006-03-01/"
 
+_HEADER_CONTROL_CHARS = re.compile(r'[\r\n\x00-\x1f\x7f]')
+
+
+def _sanitize_header_value(value: str) -> str:
+    return _HEADER_CONTROL_CHARS.sub('', value)
+
+
+MAX_XML_PAYLOAD_SIZE = 1048576  # 1 MB
+
+
+def _parse_xml_with_limit(payload: bytes) -> Element:
+    """Parse XML payload with size limit to prevent DoS attacks."""
+    max_size = current_app.config.get("MAX_XML_PAYLOAD_SIZE", MAX_XML_PAYLOAD_SIZE)
+    if len(payload) > max_size:
+        raise ParseError(f"XML payload exceeds maximum size of {max_size} bytes")
+    return fromstring(payload)
+
+
 s3_api_bp = Blueprint("s3_api", __name__)
 
 def _storage() -> ObjectStorage:
@@ -60,10 +77,13 @@ def _build_policy_context() -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
     if request.headers.get("Referer"):
         ctx["aws:Referer"] = request.headers.get("Referer")
-    if request.access_route:
-        ctx["aws:SourceIp"] = request.access_route[0]
+    num_proxies = current_app.config.get("NUM_TRUSTED_PROXIES", 0)
+    if num_proxies > 0 and request.access_route and len(request.access_route) > num_proxies:
+        ctx["aws:SourceIp"] = request.access_route[-num_proxies]
     elif request.remote_addr:
         ctx["aws:SourceIp"] = request.remote_addr
+    elif request.access_route:
+        ctx["aws:SourceIp"] = request.access_route[0]
     ctx["aws:SecureTransport"] = str(request.is_secure).lower()
     if request.headers.get("User-Agent"):
         ctx["aws:UserAgent"] = request.headers.get("User-Agent")
@@ -80,6 +100,22 @@ def _notifications() -> NotificationService:
 
 def _access_logging() -> AccessLoggingService:
     return current_app.extensions["access_logging"]
+
+
+def _get_list_buckets_limit() -> str:
+    return current_app.config.get("RATELIMIT_LIST_BUCKETS", "60 per minute")
+
+
+def _get_bucket_ops_limit() -> str:
+    return current_app.config.get("RATELIMIT_BUCKET_OPS", "120 per minute")
+
+
+def _get_object_ops_limit() -> str:
+    return current_app.config.get("RATELIMIT_OBJECT_OPS", "240 per minute")
+
+
+def _get_head_ops_limit() -> str:
+    return current_app.config.get("RATELIMIT_HEAD_OPS", "100 per minute")
 
 
 def _xml_response(element: Element, status: int = 200) -> Response:
@@ -107,30 +143,36 @@ def _require_xml_content_type() -> Response | None:
 def _parse_range_header(range_header: str, file_size: int) -> list[tuple[int, int]] | None:
     if not range_header.startswith("bytes="):
         return None
+    max_range_value = 2**63 - 1
     ranges = []
     range_spec = range_header[6:]
     for part in range_spec.split(","):
         part = part.strip()
         if not part:
             continue
-        if part.startswith("-"):
-            suffix_length = int(part[1:])
-            if suffix_length <= 0:
-                return None
-            start = max(0, file_size - suffix_length)
-            end = file_size - 1
-        elif part.endswith("-"):
-            start = int(part[:-1])
-            if start >= file_size:
-                return None
-            end = file_size - 1
-        else:
-            start_str, end_str = part.split("-", 1)
-            start = int(start_str)
-            end = int(end_str)
-            if start > end or start >= file_size:
-                return None
-            end = min(end, file_size - 1)
+        try:
+            if part.startswith("-"):
+                suffix_length = int(part[1:])
+                if suffix_length <= 0 or suffix_length > max_range_value:
+                    return None
+                start = max(0, file_size - suffix_length)
+                end = file_size - 1
+            elif part.endswith("-"):
+                start = int(part[:-1])
+                if start < 0 or start > max_range_value or start >= file_size:
+                    return None
+                end = file_size - 1
+            else:
+                start_str, end_str = part.split("-", 1)
+                start = int(start_str)
+                end = int(end_str)
+                if start < 0 or end < 0 or start > max_range_value or end > max_range_value:
+                    return None
+                if start > end or start >= file_size:
+                    return None
+                end = min(end, file_size - 1)
+        except (ValueError, OverflowError):
+            return None
         ranges.append((start, end))
     return ranges if ranges else None
 
@@ -177,7 +219,7 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     access_key, date_stamp, region, service, signed_headers_str, signature = match.groups()
     secret_key = _iam().get_secret_key(access_key)
     if not secret_key:
-        raise IamError("Invalid access key")
+        raise IamError("SignatureDoesNotMatch")
 
     method = req.method
     canonical_uri = _get_canonical_uri(req)
@@ -223,7 +265,8 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
 
     now = datetime.now(timezone.utc)
     time_diff = abs((now - request_time).total_seconds())
-    if time_diff > 900:
+    tolerance = current_app.config.get("SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 900)
+    if time_diff > tolerance:
         raise IamError("Request timestamp too old or too far in the future")
 
     required_headers = {'host', 'x-amz-date'}
@@ -359,16 +402,18 @@ def _verify_sigv4(req: Any) -> Principal | None:
 
 
 def _require_principal():
-    if ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
-       (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"):
+    sigv4_attempted = ("Authorization" in request.headers and request.headers["Authorization"].startswith("AWS4-HMAC-SHA256")) or \
+                      (request.args.get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256")
+    if sigv4_attempted:
         try:
             principal = _verify_sigv4(request)
             if principal:
                 return principal, None
+            return None, _error_response("AccessDenied", "Signature verification failed", 403)
         except IamError as exc:
             return None, _error_response("AccessDenied", str(exc), 403)
         except (ValueError, TypeError):
-             return None, _error_response("AccessDenied", "Signature verification failed", 403)
+            return None, _error_response("AccessDenied", "Signature verification failed", 403)
 
     access_key = request.headers.get("X-Access-Key")
     secret_key = request.headers.get("X-Secret-Key")
@@ -485,8 +530,10 @@ def _validate_presigned_request(action: str, bucket_name: str, object_key: str) 
         expiry = int(expires)
     except ValueError as exc:
         raise IamError("Invalid expiration") from exc
-    if expiry < 1 or expiry > 7 * 24 * 3600:
-        raise IamError("Expiration must be between 1 second and 7 days")
+    min_expiry = current_app.config.get("PRESIGNED_URL_MIN_EXPIRY_SECONDS", 1)
+    max_expiry = current_app.config.get("PRESIGNED_URL_MAX_EXPIRY_SECONDS", 604800)
+    if expiry < min_expiry or expiry > max_expiry:
+        raise IamError(f"Expiration must be between {min_expiry} second(s) and {max_expiry} seconds")
 
     try:
         request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
@@ -687,7 +734,7 @@ def _find_element_text(parent: Element, name: str, default: str = "") -> str:
 
 def _parse_tagging_document(payload: bytes) -> list[dict[str, str]]:
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError as exc:
         raise ValueError("Malformed XML") from exc
     if _strip_ns(root.tag) != "Tagging":
@@ -788,7 +835,7 @@ def _validate_content_type(object_key: str, content_type: str | None) -> str | N
 
 def _parse_cors_document(payload: bytes) -> list[dict[str, Any]]:
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError as exc:
         raise ValueError("Malformed XML") from exc
     if _strip_ns(root.tag) != "CORSConfiguration":
@@ -841,7 +888,7 @@ def _render_cors_document(rules: list[dict[str, Any]]) -> Element:
 
 def _parse_encryption_document(payload: bytes) -> dict[str, Any]:
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError as exc:
         raise ValueError("Malformed XML") from exc
     if _strip_ns(root.tag) != "ServerSideEncryptionConfiguration":
@@ -943,6 +990,7 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "logging": _bucket_logging_handler,
         "uploads": _bucket_uploads_handler,
         "policy": _bucket_policy_handler,
+        "replication": _bucket_replication_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -977,7 +1025,7 @@ def _bucket_versioning_handler(bucket_name: str) -> Response:
         if not payload.strip():
             return _error_response("MalformedXML", "Request body is required", 400)
         try:
-            root = fromstring(payload)
+            root = _parse_xml_with_limit(payload)
         except ParseError:
             return _error_response("MalformedXML", "Unable to parse XML document", 400)
         if _strip_ns(root.tag) != "VersioningConfiguration":
@@ -1039,8 +1087,9 @@ def _bucket_tagging_handler(bucket_name: str) -> Response:
         tags = _parse_tagging_document(payload)
     except ValueError as exc:
         return _error_response("MalformedXML", str(exc), 400)
-    if len(tags) > 50:
-        return _error_response("InvalidTag", "A maximum of 50 tags is supported", 400)
+    tag_limit = current_app.config.get("OBJECT_TAG_LIMIT", 50)
+    if len(tags) > tag_limit:
+        return _error_response("InvalidTag", f"A maximum of {tag_limit} tags is supported", 400)
     try:
         storage.set_bucket_tags(bucket_name, tags)
     except StorageError as exc:
@@ -1111,6 +1160,33 @@ def _object_tagging_handler(bucket_name: str, object_key: str) -> Response:
     return Response(status=204)
 
 
+def _validate_cors_origin(origin: str) -> bool:
+    """Validate a CORS origin pattern."""
+    import re
+    origin = origin.strip()
+    if not origin:
+        return False
+    if origin == "*":
+        return True
+    if origin.startswith("*."):
+        domain = origin[2:]
+        if not domain or ".." in domain:
+            return False
+        return bool(re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$', domain))
+    if origin.startswith(("http://", "https://")):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(origin)
+            if not parsed.netloc:
+                return False
+            if parsed.path and parsed.path != "/":
+                return False
+            return True
+        except Exception:
+            return False
+    return False
+
+
 def _sanitize_cors_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     sanitized: list[dict[str, Any]] = []
     for rule in rules:
@@ -1120,6 +1196,13 @@ def _sanitize_cors_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         expose_headers = [header.strip() for header in rule.get("ExposeHeaders", []) if header and header.strip()]
         if not allowed_origins or not allowed_methods:
             raise ValueError("Each CORSRule must include AllowedOrigin and AllowedMethod entries")
+        for origin in allowed_origins:
+            if not _validate_cors_origin(origin):
+                raise ValueError(f"Invalid CORS origin: {origin}")
+        valid_methods = {"GET", "PUT", "POST", "DELETE", "HEAD"}
+        for method in allowed_methods:
+            if method not in valid_methods:
+                raise ValueError(f"Invalid CORS method: {method}")
         sanitized_rule: dict[str, Any] = {
             "AllowedOrigins": allowed_origins,
             "AllowedMethods": allowed_methods,
@@ -1329,7 +1412,10 @@ def _bucket_list_versions_handler(bucket_name: str) -> Response:
     prefix = request.args.get("prefix", "")
     delimiter = request.args.get("delimiter", "")
     try:
-        max_keys = max(1, min(int(request.args.get("max-keys", 1000)), 1000))
+        max_keys = int(request.args.get("max-keys", 1000))
+        if max_keys < 1:
+            return _error_response("InvalidArgument", "max-keys must be a positive integer", 400)
+        max_keys = min(max_keys, 1000)
     except ValueError:
         return _error_response("InvalidArgument", "max-keys must be an integer", 400)
     key_marker = request.args.get("key-marker", "")
@@ -1493,7 +1579,7 @@ def _render_lifecycle_config(config: list) -> Element:
 def _parse_lifecycle_config(payload: bytes) -> list:
     """Parse lifecycle configuration from XML."""
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError as exc:
         raise ValueError(f"Unable to parse XML document: {exc}") from exc
     
@@ -1679,7 +1765,7 @@ def _bucket_object_lock_handler(bucket_name: str) -> Response:
         return _error_response("MalformedXML", "Request body is required", 400)
 
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError:
         return _error_response("MalformedXML", "Unable to parse XML document", 400)
 
@@ -1748,7 +1834,7 @@ def _bucket_notification_handler(bucket_name: str) -> Response:
         return Response(status=200)
 
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError:
         return _error_response("MalformedXML", "Unable to parse XML document", 400)
 
@@ -1830,7 +1916,7 @@ def _bucket_logging_handler(bucket_name: str) -> Response:
         return Response(status=200)
 
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError:
         return _error_response("MalformedXML", "Unable to parse XML document", 400)
 
@@ -1883,7 +1969,10 @@ def _bucket_uploads_handler(bucket_name: str) -> Response:
     prefix = request.args.get("prefix", "")
     delimiter = request.args.get("delimiter", "")
     try:
-        max_uploads = max(1, min(int(request.args.get("max-uploads", 1000)), 1000))
+        max_uploads = int(request.args.get("max-uploads", 1000))
+        if max_uploads < 1:
+            return _error_response("InvalidArgument", "max-uploads must be a positive integer", 400)
+        max_uploads = min(max_uploads, 1000)
     except ValueError:
         return _error_response("InvalidArgument", "max-uploads must be an integer", 400)
 
@@ -1969,7 +2058,7 @@ def _object_retention_handler(bucket_name: str, object_key: str) -> Response:
         return _error_response("MalformedXML", "Request body is required", 400)
 
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError:
         return _error_response("MalformedXML", "Unable to parse XML document", 400)
 
@@ -2041,7 +2130,7 @@ def _object_legal_hold_handler(bucket_name: str, object_key: str) -> Response:
         return _error_response("MalformedXML", "Request body is required", 400)
 
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError:
         return _error_response("MalformedXML", "Unable to parse XML document", 400)
 
@@ -2074,7 +2163,7 @@ def _bulk_delete_handler(bucket_name: str) -> Response:
     if not payload.strip():
         return _error_response("MalformedXML", "Request body must include a Delete specification", 400)
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError:
         return _error_response("MalformedXML", "Unable to parse XML document", 400)
     if _strip_ns(root.tag) != "Delete":
@@ -2142,8 +2231,156 @@ def _bulk_delete_handler(bucket_name: str) -> Response:
     return _xml_response(result, status=200)
 
 
+def _post_object(bucket_name: str) -> Response:
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    object_key = request.form.get("key")
+    policy_b64 = request.form.get("policy")
+    signature = request.form.get("x-amz-signature")
+    credential = request.form.get("x-amz-credential")
+    algorithm = request.form.get("x-amz-algorithm")
+    amz_date = request.form.get("x-amz-date")
+    if not all([object_key, policy_b64, signature, credential, algorithm, amz_date]):
+        return _error_response("InvalidArgument", "Missing required form fields", 400)
+    if algorithm != "AWS4-HMAC-SHA256":
+        return _error_response("InvalidArgument", "Unsupported signing algorithm", 400)
+    try:
+        policy_json = base64.b64decode(policy_b64).decode("utf-8")
+        policy = __import__("json").loads(policy_json)
+    except (ValueError, __import__("json").JSONDecodeError) as exc:
+        return _error_response("InvalidPolicyDocument", f"Invalid policy: {exc}", 400)
+    expiration = policy.get("expiration")
+    if expiration:
+        try:
+            exp_time = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) > exp_time:
+                return _error_response("AccessDenied", "Policy expired", 403)
+        except ValueError:
+            return _error_response("InvalidPolicyDocument", "Invalid expiration format", 400)
+    conditions = policy.get("conditions", [])
+    validation_error = _validate_post_policy_conditions(bucket_name, object_key, conditions, request.form, request.content_length or 0)
+    if validation_error:
+        return _error_response("AccessDenied", validation_error, 403)
+    try:
+        parts = credential.split("/")
+        if len(parts) != 5:
+            raise ValueError("Invalid credential format")
+        access_key, date_stamp, region, service, _ = parts
+    except ValueError:
+        return _error_response("InvalidArgument", "Invalid credential format", 400)
+    secret_key = _iam().get_secret_key(access_key)
+    if not secret_key:
+        return _error_response("AccessDenied", "Invalid access key", 403)
+    signing_key = _derive_signing_key(secret_key, date_stamp, region, service)
+    expected_signature = hmac.new(signing_key, policy_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_signature, signature):
+        return _error_response("SignatureDoesNotMatch", "Signature verification failed", 403)
+    principal = _iam().get_principal(access_key)
+    if not principal:
+        return _error_response("AccessDenied", "Invalid access key", 403)
+    if "${filename}" in object_key:
+        temp_key = object_key.replace("${filename}", request.files.get("file").filename if request.files.get("file") else "upload")
+    else:
+        temp_key = object_key
+    try:
+        _authorize_action(principal, bucket_name, "write", object_key=temp_key)
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    file = request.files.get("file")
+    if not file:
+        return _error_response("InvalidArgument", "Missing file field", 400)
+    if "${filename}" in object_key:
+        object_key = object_key.replace("${filename}", file.filename or "upload")
+    metadata = {}
+    for field_name, value in request.form.items():
+        if field_name.lower().startswith("x-amz-meta-"):
+            key = field_name[11:]
+            if key:
+                metadata[key] = value
+    try:
+        meta = storage.put_object(bucket_name, object_key, file.stream, metadata=metadata or None)
+    except QuotaExceededError as exc:
+        return _error_response("QuotaExceeded", str(exc), 403)
+    except StorageError as exc:
+        return _error_response("InvalidArgument", str(exc), 400)
+    current_app.logger.info("Object uploaded via POST", extra={"bucket": bucket_name, "key": object_key, "size": meta.size})
+    success_action_status = request.form.get("success_action_status", "204")
+    success_action_redirect = request.form.get("success_action_redirect")
+    if success_action_redirect:
+        allowed_hosts = current_app.config.get("ALLOWED_REDIRECT_HOSTS", [])
+        parsed = urlparse(success_action_redirect)
+        if parsed.scheme not in ("http", "https"):
+            return _error_response("InvalidArgument", "Redirect URL must use http or https", 400)
+        if allowed_hosts and parsed.netloc not in allowed_hosts:
+            return _error_response("InvalidArgument", "Redirect URL host not allowed", 400)
+        redirect_url = f"{success_action_redirect}?bucket={bucket_name}&key={quote(object_key)}&etag={meta.etag}"
+        return Response(status=303, headers={"Location": redirect_url})
+    if success_action_status == "200":
+        root = Element("PostResponse")
+        SubElement(root, "Location").text = f"/{bucket_name}/{object_key}"
+        SubElement(root, "Bucket").text = bucket_name
+        SubElement(root, "Key").text = object_key
+        SubElement(root, "ETag").text = f'"{meta.etag}"'
+        return _xml_response(root, status=200)
+    if success_action_status == "201":
+        root = Element("PostResponse")
+        SubElement(root, "Location").text = f"/{bucket_name}/{object_key}"
+        SubElement(root, "Bucket").text = bucket_name
+        SubElement(root, "Key").text = object_key
+        SubElement(root, "ETag").text = f'"{meta.etag}"'
+        return _xml_response(root, status=201)
+    return Response(status=204)
+
+
+def _validate_post_policy_conditions(bucket_name: str, object_key: str, conditions: list, form_data, content_length: int) -> Optional[str]:
+    for condition in conditions:
+        if isinstance(condition, dict):
+            for key, expected_value in condition.items():
+                if key == "bucket":
+                    if bucket_name != expected_value:
+                        return f"Bucket must be {expected_value}"
+                elif key == "key":
+                    if object_key != expected_value:
+                        return f"Key must be {expected_value}"
+                else:
+                    actual_value = form_data.get(key, "")
+                    if actual_value != expected_value:
+                        return f"Field {key} must be {expected_value}"
+        elif isinstance(condition, list) and len(condition) >= 2:
+            operator = condition[0].lower() if isinstance(condition[0], str) else ""
+            if operator == "starts-with" and len(condition) == 3:
+                field = condition[1].lstrip("$")
+                prefix = condition[2]
+                if field == "key":
+                    if not object_key.startswith(prefix):
+                        return f"Key must start with {prefix}"
+                else:
+                    actual_value = form_data.get(field, "")
+                    if not actual_value.startswith(prefix):
+                        return f"Field {field} must start with {prefix}"
+            elif operator == "eq" and len(condition) == 3:
+                field = condition[1].lstrip("$")
+                expected = condition[2]
+                if field == "key":
+                    if object_key != expected:
+                        return f"Key must equal {expected}"
+                else:
+                    actual_value = form_data.get(field, "")
+                    if actual_value != expected:
+                        return f"Field {field} must equal {expected}"
+            elif operator == "content-length-range" and len(condition) == 3:
+                try:
+                    min_size, max_size = int(condition[1]), int(condition[2])
+                except (TypeError, ValueError):
+                    return "Invalid content-length-range values"
+                if content_length < min_size or content_length > max_size:
+                    return f"Content length must be between {min_size} and {max_size}"
+    return None
+
+
 @s3_api_bp.get("/")
-@limiter.limit("60 per minute")
+@limiter.limit(_get_list_buckets_limit)
 def list_buckets() -> Response:
     principal, error = _require_principal()
     if error:
@@ -2171,7 +2408,7 @@ def list_buckets() -> Response:
 
 
 @s3_api_bp.route("/<bucket_name>", methods=["PUT", "DELETE", "GET", "POST"], strict_slashes=False)
-@limiter.limit("120 per minute")
+@limiter.limit(_get_bucket_ops_limit)
 def bucket_handler(bucket_name: str) -> Response:
     storage = _storage()
     subresource_response = _maybe_handle_bucket_subresource(bucket_name)
@@ -2179,9 +2416,12 @@ def bucket_handler(bucket_name: str) -> Response:
         return subresource_response
 
     if request.method == "POST":
-        if "delete" not in request.args:
-            return _method_not_allowed(["GET", "PUT", "DELETE"])
-        return _bulk_delete_handler(bucket_name)
+        if "delete" in request.args:
+            return _bulk_delete_handler(bucket_name)
+        content_type = request.headers.get("Content-Type", "")
+        if "multipart/form-data" in content_type:
+            return _post_object(bucket_name)
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
 
     if request.method == "PUT":
         principal, error = _require_principal()
@@ -2231,23 +2471,24 @@ def bucket_handler(bucket_name: str) -> Response:
     prefix = request.args.get("prefix", "")
     delimiter = request.args.get("delimiter", "")
     try:
-        max_keys = max(1, min(int(request.args.get("max-keys", current_app.config["UI_PAGE_SIZE"])), 1000))
+        max_keys = int(request.args.get("max-keys", current_app.config["UI_PAGE_SIZE"]))
+        if max_keys < 1:
+            return _error_response("InvalidArgument", "max-keys must be a positive integer", 400)
+        max_keys = min(max_keys, 1000)
     except ValueError:
         return _error_response("InvalidArgument", "max-keys must be an integer", 400)
-    
+
     marker = request.args.get("marker", "")  # ListObjects v1
     continuation_token = request.args.get("continuation-token", "")  # ListObjectsV2
     start_after = request.args.get("start-after", "")  # ListObjectsV2
     
-    # For ListObjectsV2, continuation-token takes precedence, then start-after
-    # For ListObjects v1, use marker
     effective_start = ""
     if list_type == "2":
         if continuation_token:
             try:
                 effective_start = base64.urlsafe_b64decode(continuation_token.encode()).decode("utf-8")
             except (ValueError, UnicodeDecodeError):
-                effective_start = continuation_token
+                return _error_response("InvalidArgument", "Invalid continuation token", 400)
         elif start_after:
             effective_start = start_after
     else:
@@ -2363,7 +2604,7 @@ def bucket_handler(bucket_name: str) -> Response:
 
 
 @s3_api_bp.route("/<bucket_name>/<path:object_key>", methods=["PUT", "GET", "DELETE", "HEAD", "POST"], strict_slashes=False)
-@limiter.limit("240 per minute")
+@limiter.limit(_get_object_ops_limit)
 def object_handler(bucket_name: str, object_key: str):
     storage = _storage()
 
@@ -2381,6 +2622,8 @@ def object_handler(bucket_name: str, object_key: str):
             return _initiate_multipart_upload(bucket_name, object_key)
         if "uploadId" in request.args:
             return _complete_multipart_upload(bucket_name, object_key)
+        if "select" in request.args:
+            return _select_object_content(bucket_name, object_key)
         return _method_not_allowed(["GET", "PUT", "DELETE", "HEAD", "POST"])
 
     if request.method == "PUT":
@@ -2560,7 +2803,7 @@ def object_handler(bucket_name: str, object_key: str):
             for param, header in response_overrides.items():
                 value = request.args.get(param)
                 if value:
-                    response.headers[header] = value
+                    response.headers[header] = _sanitize_header_value(value)
 
         action = "Object read" if request.method == "GET" else "Object head"
         current_app.logger.info(action, extra={"bucket": bucket_name, "key": object_key, "bytes": logged_bytes})
@@ -2680,8 +2923,122 @@ def _bucket_policy_handler(bucket_name: str) -> Response:
     return Response(status=204)
 
 
+def _bucket_replication_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    replication = _replication_manager()
+    if request.method == "GET":
+        rule = replication.get_rule(bucket_name)
+        if not rule:
+            return _error_response("ReplicationConfigurationNotFoundError", "Replication configuration not found", 404)
+        return _xml_response(_render_replication_config(rule))
+    if request.method == "DELETE":
+        replication.delete_rule(bucket_name)
+        current_app.logger.info("Bucket replication removed", extra={"bucket": bucket_name})
+        return Response(status=204)
+    ct_error = _require_xml_content_type()
+    if ct_error:
+        return ct_error
+    payload = request.get_data(cache=False) or b""
+    try:
+        rule = _parse_replication_config(bucket_name, payload)
+    except ValueError as exc:
+        return _error_response("MalformedXML", str(exc), 400)
+    replication.set_rule(rule)
+    current_app.logger.info("Bucket replication updated", extra={"bucket": bucket_name})
+    return Response(status=200)
+
+
+def _parse_replication_config(bucket_name: str, payload: bytes):
+    from .replication import ReplicationRule, REPLICATION_MODE_ALL
+    root = _parse_xml_with_limit(payload)
+    if _strip_ns(root.tag) != "ReplicationConfiguration":
+        raise ValueError("Root element must be ReplicationConfiguration")
+    rule_el = None
+    for child in list(root):
+        if _strip_ns(child.tag) == "Rule":
+            rule_el = child
+            break
+    if rule_el is None:
+        raise ValueError("At least one Rule is required")
+    status_el = _find_element(rule_el, "Status")
+    status = status_el.text if status_el is not None and status_el.text else "Enabled"
+    enabled = status.lower() == "enabled"
+    filter_prefix = None
+    filter_el = _find_element(rule_el, "Filter")
+    if filter_el is not None:
+        prefix_el = _find_element(filter_el, "Prefix")
+        if prefix_el is not None and prefix_el.text:
+            filter_prefix = prefix_el.text
+    dest_el = _find_element(rule_el, "Destination")
+    if dest_el is None:
+        raise ValueError("Destination element is required")
+    bucket_el = _find_element(dest_el, "Bucket")
+    if bucket_el is None or not bucket_el.text:
+        raise ValueError("Destination Bucket is required")
+    target_bucket, target_connection_id = _parse_destination_arn(bucket_el.text)
+    sync_deletions = True
+    dm_el = _find_element(rule_el, "DeleteMarkerReplication")
+    if dm_el is not None:
+        dm_status_el = _find_element(dm_el, "Status")
+        if dm_status_el is not None and dm_status_el.text:
+            sync_deletions = dm_status_el.text.lower() == "enabled"
+    return ReplicationRule(
+        bucket_name=bucket_name,
+        target_connection_id=target_connection_id,
+        target_bucket=target_bucket,
+        enabled=enabled,
+        mode=REPLICATION_MODE_ALL,
+        sync_deletions=sync_deletions,
+        filter_prefix=filter_prefix,
+    )
+
+
+def _parse_destination_arn(arn: str) -> tuple:
+    if not arn.startswith("arn:aws:s3:::"):
+        raise ValueError(f"Invalid ARN format: {arn}")
+    bucket_part = arn[13:]
+    if "/" in bucket_part:
+        connection_id, bucket_name = bucket_part.split("/", 1)
+    else:
+        connection_id = "local"
+        bucket_name = bucket_part
+    return bucket_name, connection_id
+
+
+def _render_replication_config(rule) -> Element:
+    root = Element("ReplicationConfiguration")
+    SubElement(root, "Role").text = "arn:aws:iam::000000000000:role/replication"
+    rule_el = SubElement(root, "Rule")
+    SubElement(rule_el, "ID").text = f"{rule.bucket_name}-replication"
+    SubElement(rule_el, "Status").text = "Enabled" if rule.enabled else "Disabled"
+    SubElement(rule_el, "Priority").text = "1"
+    filter_el = SubElement(rule_el, "Filter")
+    if rule.filter_prefix:
+        SubElement(filter_el, "Prefix").text = rule.filter_prefix
+    dest_el = SubElement(rule_el, "Destination")
+    if rule.target_connection_id == "local":
+        arn = f"arn:aws:s3:::{rule.target_bucket}"
+    else:
+        arn = f"arn:aws:s3:::{rule.target_connection_id}/{rule.target_bucket}"
+    SubElement(dest_el, "Bucket").text = arn
+    dm_el = SubElement(rule_el, "DeleteMarkerReplication")
+    SubElement(dm_el, "Status").text = "Enabled" if rule.sync_deletions else "Disabled"
+    return root
+
+
 @s3_api_bp.route("/<bucket_name>", methods=["HEAD"])
-@limiter.limit("100 per minute")
+@limiter.limit(_get_head_ops_limit)
 def head_bucket(bucket_name: str) -> Response:
     principal, error = _require_principal()
     if error:
@@ -2696,7 +3053,7 @@ def head_bucket(bucket_name: str) -> Response:
 
 
 @s3_api_bp.route("/<bucket_name>/<path:object_key>", methods=["HEAD"])
-@limiter.limit("100 per minute")
+@limiter.limit(_get_head_ops_limit)
 def head_object(bucket_name: str, object_key: str) -> Response:
     principal, error = _require_principal()
     if error:
@@ -2957,6 +3314,10 @@ def _initiate_multipart_upload(bucket_name: str, object_key: str) -> Response:
 
 
 def _upload_part(bucket_name: str, object_key: str) -> Response:
+    copy_source = request.headers.get("x-amz-copy-source")
+    if copy_source:
+        return _upload_part_copy(bucket_name, object_key, copy_source)
+
     principal, error = _object_principal("write", bucket_name, object_key)
     if error:
         return error
@@ -2970,6 +3331,9 @@ def _upload_part(bucket_name: str, object_key: str) -> Response:
         part_number = int(part_number_str)
     except ValueError:
         return _error_response("InvalidArgument", "partNumber must be an integer", 400)
+
+    if part_number < 1 or part_number > 10000:
+        return _error_response("InvalidArgument", "partNumber must be between 1 and 10000", 400)
 
     stream = request.stream
     content_encoding = request.headers.get("Content-Encoding", "").lower()
@@ -2990,6 +3354,67 @@ def _upload_part(bucket_name: str, object_key: str) -> Response:
     return response
 
 
+def _upload_part_copy(bucket_name: str, object_key: str, copy_source: str) -> Response:
+    principal, error = _object_principal("write", bucket_name, object_key)
+    if error:
+        return error
+
+    upload_id = request.args.get("uploadId")
+    part_number_str = request.args.get("partNumber")
+    if not upload_id or not part_number_str:
+        return _error_response("InvalidArgument", "uploadId and partNumber are required", 400)
+
+    try:
+        part_number = int(part_number_str)
+    except ValueError:
+        return _error_response("InvalidArgument", "partNumber must be an integer", 400)
+
+    if part_number < 1 or part_number > 10000:
+        return _error_response("InvalidArgument", "partNumber must be between 1 and 10000", 400)
+
+    copy_source = unquote(copy_source)
+    if copy_source.startswith("/"):
+        copy_source = copy_source[1:]
+    parts = copy_source.split("/", 1)
+    if len(parts) != 2:
+        return _error_response("InvalidArgument", "Invalid x-amz-copy-source format", 400)
+    source_bucket, source_key = parts
+    if not source_bucket or not source_key:
+        return _error_response("InvalidArgument", "Invalid x-amz-copy-source format", 400)
+
+    _, read_error = _object_principal("read", source_bucket, source_key)
+    if read_error:
+        return read_error
+
+    copy_source_range = request.headers.get("x-amz-copy-source-range")
+    start_byte, end_byte = None, None
+    if copy_source_range:
+        match = re.match(r"bytes=(\d+)-(\d+)", copy_source_range)
+        if not match:
+            return _error_response("InvalidArgument", "Invalid x-amz-copy-source-range format", 400)
+        start_byte, end_byte = int(match.group(1)), int(match.group(2))
+
+    try:
+        result = _storage().upload_part_copy(
+            bucket_name, upload_id, part_number,
+            source_bucket, source_key,
+            start_byte, end_byte
+        )
+    except ObjectNotFoundError:
+        return _error_response("NoSuchKey", "Source object not found", 404)
+    except StorageError as exc:
+        if "Multipart upload not found" in str(exc):
+            return _error_response("NoSuchUpload", str(exc), 404)
+        if "Invalid byte range" in str(exc):
+            return _error_response("InvalidRange", str(exc), 416)
+        return _error_response("InvalidArgument", str(exc), 400)
+
+    root = Element("CopyPartResult")
+    SubElement(root, "LastModified").text = result["last_modified"].strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    SubElement(root, "ETag").text = f'"{result["etag"]}"'
+    return _xml_response(root)
+
+
 def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
     principal, error = _object_principal("write", bucket_name, object_key)
     if error:
@@ -3004,7 +3429,7 @@ def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
         return ct_error
     payload = request.get_data(cache=False) or b""
     try:
-        root = fromstring(payload)
+        root = _parse_xml_with_limit(payload)
     except ParseError:
         return _error_response("MalformedXML", "Unable to parse XML document", 400)
     
@@ -3024,8 +3449,14 @@ def _complete_multipart_upload(bucket_name: str, object_key: str) -> Response:
             etag_el = part_el.find("ETag")
             
         if part_number_el is not None and etag_el is not None:
+            try:
+                part_num = int(part_number_el.text or 0)
+            except ValueError:
+                return _error_response("InvalidArgument", "PartNumber must be an integer", 400)
+            if part_num < 1 or part_num > 10000:
+                return _error_response("InvalidArgument", f"PartNumber {part_num} must be between 1 and 10000", 400)
             parts.append({
-                "PartNumber": int(part_number_el.text or 0),
+                "PartNumber": part_num,
                 "ETag": (etag_el.text or "").strip('"')
             })
 
@@ -3072,6 +3503,164 @@ def _abort_multipart_upload(bucket_name: str, object_key: str) -> Response:
         current_app.logger.warning(f"Error aborting multipart upload: {exc}")
 
     return Response(status=204)
+
+
+def _select_object_content(bucket_name: str, object_key: str) -> Response:
+    _, error = _object_principal("read", bucket_name, object_key)
+    if error:
+        return error
+    ct_error = _require_xml_content_type()
+    if ct_error:
+        return ct_error
+    payload = request.get_data(cache=False) or b""
+    try:
+        root = _parse_xml_with_limit(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+    if _strip_ns(root.tag) != "SelectObjectContentRequest":
+        return _error_response("MalformedXML", "Root element must be SelectObjectContentRequest", 400)
+    expression_el = _find_element(root, "Expression")
+    if expression_el is None or not expression_el.text:
+        return _error_response("InvalidRequest", "Expression is required", 400)
+    expression = expression_el.text
+    expression_type_el = _find_element(root, "ExpressionType")
+    expression_type = expression_type_el.text if expression_type_el is not None and expression_type_el.text else "SQL"
+    if expression_type.upper() != "SQL":
+        return _error_response("InvalidRequest", "Only SQL expression type is supported", 400)
+    input_el = _find_element(root, "InputSerialization")
+    if input_el is None:
+        return _error_response("InvalidRequest", "InputSerialization is required", 400)
+    try:
+        input_format, input_config = _parse_select_input_serialization(input_el)
+    except ValueError as exc:
+        return _error_response("InvalidRequest", str(exc), 400)
+    output_el = _find_element(root, "OutputSerialization")
+    if output_el is None:
+        return _error_response("InvalidRequest", "OutputSerialization is required", 400)
+    try:
+        output_format, output_config = _parse_select_output_serialization(output_el)
+    except ValueError as exc:
+        return _error_response("InvalidRequest", str(exc), 400)
+    storage = _storage()
+    try:
+        path = storage.get_object_path(bucket_name, object_key)
+    except ObjectNotFoundError:
+        return _error_response("NoSuchKey", "Object not found", 404)
+    except StorageError:
+        return _error_response("NoSuchKey", "Object not found", 404)
+    from .select_content import execute_select_query, SelectError
+    try:
+        result_stream = execute_select_query(
+            file_path=path,
+            expression=expression,
+            input_format=input_format,
+            input_config=input_config,
+            output_format=output_format,
+            output_config=output_config,
+        )
+    except SelectError as exc:
+        return _error_response("InvalidRequest", str(exc), 400)
+
+    def generate_events():
+        bytes_scanned = 0
+        bytes_returned = 0
+        for chunk in result_stream:
+            bytes_returned += len(chunk)
+            yield _encode_select_event("Records", chunk)
+        stats_payload = _build_stats_xml(bytes_scanned, bytes_returned)
+        yield _encode_select_event("Stats", stats_payload)
+        yield _encode_select_event("End", b"")
+
+    return Response(generate_events(), mimetype="application/octet-stream", headers={"x-amz-request-charged": "requester"})
+
+
+def _parse_select_input_serialization(el: Element) -> tuple:
+    csv_el = _find_element(el, "CSV")
+    if csv_el is not None:
+        file_header_el = _find_element(csv_el, "FileHeaderInfo")
+        config = {
+            "file_header_info": file_header_el.text.upper() if file_header_el is not None and file_header_el.text else "NONE",
+            "comments": _find_element_text(csv_el, "Comments", "#"),
+            "field_delimiter": _find_element_text(csv_el, "FieldDelimiter", ","),
+            "record_delimiter": _find_element_text(csv_el, "RecordDelimiter", "\n"),
+            "quote_character": _find_element_text(csv_el, "QuoteCharacter", '"'),
+            "quote_escape_character": _find_element_text(csv_el, "QuoteEscapeCharacter", '"'),
+        }
+        return "CSV", config
+    json_el = _find_element(el, "JSON")
+    if json_el is not None:
+        type_el = _find_element(json_el, "Type")
+        config = {
+            "type": type_el.text.upper() if type_el is not None and type_el.text else "DOCUMENT",
+        }
+        return "JSON", config
+    parquet_el = _find_element(el, "Parquet")
+    if parquet_el is not None:
+        return "Parquet", {}
+    raise ValueError("InputSerialization must specify CSV, JSON, or Parquet")
+
+
+def _parse_select_output_serialization(el: Element) -> tuple:
+    csv_el = _find_element(el, "CSV")
+    if csv_el is not None:
+        config = {
+            "field_delimiter": _find_element_text(csv_el, "FieldDelimiter", ","),
+            "record_delimiter": _find_element_text(csv_el, "RecordDelimiter", "\n"),
+            "quote_character": _find_element_text(csv_el, "QuoteCharacter", '"'),
+            "quote_fields": _find_element_text(csv_el, "QuoteFields", "ASNEEDED").upper(),
+        }
+        return "CSV", config
+    json_el = _find_element(el, "JSON")
+    if json_el is not None:
+        config = {
+            "record_delimiter": _find_element_text(json_el, "RecordDelimiter", "\n"),
+        }
+        return "JSON", config
+    raise ValueError("OutputSerialization must specify CSV or JSON")
+
+
+def _encode_select_event(event_type: str, payload: bytes) -> bytes:
+    import struct
+    import binascii
+    headers = _build_event_headers(event_type)
+    headers_length = len(headers)
+    total_length = 4 + 4 + 4 + headers_length + len(payload) + 4
+    prelude = struct.pack(">I", total_length) + struct.pack(">I", headers_length)
+    prelude_crc = binascii.crc32(prelude) & 0xffffffff
+    prelude += struct.pack(">I", prelude_crc)
+    message = prelude + headers + payload
+    message_crc = binascii.crc32(message) & 0xffffffff
+    message += struct.pack(">I", message_crc)
+    return message
+
+
+def _build_event_headers(event_type: str) -> bytes:
+    headers = b""
+    headers += _encode_select_header(":event-type", event_type)
+    if event_type == "Records":
+        headers += _encode_select_header(":content-type", "application/octet-stream")
+    elif event_type == "Stats":
+        headers += _encode_select_header(":content-type", "text/xml")
+    headers += _encode_select_header(":message-type", "event")
+    return headers
+
+
+def _encode_select_header(name: str, value: str) -> bytes:
+    import struct
+    name_bytes = name.encode("utf-8")
+    value_bytes = value.encode("utf-8")
+    header = struct.pack("B", len(name_bytes)) + name_bytes
+    header += struct.pack("B", 7)
+    header += struct.pack(">H", len(value_bytes)) + value_bytes
+    return header
+
+
+def _build_stats_xml(bytes_scanned: int, bytes_returned: int) -> bytes:
+    stats = Element("Stats")
+    SubElement(stats, "BytesScanned").text = str(bytes_scanned)
+    SubElement(stats, "BytesProcessed").text = str(bytes_scanned)
+    SubElement(stats, "BytesReturned").text = str(bytes_returned)
+    return tostring(stats, encoding="utf-8")
 
 
 @s3_api_bp.before_request
