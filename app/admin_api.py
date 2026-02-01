@@ -78,6 +78,16 @@ def _validate_region(region: str) -> Optional[str]:
         return "Region must match format like us-east-1"
     return None
 
+
+def _validate_site_id(site_id: str) -> Optional[str]:
+    """Validate site_id format. Returns error message or None."""
+    if not site_id or len(site_id) > 63:
+        return "site_id must be 1-63 characters"
+    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$', site_id):
+        return "site_id must start with alphanumeric and contain only alphanumeric, hyphens, underscores"
+    return None
+
+
 logger = logging.getLogger(__name__)
 
 admin_api_bp = Blueprint("admin_api", __name__, url_prefix="/admin")
@@ -168,6 +178,25 @@ def update_local_site():
     if not site_id:
         return _json_error("ValidationError", "site_id is required", 400)
 
+    site_id_error = _validate_site_id(site_id)
+    if site_id_error:
+        return _json_error("ValidationError", site_id_error, 400)
+
+    if endpoint:
+        endpoint_error = _validate_endpoint(endpoint)
+        if endpoint_error:
+            return _json_error("ValidationError", endpoint_error, 400)
+
+    if "priority" in payload:
+        priority_error = _validate_priority(payload["priority"])
+        if priority_error:
+            return _json_error("ValidationError", priority_error, 400)
+
+    if "region" in payload:
+        region_error = _validate_region(payload["region"])
+        if region_error:
+            return _json_error("ValidationError", region_error, 400)
+
     registry = _site_registry()
     existing = registry.get_local_site()
 
@@ -220,6 +249,11 @@ def register_peer_site():
 
     if not site_id:
         return _json_error("ValidationError", "site_id is required", 400)
+
+    site_id_error = _validate_site_id(site_id)
+    if site_id_error:
+        return _json_error("ValidationError", site_id_error, 400)
+
     if not endpoint:
         return _json_error("ValidationError", "endpoint is required", 400)
 
@@ -292,6 +326,21 @@ def update_peer_site(site_id: str):
         return _json_error("NotFound", f"Peer site '{site_id}' not found", 404)
 
     payload = request.get_json(silent=True) or {}
+
+    if "endpoint" in payload:
+        endpoint_error = _validate_endpoint(payload["endpoint"])
+        if endpoint_error:
+            return _json_error("ValidationError", endpoint_error, 400)
+
+    if "priority" in payload:
+        priority_error = _validate_priority(payload["priority"])
+        if priority_error:
+            return _json_error("ValidationError", priority_error, 400)
+
+    if "region" in payload:
+        region_error = _validate_region(payload["region"])
+        if region_error:
+            return _json_error("ValidationError", region_error, 400)
 
     peer = PeerSite(
         site_id=site_id,

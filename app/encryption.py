@@ -1,9 +1,9 @@
-"""Encryption providers for server-side and client-side encryption."""
 from __future__ import annotations
 
 import base64
 import io
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -19,6 +19,8 @@ from cryptography.hazmat.primitives import hashes
 if sys.platform != "win32":
     import fcntl
 
+logger = logging.getLogger(__name__)
+
 
 def _set_secure_file_permissions(file_path: Path) -> None:
     """Set restrictive file permissions (owner read/write only)."""
@@ -31,8 +33,10 @@ def _set_secure_file_permissions(file_path: Path) -> None:
                      "/grant:r", f"{username}:F"],
                     check=True, capture_output=True
                 )
-        except (subprocess.SubprocessError, OSError):
-            pass
+            else:
+                logger.warning("Could not set secure permissions on %s: USERNAME not set", file_path)
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("Failed to set secure permissions on %s: %s", file_path, exc)
     else:
         os.chmod(file_path, 0o600)
 
@@ -84,19 +88,31 @@ class EncryptionMetadata:
 
 class EncryptionProvider:
     """Base class for encryption providers."""
-    
+
     def encrypt(self, plaintext: bytes, context: Dict[str, str] | None = None) -> EncryptionResult:
         raise NotImplementedError
-    
+
     def decrypt(self, ciphertext: bytes, nonce: bytes, encrypted_data_key: bytes,
                 key_id: str, context: Dict[str, str] | None = None) -> bytes:
         raise NotImplementedError
-    
+
     def generate_data_key(self) -> tuple[bytes, bytes]:
         """Generate a data key and its encrypted form.
-        
+
         Returns:
             Tuple of (plaintext_key, encrypted_key)
+        """
+        raise NotImplementedError
+
+    def decrypt_data_key(self, encrypted_data_key: bytes, key_id: str | None = None) -> bytes:
+        """Decrypt an encrypted data key.
+
+        Args:
+            encrypted_data_key: The encrypted data key bytes
+            key_id: Optional key identifier (used by KMS providers)
+
+        Returns:
+            The decrypted data key
         """
         raise NotImplementedError
 
@@ -157,13 +173,15 @@ class LocalKeyEncryption(EncryptionProvider):
         except OSError as exc:
             raise EncryptionError(f"Failed to acquire lock for master key: {exc}") from exc
     
+    DATA_KEY_AAD = b'{"purpose":"data_key","version":1}'
+
     def _encrypt_data_key(self, data_key: bytes) -> bytes:
         """Encrypt the data key with the master key."""
         aesgcm = AESGCM(self.master_key)
         nonce = secrets.token_bytes(12)
-        encrypted = aesgcm.encrypt(nonce, data_key, None)
+        encrypted = aesgcm.encrypt(nonce, data_key, self.DATA_KEY_AAD)
         return nonce + encrypted
-    
+
     def _decrypt_data_key(self, encrypted_data_key: bytes) -> bytes:
         """Decrypt the data key using the master key."""
         if len(encrypted_data_key) < 12 + 32 + 16:  # nonce + key + tag
@@ -172,10 +190,17 @@ class LocalKeyEncryption(EncryptionProvider):
         nonce = encrypted_data_key[:12]
         ciphertext = encrypted_data_key[12:]
         try:
-            return aesgcm.decrypt(nonce, ciphertext, None)
-        except Exception as exc:
-            raise EncryptionError(f"Failed to decrypt data key: {exc}") from exc
-    
+            return aesgcm.decrypt(nonce, ciphertext, self.DATA_KEY_AAD)
+        except Exception:
+            try:
+                return aesgcm.decrypt(nonce, ciphertext, None)
+            except Exception as exc:
+                raise EncryptionError(f"Failed to decrypt data key: {exc}") from exc
+
+    def decrypt_data_key(self, encrypted_data_key: bytes, key_id: str | None = None) -> bytes:
+        """Decrypt an encrypted data key (key_id ignored for local encryption)."""
+        return self._decrypt_data_key(encrypted_data_key)
+
     def generate_data_key(self) -> tuple[bytes, bytes]:
         """Generate a data key and its encrypted form."""
         plaintext_key = secrets.token_bytes(32)
@@ -281,10 +306,7 @@ class StreamingEncryptor:
 
         Performance: Writes chunks directly to output buffer instead of accumulating in list.
         """
-        if isinstance(self.provider, LocalKeyEncryption):
-            data_key = self.provider._decrypt_data_key(metadata.encrypted_data_key)
-        else:
-            raise EncryptionError("Unsupported provider for streaming decryption")
+        data_key = self.provider.decrypt_data_key(metadata.encrypted_data_key, metadata.key_id)
 
         aesgcm = AESGCM(data_key)
         base_nonce = metadata.nonce

@@ -34,8 +34,10 @@ def _set_secure_file_permissions(file_path: Path) -> None:
                      "/grant:r", f"{username}:F"],
                     check=True, capture_output=True
                 )
-        except (subprocess.SubprocessError, OSError):
-            pass
+            else:
+                logger.warning("Could not set secure permissions on %s: USERNAME not set", file_path)
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("Failed to set secure permissions on %s: %s", file_path, exc)
     else:
         os.chmod(file_path, 0o600)
 
@@ -127,6 +129,15 @@ class KMSEncryptionProvider(EncryptionProvider):
         except Exception as exc:
             logger.debug("KMS decryption failed: %s", exc)
             raise EncryptionError("Failed to decrypt data") from exc
+
+    def decrypt_data_key(self, encrypted_data_key: bytes, key_id: str | None = None) -> bytes:
+        """Decrypt an encrypted data key using KMS."""
+        if key_id is None:
+            key_id = self.key_id
+        data_key = self.kms.decrypt_data_key(key_id, encrypted_data_key, context=None)
+        if len(data_key) != 32:
+            raise EncryptionError("Invalid data key size")
+        return data_key
 
 
 class KMSManager:

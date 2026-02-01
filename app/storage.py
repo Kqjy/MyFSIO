@@ -46,6 +46,34 @@ else:
             fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def _atomic_lock_file(lock_path: Path, max_retries: int = 10, base_delay: float = 0.1) -> Generator[None, None, None]:
+    """Atomically acquire a lock file with exponential backoff.
+
+    Uses O_EXCL to ensure atomic creation of the lock file.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    for attempt in range(max_retries):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if attempt == max_retries - 1:
+                raise BlockingIOError("Another upload to this key is in progress")
+            delay = base_delay * (2 ** attempt)
+            time.sleep(min(delay, 2.0))
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -1157,36 +1185,28 @@ class ObjectStorage:
                 )
         
         destination.parent.mkdir(parents=True, exist_ok=True)
-        
-        lock_file_path = self._system_bucket_root(bucket_id) / "locks" / f"{safe_key.as_posix().replace('/', '_')}.lock"
-        lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            with lock_file_path.open("w") as lock_file:
-                with _file_lock(lock_file):
-                    if self._is_versioning_enabled(bucket_path) and destination.exists():
-                        self._archive_current_version(bucket_id, safe_key, reason="overwrite")
-                    checksum = hashlib.md5()
-                    with destination.open("wb") as target:
-                        for _, record in validated:
-                            part_path = upload_root / record["filename"]
-                            if not part_path.exists():
-                                raise StorageError(f"Missing part file {record['filename']}")
-                            with part_path.open("rb") as chunk:
-                                while True:
-                                    data = chunk.read(1024 * 1024)
-                                    if not data:
-                                        break
-                                    checksum.update(data)
-                                    target.write(data)
 
+        lock_file_path = self._system_bucket_root(bucket_id) / "locks" / f"{safe_key.as_posix().replace('/', '_')}.lock"
+
+        try:
+            with _atomic_lock_file(lock_file_path):
+                if self._is_versioning_enabled(bucket_path) and destination.exists():
+                    self._archive_current_version(bucket_id, safe_key, reason="overwrite")
+                checksum = hashlib.md5()
+                with destination.open("wb") as target:
+                    for _, record in validated:
+                        part_path = upload_root / record["filename"]
+                        if not part_path.exists():
+                            raise StorageError(f"Missing part file {record['filename']}")
+                        with part_path.open("rb") as chunk:
+                            while True:
+                                data = chunk.read(1024 * 1024)
+                                if not data:
+                                    break
+                                checksum.update(data)
+                                target.write(data)
         except BlockingIOError:
             raise StorageError("Another upload to this key is in progress")
-        finally:
-            try:
-                lock_file_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
         shutil.rmtree(upload_root, ignore_errors=True)
 
@@ -1867,13 +1887,13 @@ class ObjectStorage:
     def _sanitize_object_key(object_key: str, max_length_bytes: int = 1024) -> Path:
         if not object_key:
             raise StorageError("Object key required")
-        if len(object_key.encode("utf-8")) > max_length_bytes:
-            raise StorageError(f"Object key exceeds maximum length of {max_length_bytes} bytes")
         if "\x00" in object_key:
             raise StorageError("Object key contains null bytes")
+        object_key = unicodedata.normalize("NFC", object_key)
+        if len(object_key.encode("utf-8")) > max_length_bytes:
+            raise StorageError(f"Object key exceeds maximum length of {max_length_bytes} bytes")
         if object_key.startswith(("/", "\\")):
             raise StorageError("Object key cannot start with a slash")
-        object_key = unicodedata.normalize("NFC", object_key)
 
         candidate = Path(object_key)
         if ".." in candidate.parts:
