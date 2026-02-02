@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import secrets
 import threading
 import time
@@ -121,7 +122,8 @@ class IamService:
         self._failed_attempts: Dict[str, Deque[datetime]] = {}
         self._last_load_time = 0.0
         self._principal_cache: Dict[str, Tuple[Principal, float]] = {}
-        self._cache_ttl = 10.0
+        self._secret_key_cache: Dict[str, Tuple[str, float]] = {}
+        self._cache_ttl = float(os.environ.get("IAM_CACHE_TTL_SECONDS", "5.0"))
         self._last_stat_check = 0.0
         self._stat_check_interval = 1.0
         self._sessions: Dict[str, Dict[str, Any]] = {}
@@ -139,6 +141,7 @@ class IamService:
             if self.config_path.stat().st_mtime > self._last_load_time:
                 self._load()
                 self._principal_cache.clear()
+                self._secret_key_cache.clear()
         except OSError:
             pass
 
@@ -367,6 +370,9 @@ class IamService:
         user["secret_key"] = new_secret
         self._save()
         self._principal_cache.pop(access_key, None)
+        self._secret_key_cache.pop(access_key, None)
+        from .s3_api import clear_signing_key_cache
+        clear_signing_key_cache()
         self._load()
         return new_secret
 
@@ -385,6 +391,10 @@ class IamService:
             raise IamError("User not found")
         self._raw_config["users"] = remaining
         self._save()
+        self._principal_cache.pop(access_key, None)
+        self._secret_key_cache.pop(access_key, None)
+        from .s3_api import clear_signing_key_cache
+        clear_signing_key_cache()
         self._load()
 
     def update_user_policies(self, access_key: str, policies: Sequence[Dict[str, Any]]) -> None:
@@ -546,10 +556,19 @@ class IamService:
         raise IamError("User not found")
 
     def get_secret_key(self, access_key: str) -> str | None:
+        now = time.time()
+        cached = self._secret_key_cache.get(access_key)
+        if cached:
+            secret_key, cached_time = cached
+            if now - cached_time < self._cache_ttl:
+                return secret_key
+
         self._maybe_reload()
         record = self._users.get(access_key)
         if record:
-            return record["secret_key"]
+            secret_key = record["secret_key"]
+            self._secret_key_cache[access_key] = (secret_key, now)
+            return secret_key
         return None
 
     def get_principal(self, access_key: str) -> Principal | None:

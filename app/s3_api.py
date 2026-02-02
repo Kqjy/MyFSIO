@@ -6,9 +6,12 @@ import hmac
 import logging
 import mimetypes
 import re
+import threading
+import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote, urlencode, urlparse, unquote
 from xml.etree.ElementTree import Element, SubElement, tostring, ParseError
 from defusedxml.ElementTree import fromstring
@@ -181,11 +184,41 @@ def _sign(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
 
+_SIGNING_KEY_CACHE: OrderedDict[Tuple[str, str, str, str], Tuple[bytes, float]] = OrderedDict()
+_SIGNING_KEY_CACHE_LOCK = threading.Lock()
+_SIGNING_KEY_CACHE_TTL = 60.0
+_SIGNING_KEY_CACHE_MAX_SIZE = 256
+
+
+def clear_signing_key_cache() -> None:
+    with _SIGNING_KEY_CACHE_LOCK:
+        _SIGNING_KEY_CACHE.clear()
+
+
 def _get_signature_key(key: str, date_stamp: str, region_name: str, service_name: str) -> bytes:
+    cache_key = (key, date_stamp, region_name, service_name)
+    now = time.time()
+
+    with _SIGNING_KEY_CACHE_LOCK:
+        cached = _SIGNING_KEY_CACHE.get(cache_key)
+        if cached:
+            signing_key, cached_time = cached
+            if now - cached_time < _SIGNING_KEY_CACHE_TTL:
+                _SIGNING_KEY_CACHE.move_to_end(cache_key)
+                return signing_key
+            else:
+                del _SIGNING_KEY_CACHE[cache_key]
+
     k_date = _sign(("AWS4" + key).encode("utf-8"), date_stamp)
     k_region = _sign(k_date, region_name)
     k_service = _sign(k_region, service_name)
     k_signing = _sign(k_service, "aws4_request")
+
+    with _SIGNING_KEY_CACHE_LOCK:
+        if len(_SIGNING_KEY_CACHE) >= _SIGNING_KEY_CACHE_MAX_SIZE:
+            _SIGNING_KEY_CACHE.popitem(last=False)
+        _SIGNING_KEY_CACHE[cache_key] = (k_signing, now)
+
     return k_signing
 
 
