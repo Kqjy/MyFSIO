@@ -6,6 +6,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from fnmatch import fnmatch, translate
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
@@ -13,9 +14,14 @@ from typing import Any, Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 RESOURCE_PREFIX = "arn:aws:s3:::"
 
 
+@lru_cache(maxsize=256)
+def _compile_pattern(pattern: str) -> Pattern[str]:
+    return re.compile(translate(pattern), re.IGNORECASE)
+
+
 def _match_string_like(value: str, pattern: str) -> bool:
-    regex = translate(pattern)
-    return bool(re.match(regex, value, re.IGNORECASE))
+    compiled = _compile_pattern(pattern)
+    return bool(compiled.match(value))
 
 
 def _ip_in_cidr(ip_str: str, cidr: str) -> bool:

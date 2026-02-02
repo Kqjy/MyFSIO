@@ -1469,7 +1469,8 @@ class ObjectStorage:
             
             if meta_files:
                 meta_cache = {}
-                with ThreadPoolExecutor(max_workers=min(64, len(meta_files))) as executor:
+                max_workers = min((os.cpu_count() or 4) * 2, len(meta_files), 16)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     for key, etag in executor.map(read_meta_file, meta_files):
                         if etag:
                             meta_cache[key] = etag
