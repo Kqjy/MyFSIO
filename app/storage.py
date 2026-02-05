@@ -285,6 +285,10 @@ class ObjectStorage:
                 return cached_stats
             raise
 
+        existing_serial = 0
+        if cached_stats is not None:
+            existing_serial = cached_stats.get("_cache_serial", 0)
+
         stats = {
             "objects": object_count,
             "bytes": total_bytes,
@@ -292,6 +296,7 @@ class ObjectStorage:
             "version_bytes": version_bytes,
             "total_objects": object_count + version_count,
             "total_bytes": total_bytes + version_bytes,
+            "_cache_serial": existing_serial,
         }
 
         try:
@@ -323,7 +328,7 @@ class ObjectStorage:
 
         This avoids expensive full directory scans on every PUT/DELETE by
         adjusting the cached values directly. Also signals cross-process cache
-        invalidation by updating the file mtime.
+        invalidation by incrementing _cache_serial.
         """
         cache_path = self._system_bucket_root(bucket_id) / "stats.json"
         try:
@@ -331,13 +336,14 @@ class ObjectStorage:
             if cache_path.exists():
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
             else:
-                data = {"objects": 0, "bytes": 0, "version_count": 0, "version_bytes": 0, "total_objects": 0, "total_bytes": 0}
+                data = {"objects": 0, "bytes": 0, "version_count": 0, "version_bytes": 0, "total_objects": 0, "total_bytes": 0, "_cache_serial": 0}
             data["objects"] = max(0, data.get("objects", 0) + objects_delta)
             data["bytes"] = max(0, data.get("bytes", 0) + bytes_delta)
             data["version_count"] = max(0, data.get("version_count", 0) + version_count_delta)
             data["version_bytes"] = max(0, data.get("version_bytes", 0) + version_bytes_delta)
             data["total_objects"] = max(0, data.get("total_objects", 0) + objects_delta + version_count_delta)
             data["total_bytes"] = max(0, data.get("total_bytes", 0) + bytes_delta + version_bytes_delta)
+            data["_cache_serial"] = data.get("_cache_serial", 0) + 1
             cache_path.write_text(json.dumps(data), encoding="utf-8")
         except (OSError, json.JSONDecodeError):
             pass
@@ -1679,15 +1685,16 @@ class ObjectStorage:
             pass
 
     def _get_cache_marker_mtime(self, bucket_id: str) -> float:
-        """Get the mtime of stats.json for cross-process cache invalidation.
+        """Get the cache serial from stats.json for cross-process cache invalidation.
 
-        Uses stats.json because it's already updated on every object change
-        via _update_bucket_stats_cache.
+        Uses _cache_serial field instead of file mtime because Windows filesystem
+        caching can delay mtime visibility across processes.
         """
         stats_path = self._system_bucket_root(bucket_id) / "stats.json"
         try:
-            return stats_path.stat().st_mtime
-        except OSError:
+            data = json.loads(stats_path.read_text(encoding="utf-8"))
+            return float(data.get("_cache_serial", 0))
+        except (OSError, json.JSONDecodeError):
             return 0
 
     def _update_object_cache_entry(self, bucket_id: str, key: str, meta: Optional[ObjectMeta]) -> None:
