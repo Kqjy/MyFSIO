@@ -1627,7 +1627,7 @@ class ObjectStorage:
 
         Uses LRU eviction to prevent unbounded cache growth.
         Thread-safe with per-bucket locks to reduce contention.
-        Checks stats.json mtime for cross-process cache invalidation.
+        Checks stats.json for cross-process cache invalidation.
         """
         now = time.time()
         current_stats_mtime = self._get_cache_marker_mtime(bucket_id)
@@ -1635,7 +1635,7 @@ class ObjectStorage:
         with self._cache_lock:
             cached = self._object_cache.get(bucket_id)
             if cached:
-                objects, timestamp, cached_stats_mtime = cached             
+                objects, timestamp, cached_stats_mtime = cached
                 if now - timestamp < self._cache_ttl and current_stats_mtime == cached_stats_mtime:
                     self._object_cache.move_to_end(bucket_id)
                     return objects
@@ -1665,6 +1665,8 @@ class ObjectStorage:
 
                 self._object_cache[bucket_id] = (objects, time.time(), new_stats_mtime)
                 self._object_cache.move_to_end(bucket_id)
+                self._cache_version[bucket_id] = current_version + 1
+                self._sorted_key_cache.pop(bucket_id, None)
 
         return objects
 
