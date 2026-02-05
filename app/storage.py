@@ -177,7 +177,7 @@ class ObjectStorage:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._ensure_system_roots()
-        self._object_cache: OrderedDict[str, tuple[Dict[str, ObjectMeta], float]] = OrderedDict()
+        self._object_cache: OrderedDict[str, tuple[Dict[str, ObjectMeta], float, float]] = OrderedDict()
         self._cache_lock = threading.Lock()
         self._bucket_locks: Dict[str, threading.Lock] = {}
         self._cache_version: Dict[str, int] = {}
@@ -1621,39 +1621,43 @@ class ObjectStorage:
 
         Uses LRU eviction to prevent unbounded cache growth.
         Thread-safe with per-bucket locks to reduce contention.
-        Also checks file-based marker for cross-process cache invalidation.
+        Checks stats.json mtime for cross-process cache invalidation.
         """
         now = time.time()
-        marker_mtime = self._get_cache_marker_mtime(bucket_id)
+        current_stats_mtime = self._get_cache_marker_mtime(bucket_id)
 
         with self._cache_lock:
             cached = self._object_cache.get(bucket_id)
             if cached:
-                objects, timestamp = cached
-                if now - timestamp < self._cache_ttl and marker_mtime <= timestamp:
+                objects, timestamp, cached_stats_mtime = cached             
+                if now - timestamp < self._cache_ttl and current_stats_mtime == cached_stats_mtime:
                     self._object_cache.move_to_end(bucket_id)
                     return objects
             cache_version = self._cache_version.get(bucket_id, 0)
 
         bucket_lock = self._get_bucket_lock(bucket_id)
         with bucket_lock:
+            current_stats_mtime = self._get_cache_marker_mtime(bucket_id)
             with self._cache_lock:
                 cached = self._object_cache.get(bucket_id)
                 if cached:
-                    objects, timestamp = cached
-                    if now - timestamp < self._cache_ttl and marker_mtime <= timestamp:
+                    objects, timestamp, cached_stats_mtime = cached
+                    if now - timestamp < self._cache_ttl and current_stats_mtime == cached_stats_mtime:
                         self._object_cache.move_to_end(bucket_id)
                         return objects
+
             objects = self._build_object_cache(bucket_path)
+            new_stats_mtime = self._get_cache_marker_mtime(bucket_id)
 
             with self._cache_lock:
                 current_version = self._cache_version.get(bucket_id, 0)
                 if current_version != cache_version:
                     objects = self._build_object_cache(bucket_path)
+                    new_stats_mtime = self._get_cache_marker_mtime(bucket_id)
                 while len(self._object_cache) >= self._object_cache_max_size:
                     self._object_cache.popitem(last=False)
 
-                self._object_cache[bucket_id] = (objects, time.time())
+                self._object_cache[bucket_id] = (objects, time.time(), new_stats_mtime)
                 self._object_cache.move_to_end(bucket_id)
 
         return objects
@@ -1695,7 +1699,7 @@ class ObjectStorage:
         with self._cache_lock:
             cached = self._object_cache.get(bucket_id)
             if cached:
-                objects, timestamp = cached
+                objects, timestamp, stats_mtime = cached
                 if meta is None:
                     objects.pop(key, None)
                 else:
