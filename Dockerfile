@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM python:3.14.3-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -6,7 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install build deps for any wheels that need compilation, then clean up
 RUN apt-get update \ 
     && apt-get install -y --no-install-recommends build-essential \ 
     && rm -rf /var/lib/apt/lists/*
@@ -16,10 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Make entrypoint executable
 RUN chmod +x docker-entrypoint.sh
 
-# Create data directory and set permissions
 RUN mkdir -p /app/data \
     && useradd -m -u 1000 myfsio \ 
     && chown -R myfsio:myfsio /app

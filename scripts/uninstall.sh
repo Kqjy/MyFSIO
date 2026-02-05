@@ -88,7 +88,8 @@ echo "The following items will be removed:"
 echo ""
 echo "  Install directory: $INSTALL_DIR"
 if [[ "$KEEP_DATA" != true ]]; then
-    echo "  Data directory:    $DATA_DIR (ALL YOUR DATA WILL BE DELETED!)"
+    echo "  Data directory:    $DATA_DIR"
+    echo "                     [!] ALL DATA, IAM USERS, AND ENCRYPTION KEYS WILL BE DELETED!"
 else
     echo "  Data directory:    $DATA_DIR (WILL BE KEPT)"
 fi
@@ -227,8 +228,15 @@ echo ""
 if [[ "$KEEP_DATA" == true ]]; then
     echo "Your data has been preserved at: $DATA_DIR"
     echo ""
-    echo "To reinstall MyFSIO with existing data, run:"
-    echo "  curl -fsSL https://go.jzwsite.com/myfsio-install | sudo bash"
+    echo "Preserved files include:"
+    echo "  - All buckets and objects"
+    echo "  - IAM configuration: $DATA_DIR/.myfsio.sys/config/iam.json"
+    echo "  - Bucket policies:   $DATA_DIR/.myfsio.sys/config/bucket_policies.json"
+    echo "  - Secret key:        $DATA_DIR/.myfsio.sys/config/.secret"
+    echo "  - Encryption keys:   $DATA_DIR/.myfsio.sys/keys/ (if encryption was enabled)"
+    echo ""
+    echo "To reinstall MyFSIO with existing data:"
+    echo "  ./install.sh --data-dir $DATA_DIR"
     echo ""
 fi
 
