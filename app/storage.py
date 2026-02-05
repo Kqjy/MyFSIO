@@ -1685,15 +1685,17 @@ class ObjectStorage:
             pass
 
     def _get_cache_marker_mtime(self, bucket_id: str) -> float:
-        """Get the cache serial from stats.json for cross-process cache invalidation.
+        """Get a cache marker combining serial and object count for cross-process invalidation.
 
-        Uses _cache_serial field instead of file mtime because Windows filesystem
-        caching can delay mtime visibility across processes.
+        Returns a combined value that changes if either _cache_serial or object count changes.
+        This handles cases where the serial was reset but object count differs.
         """
         stats_path = self._system_bucket_root(bucket_id) / "stats.json"
         try:
             data = json.loads(stats_path.read_text(encoding="utf-8"))
-            return float(data.get("_cache_serial", 0))
+            serial = data.get("_cache_serial", 0)
+            count = data.get("objects", 0)
+            return float(serial * 1000000 + count)
         except (OSError, json.JSONDecodeError):
             return 0
 
