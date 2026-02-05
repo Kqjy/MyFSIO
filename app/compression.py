@@ -36,10 +36,11 @@ class GzipMiddleware:
         content_type = None
         content_length = None
         should_compress = False
+        is_streaming = False
         exc_info_holder = [None]
 
         def custom_start_response(status: str, headers: List[Tuple[str, str]], exc_info=None):
-            nonlocal response_started, status_code, response_headers, content_type, content_length, should_compress
+            nonlocal response_started, status_code, response_headers, content_type, content_length, should_compress, is_streaming
             response_started = True
             status_code = int(status.split(' ', 1)[0])
             response_headers = list(headers)
@@ -54,6 +55,9 @@ class GzipMiddleware:
                 elif name_lower == 'content-encoding':
                     should_compress = False
                     return start_response(status, headers, exc_info)
+                elif name_lower == 'x-stream-response':
+                    is_streaming = True
+                    return start_response(status, headers, exc_info)
 
             if content_type and content_type in COMPRESSIBLE_MIMES:
                 if content_length is None or content_length >= self.min_size:
@@ -61,7 +65,12 @@ class GzipMiddleware:
 
             return None
 
-        response_body = b''.join(self.app(environ, custom_start_response))
+        app_iter = self.app(environ, custom_start_response)
+
+        if is_streaming:
+            return app_iter
+
+        response_body = b''.join(app_iter)
 
         if not response_started:
             return [response_body]

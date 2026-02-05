@@ -711,6 +711,7 @@ def stream_bucket_objects(bucket_name: str):
         headers={
             'Cache-Control': 'no-cache',
             'X-Accel-Buffering': 'no',
+            'X-Stream-Response': 'true',
         }
     )
 
