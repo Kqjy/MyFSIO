@@ -451,10 +451,10 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
           <span class="docs-section-kicker">03</span>
           <h2 class="h4 mb-0">Authenticate &amp; manage IAM</h2>
         </div>
-        <p class="text-muted">MyFSIO seeds <code>data/.myfsio.sys/config/iam.json</code> with <code>localadmin/localadmin</code>. Sign in once, rotate it, then grant least-privilege access to teammates and tools.</p>
+        <p class="text-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Missed it? Check <code>data/.myfsio.sys/config/iam.json</code> directly—credentials are stored in plaintext.</p>
         <div class="docs-highlight mb-3">
           <ol class="mb-0">
-            <li>Visit <code>/ui/login</code>, enter the bootstrap credentials, and rotate them immediately from the IAM page.</li>
+            <li>Check the console output (or <code>iam.json</code>) for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/ui/login</code>.</li>
             <li>Create additional users with descriptive display names and AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>).</li>
             <li>Rotate secrets when sharing with CI jobs—new secrets display once and persist to <code>data/.myfsio.sys/config/iam.json</code>.</li>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
@@ -2136,8 +2136,8 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
             <code class="d-block">{{ api_base }}</code>
           </div>
           <div>
-            <div class="small text-uppercase text-muted">Sample user</div>
-            <code class="d-block">localadmin / localadmin</code>
+            <div class="small text-uppercase text-muted">Initial credentials</div>
+            <span class="text-muted small">Generated on first run (check console)</span>
           </div>
           <div>
             <div class="small text-uppercase text-muted">Logs</div>

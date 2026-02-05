@@ -220,13 +220,16 @@ def _bucket_access_descriptor(policy: dict[str, Any] | None) -> tuple[str, str]:
 
 
 def _current_principal():
-    creds = session.get("credentials")
+    token = session.get("cred_token")
+    creds = _secret_store().peek(token) if token else None
     if not creds:
         return None
     try:
         return _iam().authenticate(creds["access_key"], creds["secret_key"])
     except IamError:
-        session.pop("credentials", None)
+        session.pop("cred_token", None)
+        if token:
+            _secret_store().pop(token)
         return None
 
 
@@ -251,7 +254,8 @@ def _authorize_ui(principal, bucket_name: str | None, action: str, *, object_key
 
 
 def _api_headers() -> dict[str, str]:
-    creds = session.get("credentials") or {}
+    token = session.get("cred_token")
+    creds = _secret_store().peek(token) or {}
     return {
         "X-Access-Key": creds.get("access_key", ""),
         "X-Secret-Key": creds.get("secret_key", ""),
@@ -296,7 +300,9 @@ def login():
         except IamError as exc:
             flash(_friendly_error_message(exc), "danger")
             return render_template("login.html")
-        session["credentials"] = {"access_key": access_key, "secret_key": secret_key}
+        creds = {"access_key": access_key, "secret_key": secret_key}
+        token = _secret_store().remember(creds, ttl=3600)
+        session["cred_token"] = token
         session.permanent = True
         flash(f"Welcome back, {principal.display_name}", "success")
         return redirect(url_for("ui.buckets_overview"))
@@ -305,7 +311,9 @@ def login():
 
 @ui_bp.post("/logout")
 def logout():
-    session.pop("credentials", None)
+    token = session.pop("cred_token", None)
+    if token:
+        _secret_store().pop(token)
     flash("Signed out", "info")
     return redirect(url_for("ui.login"))
 
@@ -542,7 +550,10 @@ def list_bucket_objects(bucket_name: str):
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
 
-    max_keys = min(int(request.args.get("max_keys", 1000)), 100000)
+    try:
+        max_keys = min(int(request.args.get("max_keys", 1000)), 100000)
+    except ValueError:
+        return jsonify({"error": "max_keys must be an integer"}), 400
     continuation_token = request.args.get("continuation_token") or None
     prefix = request.args.get("prefix") or None
 

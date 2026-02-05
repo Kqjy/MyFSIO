@@ -619,12 +619,14 @@ MyFSIO implements a comprehensive Identity and Access Management (IAM) system th
 
 ### Getting Started
 
-1. On first boot, `data/.myfsio.sys/config/iam.json` is seeded with `localadmin / localadmin` that has wildcard access.
-2. Sign into the UI using those credentials, then open **IAM**:
+1. On first boot, `data/.myfsio.sys/config/iam.json` is created with a randomly generated admin user. The access key and secret key are printed to the console during first startup. If you miss it, check the `iam.json` file directly—credentials are stored in plaintext.
+2. Sign into the UI using the generated credentials, then open **IAM**:
    - **Create user**: supply a display name and optional JSON inline policy array.
    - **Rotate secret**: generates a new secret key; the UI surfaces it once.
    - **Policy editor**: select a user, paste an array of objects (`{"bucket": "*", "actions": ["list", "read"]}`), and submit. Alias support includes AWS-style verbs (e.g., `s3:GetObject`).
 3. Wildcard action `iam:*` is supported for admin user definitions.
+
+> **Breaking Change (v0.2.0+):** Previous versions used fixed default credentials (`localadmin/localadmin`). If upgrading from an older version, your existing credentials remain unchanged, but new installations will generate random credentials.
 
 ### Authentication
 

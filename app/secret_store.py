@@ -18,6 +18,18 @@ class EphemeralSecretStore:
         self._store[token] = (payload, expires_at)
         return token
 
+    def peek(self, token: str | None) -> Any | None:
+        if not token:
+            return None
+        entry = self._store.get(token)
+        if not entry:
+            return None
+        payload, expires_at = entry
+        if expires_at < time.time():
+            self._store.pop(token, None)
+            return None
+        return payload
+
     def pop(self, token: str | None) -> Any | None:
         if not token:
             return None
