@@ -529,11 +529,13 @@ class IamService:
         return candidate if candidate in ALLOWED_ACTIONS else ""
 
     def _write_default(self) -> None:
+        access_key = secrets.token_hex(12)
+        secret_key = secrets.token_urlsafe(32)
         default = {
             "users": [
                 {
-                    "access_key": "localadmin",
-                    "secret_key": "localadmin",
+                    "access_key": access_key,
+                    "secret_key": secret_key,
                     "display_name": "Local Admin",
                     "policies": [
                         {"bucket": "*", "actions": list(ALLOWED_ACTIONS)}
@@ -542,6 +544,14 @@ class IamService:
             ]
         }
         self.config_path.write_text(json.dumps(default, indent=2))
+        print(f"\n{'='*60}")
+        print("MYFSIO FIRST RUN - ADMIN CREDENTIALS GENERATED")
+        print(f"{'='*60}")
+        print(f"Access Key: {access_key}")
+        print(f"Secret Key: {secret_key}")
+        print(f"{'='*60}")
+        print(f"Missed this? Check: {self.config_path}")
+        print(f"{'='*60}\n")
 
     def _generate_access_key(self) -> str:
         return secrets.token_hex(8)

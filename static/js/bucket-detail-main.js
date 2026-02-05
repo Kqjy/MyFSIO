@@ -182,6 +182,9 @@
   let visibleItems = [];
   let renderedRange = { start: 0, end: 0 };
 
+  let memoizedVisibleItems = null;
+  let memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
+
   const createObjectRow = (obj, displayKey = null) => {
     const tr = document.createElement('tr');
     tr.dataset.objectRow = '';
@@ -340,7 +343,21 @@
     }
   };
 
-  const computeVisibleItems = () => {
+  const computeVisibleItems = (forceRecompute = false) => {
+    const currentInputs = {
+      objectCount: allObjects.length,
+      prefix: currentPrefix,
+      filterTerm: currentFilterTerm
+    };
+
+    if (!forceRecompute &&
+        memoizedVisibleItems !== null &&
+        memoizedInputs.objectCount === currentInputs.objectCount &&
+        memoizedInputs.prefix === currentInputs.prefix &&
+        memoizedInputs.filterTerm === currentInputs.filterTerm) {
+      return memoizedVisibleItems;
+    }
+
     const items = [];
     const folders = new Set();
 
@@ -381,6 +398,8 @@
       return aKey.localeCompare(bKey);
     });
 
+    memoizedVisibleItems = items;
+    memoizedInputs = currentInputs;
     return items;
   };
 
@@ -533,6 +552,8 @@
     loadedObjectCount = 0;
     totalObjectCount = 0;
     allObjects = [];
+    memoizedVisibleItems = null;
+    memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
     pendingStreamObjects = [];
 
     streamAbortController = new AbortController();
@@ -643,6 +664,8 @@
       loadedObjectCount = 0;
       totalObjectCount = 0;
       allObjects = [];
+      memoizedVisibleItems = null;
+      memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
     }
 
     if (append && loadMoreSpinner) {
@@ -985,12 +1008,14 @@
   };
 
   const navigateToFolder = (prefix) => {
+    if (streamAbortController) {
+      streamAbortController.abort();
+      streamAbortController = null;
+    }
+
     currentPrefix = prefix;
 
     if (scrollContainer) scrollContainer.scrollTop = 0;
-
-    refreshVirtualList();
-    renderBreadcrumb(prefix);
 
     selectedRows.clear();
 
@@ -1001,6 +1026,9 @@
     if (previewPanel) previewPanel.classList.add('d-none');
     if (previewEmpty) previewEmpty.classList.remove('d-none');
     activeRow = null;
+
+    isLoadingObjects = false;
+    loadObjects(false);
   };
 
   const renderObjectsView = () => {

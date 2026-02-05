@@ -398,6 +398,14 @@
             <option value="24" selected>Last 24 hours</option>
             <option value="168">Last 7 days</option>
           </select>
+          <select class="form-select form-select-sm" id="maxDataPoints" style="width: auto;" title="Maximum data points to display">
+            <option value="100">100 points</option>
+            <option value="250">250 points</option>
+            <option value="500" selected>500 points</option>
+            <option value="1000">1000 points</option>
+            <option value="2000">2000 points</option>
+            <option value="0">Unlimited</option>
+          </select>
         </div>
       </div>
       <div class="card-body p-4">
@@ -817,8 +825,8 @@
   var diskChart = null;
   var historyStatus = document.getElementById('historyStatus');
   var timeRangeSelect = document.getElementById('historyTimeRange');
+  var maxDataPointsSelect = document.getElementById('maxDataPoints');
   var historyTimer = null;
-  var MAX_DATA_POINTS = 500;
 
   function createChart(ctx, label, color) {
     return new Chart(ctx, {
@@ -889,7 +897,8 @@
           if (historyStatus) historyStatus.textContent = 'No history data available yet. Data is recorded every ' + (data.interval_minutes || 5) + ' minutes.';
           return;
         }
-        var history = data.history.slice(-MAX_DATA_POINTS);
+        var maxPoints = maxDataPointsSelect ? parseInt(maxDataPointsSelect.value, 10) : 500;
+        var history = maxPoints > 0 ? data.history.slice(-maxPoints) : data.history;
         var labels = history.map(function(h) { return formatTime(h.timestamp); });
         var cpuData = history.map(function(h) { return h.cpu_percent; });
         var memData = history.map(function(h) { return h.memory_percent; });
@@ -925,6 +934,10 @@
 
   if (timeRangeSelect) {
     timeRangeSelect.addEventListener('change', loadHistory);
+  }
+
+  if (maxDataPointsSelect) {
+    maxDataPointsSelect.addEventListener('change', loadHistory);
   }
 
   document.addEventListener('visibilitychange', function() {

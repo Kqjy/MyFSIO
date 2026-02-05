@@ -1004,7 +1004,8 @@ def _apply_object_headers(
     response.headers["ETag"] = f'"{etag}"'
     response.headers["Accept-Ranges"] = "bytes"
     for key, value in (metadata or {}).items():
-        response.headers[f"X-Amz-Meta-{key}"] = value
+        safe_value = _sanitize_header_value(str(value))
+        response.headers[f"X-Amz-Meta-{key}"] = safe_value
 
 
 def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
@@ -2342,10 +2343,12 @@ def _post_object(bucket_name: str) -> Response:
     success_action_redirect = request.form.get("success_action_redirect")
     if success_action_redirect:
         allowed_hosts = current_app.config.get("ALLOWED_REDIRECT_HOSTS", [])
+        if not allowed_hosts:
+            allowed_hosts = [request.host]
         parsed = urlparse(success_action_redirect)
         if parsed.scheme not in ("http", "https"):
             return _error_response("InvalidArgument", "Redirect URL must use http or https", 400)
-        if allowed_hosts and parsed.netloc not in allowed_hosts:
+        if parsed.netloc not in allowed_hosts:
             return _error_response("InvalidArgument", "Redirect URL host not allowed", 400)
         redirect_url = f"{success_action_redirect}?bucket={bucket_name}&key={quote(object_key)}&etag={meta.etag}"
         return Response(status=303, headers={"Location": redirect_url})
@@ -2773,9 +2776,14 @@ def object_handler(bucket_name: str, object_key: str):
                 except StorageError as exc:
                     return _error_response("InternalError", str(exc), 500)
             else:
-                stat = path.stat()
-                file_size = stat.st_size
-                etag = storage._compute_etag(path)
+                try:
+                    stat = path.stat()
+                    file_size = stat.st_size
+                    etag = storage._compute_etag(path)
+                except PermissionError:
+                    return _error_response("AccessDenied", "Permission denied accessing object", 403)
+                except OSError as exc:
+                    return _error_response("InternalError", f"Failed to access object: {exc}", 500)
 
                 if range_header:
                     try:
@@ -2816,13 +2824,22 @@ def object_handler(bucket_name: str, object_key: str):
                 except StorageError as exc:
                     return _error_response("InternalError", str(exc), 500)
             else:
-                stat = path.stat()
-                response = Response(status=200)
-                etag = storage._compute_etag(path)
+                try:
+                    stat = path.stat()
+                    response = Response(status=200)
+                    etag = storage._compute_etag(path)
+                except PermissionError:
+                    return _error_response("AccessDenied", "Permission denied accessing object", 403)
+                except OSError as exc:
+                    return _error_response("InternalError", f"Failed to access object: {exc}", 500)
             response.headers["Content-Type"] = mimetype
             logged_bytes = 0
 
-        _apply_object_headers(response, file_stat=path.stat() if not is_encrypted else None, metadata=metadata, etag=etag)
+        try:
+            file_stat = path.stat() if not is_encrypted else None
+        except (PermissionError, OSError):
+            file_stat = None
+        _apply_object_headers(response, file_stat=file_stat, metadata=metadata, etag=etag)
 
         if request.method == "GET":
             response_overrides = {

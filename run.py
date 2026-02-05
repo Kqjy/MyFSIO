@@ -5,6 +5,7 @@ import argparse
 import os
 import sys
 import warnings
+import multiprocessing
 from multiprocessing import Process
 from pathlib import Path
 
@@ -87,6 +88,10 @@ def serve_ui(port: int, prod: bool = False, config: Optional[AppConfig] = None) 
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    if _is_frozen():
+        multiprocessing.set_start_method("spawn", force=True)
+
     parser = argparse.ArgumentParser(description="Run the S3 clone services.")
     parser.add_argument("--mode", choices=["api", "ui", "both"], default="both")
     parser.add_argument("--api-port", type=int, default=5000)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -353,6 +354,10 @@ def update_peer_site(site_id: str):
         region_error = _validate_region(payload["region"])
         if region_error:
             return _json_error("ValidationError", region_error, 400)
+
+    if "connection_id" in payload:
+        if payload["connection_id"] and not _connections().get(payload["connection_id"]):
+            return _json_error("ValidationError", f"Connection '{payload['connection_id']}' not found", 400)
 
     peer = PeerSite(
         site_id=site_id,
