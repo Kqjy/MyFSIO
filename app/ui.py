@@ -594,7 +594,7 @@ def list_bucket_objects(bucket_name: str):
             "etag": obj.etag,
         })
 
-    return jsonify({
+    response = jsonify({
         "objects": objects_data,
         "is_truncated": result.is_truncated,
         "next_continuation_token": result.next_continuation_token,
@@ -613,6 +613,8 @@ def list_bucket_objects(bucket_name: str):
             "metadata": metadata_template,
         },
     })
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @ui_bp.get("/buckets/<bucket_name>/objects/stream")

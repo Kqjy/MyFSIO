@@ -522,7 +522,7 @@ class ObjectStorage:
 
     def get_object_path(self, bucket_name: str, object_key: str) -> Path:
         path = self._object_path(bucket_name, object_key)
-        if not path.exists():
+        if not path.is_file():
             raise ObjectNotFoundError("Object not found")
         return path
 

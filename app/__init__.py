@@ -263,11 +263,37 @@ def create_app(
 
     @app.errorhandler(500)
     def internal_error(error):
-        return render_template('500.html'), 500
+        wants_html = request.accept_mimetypes.accept_html
+        path = request.path or ""
+        if include_ui and wants_html and (path.startswith("/ui") or path == "/"):
+            return render_template('500.html'), 500
+        error_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Error>'
+            '<Code>InternalError</Code>'
+            '<Message>An internal server error occurred</Message>'
+            f'<Resource>{path}</Resource>'
+            f'<RequestId>{getattr(g, "request_id", "-")}</RequestId>'
+            '</Error>'
+        )
+        return error_xml, 500, {'Content-Type': 'application/xml'}
 
     @app.errorhandler(CSRFError)
     def handle_csrf_error(e):
-        return render_template('csrf_error.html', reason=e.description), 400
+        wants_html = request.accept_mimetypes.accept_html
+        path = request.path or ""
+        if include_ui and wants_html and (path.startswith("/ui") or path == "/"):
+            return render_template('csrf_error.html', reason=e.description), 400
+        error_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Error>'
+            '<Code>CSRFError</Code>'
+            f'<Message>{e.description}</Message>'
+            f'<Resource>{path}</Resource>'
+            f'<RequestId>{getattr(g, "request_id", "-")}</RequestId>'
+            '</Error>'
+        )
+        return error_xml, 400, {'Content-Type': 'application/xml'}
 
     @app.template_filter("filesizeformat")
     def filesizeformat(value: int) -> str:
