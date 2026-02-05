@@ -301,7 +301,8 @@ def login():
             flash(_friendly_error_message(exc), "danger")
             return render_template("login.html")
         creds = {"access_key": access_key, "secret_key": secret_key}
-        token = _secret_store().remember(creds, ttl=3600)
+        ttl = int(current_app.permanent_session_lifetime.total_seconds())
+        token = _secret_store().remember(creds, ttl=ttl)
         session["cred_token"] = token
         session.permanent = True
         flash(f"Welcome back, {principal.display_name}", "success")
