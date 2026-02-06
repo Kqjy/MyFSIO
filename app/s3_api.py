@@ -999,7 +999,8 @@ def _apply_object_headers(
     etag: str,
 ) -> None:
     if file_stat is not None:
-        response.headers["Content-Length"] = str(file_stat.st_size)
+        if response.status_code != 206:
+            response.headers["Content-Length"] = str(file_stat.st_size)
         response.headers["Last-Modified"] = http_date(file_stat.st_mtime)
     response.headers["ETag"] = f'"{etag}"'
     response.headers["Accept-Ranges"] = "bytes"
