@@ -516,6 +516,9 @@
     };
   };
 
+  let lastStreamRenderTime = 0;
+  const STREAM_RENDER_THROTTLE_MS = 500;
+
   const flushPendingStreamObjects = () => {
     if (pendingStreamObjects.length === 0) return;
     const batch = pendingStreamObjects.splice(0, pendingStreamObjects.length);
@@ -532,6 +535,19 @@
         loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()}${countText} loading...`;
       }
     }
+    if (objectsLoadingRow && objectsLoadingRow.parentNode) {
+      const loadingText = objectsLoadingRow.querySelector('p');
+      if (loadingText) {
+        const countText = totalObjectCount > 0 ? ` of ${totalObjectCount.toLocaleString()}` : '';
+        loadingText.textContent = `Loading ${loadedObjectCount.toLocaleString()}${countText} objects...`;
+      }
+    }
+    const now = performance.now();
+    if (!streamingComplete && now - lastStreamRenderTime < STREAM_RENDER_THROTTLE_MS) {
+      streamRenderScheduled = false;
+      return;
+    }
+    lastStreamRenderTime = now;
     refreshVirtualList();
     streamRenderScheduled = false;
   };
@@ -555,6 +571,7 @@
     memoizedVisibleItems = null;
     memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
     pendingStreamObjects = [];
+    lastStreamRenderTime = 0;
 
     streamAbortController = new AbortController();
 
@@ -569,7 +586,10 @@
         throw new Error(`HTTP ${response.status}`);
       }
 
-      if (objectsLoadingRow) objectsLoadingRow.remove();
+      if (objectsLoadingRow) {
+        const loadingText = objectsLoadingRow.querySelector('p');
+        if (loadingText) loadingText.textContent = 'Receiving objects...';
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -597,6 +617,10 @@
                 break;
               case 'count':
                 totalObjectCount = msg.total_count || 0;
+                if (objectsLoadingRow) {
+                  const loadingText = objectsLoadingRow.querySelector('p');
+                  if (loadingText) loadingText.textContent = `Loading 0 of ${totalObjectCount.toLocaleString()} objects...`;
+                }
                 break;
               case 'object':
                 pendingStreamObjects.push(processStreamObject(msg));
@@ -630,10 +654,14 @@
         } catch (e) { }
       }
 
-      flushPendingStreamObjects();
       streamingComplete = true;
+      flushPendingStreamObjects();
       hasMoreObjects = false;
       updateObjectCountBadge();
+
+      if (objectsLoadingRow && objectsLoadingRow.parentNode) {
+        objectsLoadingRow.remove();
+      }
 
       if (loadMoreStatus) {
         loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;

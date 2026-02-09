@@ -309,6 +309,18 @@ class IamService:
         if not self._is_allowed(principal, normalized, action):
             raise IamError(f"Access denied for action '{action}' on bucket '{bucket_name}'")
 
+    def check_permissions(self, principal: Principal, bucket_name: str | None, actions: Iterable[str]) -> Dict[str, bool]:
+        self._maybe_reload()
+        bucket_name = (bucket_name or "*").lower() if bucket_name != "*" else (bucket_name or "*")
+        normalized_actions = {a: self._normalize_action(a) for a in actions}
+        results: Dict[str, bool] = {}
+        for original, canonical in normalized_actions.items():
+            if canonical not in ALLOWED_ACTIONS:
+                results[original] = False
+            else:
+                results[original] = self._is_allowed(principal, bucket_name, canonical)
+        return results
+
     def buckets_for_principal(self, principal: Principal, buckets: Iterable[str]) -> List[str]:
         return [bucket for bucket in buckets if self._is_allowed(principal, bucket, "list")]
 
