@@ -11,6 +11,7 @@ import time
 import unicodedata
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -187,6 +188,7 @@ class ObjectStorage:
         self._object_cache_max_size = object_cache_max_size
         self._object_key_max_length_bytes = object_key_max_length_bytes
         self._sorted_key_cache: Dict[str, tuple[list[str], int]] = {}
+        self._cleanup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ParentCleanup")
 
     def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
         """Get or create a lock for a specific bucket. Reduces global lock contention."""
@@ -544,11 +546,14 @@ class ObjectStorage:
         return self._read_metadata(bucket_path.name, safe_key) or {}
 
     def _cleanup_empty_parents(self, path: Path, stop_at: Path) -> None:
-        """Remove empty parent directories up to (but not including) stop_at.
-        
+        """Remove empty parent directories in a background thread.
+
         On Windows/OneDrive, directories may be locked briefly after file deletion.
-        This method retries with a small delay to handle that case.
+        Running this in the background avoids blocking the request thread with retries.
         """
+        self._cleanup_executor.submit(self._do_cleanup_empty_parents, path, stop_at)
+
+    def _do_cleanup_empty_parents(self, path: Path, stop_at: Path) -> None:
         for parent in path.parents:
             if parent == stop_at:
                 break
@@ -556,7 +561,7 @@ class ObjectStorage:
                 try:
                     if parent.exists() and not any(parent.iterdir()):
                         parent.rmdir()
-                        break 
+                        break
                 except OSError:
                     if attempt < 2:
                         time.sleep(0.1)

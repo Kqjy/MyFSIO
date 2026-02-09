@@ -423,57 +423,25 @@ def bucket_detail(bucket_name: str):
         },
         indent=2,
     )
-    can_edit_policy = False
-    if principal:
-        try:
-            _iam().authorize(principal, bucket_name, "policy")
-            can_edit_policy = True
-        except IamError:
-            can_edit_policy = False
+    iam = _iam()
+    bucket_perms = iam.check_permissions(
+        principal, bucket_name, ["policy", "lifecycle", "cors", "write", "replication"],
+    ) if principal else {}
+    admin_perms = iam.check_permissions(
+        principal, None, ["iam:list_users"],
+    ) if principal else {}
 
-    can_manage_lifecycle = False
-    if principal:
-        try:
-            _iam().authorize(principal, bucket_name, "lifecycle")
-            can_manage_lifecycle = True
-        except IamError:
-            can_manage_lifecycle = False
-
-    can_manage_cors = False
-    if principal:
-        try:
-            _iam().authorize(principal, bucket_name, "cors")
-            can_manage_cors = True
-        except IamError:
-            can_manage_cors = False
+    can_edit_policy = bucket_perms.get("policy", False)
+    can_manage_lifecycle = bucket_perms.get("lifecycle", False)
+    can_manage_cors = bucket_perms.get("cors", False)
+    can_manage_versioning = bucket_perms.get("write", False)
+    can_manage_replication = bucket_perms.get("replication", False)
+    is_replication_admin = admin_perms.get("iam:list_users", False)
 
     try:
         versioning_enabled = storage.is_versioning_enabled(bucket_name)
     except StorageError:
         versioning_enabled = False
-    can_manage_versioning = False
-    if principal:
-        try:
-            _iam().authorize(principal, bucket_name, "write")
-            can_manage_versioning = True
-        except IamError:
-            can_manage_versioning = False
-
-    can_manage_replication = False
-    if principal:
-        try:
-            _iam().authorize(principal, bucket_name, "replication")
-            can_manage_replication = True
-        except IamError:
-            can_manage_replication = False
-
-    is_replication_admin = False
-    if principal:
-        try:
-            _iam().authorize(principal, None, "iam:list_users")
-            is_replication_admin = True
-        except IamError:
-            is_replication_admin = False
 
     replication_rule = _replication().get_rule(bucket_name)
     connections = _connections().list() if (is_replication_admin or replication_rule) else []
@@ -489,12 +457,7 @@ def bucket_detail(bucket_name: str):
 
     bucket_quota = storage.get_bucket_quota(bucket_name)
     bucket_stats = storage.bucket_stats(bucket_name)
-    can_manage_quota = False
-    try:
-        _iam().authorize(principal, None, "iam:list_users")
-        can_manage_quota = True
-    except IamError:
-        pass
+    can_manage_quota = is_replication_admin
 
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
     objects_stream_url = url_for("ui.stream_bucket_objects", bucket_name=bucket_name)
@@ -1003,21 +966,33 @@ def bulk_download_objects(bucket_name: str):
 
     unique_keys = list(dict.fromkeys(cleaned))
     storage = _storage()
-    
+
     try:
         _authorize_ui(principal, bucket_name, "read")
     except IamError as exc:
         return jsonify({"error": str(exc)}), 403
+
+    max_total_bytes = current_app.config.get("BULK_DOWNLOAD_MAX_BYTES", 1024 * 1024 * 1024)
+    total_size = 0
+    for key in unique_keys:
+        try:
+            path = storage.get_object_path(bucket_name, key)
+            total_size += path.stat().st_size
+        except (StorageError, OSError):
+            continue
+    if total_size > max_total_bytes:
+        limit_mb = max_total_bytes // (1024 * 1024)
+        return jsonify({"error": f"Total download size exceeds {limit_mb} MB limit. Select fewer objects."}), 400
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for key in unique_keys:
             try:
                 _authorize_ui(principal, bucket_name, "read", object_key=key)
-                
+
                 metadata = storage.get_object_metadata(bucket_name, key)
                 is_encrypted = "x-amz-server-side-encryption" in metadata
-                
+
                 if is_encrypted and hasattr(storage, 'get_object_data'):
                     data, _ = storage.get_object_data(bucket_name, key)
                     zf.writestr(key, data)

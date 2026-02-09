@@ -176,11 +176,12 @@ class ReplicationFailureStore:
         self.storage_root = storage_root
         self.max_failures_per_bucket = max_failures_per_bucket
         self._lock = threading.Lock()
+        self._cache: Dict[str, List[ReplicationFailure]] = {}
 
     def _get_failures_path(self, bucket_name: str) -> Path:
         return self.storage_root / ".myfsio.sys" / "buckets" / bucket_name / "replication_failures.json"
 
-    def load_failures(self, bucket_name: str) -> List[ReplicationFailure]:
+    def _load_from_disk(self, bucket_name: str) -> List[ReplicationFailure]:
         path = self._get_failures_path(bucket_name)
         if not path.exists():
             return []
@@ -192,7 +193,7 @@ class ReplicationFailureStore:
             logger.error(f"Failed to load replication failures for {bucket_name}: {e}")
             return []
 
-    def save_failures(self, bucket_name: str, failures: List[ReplicationFailure]) -> None:
+    def _save_to_disk(self, bucket_name: str, failures: List[ReplicationFailure]) -> None:
         path = self._get_failures_path(bucket_name)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {"failures": [f.to_dict() for f in failures[:self.max_failures_per_bucket]]}
@@ -201,6 +202,18 @@ class ReplicationFailureStore:
                 json.dump(data, f, indent=2)
         except OSError as e:
             logger.error(f"Failed to save replication failures for {bucket_name}: {e}")
+
+    def load_failures(self, bucket_name: str) -> List[ReplicationFailure]:
+        if bucket_name in self._cache:
+            return list(self._cache[bucket_name])
+        failures = self._load_from_disk(bucket_name)
+        self._cache[bucket_name] = failures
+        return list(failures)
+
+    def save_failures(self, bucket_name: str, failures: List[ReplicationFailure]) -> None:
+        trimmed = failures[:self.max_failures_per_bucket]
+        self._cache[bucket_name] = trimmed
+        self._save_to_disk(bucket_name, trimmed)
 
     def add_failure(self, bucket_name: str, failure: ReplicationFailure) -> None:
         with self._lock:
@@ -227,6 +240,7 @@ class ReplicationFailureStore:
 
     def clear_failures(self, bucket_name: str) -> None:
         with self._lock:
+            self._cache.pop(bucket_name, None)
             path = self._get_failures_path(bucket_name)
             if path.exists():
                 path.unlink()
