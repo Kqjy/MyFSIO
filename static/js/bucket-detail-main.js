@@ -657,6 +657,7 @@
       streamingComplete = true;
       flushPendingStreamObjects();
       hasMoreObjects = false;
+      totalObjectCount = loadedObjectCount;
       updateObjectCountBadge();
 
       if (objectsLoadingRow && objectsLoadingRow.parentNode) {
