@@ -2781,7 +2781,7 @@ def object_handler(bucket_name: str, object_key: str):
                 try:
                     stat = path.stat()
                     file_size = stat.st_size
-                    etag = storage._compute_etag(path)
+                    etag = metadata.get("__etag__") or storage._compute_etag(path)
                 except PermissionError:
                     return _error_response("AccessDenied", "Permission denied accessing object", 403)
                 except OSError as exc:
@@ -2829,7 +2829,7 @@ def object_handler(bucket_name: str, object_key: str):
                 try:
                     stat = path.stat()
                     response = Response(status=200)
-                    etag = storage._compute_etag(path)
+                    etag = metadata.get("__etag__") or storage._compute_etag(path)
                 except PermissionError:
                     return _error_response("AccessDenied", "Permission denied accessing object", 403)
                 except OSError as exc:

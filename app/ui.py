@@ -1162,7 +1162,9 @@ def object_preview(bucket_name: str, object_key: str) -> Response:
         "text/html", "text/xml", "application/xhtml+xml",
         "application/xml", "image/svg+xml",
     }
-    force_download = content_type.split(";")[0].strip().lower() in _DANGEROUS_TYPES
+    base_ct = content_type.split(";")[0].strip().lower()
+    if not download and base_ct in _DANGEROUS_TYPES:
+        content_type = "text/plain; charset=utf-8"
 
     def generate():
         try:
@@ -1181,7 +1183,7 @@ def object_preview(bucket_name: str, object_key: str) -> Response:
         headers["Content-Length"] = str(content_length)
     if content_range:
         headers["Content-Range"] = content_range
-    disposition = "attachment" if download or force_download else "inline"
+    disposition = "attachment" if download else "inline"
     if ascii_safe:
         headers["Content-Disposition"] = f'{disposition}; filename="{safe_filename}"'
     else:
