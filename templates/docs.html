@@ -97,8 +97,8 @@ python run.py --mode ui
             <tbody>
               <tr>
                 <td><code>API_BASE_URL</code></td>
-                <td><code>None</code></td>
-                <td>The public URL of the API. <strong>Required</strong> if running behind a proxy. Ensures presigned URLs are generated correctly.</td>
+                <td><code>http://127.0.0.1:5000</code></td>
+                <td>Internal S3 API URL used by the web UI proxy. Also used for presigned URL generation. Set to your public URL if running behind a reverse proxy.</td>
               </tr>
               <tr>
                 <td><code>STORAGE_ROOT</code></td>

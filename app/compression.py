@@ -36,11 +36,11 @@ class GzipMiddleware:
         content_type = None
         content_length = None
         should_compress = False
-        is_streaming = False
+        passthrough = False
         exc_info_holder = [None]
 
         def custom_start_response(status: str, headers: List[Tuple[str, str]], exc_info=None):
-            nonlocal response_started, status_code, response_headers, content_type, content_length, should_compress, is_streaming
+            nonlocal response_started, status_code, response_headers, content_type, content_length, should_compress, passthrough
             response_started = True
             status_code = int(status.split(' ', 1)[0])
             response_headers = list(headers)
@@ -51,23 +51,29 @@ class GzipMiddleware:
                 if name_lower == 'content-type':
                     content_type = value.split(';')[0].strip().lower()
                 elif name_lower == 'content-length':
-                    content_length = int(value)
+                    try:
+                        content_length = int(value)
+                    except (ValueError, TypeError):
+                        pass
                 elif name_lower == 'content-encoding':
-                    should_compress = False
+                    passthrough = True
                     return start_response(status, headers, exc_info)
                 elif name_lower == 'x-stream-response':
-                    is_streaming = True
+                    passthrough = True
                     return start_response(status, headers, exc_info)
 
             if content_type and content_type in COMPRESSIBLE_MIMES:
                 if content_length is None or content_length >= self.min_size:
                     should_compress = True
+            else:
+                passthrough = True
+                return start_response(status, headers, exc_info)
 
             return None
 
         app_iter = self.app(environ, custom_start_response)
 
-        if is_streaming:
+        if passthrough:
             return app_iter
 
         response_body = b''.join(app_iter)

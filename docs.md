@@ -7,7 +7,7 @@ This document expands on the README to describe the full workflow for running, c
 MyFSIO ships two Flask entrypoints that share the same storage, IAM, and bucket-policy state:
 
 - **API server** – Implements the S3-compatible REST API, policy evaluation, and Signature Version 4 presign service.
-- **UI server** – Provides the browser console for buckets, IAM, and policies. It proxies to the API for presign operations.
+- **UI server** – Provides the browser console for buckets, IAM, and policies. It proxies all storage operations through the S3 API via boto3 (SigV4-signed), mirroring the architecture used by MinIO and Garage.
 
 Both servers read `AppConfig`, so editing JSON stores on disk instantly affects both surfaces.
 
@@ -136,7 +136,7 @@ All configuration is done via environment variables. The table below lists every
 | `MAX_UPLOAD_SIZE` | `1073741824` (1 GiB) | Bytes. Caps incoming uploads in both API + UI. |
 | `UI_PAGE_SIZE` | `100` | `MaxKeys` hint shown in listings. |
 | `SECRET_KEY` | Auto-generated | Flask session key. Auto-generates and persists if not set. **Set explicitly in production.** |
-| `API_BASE_URL` | `None` | Public URL for presigned URLs. Required behind proxies. |
+| `API_BASE_URL` | `http://127.0.0.1:5000` | Internal S3 API URL used by the web UI proxy. Also used for presigned URL generation. Set to your public URL if running behind a reverse proxy. |
 | `AWS_REGION` | `us-east-1` | Region embedded in SigV4 credential scope. |
 | `AWS_SERVICE` | `s3` | Service string for SigV4. |
 

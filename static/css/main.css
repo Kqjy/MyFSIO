@@ -1288,6 +1288,20 @@ html.sidebar-will-collapse .sidebar-user {
 	padding: 2rem 1rem;
 }
 
+#preview-text {
+	padding: 1rem 1.125rem;
+	max-height: 360px;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: 'SFMono-Regular', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+	font-size: .8rem;
+	line-height: 1.6;
+	tab-size: 4;
+	color: var(--myfsio-text);
+	background: transparent;
+}
+
 .upload-progress-stack {
 	display: flex;
 	flex-direction: column;

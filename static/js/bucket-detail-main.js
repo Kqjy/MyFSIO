@@ -101,6 +101,7 @@
   const previewImage = document.getElementById('preview-image');
   const previewVideo = document.getElementById('preview-video');
   const previewAudio = document.getElementById('preview-audio');
+  const previewText = document.getElementById('preview-text');
   const previewIframe = document.getElementById('preview-iframe');
   const downloadButton = document.getElementById('downloadButton');
   const presignButton = document.getElementById('presignButton');
@@ -657,6 +658,7 @@
       streamingComplete = true;
       flushPendingStreamObjects();
       hasMoreObjects = false;
+      totalObjectCount = loadedObjectCount;
       updateObjectCountBadge();
 
       if (objectsLoadingRow && objectsLoadingRow.parentNode) {
@@ -1894,6 +1896,10 @@
         el.setAttribute('src', 'about:blank');
       }
     });
+    if (previewText) {
+      previewText.classList.add('d-none');
+      previewText.textContent = '';
+    }
     previewPlaceholder.classList.remove('d-none');
   };
 
@@ -1957,11 +1963,28 @@
       previewIframe.style.minHeight = '500px';
       previewIframe.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
-    } else if (previewUrl && lower.match(/\.(txt|log|json|md|csv|xml|html|htm|js|ts|py|java|c|cpp|h|css|scss|yaml|yml|toml|ini|cfg|conf|sh|bat)$/)) {
-      previewIframe.src = previewUrl;
-      previewIframe.style.minHeight = '200px';
-      previewIframe.classList.remove('d-none');
+    } else if (previewUrl && previewText && lower.match(/\.(txt|log|json|md|csv|xml|html|htm|js|ts|py|java|c|cpp|h|css|scss|yaml|yml|toml|ini|cfg|conf|sh|bat|rs|go|rb|php|sql|r|swift|kt|scala|pl|lua|zig|ex|exs|hs|erl|ps1|psm1|psd1|fish|zsh|env|properties|gradle|makefile|dockerfile|vagrantfile|gitignore|gitattributes|editorconfig|eslintrc|prettierrc)$/)) {
+      previewText.textContent = 'Loading\u2026';
+      previewText.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
+      const currentRow = row;
+      fetch(previewUrl)
+        .then((r) => {
+          if (!r.ok) throw new Error(r.statusText);
+          const len = parseInt(r.headers.get('Content-Length') || '0', 10);
+          if (len > 512 * 1024) {
+            return r.text().then((t) => t.slice(0, 512 * 1024) + '\n\n--- Truncated (file too large for preview) ---');
+          }
+          return r.text();
+        })
+        .then((text) => {
+          if (activeRow !== currentRow) return;
+          previewText.textContent = text;
+        })
+        .catch(() => {
+          if (activeRow !== currentRow) return;
+          previewText.textContent = 'Failed to load preview';
+        });
     }
 
     const metadataUrl = row.dataset.metadataUrl;

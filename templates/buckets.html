@@ -141,7 +141,7 @@
         let visibleCount = 0;
 
         bucketItems.forEach(item => {
-          const name = item.querySelector('.card-title').textContent.toLowerCase();
+          const name = item.querySelector('.bucket-name').textContent.toLowerCase();
           if (name.includes(term)) {
             item.classList.remove('d-none');
             visibleCount++;

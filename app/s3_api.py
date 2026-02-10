@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import mimetypes
 import re
@@ -2780,7 +2781,7 @@ def object_handler(bucket_name: str, object_key: str):
                 try:
                     stat = path.stat()
                     file_size = stat.st_size
-                    etag = storage._compute_etag(path)
+                    etag = metadata.get("__etag__") or storage._compute_etag(path)
                 except PermissionError:
                     return _error_response("AccessDenied", "Permission denied accessing object", 403)
                 except OSError as exc:
@@ -2828,7 +2829,7 @@ def object_handler(bucket_name: str, object_key: str):
                 try:
                     stat = path.stat()
                     response = Response(status=200)
-                    etag = storage._compute_etag(path)
+                    etag = metadata.get("__etag__") or storage._compute_etag(path)
                 except PermissionError:
                     return _error_response("AccessDenied", "Permission denied accessing object", 403)
                 except OSError as exc:
@@ -2963,7 +2964,11 @@ def _bucket_policy_handler(bucket_name: str) -> Response:
         store.delete_policy(bucket_name)
         current_app.logger.info("Bucket policy removed", extra={"bucket": bucket_name})
         return Response(status=204)
-    payload = request.get_json(silent=True)
+    raw_body = request.get_data(cache=False) or b""
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, ValueError):
+        return _error_response("MalformedPolicy", "Policy document must be JSON", 400)
     if not payload:
         return _error_response("MalformedPolicy", "Policy document must be JSON", 400)
     try:

@@ -223,6 +223,13 @@ def create_app(
     app.extensions["access_logging"] = access_logging_service
     app.extensions["site_registry"] = site_registry
 
+    from .s3_client import S3ProxyClient
+    api_base = app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
+    app.extensions["s3_proxy"] = S3ProxyClient(
+        api_base_url=api_base,
+        region=app.config.get("AWS_REGION", "us-east-1"),
+    )
+
     operation_metrics_collector = None
     if app.config.get("OPERATION_METRICS_ENABLED", False):
         operation_metrics_collector = OperationMetricsCollector(
