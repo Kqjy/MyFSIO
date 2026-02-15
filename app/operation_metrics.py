@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+MAX_LATENCY_SAMPLES = 5000
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,17 @@ class OperationStats:
     latency_max_ms: float = 0.0
     bytes_in: int = 0
     bytes_out: int = 0
+    latency_samples: List[float] = field(default_factory=list)
+
+    @staticmethod
+    def _compute_percentile(sorted_data: List[float], p: float) -> float:
+        if not sorted_data:
+            return 0.0
+        k = (len(sorted_data) - 1) * (p / 100.0)
+        f = int(k)
+        c = min(f + 1, len(sorted_data) - 1)
+        d = k - f
+        return sorted_data[f] + d * (sorted_data[c] - sorted_data[f])
 
     def record(self, latency_ms: float, success: bool, bytes_in: int = 0, bytes_out: int = 0) -> None:
         self.count += 1
@@ -36,10 +50,17 @@ class OperationStats:
             self.latency_max_ms = latency_ms
         self.bytes_in += bytes_in
         self.bytes_out += bytes_out
+        if len(self.latency_samples) < MAX_LATENCY_SAMPLES:
+            self.latency_samples.append(latency_ms)
+        else:
+            j = random.randint(0, self.count - 1)
+            if j < MAX_LATENCY_SAMPLES:
+                self.latency_samples[j] = latency_ms
 
     def to_dict(self) -> Dict[str, Any]:
         avg_latency = self.latency_sum_ms / self.count if self.count > 0 else 0.0
         min_latency = self.latency_min_ms if self.latency_min_ms != float("inf") else 0.0
+        sorted_latencies = sorted(self.latency_samples)
         return {
             "count": self.count,
             "success_count": self.success_count,
@@ -47,6 +68,9 @@ class OperationStats:
             "latency_avg_ms": round(avg_latency, 2),
             "latency_min_ms": round(min_latency, 2),
             "latency_max_ms": round(self.latency_max_ms, 2),
+            "latency_p50_ms": round(self._compute_percentile(sorted_latencies, 50), 2),
+            "latency_p95_ms": round(self._compute_percentile(sorted_latencies, 95), 2),
+            "latency_p99_ms": round(self._compute_percentile(sorted_latencies, 99), 2),
             "bytes_in": self.bytes_in,
             "bytes_out": self.bytes_out,
         }
@@ -62,6 +86,11 @@ class OperationStats:
             self.latency_max_ms = other.latency_max_ms
         self.bytes_in += other.bytes_in
         self.bytes_out += other.bytes_out
+        combined = self.latency_samples + other.latency_samples
+        if len(combined) > MAX_LATENCY_SAMPLES:
+            random.shuffle(combined)
+            combined = combined[:MAX_LATENCY_SAMPLES]
+        self.latency_samples = combined
 
 
 @dataclass
