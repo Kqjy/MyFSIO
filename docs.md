@@ -1552,6 +1552,9 @@ GET    /<bucket>?notification           # Get event notifications
 PUT    /<bucket>?notification           # Set event notifications (webhooks)
 GET    /<bucket>?object-lock            # Get object lock configuration
 PUT    /<bucket>?object-lock            # Set object lock configuration
+GET    /<bucket>?website                # Get website configuration
+PUT    /<bucket>?website                # Set website configuration
+DELETE /<bucket>?website                # Delete website configuration
 GET    /<bucket>?uploads                # List active multipart uploads
 GET    /<bucket>?versions               # List object versions
 GET    /<bucket>?location               # Get bucket location/region
@@ -1596,6 +1599,11 @@ PUT    /admin/sites/<site_id>           # Update peer site
 DELETE /admin/sites/<site_id>           # Unregister peer site
 GET    /admin/sites/<site_id>/health    # Check peer health
 GET    /admin/topology                  # Get cluster topology
+GET    /admin/website-domains           # List domain mappings
+POST   /admin/website-domains           # Create domain mapping
+GET    /admin/website-domains/<domain>  # Get domain mapping
+PUT    /admin/website-domains/<domain>  # Update domain mapping
+DELETE /admin/website-domains/<domain>  # Delete domain mapping
 
 # KMS API
 GET    /kms/keys                        # List KMS keys
@@ -2229,3 +2237,113 @@ curl "http://localhost:5000/my-bucket?list-type=2&start-after=photos/2024/" \
 | `start-after` | Start listing after this key |
 | `fetch-owner` | Include owner info in response |
 | `encoding-type` | Set to `url` for URL-encoded keys
+
+## 26. Static Website Hosting
+
+MyFSIO can serve S3 buckets as static websites via custom domain mappings. When a request arrives with a `Host` header matching a mapped domain, MyFSIO resolves the bucket and serves objects directly.
+
+### Enabling
+
+Set the environment variable:
+
+```bash
+WEBSITE_HOSTING_ENABLED=true
+```
+
+When disabled, all website hosting endpoints return 400 and domain-based serving is skipped.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBSITE_HOSTING_ENABLED` | `false` | Master switch for website hosting |
+
+### Setting Up a Website
+
+**Step 1: Configure the bucket website settings**
+
+```bash
+curl -X PUT "http://localhost:5000/my-site?website" \
+  -H "Authorization: ..." \
+  -d '<?xml version="1.0" encoding="UTF-8"?>
+<WebsiteConfiguration>
+  <IndexDocument><Suffix>index.html</Suffix></IndexDocument>
+  <ErrorDocument><Key>404.html</Key></ErrorDocument>
+</WebsiteConfiguration>'
+```
+
+- `IndexDocument` with `Suffix` is required (must not contain `/`)
+- `ErrorDocument` is optional
+
+**Step 2: Map a domain to the bucket**
+
+```bash
+curl -X POST "http://localhost:5000/admin/website-domains" \
+  -H "Authorization: ..." \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "example.com", "bucket": "my-site"}'
+```
+
+**Step 3: Point your domain to MyFSIO**
+
+For HTTP-only (direct access), point DNS to the MyFSIO host on port 5000.
+
+For HTTPS (recommended), use a reverse proxy. The critical requirement is passing the original `Host` header so MyFSIO can match the domain to a bucket.
+
+**nginx example:**
+
+```nginx
+server {
+    server_name example.com;
+    listen 443 ssl;
+
+    ssl_certificate     /etc/ssl/certs/example.com.pem;
+    ssl_certificate_key /etc/ssl/private/example.com.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+`proxy_set_header Host $host;` is required — without it, MyFSIO cannot match the incoming domain to a bucket. You do not need any path-based routing rules; MyFSIO handles all object resolution internally.
+
+### How Domain Routing Works
+
+1. A request arrives with `Host: example.com`
+2. MyFSIO's `before_request` hook strips the port and looks up the domain in the `WebsiteDomainStore`
+3. If a match is found, it loads the bucket's website config (index/error documents)
+4. Object key resolution:
+   - `/` or trailing `/` → append `index_document` (e.g., `index.html`)
+   - `/path` → try exact match, then try `path/index_document`
+   - Not found → serve `error_document` with 404 status
+5. If no domain match is found, the request falls through to normal S3 API / UI routing
+
+### Domain Mapping Admin API
+
+All endpoints require admin (`iam:*`) permissions.
+
+| Method | Route | Body | Description |
+|--------|-------|------|-------------|
+| `GET` | `/admin/website-domains` | — | List all mappings |
+| `POST` | `/admin/website-domains` | `{"domain": "...", "bucket": "..."}` | Create mapping |
+| `GET` | `/admin/website-domains/<domain>` | — | Get single mapping |
+| `PUT` | `/admin/website-domains/<domain>` | `{"bucket": "..."}` | Update mapping |
+| `DELETE` | `/admin/website-domains/<domain>` | — | Delete mapping |
+
+### Bucket Website API
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `PUT` | `/<bucket>?website` | Set website config (XML body) |
+| `GET` | `/<bucket>?website` | Get website config (XML response) |
+| `DELETE` | `/<bucket>?website` | Remove website config |
+
+### Web UI
+
+- **Per-bucket config:** Bucket Details → Properties tab → "Static Website Hosting" card
+- **Domain management:** Sidebar → "Domains" (visible when hosting is enabled and user is admin)

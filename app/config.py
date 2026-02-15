@@ -149,6 +149,7 @@ class AppConfig:
     num_trusted_proxies: int
     allowed_redirect_hosts: list[str]
     allow_internal_endpoints: bool
+    website_hosting_enabled: bool
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -317,6 +318,7 @@ class AppConfig:
         allowed_redirect_hosts_raw = _get("ALLOWED_REDIRECT_HOSTS", "")
         allowed_redirect_hosts = [h.strip() for h in str(allowed_redirect_hosts_raw).split(",") if h.strip()]
         allow_internal_endpoints = str(_get("ALLOW_INTERNAL_ENDPOINTS", "0")).lower() in {"1", "true", "yes", "on"}
+        website_hosting_enabled = str(_get("WEBSITE_HOSTING_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -403,7 +405,8 @@ class AppConfig:
                    ratelimit_admin=ratelimit_admin,
                    num_trusted_proxies=num_trusted_proxies,
                    allowed_redirect_hosts=allowed_redirect_hosts,
-                   allow_internal_endpoints=allow_internal_endpoints)
+                   allow_internal_endpoints=allow_internal_endpoints,
+                   website_hosting_enabled=website_hosting_enabled)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -509,6 +512,8 @@ class AppConfig:
             print(f"  ENCRYPTION:       Enabled (Master key: {self.encryption_master_key_path})")
         if self.kms_enabled:
             print(f"  KMS:              Enabled (Keys: {self.kms_keys_path})")
+        if self.website_hosting_enabled:
+            print(f"  WEBSITE_HOSTING:  Enabled")
         def _auto(flag: bool) -> str:
             return " (auto)" if flag else ""
         print(f"  SERVER_THREADS:   {self.server_threads}{_auto(self.server_threads_auto)}")
@@ -611,4 +616,5 @@ class AppConfig:
             "NUM_TRUSTED_PROXIES": self.num_trusted_proxies,
             "ALLOWED_REDIRECT_HOSTS": self.allowed_redirect_hosts,
             "ALLOW_INTERNAL_ENDPOINTS": self.allow_internal_endpoints,
+            "WEBSITE_HOSTING_ENABLED": self.website_hosting_enabled,
         }

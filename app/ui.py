@@ -286,7 +286,8 @@ def inject_nav_state() -> dict[str, Any]:
     return {
         "principal": principal,
         "can_manage_iam": can_manage,
-        "can_view_metrics": can_manage, 
+        "can_view_metrics": can_manage,
+        "website_hosting_nav": can_manage and current_app.config.get("WEBSITE_HOSTING_ENABLED", False),
         "csrf_token": generate_csrf,
     }
 
@@ -498,11 +499,19 @@ def bucket_detail(bucket_name: str):
     encryption_enabled = current_app.config.get("ENCRYPTION_ENABLED", False)
     lifecycle_enabled = current_app.config.get("LIFECYCLE_ENABLED", False)
     site_sync_enabled = current_app.config.get("SITE_SYNC_ENABLED", False)
+    website_hosting_enabled = current_app.config.get("WEBSITE_HOSTING_ENABLED", False)
     can_manage_encryption = can_manage_versioning
 
     bucket_quota = storage.get_bucket_quota(bucket_name)
     bucket_stats = storage.bucket_stats(bucket_name)
     can_manage_quota = is_replication_admin
+
+    website_config = None
+    if website_hosting_enabled:
+        try:
+            website_config = storage.get_bucket_website(bucket_name)
+        except StorageError:
+            website_config = None
 
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
     objects_stream_url = url_for("ui.stream_bucket_objects", bucket_name=bucket_name)
@@ -546,6 +555,9 @@ def bucket_detail(bucket_name: str):
         bucket_stats=bucket_stats,
         can_manage_quota=can_manage_quota,
         site_sync_enabled=site_sync_enabled,
+        website_hosting_enabled=website_hosting_enabled,
+        website_config=website_config,
+        can_manage_website=can_edit_policy,
     )
 
 
@@ -1610,6 +1622,75 @@ def update_bucket_encryption(bucket_name: str):
     return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
 
 
+@ui_bp.post("/buckets/<bucket_name>/website")
+def update_bucket_website(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "policy")
+    except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 403
+        flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        if _wants_json():
+            return jsonify({"error": "Website hosting is not enabled"}), 400
+        flash("Website hosting is not enabled", "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+    action = request.form.get("action", "enable")
+
+    if action == "disable":
+        try:
+            _storage().set_bucket_website(bucket_name, None)
+            if _wants_json():
+                return jsonify({"success": True, "message": "Static website hosting disabled", "enabled": False})
+            flash("Static website hosting disabled", "info")
+        except StorageError as exc:
+            if _wants_json():
+                return jsonify({"error": _friendly_error_message(exc)}), 400
+            flash(_friendly_error_message(exc), "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+    index_document = request.form.get("index_document", "").strip()
+    error_document = request.form.get("error_document", "").strip()
+
+    if not index_document:
+        if _wants_json():
+            return jsonify({"error": "Index document is required"}), 400
+        flash("Index document is required", "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+    if "/" in index_document:
+        if _wants_json():
+            return jsonify({"error": "Index document must not contain '/'"}), 400
+        flash("Index document must not contain '/'", "danger")
+        return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+    website_cfg: dict[str, Any] = {"index_document": index_document}
+    if error_document:
+        website_cfg["error_document"] = error_document
+
+    try:
+        _storage().set_bucket_website(bucket_name, website_cfg)
+        if _wants_json():
+            return jsonify({
+                "success": True,
+                "message": "Static website hosting enabled",
+                "enabled": True,
+                "index_document": index_document,
+                "error_document": error_document,
+            })
+        flash("Static website hosting enabled", "success")
+    except StorageError as exc:
+        if _wants_json():
+            return jsonify({"error": _friendly_error_message(exc)}), 400
+        flash(_friendly_error_message(exc), "danger")
+
+    return redirect(url_for("ui.bucket_detail", bucket_name=bucket_name, tab="properties"))
+
+
 @ui_bp.get("/iam")
 def iam_dashboard():
     principal = _current_principal()
@@ -2273,6 +2354,142 @@ def connections_dashboard():
         
     connections = _connections().list()
     return render_template("connections.html", connections=connections, principal=principal)
+
+
+@ui_bp.get("/website-domains")
+def website_domains_dashboard():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        flash("Website hosting is not enabled", "warning")
+        return redirect(url_for("ui.buckets_overview"))
+
+    store = current_app.extensions.get("website_domains")
+    mappings = store.list_all() if store else []
+    storage = _storage()
+    buckets = [b.name for b in storage.list_buckets()]
+    return render_template(
+        "website_domains.html",
+        mappings=mappings,
+        buckets=buckets,
+        principal=principal,
+        can_manage_iam=True,
+    )
+
+
+@ui_bp.post("/website-domains/create")
+def create_website_domain():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        if _wants_json():
+            return jsonify({"error": "Access denied"}), 403
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        if _wants_json():
+            return jsonify({"error": "Website hosting is not enabled"}), 400
+        flash("Website hosting is not enabled", "warning")
+        return redirect(url_for("ui.buckets_overview"))
+
+    domain = (request.form.get("domain") or "").strip().lower()
+    bucket = (request.form.get("bucket") or "").strip()
+
+    if not domain:
+        if _wants_json():
+            return jsonify({"error": "Domain is required"}), 400
+        flash("Domain is required", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    if not bucket:
+        if _wants_json():
+            return jsonify({"error": "Bucket is required"}), 400
+        flash("Bucket is required", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket):
+        if _wants_json():
+            return jsonify({"error": f"Bucket '{bucket}' does not exist"}), 404
+        flash(f"Bucket '{bucket}' does not exist", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    store = current_app.extensions.get("website_domains")
+    if store.get_bucket(domain):
+        if _wants_json():
+            return jsonify({"error": f"Domain '{domain}' is already mapped"}), 409
+        flash(f"Domain '{domain}' is already mapped", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    store.set_mapping(domain, bucket)
+    if _wants_json():
+        return jsonify({"success": True, "domain": domain, "bucket": bucket}), 201
+    flash(f"Domain '{domain}' mapped to bucket '{bucket}'", "success")
+    return redirect(url_for("ui.website_domains_dashboard"))
+
+
+@ui_bp.post("/website-domains/<domain>/update")
+def update_website_domain(domain: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        if _wants_json():
+            return jsonify({"error": "Access denied"}), 403
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    bucket = (request.form.get("bucket") or "").strip()
+    if not bucket:
+        if _wants_json():
+            return jsonify({"error": "Bucket is required"}), 400
+        flash("Bucket is required", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    storage = _storage()
+    if not storage.bucket_exists(bucket):
+        if _wants_json():
+            return jsonify({"error": f"Bucket '{bucket}' does not exist"}), 404
+        flash(f"Bucket '{bucket}' does not exist", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    store = current_app.extensions.get("website_domains")
+    store.set_mapping(domain, bucket)
+    if _wants_json():
+        return jsonify({"success": True, "domain": domain.lower(), "bucket": bucket})
+    flash(f"Domain '{domain}' updated to bucket '{bucket}'", "success")
+    return redirect(url_for("ui.website_domains_dashboard"))
+
+
+@ui_bp.post("/website-domains/<domain>/delete")
+def delete_website_domain(domain: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:list_users")
+    except IamError:
+        if _wants_json():
+            return jsonify({"error": "Access denied"}), 403
+        flash("Access denied", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    store = current_app.extensions.get("website_domains")
+    if not store.delete_mapping(domain):
+        if _wants_json():
+            return jsonify({"error": f"No mapping for domain '{domain}'"}), 404
+        flash(f"No mapping for domain '{domain}'", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    if _wants_json():
+        return jsonify({"success": True})
+    flash(f"Domain '{domain}' mapping deleted", "success")
+    return redirect(url_for("ui.website_domains_dashboard"))
 
 
 @ui_bp.get("/metrics")

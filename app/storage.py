@@ -688,9 +688,18 @@ class ObjectStorage:
         return lifecycle if isinstance(lifecycle, list) else None
 
     def set_bucket_lifecycle(self, bucket_name: str, rules: Optional[List[Dict[str, Any]]]) -> None:
-        """Set lifecycle configuration for bucket."""
         bucket_path = self._require_bucket_path(bucket_name)
         self._set_bucket_config_entry(bucket_path.name, "lifecycle", rules)
+
+    def get_bucket_website(self, bucket_name: str) -> Optional[Dict[str, Any]]:
+        bucket_path = self._require_bucket_path(bucket_name)
+        config = self._read_bucket_config(bucket_path.name)
+        website = config.get("website")
+        return website if isinstance(website, dict) else None
+
+    def set_bucket_website(self, bucket_name: str, website_config: Optional[Dict[str, Any]]) -> None:
+        bucket_path = self._require_bucket_path(bucket_name)
+        self._set_bucket_config_entry(bucket_path.name, "website", website_config)
 
     def get_bucket_quota(self, bucket_name: str) -> Dict[str, Any]:
         """Get quota configuration for bucket.
