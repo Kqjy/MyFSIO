@@ -78,7 +78,7 @@ window.ConnectionsManagement = (function() {
 
     try {
       var controller = new AbortController();
-      var timeoutId = setTimeout(function() { controller.abort(); }, 15000);
+      var timeoutId = setTimeout(function() { controller.abort(); }, 10000);
 
       var response = await fetch(endpoints.healthTemplate.replace('CONNECTION_ID', connectionId), {
         signal: controller.signal
@@ -147,7 +147,7 @@ window.ConnectionsManagement = (function() {
       '<button type="button" class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editConnectionModal" ' +
       'data-id="' + window.UICore.escapeHtml(conn.id) + '" data-name="' + window.UICore.escapeHtml(conn.name) + '" ' +
       'data-endpoint="' + window.UICore.escapeHtml(conn.endpoint_url) + '" data-region="' + window.UICore.escapeHtml(conn.region) + '" ' +
-      'data-access="' + window.UICore.escapeHtml(conn.access_key) + '" data-secret="' + window.UICore.escapeHtml(conn.secret_key || '') + '" title="Edit connection">' +
+      'data-access="' + window.UICore.escapeHtml(conn.access_key) + '" title="Edit connection">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">' +
       '<path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/></svg></button>' +
       '<button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteConnectionModal" ' +
@@ -185,7 +185,9 @@ window.ConnectionsManagement = (function() {
         document.getElementById('edit_endpoint_url').value = button.getAttribute('data-endpoint') || '';
         document.getElementById('edit_region').value = button.getAttribute('data-region') || '';
         document.getElementById('edit_access_key').value = button.getAttribute('data-access') || '';
-        document.getElementById('edit_secret_key').value = button.getAttribute('data-secret') || '';
+        document.getElementById('edit_secret_key').value = '';
+        document.getElementById('edit_secret_key').placeholder = '(unchanged — leave blank to keep current)';
+        document.getElementById('edit_secret_key').required = false;
         document.getElementById('editTestResult').innerHTML = '';
 
         var form = document.getElementById('editConnectionForm');
@@ -288,9 +290,6 @@ window.ConnectionsManagement = (function() {
                 editBtn.setAttribute('data-endpoint', data.connection.endpoint_url);
                 editBtn.setAttribute('data-region', data.connection.region);
                 editBtn.setAttribute('data-access', data.connection.access_key);
-                if (data.connection.secret_key) {
-                  editBtn.setAttribute('data-secret', data.connection.secret_key);
-                }
               }
 
               var deleteBtn = row.querySelector('[data-bs-target="#deleteConnectionModal"]');

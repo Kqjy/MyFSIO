@@ -2819,6 +2819,112 @@ body:has(.login-card) .main-wrapper {
 	padding-top: 0 !important;
 }
 
+.context-menu {
+	position: fixed;
+	z-index: 1060;
+	min-width: 180px;
+	background: var(--myfsio-card-bg);
+	border: 1px solid var(--myfsio-card-border);
+	border-radius: 0.5rem;
+	box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+	padding: 0.25rem 0;
+	font-size: 0.875rem;
+}
+
+[data-theme='dark'] .context-menu {
+	box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+}
+
+.context-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 0.625rem;
+	padding: 0.5rem 0.875rem;
+	color: var(--myfsio-text);
+	cursor: pointer;
+	transition: background-color 0.1s ease;
+	border: none;
+	background: none;
+	width: 100%;
+	text-align: left;
+	font-size: inherit;
+}
+
+.context-menu-item:hover {
+	background-color: var(--myfsio-hover-bg);
+}
+
+.context-menu-item.text-danger:hover {
+	background-color: rgba(239, 68, 68, 0.1);
+}
+
+.context-menu-divider {
+	height: 1px;
+	background: var(--myfsio-card-border);
+	margin: 0.25rem 0;
+}
+
+.context-menu-shortcut {
+	margin-left: auto;
+	font-size: 0.75rem;
+	color: var(--myfsio-muted);
+}
+
+.kbd-shortcuts-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.kbd-shortcuts-list .shortcut-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.375rem 0;
+}
+
+.kbd-shortcuts-list kbd {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 1.75rem;
+	padding: 0.2rem 0.5rem;
+	font-family: inherit;
+	font-size: 0.75rem;
+	font-weight: 600;
+	background: var(--myfsio-preview-bg);
+	border: 1px solid var(--myfsio-card-border);
+	border-radius: 0.25rem;
+	box-shadow: 0 1px 0 1px rgba(0, 0, 0, 0.05);
+	color: var(--myfsio-text);
+}
+
+[data-theme='dark'] .kbd-shortcuts-list kbd {
+	background: rgba(255, 255, 255, 0.1);
+	box-shadow: 0 1px 0 1px rgba(0, 0, 0, 0.2);
+}
+
+.sort-dropdown .dropdown-item.active,
+.sort-dropdown .dropdown-item:active {
+	background-color: var(--myfsio-hover-bg);
+	color: var(--myfsio-text);
+}
+
+.sort-dropdown .dropdown-item {
+	font-size: 0.875rem;
+	padding: 0.375rem 1rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
+}
+
 @media print {
 	.sidebar,
 	.mobile-header {

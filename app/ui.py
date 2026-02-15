@@ -2042,16 +2042,17 @@ def update_connection(connection_id: str):
     secret_key = request.form.get("secret_key", "").strip()
     region = request.form.get("region", "us-east-1").strip()
 
-    if not all([name, endpoint, access_key, secret_key]):
+    if not all([name, endpoint, access_key]):
         if _wants_json():
-            return jsonify({"error": "All fields are required"}), 400
-        flash("All fields are required", "danger")
+            return jsonify({"error": "Name, endpoint, and access key are required"}), 400
+        flash("Name, endpoint, and access key are required", "danger")
         return redirect(url_for("ui.connections_dashboard"))
 
     conn.name = name
     conn.endpoint_url = endpoint
     conn.access_key = access_key
-    conn.secret_key = secret_key
+    if secret_key:
+        conn.secret_key = secret_key
     conn.region = region
 
     _connections().save()

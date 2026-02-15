@@ -191,6 +191,10 @@ window.UICore = (function() {
     }
   });
 
+  window.addEventListener('beforeunload', function() {
+    pollingManager.stopAll();
+  });
+
   return {
     getCsrfToken: getCsrfToken,
     formatBytes: formatBytes,
