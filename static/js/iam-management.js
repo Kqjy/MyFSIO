@@ -15,11 +15,38 @@ window.IAMManagement = (function() {
   var currentEditKey = null;
   var currentDeleteKey = null;
 
+  var ALL_S3_ACTIONS = ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'lifecycle', 'cors'];
+
   var policyTemplates = {
     full: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'lifecycle', 'cors', 'iam:*'] }],
     readonly: [{ bucket: '*', actions: ['list', 'read'] }],
     writer: [{ bucket: '*', actions: ['list', 'read', 'write'] }]
   };
+
+  function isAdminUser(policies) {
+    if (!policies || !policies.length) return false;
+    return policies.some(function(p) {
+      return p.actions && (p.actions.indexOf('iam:*') >= 0 || p.actions.indexOf('*') >= 0);
+    });
+  }
+
+  function getPermissionLevel(actions) {
+    if (!actions || !actions.length) return 'Custom (0)';
+    if (actions.indexOf('*') >= 0) return 'Full Access';
+    if (actions.length >= ALL_S3_ACTIONS.length) {
+      var hasAll = ALL_S3_ACTIONS.every(function(a) { return actions.indexOf(a) >= 0; });
+      if (hasAll) return 'Full Access';
+    }
+    var has = function(a) { return actions.indexOf(a) >= 0; };
+    if (has('list') && has('read') && has('write') && has('delete')) return 'Read + Write + Delete';
+    if (has('list') && has('read') && has('write')) return 'Read + Write';
+    if (has('list') && has('read')) return 'Read Only';
+    return 'Custom (' + actions.length + ')';
+  }
+
+  function getBucketLabel(bucket) {
+    return bucket === '*' ? 'All Buckets' : bucket;
+  }
 
   function init(config) {
     users = config.users || [];
@@ -39,6 +66,8 @@ window.IAMManagement = (function() {
     setupDeleteUserModal();
     setupRotateSecretModal();
     setupFormHandlers();
+    setupSearch();
+    setupCopyAccessKeyButtons();
   }
 
   function initModals() {
@@ -243,22 +272,29 @@ window.IAMManagement = (function() {
   }
 
   function createUserCardHtml(accessKey, displayName, policies) {
+    var admin = isAdminUser(policies);
+    var cardClass = 'card h-100 iam-user-card' + (admin ? ' iam-admin-card' : '');
+    var roleBadge = admin
+      ? '<span class="iam-role-badge iam-role-admin" data-role-badge>Admin</span>'
+      : '<span class="iam-role-badge iam-role-user" data-role-badge>User</span>';
+
     var policyBadges = '';
     if (policies && policies.length > 0) {
       policyBadges = policies.map(function(p) {
-        var actionText = p.actions && p.actions.includes('*') ? 'full' : (p.actions ? p.actions.length : 0);
-        return '<span class="badge bg-primary bg-opacity-10 text-primary">' +
+        var bucketLabel = getBucketLabel(p.bucket);
+        var permLevel = getPermissionLevel(p.actions);
+        return '<span class="iam-perm-badge">' +
           '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
           '<path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>' +
-          '</svg>' + window.UICore.escapeHtml(p.bucket) +
-          '<span class="opacity-75">(' + actionText + ')</span></span>';
+          '</svg>' + window.UICore.escapeHtml(bucketLabel) + ' &middot; ' + window.UICore.escapeHtml(permLevel) + '</span>';
       }).join('');
     } else {
       policyBadges = '<span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>';
     }
 
-    return '<div class="col-md-6 col-xl-4">' +
-      '<div class="card h-100 iam-user-card">' +
+    var esc = window.UICore.escapeHtml;
+    return '<div class="col-md-6 col-xl-4 iam-user-item" data-display-name="' + esc(displayName.toLowerCase()) + '" data-access-key-filter="' + esc(accessKey.toLowerCase()) + '">' +
+      '<div class="' + cardClass + '">' +
       '<div class="card-body">' +
       '<div class="d-flex align-items-start justify-content-between mb-3">' +
       '<div class="d-flex align-items-center gap-3 min-width-0 overflow-hidden">' +
@@ -267,8 +303,18 @@ window.IAMManagement = (function() {
       '<path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>' +
       '</svg></div>' +
       '<div class="min-width-0">' +
-      '<h6 class="fw-semibold mb-0 text-truncate" title="' + window.UICore.escapeHtml(displayName) + '">' + window.UICore.escapeHtml(displayName) + '</h6>' +
-      '<code class="small text-muted d-block text-truncate" title="' + window.UICore.escapeHtml(accessKey) + '">' + window.UICore.escapeHtml(accessKey) + '</code>' +
+      '<div class="d-flex align-items-center gap-2 mb-0">' +
+      '<h6 class="fw-semibold mb-0 text-truncate" title="' + esc(displayName) + '">' + esc(displayName) + '</h6>' +
+      roleBadge +
+      '</div>' +
+      '<div class="d-flex align-items-center gap-1">' +
+      '<code class="small text-muted text-truncate" title="' + esc(accessKey) + '">' + esc(accessKey) + '</code>' +
+      '<button type="button" class="iam-copy-key" title="Copy access key" data-copy-access-key="' + esc(accessKey) + '">' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">' +
+      '<path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>' +
+      '<path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>' +
+      '</svg></button>' +
+      '</div>' +
       '</div></div>' +
       '<div class="dropdown flex-shrink-0">' +
       '<button class="btn btn-sm btn-icon" type="button" data-bs-toggle="dropdown" aria-expanded="false">' +
@@ -276,18 +322,18 @@ window.IAMManagement = (function() {
       '<path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>' +
       '</svg></button>' +
       '<ul class="dropdown-menu dropdown-menu-end">' +
-      '<li><button class="dropdown-item" type="button" data-edit-user="' + window.UICore.escapeHtml(accessKey) + '" data-display-name="' + window.UICore.escapeHtml(displayName) + '">' +
+      '<li><button class="dropdown-item" type="button" data-edit-user="' + esc(accessKey) + '" data-display-name="' + esc(displayName) + '">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/></svg>Edit Name</button></li>' +
-      '<li><button class="dropdown-item" type="button" data-rotate-user="' + window.UICore.escapeHtml(accessKey) + '">' +
+      '<li><button class="dropdown-item" type="button" data-rotate-user="' + esc(accessKey) + '">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/><path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/></svg>Rotate Secret</button></li>' +
       '<li><hr class="dropdown-divider"></li>' +
-      '<li><button class="dropdown-item text-danger" type="button" data-delete-user="' + window.UICore.escapeHtml(accessKey) + '">' +
+      '<li><button class="dropdown-item text-danger" type="button" data-delete-user="' + esc(accessKey) + '">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>Delete User</button></li>' +
       '</ul></div></div>' +
       '<div class="mb-3">' +
       '<div class="small text-muted mb-2">Bucket Permissions</div>' +
-      '<div class="d-flex flex-wrap gap-1">' + policyBadges + '</div></div>' +
-      '<button class="btn btn-outline-primary btn-sm w-100" type="button" data-policy-editor data-access-key="' + window.UICore.escapeHtml(accessKey) + '">' +
+      '<div class="d-flex flex-wrap gap-1" data-policy-badges>' + policyBadges + '</div></div>' +
+      '<button class="btn btn-outline-primary btn-sm w-100" type="button" data-policy-editor data-access-key="' + esc(accessKey) + '">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16"><path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/><path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319z"/></svg>Manage Policies</button>' +
       '</div></div></div>';
   }
@@ -340,6 +386,13 @@ window.IAMManagement = (function() {
         document.getElementById('policyEditorUser').value = accessKey;
         document.getElementById('policyEditorDocument').value = getUserPolicies(accessKey);
         policyModal.show();
+      });
+    }
+
+    var copyBtn = cardElement.querySelector('[data-copy-access-key]');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', function() {
+        copyAccessKey(copyBtn);
       });
     }
   }
@@ -442,16 +495,32 @@ window.IAMManagement = (function() {
 
             var userCard = document.querySelector('[data-access-key="' + key + '"]');
             if (userCard) {
-              var badgeContainer = userCard.closest('.iam-user-card').querySelector('.d-flex.flex-wrap.gap-1');
+              var cardEl = userCard.closest('.iam-user-card');
+              var badgeContainer = cardEl ? cardEl.querySelector('[data-policy-badges]') : null;
               if (badgeContainer && data.policies) {
                 var badges = data.policies.map(function(p) {
-                  return '<span class="badge bg-primary bg-opacity-10 text-primary">' +
+                  var bl = getBucketLabel(p.bucket);
+                  var pl = getPermissionLevel(p.actions);
+                  return '<span class="iam-perm-badge">' +
                     '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
                     '<path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>' +
-                    '</svg>' + window.UICore.escapeHtml(p.bucket) +
-                    '<span class="opacity-75">(' + (p.actions.includes('*') ? 'full' : p.actions.length) + ')</span></span>';
+                    '</svg>' + window.UICore.escapeHtml(bl) + ' &middot; ' + window.UICore.escapeHtml(pl) + '</span>';
                 }).join('');
                 badgeContainer.innerHTML = badges || '<span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>';
+              }
+              if (cardEl) {
+                var nowAdmin = isAdminUser(data.policies);
+                cardEl.classList.toggle('iam-admin-card', nowAdmin);
+                var roleBadgeEl = cardEl.querySelector('[data-role-badge]');
+                if (roleBadgeEl) {
+                  if (nowAdmin) {
+                    roleBadgeEl.className = 'iam-role-badge iam-role-admin';
+                    roleBadgeEl.textContent = 'Admin';
+                  } else {
+                    roleBadgeEl.className = 'iam-role-badge iam-role-user';
+                    roleBadgeEl.textContent = 'User';
+                  }
+                }
               }
             }
 
@@ -484,6 +553,10 @@ window.IAMManagement = (function() {
                 if (nameEl) {
                   nameEl.textContent = newName;
                   nameEl.title = newName;
+                }
+                var itemWrapper = card.closest('.iam-user-item');
+                if (itemWrapper) {
+                  itemWrapper.setAttribute('data-display-name', newName.toLowerCase());
                 }
               }
             }
@@ -537,6 +610,52 @@ window.IAMManagement = (function() {
         });
       });
     }
+  }
+
+  function setupSearch() {
+    var searchInput = document.getElementById('iam-user-search');
+    if (!searchInput) return;
+
+    searchInput.addEventListener('input', function() {
+      var query = searchInput.value.toLowerCase().trim();
+      var items = document.querySelectorAll('.iam-user-item');
+      var noResults = document.getElementById('iam-no-results');
+      var visibleCount = 0;
+
+      items.forEach(function(item) {
+        var name = item.getAttribute('data-display-name') || '';
+        var key = item.getAttribute('data-access-key-filter') || '';
+        var matches = !query || name.indexOf(query) >= 0 || key.indexOf(query) >= 0;
+        item.classList.toggle('d-none', !matches);
+        if (matches) visibleCount++;
+      });
+
+      if (noResults) {
+        noResults.classList.toggle('d-none', visibleCount > 0);
+      }
+    });
+  }
+
+  function copyAccessKey(btn) {
+    var key = btn.getAttribute('data-copy-access-key');
+    if (!key) return;
+    var originalHtml = btn.innerHTML;
+    navigator.clipboard.writeText(key).then(function() {
+      btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg>';
+      btn.style.color = '#22c55e';
+      setTimeout(function() {
+        btn.innerHTML = originalHtml;
+        btn.style.color = '';
+      }, 1200);
+    }).catch(function() {});
+  }
+
+  function setupCopyAccessKeyButtons() {
+    document.querySelectorAll('[data-copy-access-key]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        copyAccessKey(btn);
+      });
+    });
   }
 
   return {

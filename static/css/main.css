@@ -1151,17 +1151,123 @@ html.sidebar-will-collapse .sidebar-user {
 }
 
 .iam-user-card {
-	border: 1px solid var(--myfsio-card-border);
-	border-radius: 0.75rem;
-	transition: box-shadow 0.2s ease, transform 0.2s ease;
+	position: relative;
+	border: 1px solid var(--myfsio-card-border) !important;
+	border-radius: 1rem !important;
+	overflow: hidden;
+	transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.iam-user-card::before {
+	content: '';
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 4px;
+	background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+	opacity: 0;
+	transition: opacity 0.2s ease;
 }
 
 .iam-user-card:hover {
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+	transform: translateY(-2px);
+	box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.12), 0 4px 8px -4px rgba(0, 0, 0, 0.08);
+	border-color: var(--myfsio-accent) !important;
+}
+
+.iam-user-card:hover::before {
+	opacity: 1;
 }
 
 [data-theme='dark'] .iam-user-card:hover {
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+	box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.4), 0 4px 8px -4px rgba(0, 0, 0, 0.3);
+}
+
+.iam-admin-card::before {
+	background: linear-gradient(90deg, #f59e0b, #ef4444);
+}
+
+.iam-role-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.25em 0.65em;
+	border-radius: 999px;
+	font-size: 0.7rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+
+.iam-role-admin {
+	background: rgba(245, 158, 11, 0.15);
+	color: #d97706;
+}
+
+[data-theme='dark'] .iam-role-admin {
+	background: rgba(245, 158, 11, 0.25);
+	color: #fbbf24;
+}
+
+.iam-role-user {
+	background: rgba(59, 130, 246, 0.12);
+	color: #2563eb;
+}
+
+[data-theme='dark'] .iam-role-user {
+	background: rgba(59, 130, 246, 0.2);
+	color: #60a5fa;
+}
+
+.iam-perm-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.3em 0.6em;
+	border-radius: 999px;
+	font-size: 0.75rem;
+	font-weight: 500;
+	background: rgba(59, 130, 246, 0.08);
+	color: var(--myfsio-text);
+	border: 1px solid rgba(59, 130, 246, 0.15);
+}
+
+[data-theme='dark'] .iam-perm-badge {
+	background: rgba(59, 130, 246, 0.15);
+	border-color: rgba(59, 130, 246, 0.25);
+}
+
+.iam-copy-key {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: none;
+	background: transparent;
+	color: var(--myfsio-muted);
+	border-radius: 4px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+	flex-shrink: 0;
+}
+
+.iam-copy-key:hover {
+	background: var(--myfsio-hover-bg);
+	color: var(--myfsio-text);
+}
+
+.iam-no-results {
+	text-align: center;
+	padding: 2rem 1rem;
+	color: var(--myfsio-muted);
+}
+
+@media (max-width: 768px) {
+	.iam-user-card:hover {
+		transform: none;
+	}
 }
 
 .user-avatar-lg {
