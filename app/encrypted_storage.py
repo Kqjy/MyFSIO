@@ -270,9 +270,15 @@ class EncryptedObjectStorage:
     
     def get_bucket_quota(self, bucket_name: str):
         return self.storage.get_bucket_quota(bucket_name)
-    
+
     def set_bucket_quota(self, bucket_name: str, *, max_bytes=None, max_objects=None):
         return self.storage.set_bucket_quota(bucket_name, max_bytes=max_bytes, max_objects=max_objects)
+
+    def get_bucket_website(self, bucket_name: str):
+        return self.storage.get_bucket_website(bucket_name)
+
+    def set_bucket_website(self, bucket_name: str, website_config):
+        return self.storage.set_bucket_website(bucket_name, website_config)
     
     def _compute_etag(self, path: Path) -> str:
         return self.storage._compute_etag(path)

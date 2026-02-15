@@ -17,6 +17,7 @@ from .extensions import limiter
 from .iam import IamError, Principal
 from .replication import ReplicationManager
 from .site_registry import PeerSite, SiteInfo, SiteRegistry
+from .website_domains import WebsiteDomainStore
 
 
 def _is_safe_url(url: str, allow_internal: bool = False) -> bool:
@@ -673,3 +674,98 @@ def check_bidirectional_status(site_id: str):
     result["is_fully_configured"] = len(error_issues) == 0 and len(local_bidir_rules) > 0
 
     return jsonify(result)
+
+
+def _website_domains() -> WebsiteDomainStore:
+    return current_app.extensions["website_domains"]
+
+
+def _storage():
+    return current_app.extensions["object_storage"]
+
+
+@admin_api_bp.route("/website-domains", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def list_website_domains():
+    principal, error = _require_admin()
+    if error:
+        return error
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    return jsonify(_website_domains().list_all())
+
+
+@admin_api_bp.route("/website-domains", methods=["POST"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def create_website_domain():
+    principal, error = _require_admin()
+    if error:
+        return error
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    payload = request.get_json(silent=True) or {}
+    domain = (payload.get("domain") or "").strip().lower()
+    bucket = (payload.get("bucket") or "").strip()
+    if not domain:
+        return _json_error("ValidationError", "domain is required", 400)
+    if not bucket:
+        return _json_error("ValidationError", "bucket is required", 400)
+    storage = _storage()
+    if not storage.bucket_exists(bucket):
+        return _json_error("NoSuchBucket", f"Bucket '{bucket}' does not exist", 404)
+    store = _website_domains()
+    existing = store.get_bucket(domain)
+    if existing:
+        return _json_error("Conflict", f"Domain '{domain}' is already mapped to bucket '{existing}'", 409)
+    store.set_mapping(domain, bucket)
+    logger.info("Website domain mapping created: %s -> %s", domain, bucket)
+    return jsonify({"domain": domain, "bucket": bucket}), 201
+
+
+@admin_api_bp.route("/website-domains/<domain>", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def get_website_domain(domain: str):
+    principal, error = _require_admin()
+    if error:
+        return error
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    bucket = _website_domains().get_bucket(domain)
+    if not bucket:
+        return _json_error("NotFound", f"No mapping found for domain '{domain}'", 404)
+    return jsonify({"domain": domain.lower(), "bucket": bucket})
+
+
+@admin_api_bp.route("/website-domains/<domain>", methods=["PUT"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def update_website_domain(domain: str):
+    principal, error = _require_admin()
+    if error:
+        return error
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    payload = request.get_json(silent=True) or {}
+    bucket = (payload.get("bucket") or "").strip()
+    if not bucket:
+        return _json_error("ValidationError", "bucket is required", 400)
+    storage = _storage()
+    if not storage.bucket_exists(bucket):
+        return _json_error("NoSuchBucket", f"Bucket '{bucket}' does not exist", 404)
+    store = _website_domains()
+    store.set_mapping(domain, bucket)
+    logger.info("Website domain mapping updated: %s -> %s", domain, bucket)
+    return jsonify({"domain": domain.lower(), "bucket": bucket})
+
+
+@admin_api_bp.route("/website-domains/<domain>", methods=["DELETE"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def delete_website_domain(domain: str):
+    principal, error = _require_admin()
+    if error:
+        return error
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    if not _website_domains().delete_mapping(domain):
+        return _json_error("NotFound", f"No mapping found for domain '{domain}'", 404)
+    logger.info("Website domain mapping deleted: %s", domain)
+    return Response(status=204)

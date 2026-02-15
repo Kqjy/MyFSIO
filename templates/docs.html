@@ -51,6 +51,7 @@
             <li><a href="#advanced-ops">Advanced Operations</a></li>
             <li><a href="#acls">Access Control Lists</a></li>
             <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
+            <li><a href="#website-hosting">Static Website Hosting</a></li>
           </ul>
         </div>
       </div>
@@ -2099,6 +2100,99 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
         </div>
       </div>
     </article>
+    <article id="website-hosting" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">25</span>
+          <h2 class="h4 mb-0">Static Website Hosting</h2>
+        </div>
+        <p class="text-muted">Host static websites directly from S3 buckets with custom index and error pages, served via custom domain mapping.</p>
+
+        <div class="alert alert-info small mb-3">
+          <strong>Prerequisite:</strong> Set <code>WEBSITE_HOSTING_ENABLED=true</code> to enable this feature.
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">1. Configure bucket for website hosting</h3>
+<pre class="mb-3"><code class="language-bash"># Enable website hosting with index and error documents
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?website" \
+  -H "Content-Type: application/xml" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '&lt;WebsiteConfiguration&gt;
+    &lt;IndexDocument&gt;&lt;Suffix&gt;index.html&lt;/Suffix&gt;&lt;/IndexDocument&gt;
+    &lt;ErrorDocument&gt;&lt;Key&gt;404.html&lt;/Key&gt;&lt;/ErrorDocument&gt;
+  &lt;/WebsiteConfiguration&gt;'
+
+# Get website configuration
+curl "{{ api_base }}/&lt;bucket&gt;?website" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Remove website configuration
+curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?website" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">2. Map a custom domain to the bucket</h3>
+<pre class="mb-3"><code class="language-bash"># Create domain mapping (admin only)
+curl -X POST "{{ api_base }}/admin/website-domains" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"domain": "example.com", "bucket": "my-site"}'
+
+# List all domain mappings
+curl "{{ api_base }}/admin/website-domains" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Update a mapping
+curl -X PUT "{{ api_base }}/admin/website-domains/example.com" \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"bucket": "new-site-bucket"}'
+
+# Delete a mapping
+curl -X DELETE "{{ api_base }}/admin/website-domains/example.com" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">3. Point your domain</h3>
+        <p class="small text-muted">MyFSIO handles domain routing natively via the <code>Host</code> header &mdash; no path-based proxy rules needed. Just point your domain to the MyFSIO API server.</p>
+
+        <div class="alert alert-secondary small mb-3">
+          <strong>Direct access (HTTP only):</strong> Point your domain's DNS (A or CNAME) directly to the MyFSIO server on port 5000.
+        </div>
+
+        <p class="small text-muted mb-2">For <strong>HTTPS</strong>, place a reverse proxy in front. The proxy only needs to forward traffic &mdash; MyFSIO handles the domain-to-bucket routing:</p>
+<pre class="mb-3"><code class="language-nginx"># nginx example
+server {
+    server_name example.com;
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;  # Required: passes the domain to MyFSIO
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}</code></pre>
+        <div class="alert alert-warning small mb-3">
+          <strong>Important:</strong> The <code>proxy_set_header Host $host;</code> directive is required. MyFSIO matches the incoming <code>Host</code> header against domain mappings to determine which bucket to serve.
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">How it works</h3>
+        <div class="row g-2 mb-0">
+          <div class="col-md-6">
+            <ul class="small text-muted mb-0 ps-3">
+              <li><code>/</code> serves the configured index document</li>
+              <li><code>/about/</code> serves <code>about/index.html</code></li>
+              <li>Objects served with correct Content-Type</li>
+            </ul>
+          </div>
+          <div class="col-md-6">
+            <ul class="small text-muted mb-0 ps-3">
+              <li>Missing objects return the error document with 404</li>
+              <li>Website endpoints are public (no auth required)</li>
+              <li>Normal S3 API with auth continues to work</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </article>
   </div>
   <div class="col-xl-4 docs-sidebar-col">
     <aside class="card shadow-sm docs-sidebar">
@@ -2129,6 +2223,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
           <li><a href="#advanced-ops">Advanced Operations</a></li>
           <li><a href="#acls">Access Control Lists</a></li>
           <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
+          <li><a href="#website-hosting">Static Website Hosting</a></li>
         </ul>
         <div class="docs-sidebar-callouts">
           <div>

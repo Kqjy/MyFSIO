@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html as html_module
 import logging
+import mimetypes
 import shutil
 import sys
 import time
@@ -10,7 +12,7 @@ from pathlib import Path
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
-from flask import Flask, g, has_request_context, redirect, render_template, request, url_for
+from flask import Flask, Response, g, has_request_context, redirect, render_template, request, url_for
 from flask_cors import CORS
 from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -32,8 +34,9 @@ from .object_lock import ObjectLockService
 from .replication import ReplicationManager
 from .secret_store import EphemeralSecretStore
 from .site_registry import SiteRegistry, SiteInfo
-from .storage import ObjectStorage
+from .storage import ObjectStorage, StorageError
 from .version import get_version
+from .website_domains import WebsiteDomainStore
 
 
 def _migrate_config_file(active_path: Path, legacy_paths: List[Path]) -> Path:
@@ -222,6 +225,12 @@ def create_app(
     app.extensions["notifications"] = notification_service
     app.extensions["access_logging"] = access_logging_service
     app.extensions["site_registry"] = site_registry
+
+    website_domains_store = None
+    if app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        website_domains_path = config_dir / "website_domains.json"
+        website_domains_store = WebsiteDomainStore(website_domains_path)
+    app.extensions["website_domains"] = website_domains_store
 
     from .s3_client import S3ProxyClient
     api_base = app.config.get("API_BASE_URL") or "http://127.0.0.1:5000"
@@ -471,6 +480,128 @@ def _configure_logging(app: Flask) -> None:
             "Request started",
             extra={"path": request.path, "method": request.method, "remote_addr": request.remote_addr},
         )
+
+    @app.before_request
+    def _maybe_serve_website():
+        if not app.config.get("WEBSITE_HOSTING_ENABLED"):
+            return None
+        if request.method not in {"GET", "HEAD"}:
+            return None
+        host = request.host
+        if ":" in host:
+            host = host.rsplit(":", 1)[0]
+        host = host.lower()
+        store = app.extensions.get("website_domains")
+        if not store:
+            return None
+        bucket = store.get_bucket(host)
+        if not bucket:
+            return None
+        storage = app.extensions["object_storage"]
+        if not storage.bucket_exists(bucket):
+            return _website_error_response(404, "Not Found")
+        website_config = storage.get_bucket_website(bucket)
+        if not website_config:
+            return _website_error_response(404, "Not Found")
+        index_doc = website_config.get("index_document", "index.html")
+        error_doc = website_config.get("error_document")
+        req_path = request.path.lstrip("/")
+        if not req_path or req_path.endswith("/"):
+            object_key = req_path + index_doc
+        else:
+            object_key = req_path
+        try:
+            obj_path = storage.get_object_path(bucket, object_key)
+        except (StorageError, OSError):
+            if object_key == req_path:
+                try:
+                    obj_path = storage.get_object_path(bucket, req_path + "/" + index_doc)
+                    object_key = req_path + "/" + index_doc
+                except (StorageError, OSError):
+                    return _serve_website_error(storage, bucket, error_doc, 404)
+            else:
+                return _serve_website_error(storage, bucket, error_doc, 404)
+        content_type = mimetypes.guess_type(object_key)[0] or "application/octet-stream"
+        is_encrypted = False
+        try:
+            metadata = storage.get_object_metadata(bucket, object_key)
+            is_encrypted = "x-amz-server-side-encryption" in metadata
+        except (StorageError, OSError):
+            pass
+        if request.method == "HEAD":
+            response = Response(status=200)
+            if is_encrypted and hasattr(storage, "get_object_data"):
+                try:
+                    data, _ = storage.get_object_data(bucket, object_key)
+                    response.headers["Content-Length"] = len(data)
+                except (StorageError, OSError):
+                    return _website_error_response(500, "Internal Server Error")
+            else:
+                try:
+                    stat = obj_path.stat()
+                    response.headers["Content-Length"] = stat.st_size
+                except OSError:
+                    return _website_error_response(500, "Internal Server Error")
+            response.headers["Content-Type"] = content_type
+            return response
+        if is_encrypted and hasattr(storage, "get_object_data"):
+            try:
+                data, _ = storage.get_object_data(bucket, object_key)
+                response = Response(data, mimetype=content_type)
+                response.headers["Content-Length"] = len(data)
+                return response
+            except (StorageError, OSError):
+                return _website_error_response(500, "Internal Server Error")
+        def _stream(file_path):
+            with file_path.open("rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+        try:
+            stat = obj_path.stat()
+            response = Response(_stream(obj_path), mimetype=content_type, direct_passthrough=True)
+            response.headers["Content-Length"] = stat.st_size
+            return response
+        except OSError:
+            return _website_error_response(500, "Internal Server Error")
+
+    def _serve_website_error(storage, bucket, error_doc_key, status_code):
+        if not error_doc_key:
+            return _website_error_response(status_code, "Not Found" if status_code == 404 else "Error")
+        try:
+            obj_path = storage.get_object_path(bucket, error_doc_key)
+        except (StorageError, OSError):
+            return _website_error_response(status_code, "Not Found")
+        content_type = mimetypes.guess_type(error_doc_key)[0] or "text/html"
+        is_encrypted = False
+        try:
+            metadata = storage.get_object_metadata(bucket, error_doc_key)
+            is_encrypted = "x-amz-server-side-encryption" in metadata
+        except (StorageError, OSError):
+            pass
+        if is_encrypted and hasattr(storage, "get_object_data"):
+            try:
+                data, _ = storage.get_object_data(bucket, error_doc_key)
+                response = Response(data, status=status_code, mimetype=content_type)
+                response.headers["Content-Length"] = len(data)
+                return response
+            except (StorageError, OSError):
+                return _website_error_response(status_code, "Not Found")
+        try:
+            data = obj_path.read_bytes()
+            response = Response(data, status=status_code, mimetype=content_type)
+            response.headers["Content-Length"] = len(data)
+            return response
+        except OSError:
+            return _website_error_response(status_code, "Not Found")
+
+    def _website_error_response(status_code, message):
+        safe_msg = html_module.escape(str(message))
+        safe_code = html_module.escape(str(status_code))
+        body = f"<html><head><title>{safe_code} {safe_msg}</title></head><body><h1>{safe_code} {safe_msg}</h1></body></html>"
+        return Response(body, status=status_code, mimetype="text/html")
 
     @app.after_request
     def _log_request_end(response):

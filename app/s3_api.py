@@ -1027,6 +1027,7 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "uploads": _bucket_uploads_handler,
         "policy": _bucket_policy_handler,
         "replication": _bucket_replication_handler,
+        "website": _bucket_website_handler,
     }
     requested = [key for key in handlers if key in request.args]
     if not requested:
@@ -3058,6 +3059,79 @@ def _parse_replication_config(bucket_name: str, payload: bytes):
         sync_deletions=sync_deletions,
         filter_prefix=filter_prefix,
     )
+
+
+def _bucket_website_handler(bucket_name: str) -> Response:
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
+    if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
+        return _error_response("InvalidRequest", "Website hosting is not enabled", 400)
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    storage = _storage()
+    if request.method == "GET":
+        try:
+            config = storage.get_bucket_website(bucket_name)
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        if not config:
+            return _error_response("NoSuchWebsiteConfiguration", "The specified bucket does not have a website configuration", 404)
+        root = Element("WebsiteConfiguration")
+        root.set("xmlns", S3_NS)
+        index_doc = config.get("index_document")
+        if index_doc:
+            idx_el = SubElement(root, "IndexDocument")
+            SubElement(idx_el, "Suffix").text = index_doc
+        error_doc = config.get("error_document")
+        if error_doc:
+            err_el = SubElement(root, "ErrorDocument")
+            SubElement(err_el, "Key").text = error_doc
+        return _xml_response(root)
+    if request.method == "DELETE":
+        try:
+            storage.set_bucket_website(bucket_name, None)
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        current_app.logger.info("Bucket website config deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
+    ct_error = _require_xml_content_type()
+    if ct_error:
+        return ct_error
+    payload = request.get_data(cache=False) or b""
+    if not payload.strip():
+        return _error_response("MalformedXML", "Request body is required", 400)
+    try:
+        root = _parse_xml_with_limit(payload)
+    except ParseError:
+        return _error_response("MalformedXML", "Unable to parse XML document", 400)
+    if _strip_ns(root.tag) != "WebsiteConfiguration":
+        return _error_response("MalformedXML", "Root element must be WebsiteConfiguration", 400)
+    index_el = _find_element(root, "IndexDocument")
+    if index_el is None:
+        return _error_response("InvalidArgument", "IndexDocument is required", 400)
+    suffix_el = _find_element(index_el, "Suffix")
+    if suffix_el is None or not (suffix_el.text or "").strip():
+        return _error_response("InvalidArgument", "IndexDocument Suffix is required", 400)
+    index_suffix = suffix_el.text.strip()
+    if "/" in index_suffix:
+        return _error_response("InvalidArgument", "IndexDocument Suffix must not contain '/'", 400)
+    website_config: Dict[str, Any] = {"index_document": index_suffix}
+    error_el = _find_element(root, "ErrorDocument")
+    if error_el is not None:
+        key_el = _find_element(error_el, "Key")
+        if key_el is not None and (key_el.text or "").strip():
+            website_config["error_document"] = key_el.text.strip()
+    try:
+        storage.set_bucket_website(bucket_name, website_config)
+    except StorageError as exc:
+        return _error_response("NoSuchBucket", str(exc), 404)
+    current_app.logger.info("Bucket website config updated", extra={"bucket": bucket_name, "index": index_suffix})
+    return Response(status=200)
 
 
 def _parse_destination_arn(arn: str) -> tuple:
