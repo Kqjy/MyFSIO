@@ -51,6 +51,7 @@ from .s3_client import (
 from .secret_store import EphemeralSecretStore
 from .site_registry import SiteRegistry, SiteInfo, PeerSite
 from .storage import ObjectStorage, StorageError
+from .website_domains import normalize_domain, is_valid_domain
 
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
 
@@ -2400,13 +2401,19 @@ def create_website_domain():
         flash("Website hosting is not enabled", "warning")
         return redirect(url_for("ui.buckets_overview"))
 
-    domain = (request.form.get("domain") or "").strip().lower()
+    domain = normalize_domain(request.form.get("domain") or "")
     bucket = (request.form.get("bucket") or "").strip()
 
     if not domain:
         if _wants_json():
             return jsonify({"error": "Domain is required"}), 400
         flash("Domain is required", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    if not is_valid_domain(domain):
+        if _wants_json():
+            return jsonify({"error": f"Invalid domain format: '{domain}'"}), 400
+        flash(f"Invalid domain format: '{domain}'. Use a hostname like www.example.com", "danger")
         return redirect(url_for("ui.website_domains_dashboard"))
 
     if not bucket:
@@ -2447,6 +2454,7 @@ def update_website_domain(domain: str):
         flash("Access denied", "danger")
         return redirect(url_for("ui.website_domains_dashboard"))
 
+    domain = normalize_domain(domain)
     bucket = (request.form.get("bucket") or "").strip()
     if not bucket:
         if _wants_json():
@@ -2462,9 +2470,14 @@ def update_website_domain(domain: str):
         return redirect(url_for("ui.website_domains_dashboard"))
 
     store = current_app.extensions.get("website_domains")
+    if not store.get_bucket(domain):
+        if _wants_json():
+            return jsonify({"error": f"No mapping for domain '{domain}'"}), 404
+        flash(f"No mapping for domain '{domain}'", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
     store.set_mapping(domain, bucket)
     if _wants_json():
-        return jsonify({"success": True, "domain": domain.lower(), "bucket": bucket})
+        return jsonify({"success": True, "domain": domain, "bucket": bucket})
     flash(f"Domain '{domain}' updated to bucket '{bucket}'", "success")
     return redirect(url_for("ui.website_domains_dashboard"))
 
@@ -2480,6 +2493,7 @@ def delete_website_domain(domain: str):
         flash("Access denied", "danger")
         return redirect(url_for("ui.website_domains_dashboard"))
 
+    domain = normalize_domain(domain)
     store = current_app.extensions.get("website_domains")
     if not store.delete_mapping(domain):
         if _wants_json():

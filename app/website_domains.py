@@ -1,9 +1,33 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional
+
+_DOMAIN_RE = re.compile(
+    r"^(?!-)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+)
+
+
+def normalize_domain(raw: str) -> str:
+    raw = raw.strip().lower()
+    for prefix in ("https://", "http://"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+    raw = raw.split("/", 1)[0]
+    raw = raw.split("?", 1)[0]
+    raw = raw.split("#", 1)[0]
+    if ":" in raw:
+        raw = raw.rsplit(":", 1)[0]
+    return raw
+
+
+def is_valid_domain(domain: str) -> bool:
+    if not domain or len(domain) > 253:
+        return False
+    return bool(_DOMAIN_RE.match(domain))
 
 
 class WebsiteDomainStore:

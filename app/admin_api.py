@@ -17,7 +17,7 @@ from .extensions import limiter
 from .iam import IamError, Principal
 from .replication import ReplicationManager
 from .site_registry import PeerSite, SiteInfo, SiteRegistry
-from .website_domains import WebsiteDomainStore
+from .website_domains import WebsiteDomainStore, normalize_domain, is_valid_domain
 
 
 def _is_safe_url(url: str, allow_internal: bool = False) -> bool:
@@ -704,10 +704,12 @@ def create_website_domain():
     if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
         return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
     payload = request.get_json(silent=True) or {}
-    domain = (payload.get("domain") or "").strip().lower()
+    domain = normalize_domain(payload.get("domain") or "")
     bucket = (payload.get("bucket") or "").strip()
     if not domain:
         return _json_error("ValidationError", "domain is required", 400)
+    if not is_valid_domain(domain):
+        return _json_error("ValidationError", f"Invalid domain: '{domain}'", 400)
     if not bucket:
         return _json_error("ValidationError", "bucket is required", 400)
     storage = _storage()
@@ -730,10 +732,11 @@ def get_website_domain(domain: str):
         return error
     if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
         return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    domain = normalize_domain(domain)
     bucket = _website_domains().get_bucket(domain)
     if not bucket:
         return _json_error("NotFound", f"No mapping found for domain '{domain}'", 404)
-    return jsonify({"domain": domain.lower(), "bucket": bucket})
+    return jsonify({"domain": domain, "bucket": bucket})
 
 
 @admin_api_bp.route("/website-domains/<domain>", methods=["PUT"])
@@ -744,6 +747,7 @@ def update_website_domain(domain: str):
         return error
     if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
         return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    domain = normalize_domain(domain)
     payload = request.get_json(silent=True) or {}
     bucket = (payload.get("bucket") or "").strip()
     if not bucket:
@@ -752,9 +756,11 @@ def update_website_domain(domain: str):
     if not storage.bucket_exists(bucket):
         return _json_error("NoSuchBucket", f"Bucket '{bucket}' does not exist", 404)
     store = _website_domains()
+    if not store.get_bucket(domain):
+        return _json_error("NotFound", f"No mapping found for domain '{domain}'", 404)
     store.set_mapping(domain, bucket)
     logger.info("Website domain mapping updated: %s -> %s", domain, bucket)
-    return jsonify({"domain": domain.lower(), "bucket": bucket})
+    return jsonify({"domain": domain, "bucket": bucket})
 
 
 @admin_api_bp.route("/website-domains/<domain>", methods=["DELETE"])
@@ -765,6 +771,7 @@ def delete_website_domain(domain: str):
         return error
     if not current_app.config.get("WEBSITE_HOSTING_ENABLED", False):
         return _json_error("InvalidRequest", "Website hosting is not enabled", 400)
+    domain = normalize_domain(domain)
     if not _website_domains().delete_mapping(domain):
         return _json_error("NotFound", f"No mapping found for domain '{domain}'", 404)
     logger.info("Website domain mapping deleted: %s", domain)
