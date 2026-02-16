@@ -3301,9 +3301,12 @@ def sites_dashboard():
 @ui_bp.post("/sites/local")
 def update_local_site():
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3314,6 +3317,8 @@ def update_local_site():
     display_name = request.form.get("display_name", "").strip()
 
     if not site_id:
+        if wants_json:
+            return jsonify({"error": "Site ID is required"}), 400
         flash("Site ID is required", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3335,6 +3340,8 @@ def update_local_site():
     )
     registry.set_local_site(site)
 
+    if wants_json:
+        return jsonify({"message": "Local site configuration updated"})
     flash("Local site configuration updated", "success")
     return redirect(url_for("ui.sites_dashboard"))
 
@@ -3342,9 +3349,12 @@ def update_local_site():
 @ui_bp.post("/sites/peers")
 def add_peer_site():
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3356,9 +3366,13 @@ def add_peer_site():
     connection_id = request.form.get("connection_id", "").strip() or None
 
     if not site_id:
+        if wants_json:
+            return jsonify({"error": "Site ID is required"}), 400
         flash("Site ID is required", "danger")
         return redirect(url_for("ui.sites_dashboard"))
     if not endpoint:
+        if wants_json:
+            return jsonify({"error": "Endpoint is required"}), 400
         flash("Endpoint is required", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3370,10 +3384,14 @@ def add_peer_site():
     registry = _site_registry()
 
     if registry.get_peer(site_id):
+        if wants_json:
+            return jsonify({"error": f"Peer site '{site_id}' already exists"}), 409
         flash(f"Peer site '{site_id}' already exists", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
     if connection_id and not _connections().get(connection_id):
+        if wants_json:
+            return jsonify({"error": f"Connection '{connection_id}' not found"}), 404
         flash(f"Connection '{connection_id}' not found", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3387,6 +3405,11 @@ def add_peer_site():
     )
     registry.add_peer(peer)
 
+    if wants_json:
+        redirect_url = None
+        if connection_id:
+            redirect_url = url_for("ui.replication_wizard", site_id=site_id)
+        return jsonify({"message": f"Peer site '{site_id}' added", "redirect": redirect_url})
     flash(f"Peer site '{site_id}' added", "success")
 
     if connection_id:
@@ -3397,9 +3420,12 @@ def add_peer_site():
 @ui_bp.post("/sites/peers/<site_id>/update")
 def update_peer_site(site_id: str):
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3407,6 +3433,8 @@ def update_peer_site(site_id: str):
     existing = registry.get_peer(site_id)
 
     if not existing:
+        if wants_json:
+            return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
         flash(f"Peer site '{site_id}' not found", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3414,7 +3442,10 @@ def update_peer_site(site_id: str):
     region = request.form.get("region", existing.region).strip()
     priority = request.form.get("priority", str(existing.priority))
     display_name = request.form.get("display_name", existing.display_name).strip()
-    connection_id = request.form.get("connection_id", "").strip() or existing.connection_id
+    if "connection_id" in request.form:
+        connection_id = request.form["connection_id"].strip() or None
+    else:
+        connection_id = existing.connection_id
 
     try:
         priority_int = int(priority)
@@ -3422,6 +3453,8 @@ def update_peer_site(site_id: str):
         priority_int = existing.priority
 
     if connection_id and not _connections().get(connection_id):
+        if wants_json:
+            return jsonify({"error": f"Connection '{connection_id}' not found"}), 404
         flash(f"Connection '{connection_id}' not found", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3438,6 +3471,8 @@ def update_peer_site(site_id: str):
     )
     registry.update_peer(peer)
 
+    if wants_json:
+        return jsonify({"message": f"Peer site '{site_id}' updated"})
     flash(f"Peer site '{site_id}' updated", "success")
     return redirect(url_for("ui.sites_dashboard"))
 
@@ -3445,16 +3480,23 @@ def update_peer_site(site_id: str):
 @ui_bp.post("/sites/peers/<site_id>/delete")
 def delete_peer_site(site_id: str):
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
     registry = _site_registry()
     if registry.delete_peer(site_id):
+        if wants_json:
+            return jsonify({"message": f"Peer site '{site_id}' deleted"})
         flash(f"Peer site '{site_id}' deleted", "success")
     else:
+        if wants_json:
+            return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
         flash(f"Peer site '{site_id}' not found", "danger")
 
     return redirect(url_for("ui.sites_dashboard"))
