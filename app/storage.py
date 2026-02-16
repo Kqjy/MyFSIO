@@ -18,6 +18,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Generator, List, Optional
 
+try:
+    import myfsio_core as _rc
+    _HAS_RUST = True
+except ImportError:
+    _rc = None
+    _HAS_RUST = False
+
 # Platform-specific file locking
 if os.name == "nt":
     import msvcrt
@@ -220,6 +227,11 @@ class ObjectStorage:
             raise BucketNotFoundError("Bucket does not exist")
 
     def _validate_bucket_name(self, bucket_name: str) -> None:
+        if _HAS_RUST:
+            error = _rc.validate_bucket_name(bucket_name)
+            if error:
+                raise StorageError(error)
+            return
         if len(bucket_name) < 3 or len(bucket_name) > 63:
             raise StorageError("Bucket name must be between 3 and 63 characters")
         if not re.match(r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$", bucket_name):
@@ -2133,6 +2145,18 @@ class ObjectStorage:
 
     @staticmethod
     def _sanitize_object_key(object_key: str, max_length_bytes: int = 1024) -> Path:
+        if _HAS_RUST:
+            error = _rc.validate_object_key(object_key, max_length_bytes, os.name == "nt")
+            if error:
+                raise StorageError(error)
+            normalized = unicodedata.normalize("NFC", object_key)
+            candidate = Path(normalized)
+            if candidate.is_absolute():
+                raise StorageError("Absolute object keys are not allowed")
+            if getattr(candidate, "drive", ""):
+                raise StorageError("Object key cannot include a drive letter")
+            return Path(*candidate.parts) if candidate.parts else candidate
+
         if not object_key:
             raise StorageError("Object key required")
         if "\x00" in object_key:
@@ -2146,7 +2170,7 @@ class ObjectStorage:
         candidate = Path(object_key)
         if ".." in candidate.parts:
             raise StorageError("Object key contains parent directory references")
-        
+
         if candidate.is_absolute():
             raise StorageError("Absolute object keys are not allowed")
         if getattr(candidate, "drive", ""):
@@ -2174,6 +2198,8 @@ class ObjectStorage:
 
     @staticmethod
     def _compute_etag(path: Path) -> str:
+        if _HAS_RUST:
+            return _rc.md5_file(str(path))
         checksum = hashlib.md5()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(8192), b""):

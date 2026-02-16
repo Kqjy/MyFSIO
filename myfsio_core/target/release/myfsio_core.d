@@ -1,0 +1,1 @@
+C:\Users\jun\OneDrive\Cool\s3\myfsio_core\target\release\myfsio_core.dll: C:\Users\jun\OneDrive\Cool\s3\myfsio_core\src\hashing.rs C:\Users\jun\OneDrive\Cool\s3\myfsio_core\src\lib.rs C:\Users\jun\OneDrive\Cool\s3\myfsio_core\src\sigv4.rs C:\Users\jun\OneDrive\Cool\s3\myfsio_core\src\validation.rs

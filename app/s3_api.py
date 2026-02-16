@@ -17,6 +17,13 @@ from urllib.parse import quote, urlencode, urlparse, unquote
 from xml.etree.ElementTree import Element, SubElement, tostring, ParseError
 from defusedxml.ElementTree import fromstring
 
+try:
+    import myfsio_core as _rc
+    _HAS_RUST = True
+except ImportError:
+    _rc = None
+    _HAS_RUST = False
+
 from flask import Blueprint, Response, current_app, jsonify, request, g
 from werkzeug.http import http_date
 
@@ -192,11 +199,16 @@ _SIGNING_KEY_CACHE_MAX_SIZE = 256
 
 
 def clear_signing_key_cache() -> None:
+    if _HAS_RUST:
+        _rc.clear_signing_key_cache()
     with _SIGNING_KEY_CACHE_LOCK:
         _SIGNING_KEY_CACHE.clear()
 
 
 def _get_signature_key(key: str, date_stamp: str, region_name: str, service_name: str) -> bytes:
+    if _HAS_RUST:
+        return bytes(_rc.derive_signing_key(key, date_stamp, region_name, service_name))
+
     cache_key = (key, date_stamp, region_name, service_name)
     now = time.time()
 
@@ -314,9 +326,13 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
              raise IamError("Required headers not signed")
 
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
     signing_key = _get_signature_key(secret_key, date_stamp, region, service)
-    calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    if _HAS_RUST:
+        string_to_sign = _rc.build_string_to_sign(amz_date, credential_scope, canonical_request)
+        calculated_signature = _rc.compute_signature(signing_key, string_to_sign)
+    else:
+        string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
+        calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(calculated_signature, signature):
         if current_app.config.get("DEBUG_SIGV4"):
@@ -400,18 +416,15 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         payload_hash
     ])
     
-    algorithm = "AWS4-HMAC-SHA256"
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
-    string_to_sign = "\n".join([
-        algorithm,
-        amz_date,
-        credential_scope,
-        hashed_request
-    ])
-    
     signing_key = _get_signature_key(secret_key, date_stamp, region, service)
-    calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    if _HAS_RUST:
+        string_to_sign = _rc.build_string_to_sign(amz_date, credential_scope, canonical_request)
+        calculated_signature = _rc.compute_signature(signing_key, string_to_sign)
+    else:
+        hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+        string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashed_request}"
+        calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(calculated_signature, signature):
         raise IamError("SignatureDoesNotMatch")
