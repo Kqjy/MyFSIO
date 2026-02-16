@@ -1039,6 +1039,7 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "logging": _bucket_logging_handler,
         "uploads": _bucket_uploads_handler,
         "policy": _bucket_policy_handler,
+        "policyStatus": _bucket_policy_status_handler,
         "replication": _bucket_replication_handler,
         "website": _bucket_website_handler,
     }
@@ -1321,8 +1322,8 @@ def _bucket_cors_handler(bucket_name: str) -> Response:
 
 
 def _bucket_encryption_handler(bucket_name: str) -> Response:
-    if request.method not in {"GET", "PUT"}:
-        return _method_not_allowed(["GET", "PUT"])
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
     principal, error = _require_principal()
     if error:
         return error
@@ -1343,6 +1344,13 @@ def _bucket_encryption_handler(bucket_name: str) -> Response:
                 404,
             )
         return _xml_response(_render_encryption_document(config))
+    if request.method == "DELETE":
+        try:
+            storage.set_bucket_encryption(bucket_name, None)
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        current_app.logger.info("Bucket encryption deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
     ct_error = _require_xml_content_type()
     if ct_error:
         return ct_error
@@ -1437,6 +1445,99 @@ def _bucket_acl_handler(bucket_name: str) -> Response:
         SubElement(grant_el, "Permission").text = grant.permission
 
     return _xml_response(root)
+
+
+def _object_acl_handler(bucket_name: str, object_key: str) -> Response:
+    from .acl import create_canned_acl, GRANTEE_ALL_USERS, GRANTEE_AUTHENTICATED_USERS
+
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+    storage = _storage()
+    try:
+        path = storage.get_object_path(bucket_name, object_key)
+    except (StorageError, FileNotFoundError):
+        return _error_response("NoSuchKey", "Object not found", 404)
+
+    if request.method == "PUT":
+        principal, error = _object_principal("write", bucket_name, object_key)
+        if error:
+            return error
+        owner_id = principal.access_key if principal else "anonymous"
+        canned_acl = request.headers.get("x-amz-acl", "private")
+        acl = create_canned_acl(canned_acl, owner_id)
+        acl_service = _acl()
+        metadata = storage.get_object_metadata(bucket_name, object_key)
+        metadata.update(acl_service.create_object_acl_metadata(acl))
+        safe_key = storage._sanitize_object_key(object_key, storage._object_key_max_length_bytes)
+        storage._write_metadata(bucket_name, safe_key, metadata)
+        current_app.logger.info("Object ACL set", extra={"bucket": bucket_name, "key": object_key, "acl": canned_acl})
+        return Response(status=200)
+
+    principal, error = _object_principal("read", bucket_name, object_key)
+    if error:
+        return error
+    owner_id = principal.access_key if principal else "anonymous"
+    acl_service = _acl()
+    metadata = storage.get_object_metadata(bucket_name, object_key)
+    acl = acl_service.get_object_acl(bucket_name, object_key, metadata)
+    if not acl:
+        acl = create_canned_acl("private", owner_id)
+
+    root = Element("AccessControlPolicy")
+    owner_el = SubElement(root, "Owner")
+    SubElement(owner_el, "ID").text = acl.owner
+    SubElement(owner_el, "DisplayName").text = acl.owner
+    acl_el = SubElement(root, "AccessControlList")
+    for grant in acl.grants:
+        grant_el = SubElement(acl_el, "Grant")
+        grantee = SubElement(grant_el, "Grantee")
+        if grant.grantee == GRANTEE_ALL_USERS:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "Group")
+            SubElement(grantee, "URI").text = "http://acs.amazonaws.com/groups/global/AllUsers"
+        elif grant.grantee == GRANTEE_AUTHENTICATED_USERS:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "Group")
+            SubElement(grantee, "URI").text = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+        else:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "CanonicalUser")
+            SubElement(grantee, "ID").text = grant.grantee
+            SubElement(grantee, "DisplayName").text = grant.grantee
+        SubElement(grant_el, "Permission").text = grant.permission
+    return _xml_response(root)
+
+
+def _object_attributes_handler(bucket_name: str, object_key: str) -> Response:
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+    principal, error = _object_principal("read", bucket_name, object_key)
+    if error:
+        return error
+    storage = _storage()
+    try:
+        path = storage.get_object_path(bucket_name, object_key)
+        file_stat = path.stat()
+        metadata = storage.get_object_metadata(bucket_name, object_key)
+    except (StorageError, FileNotFoundError):
+        return _error_response("NoSuchKey", "Object not found", 404)
+
+    requested = request.headers.get("x-amz-object-attributes", "")
+    attrs = {a.strip() for a in requested.split(",") if a.strip()}
+
+    root = Element("GetObjectAttributesResponse")
+    if "ETag" in attrs:
+        etag = metadata.get("__etag__") or storage._compute_etag(path)
+        SubElement(root, "ETag").text = etag
+    if "StorageClass" in attrs:
+        SubElement(root, "StorageClass").text = "STANDARD"
+    if "ObjectSize" in attrs:
+        SubElement(root, "ObjectSize").text = str(file_stat.st_size)
+    if "Checksum" in attrs:
+        SubElement(root, "Checksum")
+    if "ObjectParts" in attrs:
+        SubElement(root, "ObjectParts")
+
+    response = _xml_response(root)
+    response.headers["Last-Modified"] = http_date(file_stat.st_mtime)
+    return response
 
 
 def _bucket_list_versions_handler(bucket_name: str) -> Response:
@@ -2669,6 +2770,12 @@ def object_handler(bucket_name: str, object_key: str):
     if "legal-hold" in request.args:
         return _object_legal_hold_handler(bucket_name, object_key)
 
+    if "acl" in request.args:
+        return _object_acl_handler(bucket_name, object_key)
+
+    if "attributes" in request.args:
+        return _object_attributes_handler(bucket_name, object_key)
+
     if request.method == "POST":
         if "uploads" in request.args:
             return _initiate_multipart_upload(bucket_name, object_key)
@@ -2991,6 +3098,32 @@ def _bucket_policy_handler(bucket_name: str) -> Response:
     except ValueError as exc:
         return _error_response("MalformedPolicy", str(exc), 400)
     return Response(status=204)
+
+
+def _bucket_policy_status_handler(bucket_name: str) -> Response:
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    store = _bucket_policies()
+    policy = store.get_policy(bucket_name)
+    is_public = False
+    if policy:
+        for statement in policy.get("Statement", []):
+            if statement.get("Effect") == "Allow" and statement.get("Principal") == "*":
+                is_public = True
+                break
+    root = Element("PolicyStatus")
+    SubElement(root, "IsPublic").text = "TRUE" if is_public else "FALSE"
+    return _xml_response(root)
 
 
 def _bucket_replication_handler(bucket_name: str) -> Response:
