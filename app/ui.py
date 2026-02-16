@@ -508,11 +508,15 @@ def bucket_detail(bucket_name: str):
     can_manage_quota = is_replication_admin
 
     website_config = None
+    website_domains = []
     if website_hosting_enabled:
         try:
             website_config = storage.get_bucket_website(bucket_name)
         except StorageError:
             website_config = None
+        domain_store = current_app.extensions.get("website_domains")
+        if domain_store:
+            website_domains = domain_store.get_domains_for_bucket(bucket_name)
 
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
     objects_stream_url = url_for("ui.stream_bucket_objects", bucket_name=bucket_name)
@@ -558,6 +562,7 @@ def bucket_detail(bucket_name: str):
         site_sync_enabled=site_sync_enabled,
         website_hosting_enabled=website_hosting_enabled,
         website_config=website_config,
+        website_domains=website_domains,
         can_manage_website=can_edit_policy,
     )
 
@@ -2374,7 +2379,10 @@ def website_domains_dashboard():
     store = current_app.extensions.get("website_domains")
     mappings = store.list_all() if store else []
     storage = _storage()
-    buckets = [b.name for b in storage.list_buckets()]
+    buckets = [
+        b.name for b in storage.list_buckets()
+        if storage.get_bucket_website(b.name)
+    ]
     return render_template(
         "website_domains.html",
         mappings=mappings,

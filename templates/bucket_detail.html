@@ -1020,6 +1020,28 @@
               </div>
               {% endif %}
 
+              {% if website_domains %}
+              <div class="mb-4">
+                <label class="form-label fw-medium mb-2">Mapped Domains</label>
+                {% for domain in website_domains %}
+                <div class="d-flex align-items-center mb-1">
+                  <span class="badge bg-success-subtle text-success-emphasis me-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path fill-rule="evenodd" d="M7.21 1.293a1 1 0 0 1 1.58 0l.612.72a1 1 0 0 0 .88.332l.94-.134a1 1 0 0 1 1.118.7l.248.912a1 1 0 0 0 .59.659l.876.388a1 1 0 0 1 .435 1.505l-.546.766a1 1 0 0 0-.156.935l.306.899a1 1 0 0 1-.725 1.282l-.92.216a1 1 0 0 0-.72.555l-.41.856a1 1 0 0 1-1.396.478l-.803-.49a1 1 0 0 0-1.04 0l-.802.49a1 1 0 0 1-1.397-.478l-.41-.857a1 1 0 0 0-.72-.554l-.919-.216a1 1 0 0 1-.725-1.282l.306-.9a1 1 0 0 0-.156-.934l-.546-.766a1 1 0 0 1 .435-1.505l.877-.388a1 1 0 0 0 .589-.66l.248-.911a1 1 0 0 1 1.118-.7l.94.133a1 1 0 0 0 .88-.331l.612-.72zM11 7a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1H6v1.5a.5.5 0 0 0 1 0V7.5h1v2a.5.5 0 0 0 1 0v-2h1.5a.5.5 0 0 0 0-1H10V7z"/>
+                    </svg>
+                    connected
+                  </span>
+                  <code class="small">{{ domain }}</code>
+                </div>
+                {% endfor %}
+              </div>
+              {% elif website_config %}
+              <div class="mb-4">
+                <label class="form-label fw-medium mb-2">Mapped Domains</label>
+                <p class="text-muted small mb-0">No domains mapped to this bucket. <a href="{{ url_for('ui.website_domains_dashboard') }}">Manage domains</a></p>
+              </div>
+              {% endif %}
+
               {% if can_manage_website %}
               <form method="post" action="{{ url_for('ui.update_bucket_website', bucket_name=bucket_name) }}" id="websiteForm">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
