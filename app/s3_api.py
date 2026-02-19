@@ -986,7 +986,7 @@ def _render_encryption_document(config: dict[str, Any]) -> Element:
     return root
 
 
-def _stream_file(path, chunk_size: int = 64 * 1024):
+def _stream_file(path, chunk_size: int = 256 * 1024):
     with path.open("rb") as handle:
         while True:
             chunk = handle.read(chunk_size)
@@ -2923,7 +2923,7 @@ def object_handler(bucket_name: str, object_key: str):
                             f.seek(start_pos)
                             remaining = length_to_read
                             while remaining > 0:
-                                chunk_size = min(65536, remaining)
+                                chunk_size = min(262144, remaining)
                                 chunk = f.read(chunk_size)
                                 if not chunk:
                                     break
