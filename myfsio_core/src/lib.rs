@@ -1,4 +1,5 @@
 mod hashing;
+mod metadata;
 mod sigv4;
 mod validation;
 
@@ -24,6 +25,8 @@ mod myfsio_core {
 
         m.add_function(wrap_pyfunction!(validation::validate_object_key, m)?)?;
         m.add_function(wrap_pyfunction!(validation::validate_bucket_name, m)?)?;
+
+        m.add_function(wrap_pyfunction!(metadata::read_index_entry, m)?)?;
 
         Ok(())
     }

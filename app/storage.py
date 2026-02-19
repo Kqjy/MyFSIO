@@ -1905,6 +1905,8 @@ class ObjectStorage:
 
     def _read_index_entry(self, bucket_name: str, key: Path) -> Optional[Dict[str, Any]]:
         index_path, entry_name = self._index_file_for_key(bucket_name, key)
+        if _HAS_RUST:
+            return _rc.read_index_entry(str(index_path), entry_name)
         if not index_path.exists():
             return None
         try:
