@@ -3348,7 +3348,7 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         path = _storage().get_object_path(bucket_name, object_key)
         metadata = _storage().get_object_metadata(bucket_name, object_key)
         stat = path.stat()
-        etag = _storage()._compute_etag(path)
+        etag = metadata.get("__etag__") or _storage()._compute_etag(path)
         
         response = Response(status=200)
         _apply_object_headers(response, file_stat=stat, metadata=metadata, etag=etag)
