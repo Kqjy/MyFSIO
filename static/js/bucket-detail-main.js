@@ -162,6 +162,8 @@
   let isLoadingObjects = false;
   let hasMoreObjects = false;
   let currentFilterTerm = '';
+  let currentSortField = 'name';
+  let currentSortDir = 'asc';
   let pageSize = 5000;
   let currentPrefix = '';
   let allObjects = [];
@@ -348,14 +350,18 @@
     const currentInputs = {
       objectCount: allObjects.length,
       prefix: currentPrefix,
-      filterTerm: currentFilterTerm
+      filterTerm: currentFilterTerm,
+      sortField: currentSortField,
+      sortDir: currentSortDir
     };
 
     if (!forceRecompute &&
         memoizedVisibleItems !== null &&
         memoizedInputs.objectCount === currentInputs.objectCount &&
         memoizedInputs.prefix === currentInputs.prefix &&
-        memoizedInputs.filterTerm === currentInputs.filterTerm) {
+        memoizedInputs.filterTerm === currentInputs.filterTerm &&
+        memoizedInputs.sortField === currentInputs.sortField &&
+        memoizedInputs.sortDir === currentInputs.sortDir) {
       return memoizedVisibleItems;
     }
 
@@ -394,9 +400,19 @@
     items.sort((a, b) => {
       if (a.type === 'folder' && b.type === 'file') return -1;
       if (a.type === 'file' && b.type === 'folder') return 1;
-      const aKey = a.type === 'folder' ? a.path : a.data.key;
-      const bKey = b.type === 'folder' ? b.path : b.data.key;
-      return aKey.localeCompare(bKey);
+      if (a.type === 'folder' && b.type === 'folder') {
+        return a.path.localeCompare(b.path);
+      }
+      const dir = currentSortDir === 'asc' ? 1 : -1;
+      if (currentSortField === 'size') {
+        return (a.data.size - b.data.size) * dir;
+      }
+      if (currentSortField === 'date') {
+        const aTime = new Date(a.data.lastModified || a.data.last_modified || 0).getTime();
+        const bTime = new Date(b.data.lastModified || b.data.last_modified || 0).getTime();
+        return (aTime - bTime) * dir;
+      }
+      return a.data.key.localeCompare(b.data.key) * dir;
     });
 
     memoizedVisibleItems = items;
@@ -2033,6 +2049,128 @@
     updateFilterWarning();
     refreshVirtualList();
   });
+
+  document.querySelectorAll('[data-sort-field]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const field = el.dataset.sortField;
+      const dir = el.dataset.sortDir || 'asc';
+      currentSortField = field;
+      currentSortDir = dir;
+      document.querySelectorAll('[data-sort-field]').forEach(s => s.classList.remove('active'));
+      el.classList.add('active');
+      var label = document.getElementById('sort-dropdown-label');
+      if (label) label.textContent = el.textContent.trim();
+      refreshVirtualList();
+    });
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable) return;
+
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      document.getElementById('object-search')?.focus();
+    }
+
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      var kbModal = document.getElementById('keyboardShortcutsModal');
+      if (kbModal) {
+        var instance = bootstrap.Modal.getOrCreateInstance(kbModal);
+        instance.toggle();
+      }
+    }
+
+    if (e.key === 'Escape') {
+      var searchInput = document.getElementById('object-search');
+      if (searchInput && document.activeElement === searchInput) {
+        searchInput.value = '';
+        currentFilterTerm = '';
+        refreshVirtualList();
+        searchInput.blur();
+      }
+    }
+
+    if (e.key === 'Delete' && !e.ctrlKey && !e.metaKey) {
+      if (selectedRows.size > 0 && bulkDeleteButton && !bulkDeleteButton.disabled) {
+        bulkDeleteButton.click();
+      }
+    }
+
+    if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
+      if (visibleItems.length > 0 && selectAllCheckbox) {
+        e.preventDefault();
+        selectAllCheckbox.checked = true;
+        selectAllCheckbox.dispatchEvent(new Event('change'));
+      }
+    }
+  });
+
+  const ctxMenu = document.getElementById('objectContextMenu');
+  let ctxTargetRow = null;
+
+  const hideContextMenu = () => {
+    if (ctxMenu) ctxMenu.classList.add('d-none');
+    ctxTargetRow = null;
+  };
+
+  if (ctxMenu) {
+    document.addEventListener('click', hideContextMenu);
+    document.addEventListener('contextmenu', (e) => {
+      const row = e.target.closest('[data-object-row]');
+      if (!row) { hideContextMenu(); return; }
+      e.preventDefault();
+      ctxTargetRow = row;
+
+      const x = Math.min(e.clientX, window.innerWidth - 200);
+      const y = Math.min(e.clientY, window.innerHeight - 200);
+      ctxMenu.style.left = x + 'px';
+      ctxMenu.style.top = y + 'px';
+      ctxMenu.classList.remove('d-none');
+    });
+
+    ctxMenu.querySelectorAll('[data-ctx-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!ctxTargetRow) return;
+        const action = btn.dataset.ctxAction;
+        const key = ctxTargetRow.dataset.key;
+        const bucket = objectsContainer?.dataset.bucket || '';
+
+        if (action === 'download') {
+          const url = ctxTargetRow.dataset.downloadUrl;
+          if (url) window.open(url, '_blank');
+        } else if (action === 'copy-path') {
+          const s3Path = 's3://' + bucket + '/' + key;
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(s3Path).then(() => {
+              if (window.showToast) window.showToast('Copied: ' + s3Path, 'Copied', 'success');
+            });
+          }
+        } else if (action === 'presign') {
+          selectRow(ctxTargetRow);
+          presignLink.value = '';
+          presignModal?.show();
+          requestPresignedUrl();
+        } else if (action === 'delete') {
+          const deleteEndpoint = ctxTargetRow.dataset.deleteEndpoint;
+          if (deleteEndpoint) {
+            selectRow(ctxTargetRow);
+            const deleteModalEl = document.getElementById('deleteObjectModal');
+            const deleteModal = deleteModalEl ? bootstrap.Modal.getOrCreateInstance(deleteModalEl) : null;
+            const deleteObjectForm = document.getElementById('deleteObjectForm');
+            const deleteObjectKey = document.getElementById('deleteObjectKey');
+            if (deleteModal && deleteObjectForm) {
+              deleteObjectForm.setAttribute('action', deleteEndpoint);
+              if (deleteObjectKey) deleteObjectKey.textContent = key;
+              deleteModal.show();
+            }
+          }
+        }
+        hideContextMenu();
+      });
+    });
+  }
 
   refreshVersionsButton?.addEventListener('click', () => {
     if (!activeRow) {

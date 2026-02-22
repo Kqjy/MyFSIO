@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -17,6 +18,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Generator, List, Optional
+
+try:
+    import myfsio_core as _rc
+    _HAS_RUST = True
+except ImportError:
+    _rc = None
+    _HAS_RUST = False
 
 # Platform-specific file locking
 if os.name == "nt":
@@ -189,6 +197,8 @@ class ObjectStorage:
         self._object_key_max_length_bytes = object_key_max_length_bytes
         self._sorted_key_cache: Dict[str, tuple[list[str], int]] = {}
         self._meta_index_locks: Dict[str, threading.Lock] = {}
+        self._meta_read_cache: OrderedDict[tuple, Optional[Dict[str, Any]]] = OrderedDict()
+        self._meta_read_cache_max = 2048
         self._cleanup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ParentCleanup")
 
     def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
@@ -220,6 +230,11 @@ class ObjectStorage:
             raise BucketNotFoundError("Bucket does not exist")
 
     def _validate_bucket_name(self, bucket_name: str) -> None:
+        if _HAS_RUST:
+            error = _rc.validate_bucket_name(bucket_name)
+            if error:
+                raise StorageError(error)
+            return
         if len(bucket_name) < 3 or len(bucket_name) > 63:
             raise StorageError("Bucket name must be between 3 and 63 characters")
         if not re.match(r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$", bucket_name):
@@ -1892,14 +1907,38 @@ class ObjectStorage:
             return self._meta_index_locks[index_path]
 
     def _read_index_entry(self, bucket_name: str, key: Path) -> Optional[Dict[str, Any]]:
+        cache_key = (bucket_name, str(key))
+        with self._cache_lock:
+            hit = self._meta_read_cache.get(cache_key)
+            if hit is not None:
+                self._meta_read_cache.move_to_end(cache_key)
+                cached = hit[0]
+                return copy.deepcopy(cached) if cached is not None else None
+
         index_path, entry_name = self._index_file_for_key(bucket_name, key)
-        if not index_path.exists():
-            return None
-        try:
-            index_data = json.loads(index_path.read_text(encoding="utf-8"))
-            return index_data.get(entry_name)
-        except (OSError, json.JSONDecodeError):
-            return None
+        if _HAS_RUST:
+            result = _rc.read_index_entry(str(index_path), entry_name)
+        else:
+            if not index_path.exists():
+                result = None
+            else:
+                try:
+                    index_data = json.loads(index_path.read_text(encoding="utf-8"))
+                    result = index_data.get(entry_name)
+                except (OSError, json.JSONDecodeError):
+                    result = None
+
+        with self._cache_lock:
+            while len(self._meta_read_cache) >= self._meta_read_cache_max:
+                self._meta_read_cache.popitem(last=False)
+            self._meta_read_cache[cache_key] = (copy.deepcopy(result) if result is not None else None,)
+
+        return result
+
+    def _invalidate_meta_read_cache(self, bucket_name: str, key: Path) -> None:
+        cache_key = (bucket_name, str(key))
+        with self._cache_lock:
+            self._meta_read_cache.pop(cache_key, None)
 
     def _write_index_entry(self, bucket_name: str, key: Path, entry: Dict[str, Any]) -> None:
         index_path, entry_name = self._index_file_for_key(bucket_name, key)
@@ -1914,16 +1953,19 @@ class ObjectStorage:
                     pass
             index_data[entry_name] = entry
             index_path.write_text(json.dumps(index_data), encoding="utf-8")
+        self._invalidate_meta_read_cache(bucket_name, key)
 
     def _delete_index_entry(self, bucket_name: str, key: Path) -> None:
         index_path, entry_name = self._index_file_for_key(bucket_name, key)
         if not index_path.exists():
+            self._invalidate_meta_read_cache(bucket_name, key)
             return
         lock = self._get_meta_index_lock(str(index_path))
         with lock:
             try:
                 index_data = json.loads(index_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
+                self._invalidate_meta_read_cache(bucket_name, key)
                 return
             if entry_name in index_data:
                 del index_data[entry_name]
@@ -1934,6 +1976,7 @@ class ObjectStorage:
                         index_path.unlink()
                     except OSError:
                         pass
+        self._invalidate_meta_read_cache(bucket_name, key)
 
     def _normalize_metadata(self, metadata: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
         if not metadata:
@@ -2133,6 +2176,18 @@ class ObjectStorage:
 
     @staticmethod
     def _sanitize_object_key(object_key: str, max_length_bytes: int = 1024) -> Path:
+        if _HAS_RUST:
+            error = _rc.validate_object_key(object_key, max_length_bytes, os.name == "nt")
+            if error:
+                raise StorageError(error)
+            normalized = unicodedata.normalize("NFC", object_key)
+            candidate = Path(normalized)
+            if candidate.is_absolute():
+                raise StorageError("Absolute object keys are not allowed")
+            if getattr(candidate, "drive", ""):
+                raise StorageError("Object key cannot include a drive letter")
+            return Path(*candidate.parts) if candidate.parts else candidate
+
         if not object_key:
             raise StorageError("Object key required")
         if "\x00" in object_key:
@@ -2146,7 +2201,7 @@ class ObjectStorage:
         candidate = Path(object_key)
         if ".." in candidate.parts:
             raise StorageError("Object key contains parent directory references")
-        
+
         if candidate.is_absolute():
             raise StorageError("Absolute object keys are not allowed")
         if getattr(candidate, "drive", ""):
@@ -2174,6 +2229,8 @@ class ObjectStorage:
 
     @staticmethod
     def _compute_etag(path: Path) -> str:
+        if _HAS_RUST:
+            return _rc.md5_file(str(path))
         checksum = hashlib.md5()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(8192), b""):

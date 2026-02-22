@@ -164,9 +164,14 @@ class IamService:
         self._clear_failed_attempts(access_key)
         return self._build_principal(access_key, record)
 
+    _MAX_LOCKOUT_KEYS = 10000
+
     def _record_failed_attempt(self, access_key: str) -> None:
         if not access_key:
             return
+        if access_key not in self._failed_attempts and len(self._failed_attempts) >= self._MAX_LOCKOUT_KEYS:
+            oldest_key = min(self._failed_attempts, key=lambda k: self._failed_attempts[k][0] if self._failed_attempts[k] else datetime.min.replace(tzinfo=timezone.utc))
+            del self._failed_attempts[oldest_key]
         attempts = self._failed_attempts.setdefault(access_key, deque())
         self._prune_attempts(attempts)
         attempts.append(datetime.now(timezone.utc))

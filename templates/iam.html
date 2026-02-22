@@ -110,10 +110,26 @@
   {% else %}
   <div class="card-body px-4 pb-4">
     {% if users %}
+    {% if users|length > 1 %}
+    <div class="mb-3">
+      <div class="search-input-wrapper">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="search-icon" viewBox="0 0 16 16">
+          <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+        </svg>
+        <input type="text" class="form-control" id="iam-user-search" placeholder="Filter users by name or access key..." autocomplete="off" />
+      </div>
+    </div>
+    {% endif %}
     <div class="row g-3">
       {% for user in users %}
-      <div class="col-md-6 col-xl-4">
-        <div class="card h-100 iam-user-card">
+      {% set ns = namespace(is_admin=false) %}
+      {% for policy in user.policies %}
+        {% if 'iam:*' in policy.actions or '*' in policy.actions %}
+          {% set ns.is_admin = true %}
+        {% endif %}
+      {% endfor %}
+      <div class="col-md-6 col-xl-4 iam-user-item" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}">
+        <div class="card h-100 iam-user-card{{ ' iam-admin-card' if ns.is_admin else '' }}">
           <div class="card-body">
             <div class="d-flex align-items-start justify-content-between mb-3">
               <div class="d-flex align-items-center gap-3 min-width-0 overflow-hidden">
@@ -123,8 +139,23 @@
                   </svg>
                 </div>
                 <div class="min-width-0">
-                  <h6 class="fw-semibold mb-0 text-truncate" title="{{ user.display_name }}">{{ user.display_name }}</h6>
-                  <code class="small text-muted d-block text-truncate" title="{{ user.access_key }}">{{ user.access_key }}</code>
+                  <div class="d-flex align-items-center gap-2 mb-0">
+                    <h6 class="fw-semibold mb-0 text-truncate" title="{{ user.display_name }}">{{ user.display_name }}</h6>
+                    {% if ns.is_admin %}
+                    <span class="iam-role-badge iam-role-admin" data-role-badge>Admin</span>
+                    {% else %}
+                    <span class="iam-role-badge iam-role-user" data-role-badge>User</span>
+                    {% endif %}
+                  </div>
+                  <div class="d-flex align-items-center gap-1">
+                    <code class="small text-muted text-truncate" title="{{ user.access_key }}">{{ user.access_key }}</code>
+                    <button type="button" class="iam-copy-key" title="Copy access key" data-copy-access-key="{{ user.access_key }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+                        <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </div>
               <div class="dropdown flex-shrink-0">
@@ -166,18 +197,27 @@
             </div>
             <div class="mb-3">
               <div class="small text-muted mb-2">Bucket Permissions</div>
-              <div class="d-flex flex-wrap gap-1">
+              <div class="d-flex flex-wrap gap-1" data-policy-badges>
                 {% for policy in user.policies %}
-                  <span class="badge bg-primary bg-opacity-10 text-primary">
+                  {% set bucket_label = 'All Buckets' if policy.bucket == '*' else policy.bucket %}
+                  {% if '*' in policy.actions %}
+                    {% set perm_label = 'Full Access' %}
+                  {% elif policy.actions|length >= 9 %}
+                    {% set perm_label = 'Full Access' %}
+                  {% elif 'list' in policy.actions and 'read' in policy.actions and 'write' in policy.actions and 'delete' in policy.actions %}
+                    {% set perm_label = 'Read + Write + Delete' %}
+                  {% elif 'list' in policy.actions and 'read' in policy.actions and 'write' in policy.actions %}
+                    {% set perm_label = 'Read + Write' %}
+                  {% elif 'list' in policy.actions and 'read' in policy.actions %}
+                    {% set perm_label = 'Read Only' %}
+                  {% else %}
+                    {% set perm_label = 'Custom (' ~ policy.actions|length ~ ')' %}
+                  {% endif %}
+                  <span class="iam-perm-badge">
                     <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
                     </svg>
-                    {{ policy.bucket }}
-                    {% if '*' in policy.actions %}
-                      <span class="opacity-75">(full)</span>
-                    {% else %}
-                      <span class="opacity-75">({{ policy.actions|length }})</span>
-                    {% endif %}
+                    {{ bucket_label }} · {{ perm_label }}
                   </span>
                 {% else %}
                   <span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>
@@ -195,6 +235,12 @@
         </div>
       </div>
       {% endfor %}
+    </div>
+    <div class="iam-no-results d-none" id="iam-no-results">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="mb-2" viewBox="0 0 16 16">
+        <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+      </svg>
+      <p class="mb-0">No users match your filter.</p>
     </div>
     {% else %}
     <div class="empty-state text-center py-5">

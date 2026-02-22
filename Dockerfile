@@ -5,14 +5,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \ 
-    && apt-get install -y --no-install-recommends build-essential \ 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+RUN pip install --no-cache-dir maturin \
+    && cd myfsio_core \
+    && maturin build --release \
+    && pip install target/wheels/*.whl \
+    && cd .. \
+    && rm -rf myfsio_core/target \
+    && pip uninstall -y maturin \
+    && rustup self uninstall -y
 
 RUN chmod +x docker-entrypoint.sh
 

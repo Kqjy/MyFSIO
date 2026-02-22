@@ -17,6 +17,13 @@ from urllib.parse import quote, urlencode, urlparse, unquote
 from xml.etree.ElementTree import Element, SubElement, tostring, ParseError
 from defusedxml.ElementTree import fromstring
 
+try:
+    import myfsio_core as _rc
+    _HAS_RUST = True
+except ImportError:
+    _rc = None
+    _HAS_RUST = False
+
 from flask import Blueprint, Response, current_app, jsonify, request, g
 from werkzeug.http import http_date
 
@@ -192,11 +199,16 @@ _SIGNING_KEY_CACHE_MAX_SIZE = 256
 
 
 def clear_signing_key_cache() -> None:
+    if _HAS_RUST:
+        _rc.clear_signing_key_cache()
     with _SIGNING_KEY_CACHE_LOCK:
         _SIGNING_KEY_CACHE.clear()
 
 
 def _get_signature_key(key: str, date_stamp: str, region_name: str, service_name: str) -> bytes:
+    if _HAS_RUST:
+        return bytes(_rc.derive_signing_key(key, date_stamp, region_name, service_name))
+
     cache_key = (key, date_stamp, region_name, service_name)
     now = time.time()
 
@@ -255,39 +267,6 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     if not secret_key:
         raise IamError("SignatureDoesNotMatch")
 
-    method = req.method
-    canonical_uri = _get_canonical_uri(req)
-    
-    query_args = []
-    for key, value in req.args.items(multi=True):
-        query_args.append((key, value))
-    query_args.sort(key=lambda x: (x[0], x[1]))
-    
-    canonical_query_parts = []
-    for k, v in query_args:
-        canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
-    canonical_query_string = "&".join(canonical_query_parts)
-
-    signed_headers_list = signed_headers_str.split(";")
-    canonical_headers_parts = []
-    for header in signed_headers_list:
-        header_val = req.headers.get(header)
-        if header_val is None:
-             header_val = ""
-        
-        if header.lower() == 'expect' and header_val == "":
-            header_val = "100-continue"
-        
-        header_val = " ".join(header_val.split())
-        canonical_headers_parts.append(f"{header.lower()}:{header_val}\n")
-    canonical_headers = "".join(canonical_headers_parts)
-
-    payload_hash = req.headers.get("X-Amz-Content-Sha256")
-    if not payload_hash:
-        payload_hash = hashlib.sha256(req.get_data()).hexdigest()
-
-    canonical_request = f"{method}\n{canonical_uri}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
-
     amz_date = req.headers.get("X-Amz-Date") or req.headers.get("Date")
     if not amz_date:
         raise IamError("Missing Date header")
@@ -309,19 +288,60 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         if 'date' in signed_headers_set:
             required_headers.remove('x-amz-date')
             required_headers.add('date')
-        
+
         if not required_headers.issubset(signed_headers_set):
              raise IamError("Required headers not signed")
 
-    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
-    signing_key = _get_signature_key(secret_key, date_stamp, region, service)
-    calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    canonical_uri = _get_canonical_uri(req)
+    payload_hash = req.headers.get("X-Amz-Content-Sha256")
+    if not payload_hash:
+        payload_hash = hashlib.sha256(req.get_data()).hexdigest()
 
-    if not hmac.compare_digest(calculated_signature, signature):
-        if current_app.config.get("DEBUG_SIGV4"):
-            logger.warning("SigV4 signature mismatch for %s %s", method, req.path)
-        raise IamError("SignatureDoesNotMatch")
+    if _HAS_RUST:
+        query_params = list(req.args.items(multi=True))
+        header_values = [(h, req.headers.get(h) or "") for h in signed_headers_str.split(";")]
+        if not _rc.verify_sigv4_signature(
+            req.method, canonical_uri, query_params, signed_headers_str,
+            header_values, payload_hash, amz_date, date_stamp, region,
+            service, secret_key, signature,
+        ):
+            if current_app.config.get("DEBUG_SIGV4"):
+                logger.warning("SigV4 signature mismatch for %s %s", req.method, req.path)
+            raise IamError("SignatureDoesNotMatch")
+    else:
+        method = req.method
+        query_args = []
+        for key, value in req.args.items(multi=True):
+            query_args.append((key, value))
+        query_args.sort(key=lambda x: (x[0], x[1]))
+
+        canonical_query_parts = []
+        for k, v in query_args:
+            canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
+        canonical_query_string = "&".join(canonical_query_parts)
+
+        signed_headers_list = signed_headers_str.split(";")
+        canonical_headers_parts = []
+        for header in signed_headers_list:
+            header_val = req.headers.get(header)
+            if header_val is None:
+                 header_val = ""
+            if header.lower() == 'expect' and header_val == "":
+                header_val = "100-continue"
+            header_val = " ".join(header_val.split())
+            canonical_headers_parts.append(f"{header.lower()}:{header_val}\n")
+        canonical_headers = "".join(canonical_headers_parts)
+
+        canonical_request = f"{method}\n{canonical_uri}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
+
+        credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+        signing_key = _get_signature_key(secret_key, date_stamp, region, service)
+        string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
+        calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated_signature, signature):
+            if current_app.config.get("DEBUG_SIGV4"):
+                logger.warning("SigV4 signature mismatch for %s %s", method, req.path)
+            raise IamError("SignatureDoesNotMatch")
 
     session_token = req.headers.get("X-Amz-Security-Token")
     if session_token:
@@ -350,14 +370,21 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         req_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         raise IamError("Invalid Date format")
-    
+
     now = datetime.now(timezone.utc)
+    tolerance = timedelta(seconds=current_app.config.get("SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 900))
+    if req_time > now + tolerance:
+        raise IamError("Request date is too far in the future")
     try:
         expires_seconds = int(expires)
         if expires_seconds <= 0:
             raise IamError("Invalid Expires value: must be positive")
     except ValueError:
         raise IamError("Invalid Expires value: must be an integer")
+    min_expiry = current_app.config.get("PRESIGNED_URL_MIN_EXPIRY_SECONDS", 1)
+    max_expiry = current_app.config.get("PRESIGNED_URL_MAX_EXPIRY_SECONDS", 604800)
+    if expires_seconds < min_expiry or expires_seconds > max_expiry:
+        raise IamError(f"Expiration must be between {min_expiry} second(s) and {max_expiry} seconds")
     if now > req_time + timedelta(seconds=expires_seconds):
         raise IamError("Request expired")
 
@@ -365,56 +392,58 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     if not secret_key:
         raise IamError("Invalid access key")
 
-    method = req.method
     canonical_uri = _get_canonical_uri(req)
-    
-    query_args = []
-    for key, value in req.args.items(multi=True):
-        if key != "X-Amz-Signature":
-            query_args.append((key, value))
-    query_args.sort(key=lambda x: (x[0], x[1]))
-    
-    canonical_query_parts = []
-    for k, v in query_args:
-        canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
-    canonical_query_string = "&".join(canonical_query_parts)
-    
-    signed_headers_list = signed_headers_str.split(";")
-    canonical_headers_parts = []
-    for header in signed_headers_list:
-        val = req.headers.get(header, "").strip()
-        if header.lower() == 'expect' and val == "":
-            val = "100-continue"
-        val = " ".join(val.split())
-        canonical_headers_parts.append(f"{header.lower()}:{val}\n")
-    canonical_headers = "".join(canonical_headers_parts)
-    
-    payload_hash = "UNSIGNED-PAYLOAD"
-    
-    canonical_request = "\n".join([
-        method,
-        canonical_uri,
-        canonical_query_string,
-        canonical_headers,
-        signed_headers_str,
-        payload_hash
-    ])
-    
-    algorithm = "AWS4-HMAC-SHA256"
-    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
-    string_to_sign = "\n".join([
-        algorithm,
-        amz_date,
-        credential_scope,
-        hashed_request
-    ])
-    
-    signing_key = _get_signature_key(secret_key, date_stamp, region, service)
-    calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    if not hmac.compare_digest(calculated_signature, signature):
-        raise IamError("SignatureDoesNotMatch")
+    if _HAS_RUST:
+        query_params = [(k, v) for k, v in req.args.items(multi=True) if k != "X-Amz-Signature"]
+        header_values = [(h, req.headers.get(h) or "") for h in signed_headers_str.split(";")]
+        if not _rc.verify_sigv4_signature(
+            req.method, canonical_uri, query_params, signed_headers_str,
+            header_values, "UNSIGNED-PAYLOAD", amz_date, date_stamp, region,
+            service, secret_key, signature,
+        ):
+            raise IamError("SignatureDoesNotMatch")
+    else:
+        method = req.method
+        query_args = []
+        for key, value in req.args.items(multi=True):
+            if key != "X-Amz-Signature":
+                query_args.append((key, value))
+        query_args.sort(key=lambda x: (x[0], x[1]))
+
+        canonical_query_parts = []
+        for k, v in query_args:
+            canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
+        canonical_query_string = "&".join(canonical_query_parts)
+
+        signed_headers_list = signed_headers_str.split(";")
+        canonical_headers_parts = []
+        for header in signed_headers_list:
+            val = req.headers.get(header, "").strip()
+            if header.lower() == 'expect' and val == "":
+                val = "100-continue"
+            val = " ".join(val.split())
+            canonical_headers_parts.append(f"{header.lower()}:{val}\n")
+        canonical_headers = "".join(canonical_headers_parts)
+
+        payload_hash = "UNSIGNED-PAYLOAD"
+
+        canonical_request = "\n".join([
+            method,
+            canonical_uri,
+            canonical_query_string,
+            canonical_headers,
+            signed_headers_str,
+            payload_hash
+        ])
+
+        credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+        signing_key = _get_signature_key(secret_key, date_stamp, region, service)
+        hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+        string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashed_request}"
+        calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated_signature, signature):
+            raise IamError("SignatureDoesNotMatch")
 
     session_token = req.args.get("X-Amz-Security-Token")
     if session_token:
@@ -573,7 +602,11 @@ def _validate_presigned_request(action: str, bucket_name: str, object_key: str) 
         request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     except ValueError as exc:
         raise IamError("Invalid X-Amz-Date") from exc
-    if datetime.now(timezone.utc) > request_time + timedelta(seconds=expiry):
+    now = datetime.now(timezone.utc)
+    tolerance = timedelta(seconds=current_app.config.get("SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 900))
+    if request_time > now + tolerance:
+        raise IamError("Request date is too far in the future")
+    if now > request_time + timedelta(seconds=expiry):
         raise IamError("Presigned URL expired")
 
     signed_headers_list = [header.strip().lower() for header in signed_headers.split(";") if header]
@@ -973,7 +1006,7 @@ def _render_encryption_document(config: dict[str, Any]) -> Element:
     return root
 
 
-def _stream_file(path, chunk_size: int = 64 * 1024):
+def _stream_file(path, chunk_size: int = 256 * 1024):
     with path.open("rb") as handle:
         while True:
             chunk = handle.read(chunk_size)
@@ -1026,6 +1059,7 @@ def _maybe_handle_bucket_subresource(bucket_name: str) -> Response | None:
         "logging": _bucket_logging_handler,
         "uploads": _bucket_uploads_handler,
         "policy": _bucket_policy_handler,
+        "policyStatus": _bucket_policy_status_handler,
         "replication": _bucket_replication_handler,
         "website": _bucket_website_handler,
     }
@@ -1308,8 +1342,8 @@ def _bucket_cors_handler(bucket_name: str) -> Response:
 
 
 def _bucket_encryption_handler(bucket_name: str) -> Response:
-    if request.method not in {"GET", "PUT"}:
-        return _method_not_allowed(["GET", "PUT"])
+    if request.method not in {"GET", "PUT", "DELETE"}:
+        return _method_not_allowed(["GET", "PUT", "DELETE"])
     principal, error = _require_principal()
     if error:
         return error
@@ -1330,6 +1364,13 @@ def _bucket_encryption_handler(bucket_name: str) -> Response:
                 404,
             )
         return _xml_response(_render_encryption_document(config))
+    if request.method == "DELETE":
+        try:
+            storage.set_bucket_encryption(bucket_name, None)
+        except StorageError as exc:
+            return _error_response("NoSuchBucket", str(exc), 404)
+        current_app.logger.info("Bucket encryption deleted", extra={"bucket": bucket_name})
+        return Response(status=204)
     ct_error = _require_xml_content_type()
     if ct_error:
         return ct_error
@@ -1424,6 +1465,99 @@ def _bucket_acl_handler(bucket_name: str) -> Response:
         SubElement(grant_el, "Permission").text = grant.permission
 
     return _xml_response(root)
+
+
+def _object_acl_handler(bucket_name: str, object_key: str) -> Response:
+    from .acl import create_canned_acl, GRANTEE_ALL_USERS, GRANTEE_AUTHENTICATED_USERS
+
+    if request.method not in {"GET", "PUT"}:
+        return _method_not_allowed(["GET", "PUT"])
+    storage = _storage()
+    try:
+        path = storage.get_object_path(bucket_name, object_key)
+    except (StorageError, FileNotFoundError):
+        return _error_response("NoSuchKey", "Object not found", 404)
+
+    if request.method == "PUT":
+        principal, error = _object_principal("write", bucket_name, object_key)
+        if error:
+            return error
+        owner_id = principal.access_key if principal else "anonymous"
+        canned_acl = request.headers.get("x-amz-acl", "private")
+        acl = create_canned_acl(canned_acl, owner_id)
+        acl_service = _acl()
+        metadata = storage.get_object_metadata(bucket_name, object_key)
+        metadata.update(acl_service.create_object_acl_metadata(acl))
+        safe_key = storage._sanitize_object_key(object_key, storage._object_key_max_length_bytes)
+        storage._write_metadata(bucket_name, safe_key, metadata)
+        current_app.logger.info("Object ACL set", extra={"bucket": bucket_name, "key": object_key, "acl": canned_acl})
+        return Response(status=200)
+
+    principal, error = _object_principal("read", bucket_name, object_key)
+    if error:
+        return error
+    owner_id = principal.access_key if principal else "anonymous"
+    acl_service = _acl()
+    metadata = storage.get_object_metadata(bucket_name, object_key)
+    acl = acl_service.get_object_acl(bucket_name, object_key, metadata)
+    if not acl:
+        acl = create_canned_acl("private", owner_id)
+
+    root = Element("AccessControlPolicy")
+    owner_el = SubElement(root, "Owner")
+    SubElement(owner_el, "ID").text = acl.owner
+    SubElement(owner_el, "DisplayName").text = acl.owner
+    acl_el = SubElement(root, "AccessControlList")
+    for grant in acl.grants:
+        grant_el = SubElement(acl_el, "Grant")
+        grantee = SubElement(grant_el, "Grantee")
+        if grant.grantee == GRANTEE_ALL_USERS:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "Group")
+            SubElement(grantee, "URI").text = "http://acs.amazonaws.com/groups/global/AllUsers"
+        elif grant.grantee == GRANTEE_AUTHENTICATED_USERS:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "Group")
+            SubElement(grantee, "URI").text = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+        else:
+            grantee.set("{http://www.w3.org/2001/XMLSchema-instance}type", "CanonicalUser")
+            SubElement(grantee, "ID").text = grant.grantee
+            SubElement(grantee, "DisplayName").text = grant.grantee
+        SubElement(grant_el, "Permission").text = grant.permission
+    return _xml_response(root)
+
+
+def _object_attributes_handler(bucket_name: str, object_key: str) -> Response:
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+    principal, error = _object_principal("read", bucket_name, object_key)
+    if error:
+        return error
+    storage = _storage()
+    try:
+        path = storage.get_object_path(bucket_name, object_key)
+        file_stat = path.stat()
+        metadata = storage.get_object_metadata(bucket_name, object_key)
+    except (StorageError, FileNotFoundError):
+        return _error_response("NoSuchKey", "Object not found", 404)
+
+    requested = request.headers.get("x-amz-object-attributes", "")
+    attrs = {a.strip() for a in requested.split(",") if a.strip()}
+
+    root = Element("GetObjectAttributesResponse")
+    if "ETag" in attrs:
+        etag = metadata.get("__etag__") or storage._compute_etag(path)
+        SubElement(root, "ETag").text = etag
+    if "StorageClass" in attrs:
+        SubElement(root, "StorageClass").text = "STANDARD"
+    if "ObjectSize" in attrs:
+        SubElement(root, "ObjectSize").text = str(file_stat.st_size)
+    if "Checksum" in attrs:
+        SubElement(root, "Checksum")
+    if "ObjectParts" in attrs:
+        SubElement(root, "ObjectParts")
+
+    response = _xml_response(root)
+    response.headers["Last-Modified"] = http_date(file_stat.st_mtime)
+    return response
 
 
 def _bucket_list_versions_handler(bucket_name: str) -> Response:
@@ -2347,6 +2481,10 @@ def _post_object(bucket_name: str) -> Response:
     if success_action_redirect:
         allowed_hosts = current_app.config.get("ALLOWED_REDIRECT_HOSTS", [])
         if not allowed_hosts:
+            current_app.logger.warning(
+                "ALLOWED_REDIRECT_HOSTS not configured, falling back to request Host header. "
+                "Set ALLOWED_REDIRECT_HOSTS for production deployments."
+            )
             allowed_hosts = [request.host]
         parsed = urlparse(success_action_redirect)
         if parsed.scheme not in ("http", "https"):
@@ -2656,6 +2794,12 @@ def object_handler(bucket_name: str, object_key: str):
     if "legal-hold" in request.args:
         return _object_legal_hold_handler(bucket_name, object_key)
 
+    if "acl" in request.args:
+        return _object_acl_handler(bucket_name, object_key)
+
+    if "attributes" in request.args:
+        return _object_attributes_handler(bucket_name, object_key)
+
     if request.method == "POST":
         if "uploads" in request.args:
             return _initiate_multipart_upload(bucket_name, object_key)
@@ -2803,7 +2947,7 @@ def object_handler(bucket_name: str, object_key: str):
                             f.seek(start_pos)
                             remaining = length_to_read
                             while remaining > 0:
-                                chunk_size = min(65536, remaining)
+                                chunk_size = min(262144, remaining)
                                 chunk = f.read(chunk_size)
                                 if not chunk:
                                     break
@@ -2978,6 +3122,32 @@ def _bucket_policy_handler(bucket_name: str) -> Response:
     except ValueError as exc:
         return _error_response("MalformedPolicy", str(exc), 400)
     return Response(status=204)
+
+
+def _bucket_policy_status_handler(bucket_name: str) -> Response:
+    if request.method != "GET":
+        return _method_not_allowed(["GET"])
+    principal, error = _require_principal()
+    if error:
+        return error
+    try:
+        _authorize_action(principal, bucket_name, "policy")
+    except IamError as exc:
+        return _error_response("AccessDenied", str(exc), 403)
+    storage = _storage()
+    if not storage.bucket_exists(bucket_name):
+        return _error_response("NoSuchBucket", "Bucket does not exist", 404)
+    store = _bucket_policies()
+    policy = store.get_policy(bucket_name)
+    is_public = False
+    if policy:
+        for statement in policy.get("Statement", []):
+            if statement.get("Effect") == "Allow" and statement.get("Principal") == "*":
+                is_public = True
+                break
+    root = Element("PolicyStatus")
+    SubElement(root, "IsPublic").text = "TRUE" if is_public else "FALSE"
+    return _xml_response(root)
 
 
 def _bucket_replication_handler(bucket_name: str) -> Response:
@@ -3193,7 +3363,7 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         path = _storage().get_object_path(bucket_name, object_key)
         metadata = _storage().get_object_metadata(bucket_name, object_key)
         stat = path.stat()
-        etag = _storage()._compute_etag(path)
+        etag = metadata.get("__etag__") or _storage()._compute_etag(path)
         
         response = Response(status=200)
         _apply_object_headers(response, file_stat=stat, metadata=metadata, etag=etag)

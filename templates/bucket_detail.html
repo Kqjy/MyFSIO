@@ -100,8 +100,26 @@
               </svg>
               Upload
             </button>
+            <div class="dropdown sort-dropdown">
+              <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Sort objects">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                  <path d="M3.5 2.5a.5.5 0 0 0-1 0v8.793l-1.146-1.147a.5.5 0 0 0-.708.708l2 1.999.007.007a.497.497 0 0 0 .7-.006l2-2a.5.5 0 0 0-.707-.708L3.5 11.293V2.5zm3.5 1a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zM7.5 6a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1h-5zm0 3a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1h-3zm0 3a.5.5 0 0 0 0 1h1a.5.5 0 0 0 0-1h-1z"/>
+                </svg>
+                <span id="sort-dropdown-label">Name A-Z</span>
+              </button>
+              <ul class="dropdown-menu dropdown-menu-end">
+                <li><button class="dropdown-item active" type="button" data-sort-field="name" data-sort-dir="asc">Name A-Z</button></li>
+                <li><button class="dropdown-item" type="button" data-sort-field="name" data-sort-dir="desc">Name Z-A</button></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><button class="dropdown-item" type="button" data-sort-field="size" data-sort-dir="desc">Size (largest)</button></li>
+                <li><button class="dropdown-item" type="button" data-sort-field="size" data-sort-dir="asc">Size (smallest)</button></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><button class="dropdown-item" type="button" data-sort-field="date" data-sort-dir="desc">Date (newest)</button></li>
+                <li><button class="dropdown-item" type="button" data-sort-field="date" data-sort-dir="asc">Date (oldest)</button></li>
+              </ul>
+            </div>
             <div class="position-relative search-wrapper">
-              <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects" style="max-width: 180px;" />
+              <input id="object-search" class="form-control form-control-sm" type="search" placeholder="Filter objects (press /)" style="max-width: 180px;" />
             </div>
             <div class="bulk-actions d-none" id="bulk-actions-wrapper">
               <button class="btn btn-outline-danger btn-sm" type="button" data-bulk-delete-trigger disabled>
@@ -999,6 +1017,28 @@
                   <strong>Website hosting is disabled</strong>
                   <p class="mb-0 small">Enable website hosting to serve bucket contents as a static website.</p>
                 </div>
+              </div>
+              {% endif %}
+
+              {% if website_domains %}
+              <div class="mb-4">
+                <label class="form-label fw-medium mb-2">Mapped Domains</label>
+                {% for domain in website_domains %}
+                <div class="d-flex align-items-center mb-1">
+                  <span class="badge bg-success-subtle text-success-emphasis me-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path fill-rule="evenodd" d="M7.21 1.293a1 1 0 0 1 1.58 0l.612.72a1 1 0 0 0 .88.332l.94-.134a1 1 0 0 1 1.118.7l.248.912a1 1 0 0 0 .59.659l.876.388a1 1 0 0 1 .435 1.505l-.546.766a1 1 0 0 0-.156.935l.306.899a1 1 0 0 1-.725 1.282l-.92.216a1 1 0 0 0-.72.555l-.41.856a1 1 0 0 1-1.396.478l-.803-.49a1 1 0 0 0-1.04 0l-.802.49a1 1 0 0 1-1.397-.478l-.41-.857a1 1 0 0 0-.72-.554l-.919-.216a1 1 0 0 1-.725-1.282l.306-.9a1 1 0 0 0-.156-.934l-.546-.766a1 1 0 0 1 .435-1.505l.877-.388a1 1 0 0 0 .589-.66l.248-.911a1 1 0 0 1 1.118-.7l.94.133a1 1 0 0 0 .88-.331l.612-.72zM11 7a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1H6v1.5a.5.5 0 0 0 1 0V7.5h1v2a.5.5 0 0 0 1 0v-2h1.5a.5.5 0 0 0 0-1H10V7z"/>
+                    </svg>
+                    connected
+                  </span>
+                  <code class="small">{{ domain }}</code>
+                </div>
+                {% endfor %}
+              </div>
+              {% elif website_config %}
+              <div class="mb-4">
+                <label class="form-label fw-medium mb-2">Mapped Domains</label>
+                <p class="text-muted small mb-0">No domains mapped to this bucket. <a href="{{ url_for('ui.website_domains_dashboard') }}">Manage domains</a></p>
               </div>
               {% endif %}
 
@@ -2659,6 +2699,63 @@
         <button type="button" class="btn btn-primary" id="copyMoveConfirm">
           <span id="copyMoveConfirmLabel">Copy</span>
         </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="context-menu d-none" id="objectContextMenu">
+  <button class="context-menu-item" data-ctx-action="download">
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+      <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+    </svg>
+    Download
+  </button>
+  <button class="context-menu-item" data-ctx-action="copy-path">
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+      <path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/>
+    </svg>
+    Copy S3 Path
+  </button>
+  <button class="context-menu-item" data-ctx-action="presign">
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+      <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+    </svg>
+    Share Link
+  </button>
+  <div class="context-menu-divider"></div>
+  <button class="context-menu-item text-danger" data-ctx-action="delete">
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+      <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+    </svg>
+    Delete
+  </button>
+</div>
+
+<div class="modal fade" id="keyboardShortcutsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-sm">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-1" viewBox="0 0 16 16">
+            <path d="M14 5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h12zM2 4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H2z"/>
+            <path d="M13 10.25a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm0-2a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-5 0A.25.25 0 0 1 8.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 8 8.75v-.5zm2 0a.25.25 0 0 1 .25-.25h1.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-1.5a.25.25 0 0 1-.25-.25v-.5zm1 2a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-5-2A.25.25 0 0 1 6.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 6 8.75v-.5zm-2 0A.25.25 0 0 1 4.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 4 8.75v-.5zm-2 0A.25.25 0 0 1 2.25 8h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 2 8.75v-.5zm11-2a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-2 0a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm-2 0A.25.25 0 0 1 9.25 6h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 9 6.75v-.5zm-2 0A.25.25 0 0 1 7.25 6h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 7 6.75v-.5zm-2 0A.25.25 0 0 1 5.25 6h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5A.25.25 0 0 1 5 6.75v-.5zm-3 0A.25.25 0 0 1 2.25 6h1.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-1.5A.25.25 0 0 1 2 6.75v-.5zm0 4a.25.25 0 0 1 .25-.25h.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-.5a.25.25 0 0 1-.25-.25v-.5zm2 0a.25.25 0 0 1 .25-.25h5.5a.25.25 0 0 1 .25.25v.5a.25.25 0 0 1-.25.25h-5.5a.25.25 0 0 1-.25-.25v-.5z"/>
+          </svg>
+          Keyboard Shortcuts
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body pt-2">
+        <div class="kbd-shortcuts-list">
+          <div class="shortcut-row"><span class="text-muted">Search objects</span><kbd>/</kbd></div>
+          <div class="shortcut-row"><span class="text-muted">Select all</span><span><kbd>Ctrl</kbd> + <kbd>A</kbd></span></div>
+          <div class="shortcut-row"><span class="text-muted">Delete selected</span><kbd>Del</kbd></div>
+          <div class="shortcut-row"><span class="text-muted">Clear search</span><kbd>Esc</kbd></div>
+          <div class="shortcut-row"><span class="text-muted">Show shortcuts</span><kbd>?</kbd></div>
+        </div>
       </div>
     </div>
   </div>

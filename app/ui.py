@@ -51,6 +51,7 @@ from .s3_client import (
 from .secret_store import EphemeralSecretStore
 from .site_registry import SiteRegistry, SiteInfo, PeerSite
 from .storage import ObjectStorage, StorageError
+from .website_domains import normalize_domain, is_valid_domain
 
 ui_bp = Blueprint("ui", __name__, template_folder="../templates", url_prefix="/ui")
 
@@ -507,11 +508,15 @@ def bucket_detail(bucket_name: str):
     can_manage_quota = is_replication_admin
 
     website_config = None
+    website_domains = []
     if website_hosting_enabled:
         try:
             website_config = storage.get_bucket_website(bucket_name)
         except StorageError:
             website_config = None
+        domain_store = current_app.extensions.get("website_domains")
+        if domain_store:
+            website_domains = domain_store.get_domains_for_bucket(bucket_name)
 
     objects_api_url = url_for("ui.list_bucket_objects", bucket_name=bucket_name)
     objects_stream_url = url_for("ui.stream_bucket_objects", bucket_name=bucket_name)
@@ -557,6 +562,7 @@ def bucket_detail(bucket_name: str):
         site_sync_enabled=site_sync_enabled,
         website_hosting_enabled=website_hosting_enabled,
         website_config=website_config,
+        website_domains=website_domains,
         can_manage_website=can_edit_policy,
     )
 
@@ -737,7 +743,6 @@ def initiate_multipart_upload(bucket_name: str):
 
 
 @ui_bp.put("/buckets/<bucket_name>/multipart/<upload_id>/parts")
-@limiter.exempt
 @csrf.exempt
 def upload_multipart_part(bucket_name: str, upload_id: str):
     principal = _current_principal()
@@ -2042,16 +2047,17 @@ def update_connection(connection_id: str):
     secret_key = request.form.get("secret_key", "").strip()
     region = request.form.get("region", "us-east-1").strip()
 
-    if not all([name, endpoint, access_key, secret_key]):
+    if not all([name, endpoint, access_key]):
         if _wants_json():
-            return jsonify({"error": "All fields are required"}), 400
-        flash("All fields are required", "danger")
+            return jsonify({"error": "Name, endpoint, and access key are required"}), 400
+        flash("Name, endpoint, and access key are required", "danger")
         return redirect(url_for("ui.connections_dashboard"))
 
     conn.name = name
     conn.endpoint_url = endpoint
     conn.access_key = access_key
-    conn.secret_key = secret_key
+    if secret_key:
+        conn.secret_key = secret_key
     conn.region = region
 
     _connections().save()
@@ -2372,7 +2378,10 @@ def website_domains_dashboard():
     store = current_app.extensions.get("website_domains")
     mappings = store.list_all() if store else []
     storage = _storage()
-    buckets = [b.name for b in storage.list_buckets()]
+    buckets = [
+        b.name for b in storage.list_buckets()
+        if storage.get_bucket_website(b.name)
+    ]
     return render_template(
         "website_domains.html",
         mappings=mappings,
@@ -2399,13 +2408,19 @@ def create_website_domain():
         flash("Website hosting is not enabled", "warning")
         return redirect(url_for("ui.buckets_overview"))
 
-    domain = (request.form.get("domain") or "").strip().lower()
+    domain = normalize_domain(request.form.get("domain") or "")
     bucket = (request.form.get("bucket") or "").strip()
 
     if not domain:
         if _wants_json():
             return jsonify({"error": "Domain is required"}), 400
         flash("Domain is required", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
+
+    if not is_valid_domain(domain):
+        if _wants_json():
+            return jsonify({"error": f"Invalid domain format: '{domain}'"}), 400
+        flash(f"Invalid domain format: '{domain}'. Use a hostname like www.example.com", "danger")
         return redirect(url_for("ui.website_domains_dashboard"))
 
     if not bucket:
@@ -2446,6 +2461,7 @@ def update_website_domain(domain: str):
         flash("Access denied", "danger")
         return redirect(url_for("ui.website_domains_dashboard"))
 
+    domain = normalize_domain(domain)
     bucket = (request.form.get("bucket") or "").strip()
     if not bucket:
         if _wants_json():
@@ -2461,9 +2477,14 @@ def update_website_domain(domain: str):
         return redirect(url_for("ui.website_domains_dashboard"))
 
     store = current_app.extensions.get("website_domains")
+    if not store.get_bucket(domain):
+        if _wants_json():
+            return jsonify({"error": f"No mapping for domain '{domain}'"}), 404
+        flash(f"No mapping for domain '{domain}'", "danger")
+        return redirect(url_for("ui.website_domains_dashboard"))
     store.set_mapping(domain, bucket)
     if _wants_json():
-        return jsonify({"success": True, "domain": domain.lower(), "bucket": bucket})
+        return jsonify({"success": True, "domain": domain, "bucket": bucket})
     flash(f"Domain '{domain}' updated to bucket '{bucket}'", "success")
     return redirect(url_for("ui.website_domains_dashboard"))
 
@@ -2479,6 +2500,7 @@ def delete_website_domain(domain: str):
         flash("Access denied", "danger")
         return redirect(url_for("ui.website_domains_dashboard"))
 
+    domain = normalize_domain(domain)
     store = current_app.extensions.get("website_domains")
     if not store.delete_mapping(domain):
         if _wants_json():
@@ -3278,9 +3300,12 @@ def sites_dashboard():
 @ui_bp.post("/sites/local")
 def update_local_site():
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3291,6 +3316,8 @@ def update_local_site():
     display_name = request.form.get("display_name", "").strip()
 
     if not site_id:
+        if wants_json:
+            return jsonify({"error": "Site ID is required"}), 400
         flash("Site ID is required", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3312,6 +3339,8 @@ def update_local_site():
     )
     registry.set_local_site(site)
 
+    if wants_json:
+        return jsonify({"message": "Local site configuration updated"})
     flash("Local site configuration updated", "success")
     return redirect(url_for("ui.sites_dashboard"))
 
@@ -3319,9 +3348,12 @@ def update_local_site():
 @ui_bp.post("/sites/peers")
 def add_peer_site():
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3333,9 +3365,13 @@ def add_peer_site():
     connection_id = request.form.get("connection_id", "").strip() or None
 
     if not site_id:
+        if wants_json:
+            return jsonify({"error": "Site ID is required"}), 400
         flash("Site ID is required", "danger")
         return redirect(url_for("ui.sites_dashboard"))
     if not endpoint:
+        if wants_json:
+            return jsonify({"error": "Endpoint is required"}), 400
         flash("Endpoint is required", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3347,10 +3383,14 @@ def add_peer_site():
     registry = _site_registry()
 
     if registry.get_peer(site_id):
+        if wants_json:
+            return jsonify({"error": f"Peer site '{site_id}' already exists"}), 409
         flash(f"Peer site '{site_id}' already exists", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
     if connection_id and not _connections().get(connection_id):
+        if wants_json:
+            return jsonify({"error": f"Connection '{connection_id}' not found"}), 404
         flash(f"Connection '{connection_id}' not found", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3364,6 +3404,11 @@ def add_peer_site():
     )
     registry.add_peer(peer)
 
+    if wants_json:
+        redirect_url = None
+        if connection_id:
+            redirect_url = url_for("ui.replication_wizard", site_id=site_id)
+        return jsonify({"message": f"Peer site '{site_id}' added", "redirect": redirect_url})
     flash(f"Peer site '{site_id}' added", "success")
 
     if connection_id:
@@ -3374,9 +3419,12 @@ def add_peer_site():
 @ui_bp.post("/sites/peers/<site_id>/update")
 def update_peer_site(site_id: str):
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3384,6 +3432,8 @@ def update_peer_site(site_id: str):
     existing = registry.get_peer(site_id)
 
     if not existing:
+        if wants_json:
+            return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
         flash(f"Peer site '{site_id}' not found", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3391,7 +3441,10 @@ def update_peer_site(site_id: str):
     region = request.form.get("region", existing.region).strip()
     priority = request.form.get("priority", str(existing.priority))
     display_name = request.form.get("display_name", existing.display_name).strip()
-    connection_id = request.form.get("connection_id", "").strip() or existing.connection_id
+    if "connection_id" in request.form:
+        connection_id = request.form["connection_id"].strip() or None
+    else:
+        connection_id = existing.connection_id
 
     try:
         priority_int = int(priority)
@@ -3399,6 +3452,8 @@ def update_peer_site(site_id: str):
         priority_int = existing.priority
 
     if connection_id and not _connections().get(connection_id):
+        if wants_json:
+            return jsonify({"error": f"Connection '{connection_id}' not found"}), 404
         flash(f"Connection '{connection_id}' not found", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
@@ -3415,6 +3470,8 @@ def update_peer_site(site_id: str):
     )
     registry.update_peer(peer)
 
+    if wants_json:
+        return jsonify({"message": f"Peer site '{site_id}' updated"})
     flash(f"Peer site '{site_id}' updated", "success")
     return redirect(url_for("ui.sites_dashboard"))
 
@@ -3422,16 +3479,23 @@ def update_peer_site(site_id: str):
 @ui_bp.post("/sites/peers/<site_id>/delete")
 def delete_peer_site(site_id: str):
     principal = _current_principal()
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
     try:
         _iam().authorize(principal, None, "iam:*")
     except IamError:
+        if wants_json:
+            return jsonify({"error": "Access denied"}), 403
         flash("Access denied", "danger")
         return redirect(url_for("ui.sites_dashboard"))
 
     registry = _site_registry()
     if registry.delete_peer(site_id):
+        if wants_json:
+            return jsonify({"message": f"Peer site '{site_id}' deleted"})
         flash(f"Peer site '{site_id}' deleted", "success")
     else:
+        if wants_json:
+            return jsonify({"error": f"Peer site '{site_id}' not found"}), 404
         flash(f"Peer site '{site_id}' not found", "danger")
 
     return redirect(url_for("ui.sites_dashboard"))

@@ -321,8 +321,9 @@ class TestNotificationService:
         assert "events_sent" in stats
         assert "events_failed" in stats
 
-    @patch("app.notifications.requests.post")
-    def test_send_notification_success(self, mock_post, notification_service):
+    @patch("app.notifications._pinned_post")
+    @patch("app.notifications._resolve_and_check_url", return_value="93.184.216.34")
+    def test_send_notification_success(self, mock_resolve, mock_post, notification_service):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_post.return_value = mock_response
@@ -337,8 +338,9 @@ class TestNotificationService:
         notification_service._send_notification(event, destination)
         mock_post.assert_called_once()
 
-    @patch("app.notifications.requests.post")
-    def test_send_notification_retry_on_failure(self, mock_post, notification_service):
+    @patch("app.notifications._pinned_post")
+    @patch("app.notifications._resolve_and_check_url", return_value="93.184.216.34")
+    def test_send_notification_retry_on_failure(self, mock_resolve, mock_post, notification_service):
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.text = "Internal Server Error"
