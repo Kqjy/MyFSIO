@@ -2481,7 +2481,11 @@ def _post_object(bucket_name: str) -> Response:
     if success_action_redirect:
         allowed_hosts = current_app.config.get("ALLOWED_REDIRECT_HOSTS", [])
         if not allowed_hosts:
-            return _error_response("InvalidArgument", "Redirect not allowed: ALLOWED_REDIRECT_HOSTS not configured", 400)
+            current_app.logger.warning(
+                "ALLOWED_REDIRECT_HOSTS not configured, falling back to request Host header. "
+                "Set ALLOWED_REDIRECT_HOSTS for production deployments."
+            )
+            allowed_hosts = [request.host]
         parsed = urlparse(success_action_redirect)
         if parsed.scheme not in ("http", "https"):
             return _error_response("InvalidArgument", "Redirect URL must use http or https", 400)

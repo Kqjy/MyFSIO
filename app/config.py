@@ -314,7 +314,7 @@ class AppConfig:
         site_region = str(_get("SITE_REGION", "us-east-1"))
         site_priority = int(_get("SITE_PRIORITY", 100))
         ratelimit_admin = _validate_rate_limit(str(_get("RATE_LIMIT_ADMIN", "60 per minute")))
-        num_trusted_proxies = int(_get("NUM_TRUSTED_PROXIES", 0))
+        num_trusted_proxies = int(_get("NUM_TRUSTED_PROXIES", 1))
         allowed_redirect_hosts_raw = _get("ALLOWED_REDIRECT_HOSTS", "")
         allowed_redirect_hosts = [h.strip() for h in str(allowed_redirect_hosts_raw).split(",") if h.strip()]
         allow_internal_endpoints = str(_get("ALLOW_INTERNAL_ENDPOINTS", "0")).lower() in {"1", "true", "yes", "on"}

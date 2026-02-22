@@ -3,6 +3,7 @@ from __future__ import annotations
 import html as html_module
 import logging
 import mimetypes
+import os
 import shutil
 import sys
 import time
@@ -93,8 +94,13 @@ def create_app(
         app.config.setdefault("WTF_CSRF_ENABLED", False)
 
     # Trust X-Forwarded-* headers from proxies
-    num_proxies = app.config.get("NUM_TRUSTED_PROXIES", 0)
+    num_proxies = app.config.get("NUM_TRUSTED_PROXIES", 1)
     if num_proxies:
+        if "NUM_TRUSTED_PROXIES" not in os.environ:
+            logging.getLogger(__name__).warning(
+                "NUM_TRUSTED_PROXIES not set, defaulting to 1. "
+                "Set NUM_TRUSTED_PROXIES=0 if not behind a reverse proxy."
+            )
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=num_proxies, x_proto=num_proxies, x_host=num_proxies, x_prefix=num_proxies)
 
     # Enable gzip compression for responses (10-20x smaller JSON payloads)
