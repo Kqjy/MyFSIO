@@ -11,6 +11,7 @@ mod myfsio_core {
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        m.add_function(wrap_pyfunction!(sigv4::verify_sigv4_signature, m)?)?;
         m.add_function(wrap_pyfunction!(sigv4::derive_signing_key, m)?)?;
         m.add_function(wrap_pyfunction!(sigv4::compute_signature, m)?)?;
         m.add_function(wrap_pyfunction!(sigv4::build_string_to_sign, m)?)?;

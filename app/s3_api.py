@@ -267,39 +267,6 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     if not secret_key:
         raise IamError("SignatureDoesNotMatch")
 
-    method = req.method
-    canonical_uri = _get_canonical_uri(req)
-    
-    query_args = []
-    for key, value in req.args.items(multi=True):
-        query_args.append((key, value))
-    query_args.sort(key=lambda x: (x[0], x[1]))
-    
-    canonical_query_parts = []
-    for k, v in query_args:
-        canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
-    canonical_query_string = "&".join(canonical_query_parts)
-
-    signed_headers_list = signed_headers_str.split(";")
-    canonical_headers_parts = []
-    for header in signed_headers_list:
-        header_val = req.headers.get(header)
-        if header_val is None:
-             header_val = ""
-        
-        if header.lower() == 'expect' and header_val == "":
-            header_val = "100-continue"
-        
-        header_val = " ".join(header_val.split())
-        canonical_headers_parts.append(f"{header.lower()}:{header_val}\n")
-    canonical_headers = "".join(canonical_headers_parts)
-
-    payload_hash = req.headers.get("X-Amz-Content-Sha256")
-    if not payload_hash:
-        payload_hash = hashlib.sha256(req.get_data()).hexdigest()
-
-    canonical_request = f"{method}\n{canonical_uri}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
-
     amz_date = req.headers.get("X-Amz-Date") or req.headers.get("Date")
     if not amz_date:
         raise IamError("Missing Date header")
@@ -321,23 +288,60 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         if 'date' in signed_headers_set:
             required_headers.remove('x-amz-date')
             required_headers.add('date')
-        
+
         if not required_headers.issubset(signed_headers_set):
              raise IamError("Required headers not signed")
 
-    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    signing_key = _get_signature_key(secret_key, date_stamp, region, service)
+    canonical_uri = _get_canonical_uri(req)
+    payload_hash = req.headers.get("X-Amz-Content-Sha256")
+    if not payload_hash:
+        payload_hash = hashlib.sha256(req.get_data()).hexdigest()
+
     if _HAS_RUST:
-        string_to_sign = _rc.build_string_to_sign(amz_date, credential_scope, canonical_request)
-        calculated_signature = _rc.compute_signature(signing_key, string_to_sign)
+        query_params = list(req.args.items(multi=True))
+        header_values = [(h, req.headers.get(h) or "") for h in signed_headers_str.split(";")]
+        if not _rc.verify_sigv4_signature(
+            req.method, canonical_uri, query_params, signed_headers_str,
+            header_values, payload_hash, amz_date, date_stamp, region,
+            service, secret_key, signature,
+        ):
+            if current_app.config.get("DEBUG_SIGV4"):
+                logger.warning("SigV4 signature mismatch for %s %s", req.method, req.path)
+            raise IamError("SignatureDoesNotMatch")
     else:
+        method = req.method
+        query_args = []
+        for key, value in req.args.items(multi=True):
+            query_args.append((key, value))
+        query_args.sort(key=lambda x: (x[0], x[1]))
+
+        canonical_query_parts = []
+        for k, v in query_args:
+            canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
+        canonical_query_string = "&".join(canonical_query_parts)
+
+        signed_headers_list = signed_headers_str.split(";")
+        canonical_headers_parts = []
+        for header in signed_headers_list:
+            header_val = req.headers.get(header)
+            if header_val is None:
+                 header_val = ""
+            if header.lower() == 'expect' and header_val == "":
+                header_val = "100-continue"
+            header_val = " ".join(header_val.split())
+            canonical_headers_parts.append(f"{header.lower()}:{header_val}\n")
+        canonical_headers = "".join(canonical_headers_parts)
+
+        canonical_request = f"{method}\n{canonical_uri}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers_str}\n{payload_hash}"
+
+        credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+        signing_key = _get_signature_key(secret_key, date_stamp, region, service)
         string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
         calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    if not hmac.compare_digest(calculated_signature, signature):
-        if current_app.config.get("DEBUG_SIGV4"):
-            logger.warning("SigV4 signature mismatch for %s %s", method, req.path)
-        raise IamError("SignatureDoesNotMatch")
+        if not hmac.compare_digest(calculated_signature, signature):
+            if current_app.config.get("DEBUG_SIGV4"):
+                logger.warning("SigV4 signature mismatch for %s %s", method, req.path)
+            raise IamError("SignatureDoesNotMatch")
 
     session_token = req.headers.get("X-Amz-Security-Token")
     if session_token:
@@ -366,7 +370,7 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         req_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         raise IamError("Invalid Date format")
-    
+
     now = datetime.now(timezone.utc)
     try:
         expires_seconds = int(expires)
@@ -381,53 +385,58 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
     if not secret_key:
         raise IamError("Invalid access key")
 
-    method = req.method
     canonical_uri = _get_canonical_uri(req)
-    
-    query_args = []
-    for key, value in req.args.items(multi=True):
-        if key != "X-Amz-Signature":
-            query_args.append((key, value))
-    query_args.sort(key=lambda x: (x[0], x[1]))
-    
-    canonical_query_parts = []
-    for k, v in query_args:
-        canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
-    canonical_query_string = "&".join(canonical_query_parts)
-    
-    signed_headers_list = signed_headers_str.split(";")
-    canonical_headers_parts = []
-    for header in signed_headers_list:
-        val = req.headers.get(header, "").strip()
-        if header.lower() == 'expect' and val == "":
-            val = "100-continue"
-        val = " ".join(val.split())
-        canonical_headers_parts.append(f"{header.lower()}:{val}\n")
-    canonical_headers = "".join(canonical_headers_parts)
-    
-    payload_hash = "UNSIGNED-PAYLOAD"
-    
-    canonical_request = "\n".join([
-        method,
-        canonical_uri,
-        canonical_query_string,
-        canonical_headers,
-        signed_headers_str,
-        payload_hash
-    ])
-    
-    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    signing_key = _get_signature_key(secret_key, date_stamp, region, service)
+
     if _HAS_RUST:
-        string_to_sign = _rc.build_string_to_sign(amz_date, credential_scope, canonical_request)
-        calculated_signature = _rc.compute_signature(signing_key, string_to_sign)
+        query_params = [(k, v) for k, v in req.args.items(multi=True) if k != "X-Amz-Signature"]
+        header_values = [(h, req.headers.get(h) or "") for h in signed_headers_str.split(";")]
+        if not _rc.verify_sigv4_signature(
+            req.method, canonical_uri, query_params, signed_headers_str,
+            header_values, "UNSIGNED-PAYLOAD", amz_date, date_stamp, region,
+            service, secret_key, signature,
+        ):
+            raise IamError("SignatureDoesNotMatch")
     else:
+        method = req.method
+        query_args = []
+        for key, value in req.args.items(multi=True):
+            if key != "X-Amz-Signature":
+                query_args.append((key, value))
+        query_args.sort(key=lambda x: (x[0], x[1]))
+
+        canonical_query_parts = []
+        for k, v in query_args:
+            canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
+        canonical_query_string = "&".join(canonical_query_parts)
+
+        signed_headers_list = signed_headers_str.split(";")
+        canonical_headers_parts = []
+        for header in signed_headers_list:
+            val = req.headers.get(header, "").strip()
+            if header.lower() == 'expect' and val == "":
+                val = "100-continue"
+            val = " ".join(val.split())
+            canonical_headers_parts.append(f"{header.lower()}:{val}\n")
+        canonical_headers = "".join(canonical_headers_parts)
+
+        payload_hash = "UNSIGNED-PAYLOAD"
+
+        canonical_request = "\n".join([
+            method,
+            canonical_uri,
+            canonical_query_string,
+            canonical_headers,
+            signed_headers_str,
+            payload_hash
+        ])
+
+        credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+        signing_key = _get_signature_key(secret_key, date_stamp, region, service)
         hashed_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
         string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashed_request}"
         calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    if not hmac.compare_digest(calculated_signature, signature):
-        raise IamError("SignatureDoesNotMatch")
+        if not hmac.compare_digest(calculated_signature, signature):
+            raise IamError("SignatureDoesNotMatch")
 
     session_token = req.args.get("X-Amz-Security-Token")
     if session_token:
