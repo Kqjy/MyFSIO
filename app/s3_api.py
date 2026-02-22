@@ -372,12 +372,19 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
         raise IamError("Invalid Date format")
 
     now = datetime.now(timezone.utc)
+    tolerance = timedelta(seconds=current_app.config.get("SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 900))
+    if req_time > now + tolerance:
+        raise IamError("Request date is too far in the future")
     try:
         expires_seconds = int(expires)
         if expires_seconds <= 0:
             raise IamError("Invalid Expires value: must be positive")
     except ValueError:
         raise IamError("Invalid Expires value: must be an integer")
+    min_expiry = current_app.config.get("PRESIGNED_URL_MIN_EXPIRY_SECONDS", 1)
+    max_expiry = current_app.config.get("PRESIGNED_URL_MAX_EXPIRY_SECONDS", 604800)
+    if expires_seconds < min_expiry or expires_seconds > max_expiry:
+        raise IamError(f"Expiration must be between {min_expiry} second(s) and {max_expiry} seconds")
     if now > req_time + timedelta(seconds=expires_seconds):
         raise IamError("Request expired")
 
@@ -595,7 +602,11 @@ def _validate_presigned_request(action: str, bucket_name: str, object_key: str) 
         request_time = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     except ValueError as exc:
         raise IamError("Invalid X-Amz-Date") from exc
-    if datetime.now(timezone.utc) > request_time + timedelta(seconds=expiry):
+    now = datetime.now(timezone.utc)
+    tolerance = timedelta(seconds=current_app.config.get("SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 900))
+    if request_time > now + tolerance:
+        raise IamError("Request date is too far in the future")
+    if now > request_time + timedelta(seconds=expiry):
         raise IamError("Presigned URL expired")
 
     signed_headers_list = [header.strip().lower() for header in signed_headers.split(";") if header]
@@ -2470,7 +2481,7 @@ def _post_object(bucket_name: str) -> Response:
     if success_action_redirect:
         allowed_hosts = current_app.config.get("ALLOWED_REDIRECT_HOSTS", [])
         if not allowed_hosts:
-            allowed_hosts = [request.host]
+            return _error_response("InvalidArgument", "Redirect not allowed: ALLOWED_REDIRECT_HOSTS not configured", 400)
         parsed = urlparse(success_action_redirect)
         if parsed.scheme not in ("http", "https"):
             return _error_response("InvalidArgument", "Redirect URL must use http or https", 400)

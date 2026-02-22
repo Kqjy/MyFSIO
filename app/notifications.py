@@ -15,29 +15,23 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
+from urllib3.util.connection import create_connection as _urllib3_create_connection
 
 
-def _is_safe_url(url: str, allow_internal: bool = False) -> bool:
-    """Check if a URL is safe to make requests to (not internal/private).
-
-    Args:
-        url: The URL to check.
-        allow_internal: If True, allows internal/private IP addresses.
-                       Use for self-hosted deployments on internal networks.
-    """
+def _resolve_and_check_url(url: str, allow_internal: bool = False) -> Optional[str]:
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname
         if not hostname:
-            return False
+            return None
         cloud_metadata_hosts = {
             "metadata.google.internal",
             "169.254.169.254",
         }
         if hostname.lower() in cloud_metadata_hosts:
-            return False
+            return None
         if allow_internal:
-            return True
+            return hostname
         blocked_hosts = {
             "localhost",
             "127.0.0.1",
@@ -46,17 +40,46 @@ def _is_safe_url(url: str, allow_internal: bool = False) -> bool:
             "[::1]",
         }
         if hostname.lower() in blocked_hosts:
-            return False
+            return None
         try:
             resolved_ip = socket.gethostbyname(hostname)
             ip = ipaddress.ip_address(resolved_ip)
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                return False
+                return None
+            return resolved_ip
         except (socket.gaierror, ValueError):
-            return False
-        return True
+            return None
     except Exception:
-        return False
+        return None
+
+
+def _is_safe_url(url: str, allow_internal: bool = False) -> bool:
+    return _resolve_and_check_url(url, allow_internal) is not None
+
+
+_dns_pin_lock = threading.Lock()
+
+
+def _pinned_post(url: str, pinned_ip: str, **kwargs: Any) -> requests.Response:
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    session = requests.Session()
+    original_create = _urllib3_create_connection
+
+    def _create_pinned(address: Any, *args: Any, **kw: Any) -> Any:
+        host, req_port = address
+        if host == hostname:
+            return original_create((pinned_ip, req_port), *args, **kw)
+        return original_create(address, *args, **kw)
+
+    import urllib3.util.connection as _conn_mod
+    with _dns_pin_lock:
+        _conn_mod.create_connection = _create_pinned
+        try:
+            return session.post(url, **kwargs)
+        finally:
+            _conn_mod.create_connection = original_create
+
 
 logger = logging.getLogger(__name__)
 
@@ -344,16 +367,18 @@ class NotificationService:
                 self._queue.task_done()
 
     def _send_notification(self, event: NotificationEvent, destination: WebhookDestination) -> None:
-        if not _is_safe_url(destination.url, allow_internal=self._allow_internal_endpoints):
-            raise RuntimeError(f"Blocked request to cloud metadata service (SSRF protection): {destination.url}")
+        resolved_ip = _resolve_and_check_url(destination.url, allow_internal=self._allow_internal_endpoints)
+        if not resolved_ip:
+            raise RuntimeError(f"Blocked request (SSRF protection): {destination.url}")
         payload = event.to_s3_event()
         headers = {"Content-Type": "application/json", **destination.headers}
 
         last_error = None
         for attempt in range(destination.retry_count):
             try:
-                response = requests.post(
+                response = _pinned_post(
                     destination.url,
+                    resolved_ip,
                     json=payload,
                     headers=headers,
                     timeout=destination.timeout_seconds,

@@ -93,7 +93,9 @@ def create_app(
         app.config.setdefault("WTF_CSRF_ENABLED", False)
 
     # Trust X-Forwarded-* headers from proxies
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    num_proxies = app.config.get("NUM_TRUSTED_PROXIES", 0)
+    if num_proxies:
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=num_proxies, x_proto=num_proxies, x_host=num_proxies, x_prefix=num_proxies)
 
     # Enable gzip compression for responses (10-20x smaller JSON payloads)
     if app.config.get("ENABLE_GZIP", True):

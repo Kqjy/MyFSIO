@@ -743,7 +743,6 @@ def initiate_multipart_upload(bucket_name: str):
 
 
 @ui_bp.put("/buckets/<bucket_name>/multipart/<upload_id>/parts")
-@limiter.exempt
 @csrf.exempt
 def upload_multipart_part(bucket_name: str, upload_id: str):
     principal = _current_principal()

@@ -75,7 +75,7 @@ def _evaluate_condition_operator(
         expected_null = condition_values[0].lower() in ("true", "1", "yes") if condition_values else True
         return is_null == expected_null
 
-    return True
+    return False
 
 ACTION_ALIASES = {
     "s3:listbucket": "list",
