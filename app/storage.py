@@ -377,9 +377,18 @@ class ObjectStorage:
             raise StorageError("Bucket contains archived object versions")
         if has_multipart:
             raise StorageError("Bucket has active multipart uploads")
+        bucket_id = bucket_path.name
         self._remove_tree(bucket_path)
-        self._remove_tree(self._system_bucket_root(bucket_path.name))
-        self._remove_tree(self._multipart_bucket_root(bucket_path.name))
+        self._remove_tree(self._system_bucket_root(bucket_id))
+        self._remove_tree(self._multipart_bucket_root(bucket_id))
+        self._bucket_config_cache.pop(bucket_id, None)
+        with self._cache_lock:
+            self._object_cache.pop(bucket_id, None)
+            self._cache_version.pop(bucket_id, None)
+            self._sorted_key_cache.pop(bucket_id, None)
+            stale = [k for k in self._meta_read_cache if k[0] == bucket_id]
+            for k in stale:
+                del self._meta_read_cache[k]
 
     def list_objects(
         self,
@@ -1832,30 +1841,40 @@ class ObjectStorage:
 
     def _read_bucket_config(self, bucket_name: str) -> dict[str, Any]:
         now = time.time()
+        config_path = self._bucket_config_path(bucket_name)
         cached = self._bucket_config_cache.get(bucket_name)
         if cached:
-            config, cached_time = cached
+            config, cached_time, cached_mtime = cached
             if now - cached_time < self._bucket_config_cache_ttl:
-                return config.copy()
+                try:
+                    current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+                except OSError:
+                    current_mtime = 0.0
+                if current_mtime == cached_mtime:
+                    return config.copy()
 
-        config_path = self._bucket_config_path(bucket_name)
         if not config_path.exists():
-            self._bucket_config_cache[bucket_name] = ({}, now)
+            self._bucket_config_cache[bucket_name] = ({}, now, 0.0)
             return {}
         try:
             data = json.loads(config_path.read_text(encoding="utf-8"))
             config = data if isinstance(data, dict) else {}
-            self._bucket_config_cache[bucket_name] = (config, now)
+            mtime = config_path.stat().st_mtime
+            self._bucket_config_cache[bucket_name] = (config, now, mtime)
             return config.copy()
         except (OSError, json.JSONDecodeError):
-            self._bucket_config_cache[bucket_name] = ({}, now)
+            self._bucket_config_cache[bucket_name] = ({}, now, 0.0)
             return {}
 
     def _write_bucket_config(self, bucket_name: str, payload: dict[str, Any]) -> None:
         config_path = self._bucket_config_path(bucket_name)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(payload), encoding="utf-8")
-        self._bucket_config_cache[bucket_name] = (payload.copy(), time.time())
+        try:
+            mtime = config_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        self._bucket_config_cache[bucket_name] = (payload.copy(), time.time(), mtime)
 
     def _set_bucket_config_entry(self, bucket_name: str, key: str, value: Any | None) -> None:
         config = self._read_bucket_config(bucket_name)

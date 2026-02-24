@@ -137,11 +137,11 @@
   const versionPanel = document.getElementById('version-panel');
   const versionList = document.getElementById('version-list');
   const refreshVersionsButton = document.getElementById('refreshVersionsButton');
-  const archivedCard = document.getElementById('archived-objects-card');
-  const archivedBody = archivedCard?.querySelector('[data-archived-body]');
-  const archivedCountBadge = archivedCard?.querySelector('[data-archived-count]');
-  const archivedRefreshButton = archivedCard?.querySelector('[data-archived-refresh]');
-  const archivedEndpoint = archivedCard?.dataset.archivedEndpoint;
+  let archivedCard = document.getElementById('archived-objects-card');
+  let archivedBody = archivedCard?.querySelector('[data-archived-body]');
+  let archivedCountBadge = archivedCard?.querySelector('[data-archived-count]');
+  let archivedRefreshButton = archivedCard?.querySelector('[data-archived-refresh]');
+  let archivedEndpoint = archivedCard?.dataset.archivedEndpoint;
   let versioningEnabled = objectsContainer?.dataset.versioning === 'true';
   const versionsCache = new Map();
   let activeRow = null;
@@ -1735,6 +1735,15 @@
   }
   if (archivedCard && archivedEndpoint) {
     loadArchivedObjects();
+  }
+
+  const propertiesTab = document.getElementById('properties-tab');
+  if (propertiesTab) {
+    propertiesTab.addEventListener('shown.bs.tab', () => {
+      if (archivedCard && archivedEndpoint) {
+        loadArchivedObjects();
+      }
+    });
   }
 
   async function restoreVersion(row, version) {
@@ -4163,11 +4172,61 @@
     var archivedCardEl = document.getElementById('archived-objects-card');
     if (archivedCardEl) {
       archivedCardEl.style.display = enabled ? '' : 'none';
+    } else if (enabled) {
+      var endpoint = window.BucketDetailConfig?.endpoints?.archivedObjects || '';
+      if (endpoint) {
+        var html = '<div class="card shadow-sm mt-4" id="archived-objects-card" data-archived-endpoint="' + endpoint + '">' +
+          '<div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">' +
+          '<div class="d-flex align-items-center">' +
+          '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning me-2" viewBox="0 0 16 16">' +
+          '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
+          '</svg><span class="fw-semibold">Archived Objects</span></div>' +
+          '<div class="d-flex align-items-center gap-2">' +
+          '<span class="badge text-bg-secondary" data-archived-count>0 items</span>' +
+          '<button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>' +
+          '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
+          '<path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>' +
+          '<path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>' +
+          '</svg>Refresh</button></div></div>' +
+          '<div class="card-body">' +
+          '<p class="text-muted small mb-3">Objects that have been deleted while versioning is enabled. Their previous versions remain available until you restore or purge them.</p>' +
+          '<div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0">' +
+          '<thead class="table-light"><tr>' +
+          '<th scope="col"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 text-muted" viewBox="0 0 16 16">' +
+          '<path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>' +
+          '</svg>Key</th>' +
+          '<th scope="col">Latest Version</th>' +
+          '<th scope="col" class="text-center">Versions</th>' +
+          '<th scope="col" class="text-end">Actions</th>' +
+          '</tr></thead>' +
+          '<tbody data-archived-body><tr><td colspan="4" class="text-center text-muted py-4">' +
+          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="mb-2 d-block mx-auto" viewBox="0 0 16 16">' +
+          '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
+          '</svg>No archived objects</td></tr></tbody>' +
+          '</table></div></div></div>';
+        card.insertAdjacentHTML('afterend', html);
+        archivedCard = document.getElementById('archived-objects-card');
+        archivedBody = archivedCard.querySelector('[data-archived-body]');
+        archivedCountBadge = archivedCard.querySelector('[data-archived-count]');
+        archivedRefreshButton = archivedCard.querySelector('[data-archived-refresh]');
+        archivedEndpoint = endpoint;
+        archivedRefreshButton.addEventListener('click', function() { loadArchivedObjects(); });
+        loadArchivedObjects();
+      }
     }
 
     var dropZone = document.getElementById('objects-drop-zone');
     if (dropZone) {
       dropZone.setAttribute('data-versioning', enabled ? 'true' : 'false');
+    }
+
+    var bulkPurgeWrap = document.getElementById('bulkDeletePurgeWrap');
+    if (bulkPurgeWrap) {
+      bulkPurgeWrap.classList.toggle('d-none', !enabled);
+    }
+    var singleDeleteVerWrap = document.getElementById('deleteObjectVersioningWrap');
+    if (singleDeleteVerWrap) {
+      singleDeleteVerWrap.classList.toggle('d-none', !enabled);
     }
 
     if (!enabled) {
