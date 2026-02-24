@@ -1301,12 +1301,14 @@ def object_versions(bucket_name: str, object_key: str):
         for v in resp.get("Versions", []):
             if v.get("Key") != object_key:
                 continue
+            if v.get("IsLatest", False):
+                continue
             versions.append({
                 "version_id": v.get("VersionId", ""),
                 "last_modified": v["LastModified"].isoformat() if v.get("LastModified") else None,
                 "size": v.get("Size", 0),
                 "etag": v.get("ETag", "").strip('"'),
-                "is_latest": v.get("IsLatest", False),
+                "is_latest": False,
             })
         return jsonify({"versions": versions})
     except (ClientError, EndpointConnectionError, ConnectionClosedError) as exc:

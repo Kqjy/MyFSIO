@@ -1537,7 +1537,7 @@
 
   const confirmVersionRestore = (row, version, label = null, onConfirm) => {
     if (!version) return;
-    const timestamp = version.archived_at ? new Date(version.archived_at).toLocaleString() : version.version_id;
+    const timestamp = (version.archived_at || version.last_modified) ? new Date(version.archived_at || version.last_modified).toLocaleString() : version.version_id;
     const sizeLabel = formatBytes(Number(version.size) || 0);
     const reasonLabel = describeVersionReason(version.reason);
     const targetLabel = label || row?.dataset.key || 'this object';
@@ -1610,7 +1610,7 @@
 
       const latestCell = document.createElement('td');
       if (item.latest) {
-        const ts = item.latest.archived_at ? new Date(item.latest.archived_at).toLocaleString() : item.latest.version_id;
+        const ts = (item.latest.archived_at || item.latest.last_modified) ? new Date(item.latest.archived_at || item.latest.last_modified).toLocaleString() : item.latest.version_id;
         const sizeLabel = formatBytes(Number(item.latest.size) || 0);
         latestCell.innerHTML = `<div class="small">${ts}</div><div class="text-muted small">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
       } else {
@@ -1785,7 +1785,7 @@
       badge.textContent = `#${versionNumber}`;
       const title = document.createElement('div');
       title.className = 'fw-semibold small';
-      const timestamp = entry.archived_at ? new Date(entry.archived_at).toLocaleString() : entry.version_id;
+      const timestamp = (entry.archived_at || entry.last_modified) ? new Date(entry.archived_at || entry.last_modified).toLocaleString() : entry.version_id;
       title.textContent = timestamp;
       heading.appendChild(badge);
       heading.appendChild(title);
@@ -2816,7 +2816,16 @@
         uploadFileInput.value = '';
       }
 
-      loadObjects(false);
+      const previousKey = activeRow?.dataset.key || null;
+      loadObjects(false).then(() => {
+        if (previousKey) {
+          const newRow = document.querySelector(`[data-object-row][data-key="${CSS.escape(previousKey)}"]`);
+          if (newRow) {
+            selectRow(newRow);
+            if (versioningEnabled) loadObjectVersions(newRow, { force: true });
+          }
+        }
+      });
 
       const successCount = uploadSuccessFiles.length;
       const errorCount = uploadErrorFiles.length;
