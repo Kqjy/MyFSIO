@@ -171,6 +171,7 @@
         data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
         data-folders-url="{{ folders_url }}"
         data-buckets-for-copy-url="{{ buckets_for_copy_url }}"
+        data-bucket-total-objects="{{ bucket_stats.get('objects', 0) }}"
       >
         <table class="table table-hover align-middle mb-0" id="objects-table" style="table-layout: fixed;">
           <thead class="table-light">
@@ -2272,13 +2273,11 @@
         </div>
         <ul class="list-group mb-3" id="bulkDeleteList" style="max-height: 200px; overflow-y: auto;"></ul>
         <div class="text-muted small" id="bulkDeleteStatus"></div>
-        {% if versioning_enabled %}
-        <div class="form-check mt-3 p-3 bg-body-tertiary rounded-3">
+        <div class="form-check mt-3 p-3 bg-body-tertiary rounded-3 {% if not versioning_enabled %}d-none{% endif %}" id="bulkDeletePurgeWrap">
           <input class="form-check-input" type="checkbox" id="bulkDeletePurge" />
           <label class="form-check-label" for="bulkDeletePurge">Also delete archived versions</label>
           <div class="form-text">Removes any archived versions stored in the archive.</div>
         </div>
-        {% endif %}
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -2316,7 +2315,7 @@
           <div class="p-3 bg-body-tertiary rounded-3 mb-3">
             <code id="deleteObjectKey" class="d-block text-break"></code>
           </div>
-          {% if versioning_enabled %}
+          <div id="deleteObjectVersioningWrap" class="{% if not versioning_enabled %}d-none{% endif %}">
           <div class="alert alert-warning d-flex align-items-start small mb-3" role="alert">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-0" viewBox="0 0 16 16">
               <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
@@ -2328,7 +2327,7 @@
             <label class="form-check-label" for="deletePurgeVersions">Also delete all archived versions</label>
             <div class="form-text mb-0">Removes the live object and every stored version.</div>
           </div>
-          {% endif %}
+          </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -2771,7 +2770,8 @@
 window.BucketDetailConfig = {
   endpoints: {
     versioning: "{{ url_for('ui.update_bucket_versioning', bucket_name=bucket_name) }}",
-    bucketsOverview: "{{ url_for('ui.buckets_overview') }}"
+    bucketsOverview: "{{ url_for('ui.buckets_overview') }}",
+    archivedObjects: "{{ url_for('ui.archived_objects', bucket_name=bucket_name) }}"
   }
 };
 

@@ -137,11 +137,11 @@
   const versionPanel = document.getElementById('version-panel');
   const versionList = document.getElementById('version-list');
   const refreshVersionsButton = document.getElementById('refreshVersionsButton');
-  const archivedCard = document.getElementById('archived-objects-card');
-  const archivedBody = archivedCard?.querySelector('[data-archived-body]');
-  const archivedCountBadge = archivedCard?.querySelector('[data-archived-count]');
-  const archivedRefreshButton = archivedCard?.querySelector('[data-archived-refresh]');
-  const archivedEndpoint = archivedCard?.dataset.archivedEndpoint;
+  let archivedCard = document.getElementById('archived-objects-card');
+  let archivedBody = archivedCard?.querySelector('[data-archived-body]');
+  let archivedCountBadge = archivedCard?.querySelector('[data-archived-count]');
+  let archivedRefreshButton = archivedCard?.querySelector('[data-archived-refresh]');
+  let archivedEndpoint = archivedCard?.dataset.archivedEndpoint;
   let versioningEnabled = objectsContainer?.dataset.versioning === 'true';
   const versionsCache = new Map();
   let activeRow = null;
@@ -167,6 +167,8 @@
   let pageSize = 5000;
   let currentPrefix = '';
   let allObjects = [];
+  let streamFolders = [];
+  let useDelimiterMode = true;
   let urlTemplates = null;
   let streamAbortController = null;
   let useStreaming = !!objectsStreamUrl;
@@ -186,7 +188,7 @@
   let renderedRange = { start: 0, end: 0 };
 
   let memoizedVisibleItems = null;
-  let memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
+  let memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
 
   const createObjectRow = (obj, displayKey = null) => {
     const tr = document.createElement('tr');
@@ -319,10 +321,13 @@
     `;
   };
 
+  const bucketTotalObjects = objectsContainer ? parseInt(objectsContainer.dataset.bucketTotalObjects || '0', 10) : 0;
+
   const updateObjectCountBadge = () => {
     if (!objectCountBadge) return;
-    if (totalObjectCount === 0) {
-      objectCountBadge.textContent = '0 objects';
+    if (useDelimiterMode) {
+      const total = bucketTotalObjects || totalObjectCount;
+      objectCountBadge.textContent = `${total.toLocaleString()} object${total !== 1 ? 's' : ''}`;
     } else {
       objectCountBadge.textContent = `${totalObjectCount.toLocaleString()} object${totalObjectCount !== 1 ? 's' : ''}`;
     }
@@ -349,6 +354,7 @@
   const computeVisibleItems = (forceRecompute = false) => {
     const currentInputs = {
       objectCount: allObjects.length,
+      folderCount: streamFolders.length,
       prefix: currentPrefix,
       filterTerm: currentFilterTerm,
       sortField: currentSortField,
@@ -358,6 +364,7 @@
     if (!forceRecompute &&
         memoizedVisibleItems !== null &&
         memoizedInputs.objectCount === currentInputs.objectCount &&
+        memoizedInputs.folderCount === currentInputs.folderCount &&
         memoizedInputs.prefix === currentInputs.prefix &&
         memoizedInputs.filterTerm === currentInputs.filterTerm &&
         memoizedInputs.sortField === currentInputs.sortField &&
@@ -366,36 +373,49 @@
     }
 
     const items = [];
-    const folders = new Set();
 
-    allObjects.forEach(obj => {
-      if (!obj.key.startsWith(currentPrefix)) return;
+    if (searchResults !== null) {
+      searchResults.forEach(obj => {
+        items.push({ type: 'file', data: obj, displayKey: obj.key });
+      });
+    } else if (useDelimiterMode && streamFolders.length > 0) {
+      streamFolders.forEach(folderPath => {
+        const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
+        items.push({ type: 'folder', path: folderPath, displayKey: folderName });
+      });
+      allObjects.forEach(obj => {
+        const remainder = obj.key.slice(currentPrefix.length);
+        if (!remainder) return;
+        items.push({ type: 'file', data: obj, displayKey: remainder });
+      });
+    } else {
+      const folders = new Set();
 
-      const remainder = obj.key.slice(currentPrefix.length);
+      allObjects.forEach(obj => {
+        if (!obj.key.startsWith(currentPrefix)) return;
 
-      if (!remainder) return;
+        const remainder = obj.key.slice(currentPrefix.length);
 
-      const isFolderMarker = obj.key.endsWith('/') && obj.size === 0;
-      const slashIndex = remainder.indexOf('/');
+        if (!remainder) return;
 
-      if (slashIndex === -1 && !isFolderMarker) {
-        if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
+        const isFolderMarker = obj.key.endsWith('/') && obj.size === 0;
+        const slashIndex = remainder.indexOf('/');
+
+        if (slashIndex === -1 && !isFolderMarker) {
           items.push({ type: 'file', data: obj, displayKey: remainder });
-        }
-      } else {
-        const effectiveSlashIndex = isFolderMarker && slashIndex === remainder.length - 1
-          ? slashIndex
-          : (slashIndex === -1 ? remainder.length - 1 : slashIndex);
-        const folderName = remainder.slice(0, effectiveSlashIndex);
-        const folderPath = currentPrefix + folderName + '/';
-        if (!folders.has(folderPath)) {
-          folders.add(folderPath);
-          if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
+        } else {
+          const effectiveSlashIndex = isFolderMarker && slashIndex === remainder.length - 1
+            ? slashIndex
+            : (slashIndex === -1 ? remainder.length - 1 : slashIndex);
+          const folderName = remainder.slice(0, effectiveSlashIndex);
+          const folderPath = currentPrefix + folderName + '/';
+          if (!folders.has(folderPath)) {
+            folders.add(folderPath);
             items.push({ type: 'folder', path: folderPath, displayKey: folderName });
           }
         }
-      }
-    });
+      });
+    }
 
     items.sort((a, b) => {
       if (a.type === 'folder' && b.type === 'file') return -1;
@@ -471,7 +491,7 @@
     renderedRange = { start: -1, end: -1 };
 
     if (visibleItems.length === 0) {
-      if (allObjects.length === 0 && !hasMoreObjects) {
+      if (allObjects.length === 0 && streamFolders.length === 0 && !hasMoreObjects) {
         showEmptyState();
       } else {
         objectsTableBody.innerHTML = `
@@ -500,15 +520,7 @@
   const updateFolderViewStatus = () => {
     const folderViewStatusEl = document.getElementById('folder-view-status');
     if (!folderViewStatusEl) return;
-
-    if (currentPrefix) {
-      const folderCount = visibleItems.filter(i => i.type === 'folder').length;
-      const fileCount = visibleItems.filter(i => i.type === 'file').length;
-      folderViewStatusEl.innerHTML = `<span class="text-muted">${folderCount} folder${folderCount !== 1 ? 's' : ''}, ${fileCount} file${fileCount !== 1 ? 's' : ''} in this view</span>`;
-      folderViewStatusEl.classList.remove('d-none');
-    } else {
-      folderViewStatusEl.classList.add('d-none');
-    }
+    folderViewStatusEl.classList.add('d-none');
   };
 
   const processStreamObject = (obj) => {
@@ -536,21 +548,30 @@
   let lastStreamRenderTime = 0;
   const STREAM_RENDER_THROTTLE_MS = 500;
 
+  const buildBottomStatusText = (complete) => {
+    if (!complete) {
+      const countText = totalObjectCount > 0 ? ` of ${totalObjectCount.toLocaleString()}` : '';
+      return `${loadedObjectCount.toLocaleString()}${countText} loading...`;
+    }
+    const parts = [];
+    if (useDelimiterMode && streamFolders.length > 0) {
+      parts.push(`${streamFolders.length.toLocaleString()} folder${streamFolders.length !== 1 ? 's' : ''}`);
+    }
+    parts.push(`${loadedObjectCount.toLocaleString()} object${loadedObjectCount !== 1 ? 's' : ''}`);
+    return parts.join(', ');
+  };
+
   const flushPendingStreamObjects = () => {
-    if (pendingStreamObjects.length === 0) return;
-    const batch = pendingStreamObjects.splice(0, pendingStreamObjects.length);
-    batch.forEach(obj => {
-      loadedObjectCount++;
-      allObjects.push(obj);
-    });
+    if (pendingStreamObjects.length > 0) {
+      const batch = pendingStreamObjects.splice(0, pendingStreamObjects.length);
+      batch.forEach(obj => {
+        loadedObjectCount++;
+        allObjects.push(obj);
+      });
+    }
     updateObjectCountBadge();
     if (loadMoreStatus) {
-      if (streamingComplete) {
-        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
-      } else {
-        const countText = totalObjectCount > 0 ? ` of ${totalObjectCount.toLocaleString()}` : '';
-        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()}${countText} loading...`;
-      }
+      loadMoreStatus.textContent = buildBottomStatusText(streamingComplete);
     }
     if (objectsLoadingRow && objectsLoadingRow.parentNode) {
       const loadingText = objectsLoadingRow.querySelector('p');
@@ -585,8 +606,9 @@
     loadedObjectCount = 0;
     totalObjectCount = 0;
     allObjects = [];
+    streamFolders = [];
     memoizedVisibleItems = null;
-    memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
+    memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
     pendingStreamObjects = [];
     lastStreamRenderTime = 0;
 
@@ -595,6 +617,7 @@
     try {
       const params = new URLSearchParams();
       if (currentPrefix) params.set('prefix', currentPrefix);
+      if (useDelimiterMode) params.set('delimiter', '/');
 
       const response = await fetch(`${objectsStreamUrl}?${params}`, {
         signal: streamAbortController.signal
@@ -639,6 +662,10 @@
                   if (loadingText) loadingText.textContent = `Loading 0 of ${totalObjectCount.toLocaleString()} objects...`;
                 }
                 break;
+              case 'folder':
+                streamFolders.push(msg.prefix);
+                scheduleStreamRender();
+                break;
               case 'object':
                 pendingStreamObjects.push(processStreamObject(msg));
                 if (pendingStreamObjects.length >= STREAM_RENDER_BATCH) {
@@ -682,7 +709,7 @@
       }
 
       if (loadMoreStatus) {
-        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
+        loadMoreStatus.textContent = buildBottomStatusText(true);
       }
       refreshVirtualList();
       renderBreadcrumb(currentPrefix);
@@ -710,8 +737,9 @@
       loadedObjectCount = 0;
       totalObjectCount = 0;
       allObjects = [];
+      streamFolders = [];
       memoizedVisibleItems = null;
-      memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
     }
 
     if (append && loadMoreSpinner) {
@@ -913,7 +941,7 @@
     });
   }
 
-  const hasFolders = () => allObjects.some(obj => obj.key.includes('/'));
+  const hasFolders = () => streamFolders.length > 0 || allObjects.some(obj => obj.key.includes('/'));
 
   const getFoldersAtPrefix = (prefix) => {
     const folders = new Set();
@@ -940,6 +968,9 @@
   };
 
   const countObjectsInFolder = (folderPrefix) => {
+    if (useDelimiterMode) {
+      return { count: 0, mayHaveMore: true };
+    }
     const count = allObjects.filter(obj => obj.key.startsWith(folderPrefix)).length;
     return { count, mayHaveMore: hasMoreObjects };
   };
@@ -1018,7 +1049,13 @@
   const createFolderRow = (folderPath, displayName = null) => {
     const folderName = displayName || folderPath.slice(currentPrefix.length).replace(/\/$/, '');
     const { count: objectCount, mayHaveMore } = countObjectsInFolder(folderPath);
-    const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
+    let countLine = '';
+    if (useDelimiterMode) {
+      countLine = '';
+    } else {
+      const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
+      countLine = `<div class="text-muted small ms-4 ps-2">${countDisplay} object${objectCount !== 1 ? 's' : ''}</div>`;
+    }
 
     const tr = document.createElement('tr');
     tr.className = 'folder-row';
@@ -1036,7 +1073,7 @@
           </svg>
           <span>${escapeHtml(folderName)}/</span>
         </div>
-        <div class="text-muted small ms-4 ps-2">${countDisplay} object${objectCount !== 1 ? 's' : ''}</div>
+        ${countLine}
       </td>
       <td class="text-end text-nowrap">
         <span class="text-muted small">—</span>
@@ -1537,7 +1574,7 @@
 
   const confirmVersionRestore = (row, version, label = null, onConfirm) => {
     if (!version) return;
-    const timestamp = version.archived_at ? new Date(version.archived_at).toLocaleString() : version.version_id;
+    const timestamp = (version.archived_at || version.last_modified) ? new Date(version.archived_at || version.last_modified).toLocaleString() : version.version_id;
     const sizeLabel = formatBytes(Number(version.size) || 0);
     const reasonLabel = describeVersionReason(version.reason);
     const targetLabel = label || row?.dataset.key || 'this object';
@@ -1610,7 +1647,7 @@
 
       const latestCell = document.createElement('td');
       if (item.latest) {
-        const ts = item.latest.archived_at ? new Date(item.latest.archived_at).toLocaleString() : item.latest.version_id;
+        const ts = (item.latest.archived_at || item.latest.last_modified) ? new Date(item.latest.archived_at || item.latest.last_modified).toLocaleString() : item.latest.version_id;
         const sizeLabel = formatBytes(Number(item.latest.size) || 0);
         latestCell.innerHTML = `<div class="small">${ts}</div><div class="text-muted small">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
       } else {
@@ -1737,6 +1774,15 @@
     loadArchivedObjects();
   }
 
+  const propertiesTab = document.getElementById('properties-tab');
+  if (propertiesTab) {
+    propertiesTab.addEventListener('shown.bs.tab', () => {
+      if (archivedCard && archivedEndpoint) {
+        loadArchivedObjects();
+      }
+    });
+  }
+
   async function restoreVersion(row, version) {
     if (!row || !version?.version_id) return;
     const template = row.dataset.restoreTemplate;
@@ -1785,7 +1831,7 @@
       badge.textContent = `#${versionNumber}`;
       const title = document.createElement('div');
       title.className = 'fw-semibold small';
-      const timestamp = entry.archived_at ? new Date(entry.archived_at).toLocaleString() : entry.version_id;
+      const timestamp = (entry.archived_at || entry.last_modified) ? new Date(entry.archived_at || entry.last_modified).toLocaleString() : entry.version_id;
       title.textContent = timestamp;
       heading.appendChild(badge);
       heading.appendChild(title);
@@ -2044,8 +2090,63 @@
     }
   };
 
+  let searchDebounceTimer = null;
+  let searchAbortController = null;
+  let searchResults = null;
+
+  const performServerSearch = async (term) => {
+    if (searchAbortController) searchAbortController.abort();
+    searchAbortController = new AbortController();
+
+    try {
+      const params = new URLSearchParams({ q: term, limit: '500' });
+      if (currentPrefix) params.set('prefix', currentPrefix);
+      const searchUrl = objectsStreamUrl.replace('/stream', '/search');
+      const response = await fetch(`${searchUrl}?${params}`, {
+        signal: searchAbortController.signal
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      searchResults = (data.results || []).map(obj => processStreamObject(obj));
+      memoizedVisibleItems = null;
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+      refreshVirtualList();
+      if (loadMoreStatus) {
+        const countText = searchResults.length.toLocaleString();
+        const truncated = data.truncated ? '+' : '';
+        loadMoreStatus.textContent = `${countText}${truncated} result${searchResults.length !== 1 ? 's' : ''}`;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      if (loadMoreStatus) {
+        loadMoreStatus.textContent = 'Search failed';
+      }
+    }
+  };
+
   document.getElementById('object-search')?.addEventListener('input', (event) => {
-    currentFilterTerm = event.target.value.toLowerCase();
+    const newTerm = event.target.value.toLowerCase();
+    const wasFiltering = currentFilterTerm.length > 0;
+    const isFiltering = newTerm.length > 0;
+    currentFilterTerm = newTerm;
+
+    clearTimeout(searchDebounceTimer);
+
+    if (isFiltering) {
+      searchDebounceTimer = setTimeout(() => performServerSearch(newTerm), 300);
+      return;
+    }
+
+    if (!isFiltering && wasFiltering) {
+      if (searchAbortController) searchAbortController.abort();
+      searchResults = null;
+      memoizedVisibleItems = null;
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+      if (loadMoreStatus) {
+        loadMoreStatus.textContent = buildBottomStatusText(streamingComplete);
+      }
+    }
+
     updateFilterWarning();
     refreshVirtualList();
   });
@@ -2086,7 +2187,18 @@
       var searchInput = document.getElementById('object-search');
       if (searchInput && document.activeElement === searchInput) {
         searchInput.value = '';
+        const wasFiltering = currentFilterTerm.length > 0;
         currentFilterTerm = '';
+        if (wasFiltering) {
+          clearTimeout(searchDebounceTimer);
+          if (searchAbortController) searchAbortController.abort();
+          searchResults = null;
+          memoizedVisibleItems = null;
+          memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+          if (loadMoreStatus) {
+            loadMoreStatus.textContent = buildBottomStatusText(streamingComplete);
+          }
+        }
         refreshVirtualList();
         searchInput.blur();
       }
@@ -2816,7 +2928,16 @@
         uploadFileInput.value = '';
       }
 
-      loadObjects(false);
+      const previousKey = activeRow?.dataset.key || null;
+      loadObjects(false).then(() => {
+        if (previousKey) {
+          const newRow = document.querySelector(`[data-object-row][data-key="${CSS.escape(previousKey)}"]`);
+          if (newRow) {
+            selectRow(newRow);
+            if (versioningEnabled) loadObjectVersions(newRow, { force: true });
+          }
+        }
+      });
 
       const successCount = uploadSuccessFiles.length;
       const errorCount = uploadErrorFiles.length;
@@ -4154,11 +4275,61 @@
     var archivedCardEl = document.getElementById('archived-objects-card');
     if (archivedCardEl) {
       archivedCardEl.style.display = enabled ? '' : 'none';
+    } else if (enabled) {
+      var endpoint = window.BucketDetailConfig?.endpoints?.archivedObjects || '';
+      if (endpoint) {
+        var html = '<div class="card shadow-sm mt-4" id="archived-objects-card" data-archived-endpoint="' + endpoint + '">' +
+          '<div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">' +
+          '<div class="d-flex align-items-center">' +
+          '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning me-2" viewBox="0 0 16 16">' +
+          '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
+          '</svg><span class="fw-semibold">Archived Objects</span></div>' +
+          '<div class="d-flex align-items-center gap-2">' +
+          '<span class="badge text-bg-secondary" data-archived-count>0 items</span>' +
+          '<button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>' +
+          '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
+          '<path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>' +
+          '<path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>' +
+          '</svg>Refresh</button></div></div>' +
+          '<div class="card-body">' +
+          '<p class="text-muted small mb-3">Objects that have been deleted while versioning is enabled. Their previous versions remain available until you restore or purge them.</p>' +
+          '<div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0">' +
+          '<thead class="table-light"><tr>' +
+          '<th scope="col"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 text-muted" viewBox="0 0 16 16">' +
+          '<path d="M4 0h5.293A1 1 0 0 1 10 .293L13.707 4a1 1 0 0 1 .293.707V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5.5 1.5v2a1 1 0 0 0 1 1h2l-3-3z"/>' +
+          '</svg>Key</th>' +
+          '<th scope="col">Latest Version</th>' +
+          '<th scope="col" class="text-center">Versions</th>' +
+          '<th scope="col" class="text-end">Actions</th>' +
+          '</tr></thead>' +
+          '<tbody data-archived-body><tr><td colspan="4" class="text-center text-muted py-4">' +
+          '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="mb-2 d-block mx-auto" viewBox="0 0 16 16">' +
+          '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
+          '</svg>No archived objects</td></tr></tbody>' +
+          '</table></div></div></div>';
+        card.insertAdjacentHTML('afterend', html);
+        archivedCard = document.getElementById('archived-objects-card');
+        archivedBody = archivedCard.querySelector('[data-archived-body]');
+        archivedCountBadge = archivedCard.querySelector('[data-archived-count]');
+        archivedRefreshButton = archivedCard.querySelector('[data-archived-refresh]');
+        archivedEndpoint = endpoint;
+        archivedRefreshButton.addEventListener('click', function() { loadArchivedObjects(); });
+        loadArchivedObjects();
+      }
     }
 
     var dropZone = document.getElementById('objects-drop-zone');
     if (dropZone) {
       dropZone.setAttribute('data-versioning', enabled ? 'true' : 'false');
+    }
+
+    var bulkPurgeWrap = document.getElementById('bulkDeletePurgeWrap');
+    if (bulkPurgeWrap) {
+      bulkPurgeWrap.classList.toggle('d-none', !enabled);
+    }
+    var singleDeleteVerWrap = document.getElementById('deleteObjectVersioningWrap');
+    if (singleDeleteVerWrap) {
+      singleDeleteVerWrap.classList.toggle('d-none', !enabled);
     }
 
     if (!enabled) {

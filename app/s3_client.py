@@ -245,6 +245,7 @@ def stream_objects_ndjson(
     url_templates: dict[str, str],
     display_tz: str = "UTC",
     versioning_enabled: bool = False,
+    delimiter: Optional[str] = None,
 ) -> Generator[str, None, None]:
     meta_line = json.dumps({
         "type": "meta",
@@ -258,11 +259,20 @@ def stream_objects_ndjson(
     kwargs: dict[str, Any] = {"Bucket": bucket_name, "MaxKeys": 1000}
     if prefix:
         kwargs["Prefix"] = prefix
+    if delimiter:
+        kwargs["Delimiter"] = delimiter
 
+    running_count = 0
     try:
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(**kwargs):
-            for obj in page.get("Contents", []):
+            for cp in page.get("CommonPrefixes", []):
+                yield json.dumps({
+                    "type": "folder",
+                    "prefix": cp["Prefix"],
+                }) + "\n"
+            page_contents = page.get("Contents", [])
+            for obj in page_contents:
                 last_mod = obj["LastModified"]
                 yield json.dumps({
                     "type": "object",
@@ -273,6 +283,8 @@ def stream_objects_ndjson(
                     "last_modified_iso": format_datetime_iso(last_mod, display_tz),
                     "etag": obj.get("ETag", "").strip('"'),
                 }) + "\n"
+            running_count += len(page_contents)
+            yield json.dumps({"type": "count", "total_count": running_count}) + "\n"
     except ClientError as exc:
         error_msg = exc.response.get("Error", {}).get("Message", "S3 operation failed")
         yield json.dumps({"type": "error", "error": error_msg}) + "\n"

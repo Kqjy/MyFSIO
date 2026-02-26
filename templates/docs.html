@@ -52,6 +52,11 @@
             <li><a href="#acls">Access Control Lists</a></li>
             <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
             <li><a href="#website-hosting">Static Website Hosting</a></li>
+            <li><a href="#cors-config">CORS Configuration</a></li>
+            <li><a href="#post-object">PostObject (Form Upload)</a></li>
+            <li><a href="#list-objects-v2">List Objects API v2</a></li>
+            <li><a href="#upgrading">Upgrading &amp; Updates</a></li>
+            <li><a href="#api-matrix">Full API Reference</a></li>
           </ul>
         </div>
       </div>
@@ -126,6 +131,11 @@ python run.py --mode ui
                 <td><code>5000</code></td>
                 <td>Listen port (UI uses 5100).</td>
               </tr>
+              <tr>
+                <td><code>DISPLAY_TIMEZONE</code></td>
+                <td><code>UTC</code></td>
+                <td>Timezone for UI timestamps (e.g., <code>US/Eastern</code>, <code>Asia/Tokyo</code>).</td>
+              </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">CORS Settings</td>
               </tr>
@@ -186,6 +196,11 @@ python run.py --mode ui
                 <td><code>RATE_LIMIT_HEAD_OPS</code></td>
                 <td><code>100 per minute</code></td>
                 <td>Rate limit for HEAD requests.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_ADMIN</code></td>
+                <td><code>60 per minute</code></td>
+                <td>Rate limit for admin API endpoints (<code>/admin/*</code>).</td>
               </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Server Settings</td>
@@ -339,6 +354,24 @@ python run.py --mode ui
                 <td>Maximum presigned URL expiry time (7 days).</td>
               </tr>
               <tr class="table-secondary">
+                <td colspan="3" class="fw-semibold">Proxy &amp; Network Settings</td>
+              </tr>
+              <tr>
+                <td><code>NUM_TRUSTED_PROXIES</code></td>
+                <td><code>1</code></td>
+                <td>Number of trusted reverse proxies for <code>X-Forwarded-*</code> headers.</td>
+              </tr>
+              <tr>
+                <td><code>ALLOWED_REDIRECT_HOSTS</code></td>
+                <td>(empty)</td>
+                <td>Comma-separated whitelist of safe redirect targets.</td>
+              </tr>
+              <tr>
+                <td><code>ALLOW_INTERNAL_ENDPOINTS</code></td>
+                <td><code>false</code></td>
+                <td>Allow connections to internal/private IPs (webhooks, replication).</td>
+              </tr>
+              <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Storage Limits</td>
               </tr>
               <tr>
@@ -365,6 +398,16 @@ python run.py --mode ui
                 <td><code>LIFECYCLE_MAX_HISTORY_PER_BUCKET</code></td>
                 <td><code>50</code></td>
                 <td>Max lifecycle history records per bucket.</td>
+              </tr>
+              <tr>
+                <td><code>OBJECT_CACHE_TTL</code></td>
+                <td><code>60</code></td>
+                <td>Seconds to cache object metadata.</td>
+              </tr>
+              <tr>
+                <td><code>BULK_DOWNLOAD_MAX_BYTES</code></td>
+                <td><code>1 GB</code></td>
+                <td>Max total size for bulk ZIP downloads.</td>
               </tr>
               <tr>
                 <td><code>ENCRYPTION_CHUNK_SIZE_BYTES</code></td>
@@ -491,7 +534,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <ul>
               <li>Navigate folder hierarchies using breadcrumbs. Objects with <code>/</code> in keys display as folders.</li>
               <li>Infinite scroll loads more objects automatically. Choose batch size (50–250) from the footer dropdown.</li>
-              <li>Bulk select objects for multi-delete or multi-download. Filter by name using the search box.</li>
+              <li>Bulk select objects for multi-delete or multi-download (ZIP archive, up to 1 GiB). Filter by name using the search box.</li>
               <li>If loading fails, click <strong>Retry</strong> to attempt again—no page refresh needed.</li>
             </ul>
           </div>
@@ -614,14 +657,74 @@ curl -X PUT {{ api_base }}/demo/notes.txt \
                 <td>Delete an object.</td>
               </tr>
               <tr>
+                <td>HEAD</td>
+                <td><code>/&lt;bucket&gt;</code></td>
+                <td>Check if a bucket exists.</td>
+              </tr>
+              <tr>
+                <td>HEAD</td>
+                <td><code>/&lt;bucket&gt;/&lt;key&gt;</code></td>
+                <td>Get object metadata without downloading.</td>
+              </tr>
+              <tr>
+                <td>POST</td>
+                <td><code>/&lt;bucket&gt;?delete</code></td>
+                <td>Bulk delete objects (XML body).</td>
+              </tr>
+              <tr>
                 <td>GET/PUT/DELETE</td>
                 <td><code>/&lt;bucket&gt;?policy</code></td>
-                <td>Fetch, upsert, or remove a bucket policy (S3-compatible).</td>
+                <td>Bucket policy management.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT</td>
+                <td><code>/&lt;bucket&gt;?versioning</code></td>
+                <td>Versioning status.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT/DELETE</td>
+                <td><code>/&lt;bucket&gt;?lifecycle</code></td>
+                <td>Lifecycle rules.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT/DELETE</td>
+                <td><code>/&lt;bucket&gt;?cors</code></td>
+                <td>CORS configuration.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT/DELETE</td>
+                <td><code>/&lt;bucket&gt;?encryption</code></td>
+                <td>Default encryption.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT</td>
+                <td><code>/&lt;bucket&gt;?acl</code></td>
+                <td>Bucket ACL.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT/DELETE</td>
+                <td><code>/&lt;bucket&gt;?tagging</code></td>
+                <td>Bucket tags.</td>
+              </tr>
+              <tr>
+                <td>GET/PUT/DELETE</td>
+                <td><code>/&lt;bucket&gt;/&lt;key&gt;?tagging</code></td>
+                <td>Object tags.</td>
+              </tr>
+              <tr>
+                <td>POST</td>
+                <td><code>/&lt;bucket&gt;/&lt;key&gt;?uploads</code></td>
+                <td>Initiate multipart upload.</td>
+              </tr>
+              <tr>
+                <td>POST</td>
+                <td><code>/&lt;bucket&gt;/&lt;key&gt;?select</code></td>
+                <td>SQL query (SelectObjectContent).</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <p class="small text-muted mt-3 mb-0">All responses include <code>X-Request-Id</code> for tracing. Logs land in <code>logs/api.log</code> and <code>logs/ui.log</code>.</p>
+        <p class="small text-muted mt-3 mb-0">All responses include <code>X-Request-Id</code> for tracing. See the <a href="#api-matrix">Full API Reference</a> for the complete endpoint list. Logs land in <code>logs/api.log</code> and <code>logs/ui.log</code>.</p>
       </div>
     </article>
     <article id="examples" class="card shadow-sm docs-section">
@@ -1311,6 +1414,10 @@ curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
                 <td><strong>KMS (SSE-KMS)</strong></td>
                 <td>Encryption using customer-managed keys via the built-in KMS</td>
               </tr>
+              <tr>
+                <td><strong>SSE-C</strong></td>
+                <td>Server-side encryption with customer-provided keys (per-request)</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -1377,6 +1484,54 @@ curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
         <p class="small text-muted mb-0">
           <strong>Envelope Encryption:</strong> Each object is encrypted with a unique Data Encryption Key (DEK). The DEK is then encrypted (wrapped) by the master key or KMS key and stored alongside the ciphertext. On read, the DEK is unwrapped and used to decrypt the object transparently.
         </p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">SSE-C (Customer-Provided Keys)</h3>
+        <p class="small text-muted">With SSE-C, you supply your own 256-bit AES key with each request. The server encrypts/decrypts using your key but never stores it. You must provide the same key for both upload and download.</p>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Header</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>x-amz-server-side-encryption-customer-algorithm</code></td>
+                <td><code>AES256</code></td>
+              </tr>
+              <tr>
+                <td><code>x-amz-server-side-encryption-customer-key</code></td>
+                <td>Base64-encoded 256-bit key</td>
+              </tr>
+              <tr>
+                <td><code>x-amz-server-side-encryption-customer-key-MD5</code></td>
+                <td>Base64-encoded MD5 of the key</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+<pre class="mb-3"><code class="language-bash"># Generate a 256-bit key
+KEY=$(openssl rand -base64 32)
+KEY_MD5=$(echo -n "$KEY" | base64 -d | openssl dgst -md5 -binary | base64)
+
+# Upload with SSE-C
+curl -X PUT "{{ api_base }}/my-bucket/secret.txt" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-server-side-encryption-customer-algorithm: AES256" \
+  -H "x-amz-server-side-encryption-customer-key: $KEY" \
+  -H "x-amz-server-side-encryption-customer-key-MD5: $KEY_MD5" \
+  --data-binary @secret.txt
+
+# Download with SSE-C (same key required)
+curl "{{ api_base }}/my-bucket/secret.txt" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "x-amz-server-side-encryption-customer-algorithm: AES256" \
+  -H "x-amz-server-side-encryption-customer-key: $KEY" \
+  -H "x-amz-server-side-encryption-customer-key-MD5: $KEY_MD5"</code></pre>
+        <div class="alert alert-light border mb-0 small">
+          <strong>Note:</strong> SSE-C does not require <code>ENCRYPTION_ENABLED</code> or <code>KMS_ENABLED</code>. If you lose your key, the data is irrecoverable.
+        </div>
       </div>
     </article>
     <article id="lifecycle" class="card shadow-sm docs-section">
@@ -1926,7 +2081,7 @@ curl -X POST "{{ api_base }}/&lt;bucket&gt;/data.csv?select" \
           <span class="docs-section-kicker">22</span>
           <h2 class="h4 mb-0">Advanced S3 Operations</h2>
         </div>
-        <p class="text-muted">Copy objects, upload part copies, and use range requests for partial downloads.</p>
+        <p class="text-muted">Copy, move, and partially download objects using advanced S3 operations.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">CopyObject</h3>
 <pre class="mb-3"><code class="language-bash"># Copy within same bucket
@@ -1940,6 +2095,13 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/file.txt" \
   -H "x-amz-copy-source: /&lt;bucket&gt;/file.txt" \
   -H "x-amz-metadata-directive: REPLACE" \
   -H "x-amz-meta-newkey: newvalue"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">MoveObject (UI)</h3>
+        <p class="small text-muted">Move an object to a different key or bucket via the UI. Performs a copy then deletes the source. Requires <code>read</code>+<code>delete</code> on source and <code>write</code> on destination.</p>
+<pre class="mb-3"><code class="language-bash"># Move via UI API (session-authenticated)
+curl -X POST "http://localhost:5100/ui/buckets/&lt;bucket&gt;/objects/&lt;key&gt;/move" \
+  -H "Content-Type: application/json" --cookie "session=..." \
+  -d '{"dest_bucket": "other-bucket", "dest_key": "new-path/file.txt"}'</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">UploadPartCopy</h3>
         <p class="small text-muted">Copy data from an existing object into a multipart upload part:</p>
@@ -2193,6 +2355,279 @@ server {
         </div>
       </div>
     </article>
+    <article id="cors-config" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">26</span>
+          <h2 class="h4 mb-0">CORS Configuration</h2>
+        </div>
+        <p class="text-muted">Configure per-bucket Cross-Origin Resource Sharing rules to control which origins can access your bucket from a browser.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Setting CORS Rules</h3>
+<pre class="mb-3"><code class="language-bash"># Set CORS configuration
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?cors" \
+  -H "Content-Type: application/xml" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '&lt;CORSConfiguration&gt;
+  &lt;CORSRule&gt;
+    &lt;AllowedOrigin&gt;https://example.com&lt;/AllowedOrigin&gt;
+    &lt;AllowedMethod&gt;GET&lt;/AllowedMethod&gt;
+    &lt;AllowedMethod&gt;PUT&lt;/AllowedMethod&gt;
+    &lt;AllowedHeader&gt;*&lt;/AllowedHeader&gt;
+    &lt;ExposeHeader&gt;ETag&lt;/ExposeHeader&gt;
+    &lt;MaxAgeSeconds&gt;3600&lt;/MaxAgeSeconds&gt;
+  &lt;/CORSRule&gt;
+&lt;/CORSConfiguration&gt;'
+
+# Get CORS configuration
+curl "{{ api_base }}/&lt;bucket&gt;?cors" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Delete CORS configuration
+curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?cors" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Rule Fields</h3>
+        <div class="table-responsive mb-0">
+          <table class="table table-sm table-bordered small mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Field</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>AllowedOrigin</code></td>
+                <td>Origins allowed to make requests (supports <code>*</code> wildcard)</td>
+              </tr>
+              <tr>
+                <td><code>AllowedMethod</code></td>
+                <td>HTTP methods: <code>GET</code>, <code>PUT</code>, <code>POST</code>, <code>DELETE</code>, <code>HEAD</code></td>
+              </tr>
+              <tr>
+                <td><code>AllowedHeader</code></td>
+                <td>Request headers allowed in preflight (supports <code>*</code>)</td>
+              </tr>
+              <tr>
+                <td><code>ExposeHeader</code></td>
+                <td>Response headers visible to the browser (e.g., <code>ETag</code>, <code>x-amz-request-id</code>)</td>
+              </tr>
+              <tr>
+                <td><code>MaxAgeSeconds</code></td>
+                <td>How long the browser caches preflight results</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </article>
+    <article id="post-object" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">27</span>
+          <h2 class="h4 mb-0">PostObject (HTML Form Upload)</h2>
+        </div>
+        <p class="text-muted">Upload objects directly from an HTML form using browser-based POST uploads with policy-based authorization.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Form Fields</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Field</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>key</code></td><td>Object key (supports <code>${filename}</code> variable)</td></tr>
+              <tr><td><code>file</code></td><td>The file to upload</td></tr>
+              <tr><td><code>policy</code></td><td>Base64-encoded policy document (JSON)</td></tr>
+              <tr><td><code>x-amz-signature</code></td><td>HMAC-SHA256 signature of the policy</td></tr>
+              <tr><td><code>x-amz-credential</code></td><td>Access key / date / region / s3 / aws4_request</td></tr>
+              <tr><td><code>x-amz-algorithm</code></td><td><code>AWS4-HMAC-SHA256</code></td></tr>
+              <tr><td><code>x-amz-date</code></td><td>ISO 8601 date (e.g., <code>20250101T000000Z</code>)</td></tr>
+              <tr><td><code>Content-Type</code></td><td>MIME type of the uploaded file</td></tr>
+              <tr><td><code>x-amz-meta-*</code></td><td>Custom metadata headers</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Simple Upload (No Signing)</h3>
+<pre class="mb-3"><code class="language-html">&lt;form action="{{ api_base }}/my-bucket" method="POST" enctype="multipart/form-data"&gt;
+  &lt;input type="hidden" name="key" value="uploads/${filename}"&gt;
+  &lt;input type="file" name="file"&gt;
+  &lt;button type="submit"&gt;Upload&lt;/button&gt;
+&lt;/form&gt;</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Signed Upload (With Policy)</h3>
+        <p class="small text-muted mb-0">For authenticated uploads, include a base64-encoded policy and SigV4 signature fields. The policy constrains allowed keys, content types, and size limits. See docs.md Section 20 for full signing examples.</p>
+      </div>
+    </article>
+    <article id="list-objects-v2" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">28</span>
+          <h2 class="h4 mb-0">List Objects API v2</h2>
+        </div>
+        <p class="text-muted">Use the v2 list API for improved pagination with continuation tokens instead of markers.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Usage</h3>
+<pre class="mb-3"><code class="language-bash"># List with v2 API
+curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;prefix=logs/&amp;delimiter=/&amp;max-keys=100" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Paginate with continuation token
+curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;continuation-token=&lt;token&gt;" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Start listing after a specific key
+curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;start-after=photos/2025/" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Query Parameters</h3>
+        <div class="table-responsive mb-0">
+          <table class="table table-sm table-bordered small mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Parameter</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>list-type=2</code></td><td>Enables v2 API (required)</td></tr>
+              <tr><td><code>prefix</code></td><td>Filter to keys starting with this prefix</td></tr>
+              <tr><td><code>delimiter</code></td><td>Group keys by delimiter (typically <code>/</code> for folders)</td></tr>
+              <tr><td><code>max-keys</code></td><td>Maximum objects to return (default 1000)</td></tr>
+              <tr><td><code>continuation-token</code></td><td>Token from previous response for pagination</td></tr>
+              <tr><td><code>start-after</code></td><td>Start listing after this key (first page only)</td></tr>
+              <tr><td><code>fetch-owner</code></td><td>Include owner info in response</td></tr>
+              <tr><td><code>encoding-type</code></td><td>Set to <code>url</code> to URL-encode keys in response</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </article>
+    <article id="upgrading" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">29</span>
+          <h2 class="h4 mb-0">Upgrading &amp; Updates</h2>
+        </div>
+        <p class="text-muted">How to safely update MyFSIO to a new version.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Pre-Update Backup</h3>
+        <p class="small text-muted">Always back up before updating:</p>
+<pre class="mb-3"><code class="language-bash"># Back up configuration
+cp -r data/.myfsio.sys/config/ config-backup/
+
+# Back up data (optional, for critical deployments)
+tar czf myfsio-backup-$(date +%Y%m%d).tar.gz data/
+
+# Back up logs
+cp -r logs/ logs-backup/</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Update Procedure</h3>
+        <ol class="docs-steps mb-3">
+          <li><strong>Stop the service:</strong> <code>sudo systemctl stop myfsio</code> (or kill the process)</li>
+          <li><strong>Pull new version:</strong> <code>git pull origin main</code> or download the new binary</li>
+          <li><strong>Install dependencies:</strong> <code>pip install -r requirements.txt</code></li>
+          <li><strong>Validate config:</strong> <code>python run.py --check-config</code></li>
+          <li><strong>Start the service:</strong> <code>sudo systemctl start myfsio</code></li>
+          <li><strong>Verify:</strong> <code>curl http://localhost:5000/myfsio/health</code></li>
+        </ol>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Docker Update</h3>
+<pre class="mb-3"><code class="language-bash">docker pull myfsio:latest
+docker stop myfsio &amp;&amp; docker rm myfsio
+docker run -d --name myfsio -v myfsio-data:/app/data -p 5000:5000 -p 5100:5100 myfsio:latest</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Rollback</h3>
+        <p class="small text-muted mb-0">If something goes wrong, stop the service, restore the backed-up config and data directories, then restart with the previous binary or code version. See <code>docs.md</code> Section 4 for detailed rollback procedures including blue-green deployment strategies.</p>
+      </div>
+    </article>
+    <article id="api-matrix" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">30</span>
+          <h2 class="h4 mb-0">Full API Reference</h2>
+        </div>
+        <p class="text-muted">Complete list of all S3-compatible, admin, and KMS endpoints.</p>
+<pre class="mb-0"><code class="language-text"># Service
+GET    /myfsio/health                   # Health check
+
+# Bucket Operations
+GET    /                               # List buckets
+PUT    /&lt;bucket&gt;                        # Create bucket
+DELETE /&lt;bucket&gt;                        # Delete bucket
+GET    /&lt;bucket&gt;                        # List objects (?list-type=2)
+HEAD   /&lt;bucket&gt;                        # Check bucket exists
+POST   /&lt;bucket&gt;                        # POST object / form upload
+POST   /&lt;bucket&gt;?delete                 # Bulk delete
+
+# Bucket Configuration
+GET|PUT|DELETE /&lt;bucket&gt;?policy          # Bucket policy
+GET|PUT        /&lt;bucket&gt;?quota           # Bucket quota
+GET|PUT        /&lt;bucket&gt;?versioning      # Versioning
+GET|PUT|DELETE /&lt;bucket&gt;?lifecycle        # Lifecycle rules
+GET|PUT|DELETE /&lt;bucket&gt;?cors             # CORS config
+GET|PUT|DELETE /&lt;bucket&gt;?encryption       # Default encryption
+GET|PUT        /&lt;bucket&gt;?acl              # Bucket ACL
+GET|PUT|DELETE /&lt;bucket&gt;?tagging          # Bucket tags
+GET|PUT|DELETE /&lt;bucket&gt;?replication      # Replication rules
+GET|PUT        /&lt;bucket&gt;?logging          # Access logging
+GET|PUT        /&lt;bucket&gt;?notification     # Event notifications
+GET|PUT        /&lt;bucket&gt;?object-lock      # Object lock config
+GET|PUT|DELETE /&lt;bucket&gt;?website          # Static website
+GET            /&lt;bucket&gt;?uploads          # List multipart uploads
+GET            /&lt;bucket&gt;?versions         # List object versions
+GET            /&lt;bucket&gt;?location         # Bucket region
+
+# Object Operations
+PUT    /&lt;bucket&gt;/&lt;key&gt;                  # Upload object
+GET    /&lt;bucket&gt;/&lt;key&gt;                  # Download (Range supported)
+DELETE /&lt;bucket&gt;/&lt;key&gt;                  # Delete object
+HEAD   /&lt;bucket&gt;/&lt;key&gt;                  # Object metadata
+POST   /&lt;bucket&gt;/&lt;key&gt;?select           # SQL query (SelectObjectContent)
+
+# Object Configuration
+GET|PUT|DELETE /&lt;bucket&gt;/&lt;key&gt;?tagging    # Object tags
+GET|PUT        /&lt;bucket&gt;/&lt;key&gt;?acl        # Object ACL
+GET|PUT        /&lt;bucket&gt;/&lt;key&gt;?retention  # Object retention
+GET|PUT        /&lt;bucket&gt;/&lt;key&gt;?legal-hold # Legal hold
+
+# Multipart Upload
+POST   /&lt;bucket&gt;/&lt;key&gt;?uploads          # Initiate
+PUT    /&lt;bucket&gt;/&lt;key&gt;?uploadId=X&amp;partNumber=N  # Upload part
+POST   /&lt;bucket&gt;/&lt;key&gt;?uploadId=X       # Complete
+DELETE /&lt;bucket&gt;/&lt;key&gt;?uploadId=X       # Abort
+GET    /&lt;bucket&gt;/&lt;key&gt;?uploadId=X       # List parts
+
+# Copy (via x-amz-copy-source header)
+PUT    /&lt;bucket&gt;/&lt;key&gt;                  # CopyObject
+PUT    /&lt;bucket&gt;/&lt;key&gt;?uploadId&amp;partNumber # UploadPartCopy
+
+# Admin API
+GET|PUT /admin/site                     # Local site config
+GET     /admin/sites                    # List peers
+POST    /admin/sites                    # Register peer
+GET|PUT|DELETE /admin/sites/&lt;id&gt;        # Manage peer
+GET     /admin/sites/&lt;id&gt;/health        # Peer health
+GET     /admin/topology                 # Cluster topology
+GET|POST|PUT|DELETE /admin/website-domains  # Domain mappings
+
+# KMS API
+GET|POST /kms/keys                      # List / Create keys
+GET|DELETE /kms/keys/&lt;id&gt;               # Get / Delete key
+POST   /kms/keys/&lt;id&gt;/enable            # Enable key
+POST   /kms/keys/&lt;id&gt;/disable           # Disable key
+POST   /kms/keys/&lt;id&gt;/rotate            # Rotate key
+POST   /kms/encrypt                     # Encrypt data
+POST   /kms/decrypt                     # Decrypt data
+POST   /kms/generate-data-key           # Generate data key
+POST   /kms/generate-random             # Generate random bytes</code></pre>
+      </div>
+    </article>
   </div>
   <div class="col-xl-4 docs-sidebar-col">
     <aside class="card shadow-sm docs-sidebar">
@@ -2224,6 +2659,11 @@ server {
           <li><a href="#acls">Access Control Lists</a></li>
           <li><a href="#tagging">Object &amp; Bucket Tagging</a></li>
           <li><a href="#website-hosting">Static Website Hosting</a></li>
+          <li><a href="#cors-config">CORS Configuration</a></li>
+          <li><a href="#post-object">PostObject (Form Upload)</a></li>
+          <li><a href="#list-objects-v2">List Objects API v2</a></li>
+          <li><a href="#upgrading">Upgrading &amp; Updates</a></li>
+          <li><a href="#api-matrix">Full API Reference</a></li>
         </ul>
         <div class="docs-sidebar-callouts">
           <div>

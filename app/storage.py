@@ -154,6 +154,15 @@ class ListObjectsResult:
     total_count: Optional[int] = None
 
 
+@dataclass
+class ShallowListResult:
+    """Result for delimiter-aware directory-level listing."""
+    objects: List[ObjectMeta]
+    common_prefixes: List[str]
+    is_truncated: bool
+    next_continuation_token: Optional[str]
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -279,25 +288,41 @@ class ObjectStorage:
         version_count = 0
         version_bytes = 0
 
+        internal = self.INTERNAL_FOLDERS
+        bucket_str = str(bucket_path)
+
         try:
-            for path in bucket_path.rglob("*"):
-                if path.is_file():
-                    rel = path.relative_to(bucket_path)
-                    if not rel.parts:
-                        continue
-                    top_folder = rel.parts[0]
-                    if top_folder not in self.INTERNAL_FOLDERS:
-                        stat = path.stat()
-                        object_count += 1
-                        total_bytes += stat.st_size
+            stack = [bucket_str]
+            while stack:
+                current = stack.pop()
+                try:
+                    with os.scandir(current) as it:
+                        for entry in it:
+                            if current == bucket_str and entry.name in internal:
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(entry.path)
+                            elif entry.is_file(follow_symlinks=False):
+                                object_count += 1
+                                total_bytes += entry.stat(follow_symlinks=False).st_size
+                except PermissionError:
+                    continue
 
             versions_root = self._bucket_versions_root(bucket_name)
             if versions_root.exists():
-                for path in versions_root.rglob("*.bin"):
-                    if path.is_file():
-                        stat = path.stat()
-                        version_count += 1
-                        version_bytes += stat.st_size
+                v_stack = [str(versions_root)]
+                while v_stack:
+                    v_current = v_stack.pop()
+                    try:
+                        with os.scandir(v_current) as it:
+                            for entry in it:
+                                if entry.is_dir(follow_symlinks=False):
+                                    v_stack.append(entry.path)
+                                elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".bin"):
+                                    version_count += 1
+                                    version_bytes += entry.stat(follow_symlinks=False).st_size
+                    except PermissionError:
+                        continue
         except OSError:
             if cached_stats is not None:
                 return cached_stats
@@ -377,9 +402,18 @@ class ObjectStorage:
             raise StorageError("Bucket contains archived object versions")
         if has_multipart:
             raise StorageError("Bucket has active multipart uploads")
+        bucket_id = bucket_path.name
         self._remove_tree(bucket_path)
-        self._remove_tree(self._system_bucket_root(bucket_path.name))
-        self._remove_tree(self._multipart_bucket_root(bucket_path.name))
+        self._remove_tree(self._system_bucket_root(bucket_id))
+        self._remove_tree(self._multipart_bucket_root(bucket_id))
+        self._bucket_config_cache.pop(bucket_id, None)
+        with self._cache_lock:
+            self._object_cache.pop(bucket_id, None)
+            self._cache_version.pop(bucket_id, None)
+            self._sorted_key_cache.pop(bucket_id, None)
+            stale = [k for k in self._meta_read_cache if k[0] == bucket_id]
+            for k in stale:
+                del self._meta_read_cache[k]
 
     def list_objects(
         self,
@@ -461,6 +495,279 @@ class ObjectStorage:
         """List all objects in a bucket (no pagination). Use with caution for large buckets."""
         result = self.list_objects(bucket_name, max_keys=100000)
         return result.objects
+
+    def list_objects_shallow(
+        self,
+        bucket_name: str,
+        *,
+        prefix: str = "",
+        delimiter: str = "/",
+        max_keys: int = 1000,
+        continuation_token: Optional[str] = None,
+    ) -> ShallowListResult:
+        import bisect
+
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise BucketNotFoundError("Bucket does not exist")
+        bucket_id = bucket_path.name
+
+        if delimiter != "/" or (prefix and not prefix.endswith(delimiter)):
+            return self._shallow_via_full_scan(
+                bucket_name, prefix=prefix, delimiter=delimiter,
+                max_keys=max_keys, continuation_token=continuation_token,
+            )
+
+        target_dir = bucket_path
+        if prefix:
+            safe_prefix_path = Path(prefix.rstrip("/"))
+            if ".." in safe_prefix_path.parts:
+                return ShallowListResult(
+                    objects=[], common_prefixes=[],
+                    is_truncated=False, next_continuation_token=None,
+                )
+            target_dir = bucket_path / safe_prefix_path
+            try:
+                resolved = target_dir.resolve()
+                bucket_resolved = bucket_path.resolve()
+                if not str(resolved).startswith(str(bucket_resolved) + os.sep) and resolved != bucket_resolved:
+                    return ShallowListResult(
+                        objects=[], common_prefixes=[],
+                        is_truncated=False, next_continuation_token=None,
+                    )
+            except (OSError, ValueError):
+                return ShallowListResult(
+                    objects=[], common_prefixes=[],
+                    is_truncated=False, next_continuation_token=None,
+                )
+
+        if not target_dir.exists() or not target_dir.is_dir():
+            return ShallowListResult(
+                objects=[], common_prefixes=[],
+                is_truncated=False, next_continuation_token=None,
+            )
+
+        etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        meta_cache: Dict[str, str] = {}
+        if etag_index_path.exists():
+            try:
+                with open(etag_index_path, 'r', encoding='utf-8') as f:
+                    meta_cache = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        entries_files: list[tuple[str, int, float, Optional[str]]] = []
+        entries_dirs: list[str] = []
+
+        try:
+            with os.scandir(str(target_dir)) as it:
+                for entry in it:
+                    name = entry.name
+                    if name in self.INTERNAL_FOLDERS:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        cp = prefix + name + delimiter
+                        entries_dirs.append(cp)
+                    elif entry.is_file(follow_symlinks=False):
+                        key = prefix + name
+                        try:
+                            st = entry.stat()
+                            etag = meta_cache.get(key)
+                            entries_files.append((key, st.st_size, st.st_mtime, etag))
+                        except OSError:
+                            pass
+        except OSError:
+            return ShallowListResult(
+                objects=[], common_prefixes=[],
+                is_truncated=False, next_continuation_token=None,
+            )
+
+        entries_dirs.sort()
+        entries_files.sort(key=lambda x: x[0])
+
+        all_items: list[tuple[str, bool]] = []
+        fi, di = 0, 0
+        while fi < len(entries_files) and di < len(entries_dirs):
+            if entries_files[fi][0] <= entries_dirs[di]:
+                all_items.append((entries_files[fi][0], False))
+                fi += 1
+            else:
+                all_items.append((entries_dirs[di], True))
+                di += 1
+        while fi < len(entries_files):
+            all_items.append((entries_files[fi][0], False))
+            fi += 1
+        while di < len(entries_dirs):
+            all_items.append((entries_dirs[di], True))
+            di += 1
+
+        files_map = {e[0]: e for e in entries_files}
+
+        start_index = 0
+        if continuation_token:
+            all_keys = [item[0] for item in all_items]
+            start_index = bisect.bisect_right(all_keys, continuation_token)
+
+        selected = all_items[start_index:start_index + max_keys]
+        is_truncated = (start_index + max_keys) < len(all_items)
+
+        result_objects: list[ObjectMeta] = []
+        result_prefixes: list[str] = []
+        for item_key, is_dir in selected:
+            if is_dir:
+                result_prefixes.append(item_key)
+            else:
+                fdata = files_map[item_key]
+                result_objects.append(ObjectMeta(
+                    key=fdata[0],
+                    size=fdata[1],
+                    last_modified=datetime.fromtimestamp(fdata[2], timezone.utc),
+                    etag=fdata[3],
+                    metadata=None,
+                ))
+
+        next_token = None
+        if is_truncated and selected:
+            next_token = selected[-1][0]
+
+        return ShallowListResult(
+            objects=result_objects,
+            common_prefixes=result_prefixes,
+            is_truncated=is_truncated,
+            next_continuation_token=next_token,
+        )
+
+    def _shallow_via_full_scan(
+        self,
+        bucket_name: str,
+        *,
+        prefix: str = "",
+        delimiter: str = "/",
+        max_keys: int = 1000,
+        continuation_token: Optional[str] = None,
+    ) -> ShallowListResult:
+        list_result = self.list_objects(
+            bucket_name,
+            max_keys=max_keys * 10,
+            continuation_token=continuation_token,
+            prefix=prefix or None,
+        )
+
+        common_prefixes: list[str] = []
+        filtered_objects: list[ObjectMeta] = []
+        seen_prefixes: set[str] = set()
+
+        for obj in list_result.objects:
+            key_after_prefix = obj.key[len(prefix):] if prefix else obj.key
+            if delimiter in key_after_prefix:
+                cp = prefix + key_after_prefix.split(delimiter)[0] + delimiter
+                if cp not in seen_prefixes:
+                    seen_prefixes.add(cp)
+                    common_prefixes.append(cp)
+            else:
+                filtered_objects.append(obj)
+
+        common_prefixes.sort()
+        total_items = len(filtered_objects) + len(common_prefixes)
+        is_truncated = total_items > max_keys or list_result.is_truncated
+
+        if len(filtered_objects) >= max_keys:
+            filtered_objects = filtered_objects[:max_keys]
+            common_prefixes = []
+        else:
+            remaining = max_keys - len(filtered_objects)
+            common_prefixes = common_prefixes[:remaining]
+
+        next_token = None
+        if is_truncated:
+            if filtered_objects:
+                next_token = filtered_objects[-1].key
+            elif common_prefixes:
+                next_token = common_prefixes[-1].rstrip(delimiter) if delimiter else common_prefixes[-1]
+
+        return ShallowListResult(
+            objects=filtered_objects,
+            common_prefixes=common_prefixes,
+            is_truncated=is_truncated,
+            next_continuation_token=next_token,
+        )
+
+    def search_objects(
+        self,
+        bucket_name: str,
+        query: str,
+        *,
+        prefix: str = "",
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.is_dir():
+            raise BucketNotFoundError("Bucket does not exist")
+
+        if prefix:
+            search_root = bucket_path / prefix.replace("/", os.sep)
+            if not search_root.is_dir():
+                return {"results": [], "truncated": False}
+            resolved = search_root.resolve()
+            if not str(resolved).startswith(str(bucket_path.resolve())):
+                return {"results": [], "truncated": False}
+        else:
+            search_root = bucket_path
+
+        query_lower = query.lower()
+        results: list[Dict[str, Any]] = []
+        internal = self.INTERNAL_FOLDERS
+        bucket_str = str(bucket_path)
+        bucket_len = len(bucket_str) + 1
+        meta_root = self._bucket_meta_root(bucket_name)
+        scan_limit = limit * 4
+
+        matched = 0
+        scanned = 0
+        search_str = str(search_root)
+        stack = [search_str]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        if current == bucket_str and entry.name in internal:
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            scanned += 1
+                            key = entry.path[bucket_len:].replace(os.sep, "/")
+                            if query_lower in key.lower():
+                                st = entry.stat(follow_symlinks=False)
+                                meta_path = meta_root / (key + ".meta.json")
+                                last_modified = ""
+                                try:
+                                    if meta_path.exists():
+                                        md = json.loads(meta_path.read_text(encoding="utf-8"))
+                                        last_modified = md.get("last_modified", "")
+                                except (OSError, json.JSONDecodeError):
+                                    pass
+                                if not last_modified:
+                                    last_modified = datetime.fromtimestamp(
+                                        st.st_mtime, tz=timezone.utc
+                                    ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                                results.append({
+                                    "key": key,
+                                    "size": st.st_size,
+                                    "last_modified": last_modified,
+                                })
+                                matched += 1
+                            if matched >= scan_limit:
+                                break
+            except PermissionError:
+                continue
+            if matched >= scan_limit:
+                break
+
+        results.sort(key=lambda r: r["key"])
+        truncated = len(results) > limit
+        return {"results": results[:limit], "truncated": truncated}
 
     def put_object(
         self,
@@ -1832,30 +2139,40 @@ class ObjectStorage:
 
     def _read_bucket_config(self, bucket_name: str) -> dict[str, Any]:
         now = time.time()
+        config_path = self._bucket_config_path(bucket_name)
         cached = self._bucket_config_cache.get(bucket_name)
         if cached:
-            config, cached_time = cached
+            config, cached_time, cached_mtime = cached
             if now - cached_time < self._bucket_config_cache_ttl:
-                return config.copy()
+                try:
+                    current_mtime = config_path.stat().st_mtime if config_path.exists() else 0.0
+                except OSError:
+                    current_mtime = 0.0
+                if current_mtime == cached_mtime:
+                    return config.copy()
 
-        config_path = self._bucket_config_path(bucket_name)
         if not config_path.exists():
-            self._bucket_config_cache[bucket_name] = ({}, now)
+            self._bucket_config_cache[bucket_name] = ({}, now, 0.0)
             return {}
         try:
             data = json.loads(config_path.read_text(encoding="utf-8"))
             config = data if isinstance(data, dict) else {}
-            self._bucket_config_cache[bucket_name] = (config, now)
+            mtime = config_path.stat().st_mtime
+            self._bucket_config_cache[bucket_name] = (config, now, mtime)
             return config.copy()
         except (OSError, json.JSONDecodeError):
-            self._bucket_config_cache[bucket_name] = ({}, now)
+            self._bucket_config_cache[bucket_name] = ({}, now, 0.0)
             return {}
 
     def _write_bucket_config(self, bucket_name: str, payload: dict[str, Any]) -> None:
         config_path = self._bucket_config_path(bucket_name)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(payload), encoding="utf-8")
-        self._bucket_config_cache[bucket_name] = (payload.copy(), time.time())
+        try:
+            mtime = config_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        self._bucket_config_cache[bucket_name] = (payload.copy(), time.time(), mtime)
 
     def _set_bucket_config_entry(self, bucket_name: str, key: str, value: Any | None) -> None:
         config = self._read_bucket_config(bucket_name)

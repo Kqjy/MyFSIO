@@ -189,7 +189,13 @@ class EncryptedObjectStorage:
     
     def list_objects(self, bucket_name: str, **kwargs):
         return self.storage.list_objects(bucket_name, **kwargs)
-    
+
+    def list_objects_shallow(self, bucket_name: str, **kwargs):
+        return self.storage.list_objects_shallow(bucket_name, **kwargs)
+
+    def search_objects(self, bucket_name: str, query: str, **kwargs):
+        return self.storage.search_objects(bucket_name, query, **kwargs)
+
     def list_objects_all(self, bucket_name: str):
         return self.storage.list_objects_all(bucket_name)
     
