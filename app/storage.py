@@ -1269,13 +1269,19 @@ class ObjectStorage:
             version_bytes_delta=archived_version_size,
             version_count_delta=1 if archived_version_size > 0 else 0,
         )
-        return ObjectMeta(
+        etag = self._compute_etag(destination)
+        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
+        combined_meta = {**internal_meta, **(metadata or {})}
+        self._write_metadata(bucket_id, safe_key, combined_meta)
+        obj_meta = ObjectMeta(
             key=safe_key.as_posix(),
             size=stat.st_size,
             last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
-            etag=self._compute_etag(destination),
+            etag=etag,
             metadata=metadata or None,
         )
+        self._update_object_cache_entry(bucket_id, safe_key.as_posix(), obj_meta)
+        return obj_meta
 
     def delete_object_version(self, bucket_name: str, object_key: str, version_id: str) -> None:
         bucket_path = self._bucket_path(bucket_name)
@@ -2073,11 +2079,6 @@ class ObjectStorage:
             return 0
 
     def _update_object_cache_entry(self, bucket_id: str, key: str, meta: Optional[ObjectMeta]) -> None:
-        """Update a single entry in the object cache instead of invalidating the whole cache.
-
-        This is a performance optimization - lazy update instead of full invalidation.
-        Cross-process invalidation is handled by checking stats.json mtime.
-        """
         with self._cache_lock:
             cached = self._object_cache.get(bucket_id)
             if cached:
@@ -2088,6 +2089,25 @@ class ObjectStorage:
                     objects[key] = meta
             self._cache_version[bucket_id] = self._cache_version.get(bucket_id, 0) + 1
             self._sorted_key_cache.pop(bucket_id, None)
+
+        self._update_etag_index(bucket_id, key, meta.etag if meta else None)
+
+    def _update_etag_index(self, bucket_id: str, key: str, etag: Optional[str]) -> None:
+        etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        try:
+            index: Dict[str, str] = {}
+            if etag_index_path.exists():
+                with open(etag_index_path, 'r', encoding='utf-8') as f:
+                    index = json.load(f)
+            if etag is None:
+                index.pop(key, None)
+            else:
+                index[key] = etag
+            etag_index_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(etag_index_path, 'w', encoding='utf-8') as f:
+                json.dump(index, f)
+        except (OSError, json.JSONDecodeError):
+            pass
 
     def warm_cache(self, bucket_names: Optional[List[str]] = None) -> None:
         """Pre-warm the object cache for specified buckets or all buckets.
