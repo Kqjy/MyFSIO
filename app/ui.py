@@ -616,6 +616,7 @@ def stream_bucket_objects(bucket_name: str):
         return jsonify({"error": str(exc)}), 403
 
     prefix = request.args.get("prefix") or None
+    delimiter = request.args.get("delimiter") or None
 
     try:
         client = get_session_s3_client()
@@ -629,6 +630,7 @@ def stream_bucket_objects(bucket_name: str):
     return Response(
         stream_objects_ndjson(
             client, bucket_name, prefix, url_templates, display_tz, versioning_enabled,
+            delimiter=delimiter,
         ),
         mimetype='application/x-ndjson',
         headers={

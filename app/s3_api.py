@@ -2671,54 +2671,43 @@ def bucket_handler(bucket_name: str) -> Response:
     else:
         effective_start = marker
     
-    fetch_keys = max_keys * 10 if delimiter else max_keys
     try:
-        list_result = storage.list_objects(
-            bucket_name,
-            max_keys=fetch_keys,
-            continuation_token=effective_start or None,
-            prefix=prefix or None,
-        )
-        objects = list_result.objects
+        if delimiter:
+            shallow_result = storage.list_objects_shallow(
+                bucket_name,
+                prefix=prefix,
+                delimiter=delimiter,
+                max_keys=max_keys,
+                continuation_token=effective_start or None,
+            )
+            objects = shallow_result.objects
+            common_prefixes = shallow_result.common_prefixes
+            is_truncated = shallow_result.is_truncated
+
+            next_marker = shallow_result.next_continuation_token or ""
+            next_continuation_token = ""
+            if is_truncated and next_marker and list_type == "2":
+                next_continuation_token = base64.urlsafe_b64encode(next_marker.encode()).decode("utf-8")
+        else:
+            list_result = storage.list_objects(
+                bucket_name,
+                max_keys=max_keys,
+                continuation_token=effective_start or None,
+                prefix=prefix or None,
+            )
+            objects = list_result.objects
+            common_prefixes = []
+            is_truncated = list_result.is_truncated
+
+            next_marker = ""
+            next_continuation_token = ""
+            if is_truncated:
+                if objects:
+                    next_marker = objects[-1].key
+                if list_type == "2" and next_marker:
+                    next_continuation_token = base64.urlsafe_b64encode(next_marker.encode()).decode("utf-8")
     except StorageError as exc:
         return _error_response("NoSuchBucket", str(exc), 404)
-    
-    common_prefixes: list[str] = []
-    filtered_objects: list = []
-    if delimiter:
-        seen_prefixes: set[str] = set()
-        for obj in objects:
-            key_after_prefix = obj.key[len(prefix):] if prefix else obj.key
-            if delimiter in key_after_prefix:
-                common_prefix = prefix + key_after_prefix.split(delimiter)[0] + delimiter
-                if common_prefix not in seen_prefixes:
-                    seen_prefixes.add(common_prefix)
-                    common_prefixes.append(common_prefix)
-            else:
-                filtered_objects.append(obj)
-        objects = filtered_objects
-        common_prefixes = sorted(common_prefixes)
-    
-    total_items = len(objects) + len(common_prefixes)
-    is_truncated = total_items > max_keys or list_result.is_truncated
-    
-    if len(objects) >= max_keys:
-        objects = objects[:max_keys]
-        common_prefixes = []
-    else:
-        remaining = max_keys - len(objects)
-        common_prefixes = common_prefixes[:remaining]
-    
-    next_marker = ""
-    next_continuation_token = ""
-    if is_truncated:
-        if objects:
-            next_marker = objects[-1].key
-        elif common_prefixes:
-            next_marker = common_prefixes[-1].rstrip(delimiter) if delimiter else common_prefixes[-1]
-        
-        if list_type == "2" and next_marker:
-            next_continuation_token = base64.urlsafe_b64encode(next_marker.encode()).decode("utf-8")
 
     if list_type == "2":
         root = Element("ListBucketResult")

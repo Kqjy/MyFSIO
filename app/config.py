@@ -241,7 +241,7 @@ class AppConfig:
         cors_expose_headers = _csv(str(_get("CORS_EXPOSE_HEADERS", "*")), ["*"])
         session_lifetime_days = int(_get("SESSION_LIFETIME_DAYS", 30))
         bucket_stats_cache_ttl = int(_get("BUCKET_STATS_CACHE_TTL", 60))
-        object_cache_ttl = int(_get("OBJECT_CACHE_TTL", 5))
+        object_cache_ttl = int(_get("OBJECT_CACHE_TTL", 60))
 
         encryption_enabled = str(_get("ENCRYPTION_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
         encryption_keys_dir = storage_root / ".myfsio.sys" / "keys"

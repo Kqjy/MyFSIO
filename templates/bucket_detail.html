@@ -171,6 +171,7 @@
         data-bulk-download-endpoint="{{ url_for('ui.bulk_download_objects', bucket_name=bucket_name) }}"
         data-folders-url="{{ folders_url }}"
         data-buckets-for-copy-url="{{ buckets_for_copy_url }}"
+        data-bucket-total-objects="{{ bucket_stats.get('objects', 0) }}"
       >
         <table class="table table-hover align-middle mb-0" id="objects-table" style="table-layout: fixed;">
           <thead class="table-light">

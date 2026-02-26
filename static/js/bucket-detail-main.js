@@ -167,6 +167,8 @@
   let pageSize = 5000;
   let currentPrefix = '';
   let allObjects = [];
+  let streamFolders = [];
+  let useDelimiterMode = true;
   let urlTemplates = null;
   let streamAbortController = null;
   let useStreaming = !!objectsStreamUrl;
@@ -186,7 +188,7 @@
   let renderedRange = { start: 0, end: 0 };
 
   let memoizedVisibleItems = null;
-  let memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
+  let memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
 
   const createObjectRow = (obj, displayKey = null) => {
     const tr = document.createElement('tr');
@@ -319,10 +321,13 @@
     `;
   };
 
+  const bucketTotalObjects = objectsContainer ? parseInt(objectsContainer.dataset.bucketTotalObjects || '0', 10) : 0;
+
   const updateObjectCountBadge = () => {
     if (!objectCountBadge) return;
-    if (totalObjectCount === 0) {
-      objectCountBadge.textContent = '0 objects';
+    if (useDelimiterMode) {
+      const total = bucketTotalObjects || totalObjectCount;
+      objectCountBadge.textContent = `${total.toLocaleString()} object${total !== 1 ? 's' : ''}`;
     } else {
       objectCountBadge.textContent = `${totalObjectCount.toLocaleString()} object${totalObjectCount !== 1 ? 's' : ''}`;
     }
@@ -349,6 +354,7 @@
   const computeVisibleItems = (forceRecompute = false) => {
     const currentInputs = {
       objectCount: allObjects.length,
+      folderCount: streamFolders.length,
       prefix: currentPrefix,
       filterTerm: currentFilterTerm,
       sortField: currentSortField,
@@ -358,6 +364,7 @@
     if (!forceRecompute &&
         memoizedVisibleItems !== null &&
         memoizedInputs.objectCount === currentInputs.objectCount &&
+        memoizedInputs.folderCount === currentInputs.folderCount &&
         memoizedInputs.prefix === currentInputs.prefix &&
         memoizedInputs.filterTerm === currentInputs.filterTerm &&
         memoizedInputs.sortField === currentInputs.sortField &&
@@ -366,36 +373,53 @@
     }
 
     const items = [];
-    const folders = new Set();
 
-    allObjects.forEach(obj => {
-      if (!obj.key.startsWith(currentPrefix)) return;
-
-      const remainder = obj.key.slice(currentPrefix.length);
-
-      if (!remainder) return;
-
-      const isFolderMarker = obj.key.endsWith('/') && obj.size === 0;
-      const slashIndex = remainder.indexOf('/');
-
-      if (slashIndex === -1 && !isFolderMarker) {
+    if (useDelimiterMode && streamFolders.length > 0) {
+      streamFolders.forEach(folderPath => {
+        const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
+        if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
+          items.push({ type: 'folder', path: folderPath, displayKey: folderName });
+        }
+      });
+      allObjects.forEach(obj => {
+        const remainder = obj.key.slice(currentPrefix.length);
+        if (!remainder) return;
         if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
           items.push({ type: 'file', data: obj, displayKey: remainder });
         }
-      } else {
-        const effectiveSlashIndex = isFolderMarker && slashIndex === remainder.length - 1
-          ? slashIndex
-          : (slashIndex === -1 ? remainder.length - 1 : slashIndex);
-        const folderName = remainder.slice(0, effectiveSlashIndex);
-        const folderPath = currentPrefix + folderName + '/';
-        if (!folders.has(folderPath)) {
-          folders.add(folderPath);
-          if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
-            items.push({ type: 'folder', path: folderPath, displayKey: folderName });
+      });
+    } else {
+      const folders = new Set();
+
+      allObjects.forEach(obj => {
+        if (!obj.key.startsWith(currentPrefix)) return;
+
+        const remainder = obj.key.slice(currentPrefix.length);
+
+        if (!remainder) return;
+
+        const isFolderMarker = obj.key.endsWith('/') && obj.size === 0;
+        const slashIndex = remainder.indexOf('/');
+
+        if (slashIndex === -1 && !isFolderMarker) {
+          if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
+            items.push({ type: 'file', data: obj, displayKey: remainder });
+          }
+        } else {
+          const effectiveSlashIndex = isFolderMarker && slashIndex === remainder.length - 1
+            ? slashIndex
+            : (slashIndex === -1 ? remainder.length - 1 : slashIndex);
+          const folderName = remainder.slice(0, effectiveSlashIndex);
+          const folderPath = currentPrefix + folderName + '/';
+          if (!folders.has(folderPath)) {
+            folders.add(folderPath);
+            if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
+              items.push({ type: 'folder', path: folderPath, displayKey: folderName });
+            }
           }
         }
-      }
-    });
+      });
+    }
 
     items.sort((a, b) => {
       if (a.type === 'folder' && b.type === 'file') return -1;
@@ -471,7 +495,7 @@
     renderedRange = { start: -1, end: -1 };
 
     if (visibleItems.length === 0) {
-      if (allObjects.length === 0 && !hasMoreObjects) {
+      if (allObjects.length === 0 && streamFolders.length === 0 && !hasMoreObjects) {
         showEmptyState();
       } else {
         objectsTableBody.innerHTML = `
@@ -500,15 +524,7 @@
   const updateFolderViewStatus = () => {
     const folderViewStatusEl = document.getElementById('folder-view-status');
     if (!folderViewStatusEl) return;
-
-    if (currentPrefix) {
-      const folderCount = visibleItems.filter(i => i.type === 'folder').length;
-      const fileCount = visibleItems.filter(i => i.type === 'file').length;
-      folderViewStatusEl.innerHTML = `<span class="text-muted">${folderCount} folder${folderCount !== 1 ? 's' : ''}, ${fileCount} file${fileCount !== 1 ? 's' : ''} in this view</span>`;
-      folderViewStatusEl.classList.remove('d-none');
-    } else {
-      folderViewStatusEl.classList.add('d-none');
-    }
+    folderViewStatusEl.classList.add('d-none');
   };
 
   const processStreamObject = (obj) => {
@@ -536,21 +552,30 @@
   let lastStreamRenderTime = 0;
   const STREAM_RENDER_THROTTLE_MS = 500;
 
+  const buildBottomStatusText = (complete) => {
+    if (!complete) {
+      const countText = totalObjectCount > 0 ? ` of ${totalObjectCount.toLocaleString()}` : '';
+      return `${loadedObjectCount.toLocaleString()}${countText} loading...`;
+    }
+    const parts = [];
+    if (useDelimiterMode && streamFolders.length > 0) {
+      parts.push(`${streamFolders.length.toLocaleString()} folder${streamFolders.length !== 1 ? 's' : ''}`);
+    }
+    parts.push(`${loadedObjectCount.toLocaleString()} object${loadedObjectCount !== 1 ? 's' : ''}`);
+    return parts.join(', ');
+  };
+
   const flushPendingStreamObjects = () => {
-    if (pendingStreamObjects.length === 0) return;
-    const batch = pendingStreamObjects.splice(0, pendingStreamObjects.length);
-    batch.forEach(obj => {
-      loadedObjectCount++;
-      allObjects.push(obj);
-    });
+    if (pendingStreamObjects.length > 0) {
+      const batch = pendingStreamObjects.splice(0, pendingStreamObjects.length);
+      batch.forEach(obj => {
+        loadedObjectCount++;
+        allObjects.push(obj);
+      });
+    }
     updateObjectCountBadge();
     if (loadMoreStatus) {
-      if (streamingComplete) {
-        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
-      } else {
-        const countText = totalObjectCount > 0 ? ` of ${totalObjectCount.toLocaleString()}` : '';
-        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()}${countText} loading...`;
-      }
+      loadMoreStatus.textContent = buildBottomStatusText(streamingComplete);
     }
     if (objectsLoadingRow && objectsLoadingRow.parentNode) {
       const loadingText = objectsLoadingRow.querySelector('p');
@@ -585,8 +610,9 @@
     loadedObjectCount = 0;
     totalObjectCount = 0;
     allObjects = [];
+    streamFolders = [];
     memoizedVisibleItems = null;
-    memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
+    memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
     pendingStreamObjects = [];
     lastStreamRenderTime = 0;
 
@@ -595,6 +621,7 @@
     try {
       const params = new URLSearchParams();
       if (currentPrefix) params.set('prefix', currentPrefix);
+      if (useDelimiterMode) params.set('delimiter', '/');
 
       const response = await fetch(`${objectsStreamUrl}?${params}`, {
         signal: streamAbortController.signal
@@ -639,6 +666,10 @@
                   if (loadingText) loadingText.textContent = `Loading 0 of ${totalObjectCount.toLocaleString()} objects...`;
                 }
                 break;
+              case 'folder':
+                streamFolders.push(msg.prefix);
+                scheduleStreamRender();
+                break;
               case 'object':
                 pendingStreamObjects.push(processStreamObject(msg));
                 if (pendingStreamObjects.length >= STREAM_RENDER_BATCH) {
@@ -682,7 +713,7 @@
       }
 
       if (loadMoreStatus) {
-        loadMoreStatus.textContent = `${loadedObjectCount.toLocaleString()} objects`;
+        loadMoreStatus.textContent = buildBottomStatusText(true);
       }
       refreshVirtualList();
       renderBreadcrumb(currentPrefix);
@@ -710,8 +741,9 @@
       loadedObjectCount = 0;
       totalObjectCount = 0;
       allObjects = [];
+      streamFolders = [];
       memoizedVisibleItems = null;
-      memoizedInputs = { objectCount: -1, prefix: null, filterTerm: null };
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
     }
 
     if (append && loadMoreSpinner) {
@@ -913,7 +945,7 @@
     });
   }
 
-  const hasFolders = () => allObjects.some(obj => obj.key.includes('/'));
+  const hasFolders = () => streamFolders.length > 0 || allObjects.some(obj => obj.key.includes('/'));
 
   const getFoldersAtPrefix = (prefix) => {
     const folders = new Set();
@@ -940,6 +972,9 @@
   };
 
   const countObjectsInFolder = (folderPrefix) => {
+    if (useDelimiterMode) {
+      return { count: 0, mayHaveMore: true };
+    }
     const count = allObjects.filter(obj => obj.key.startsWith(folderPrefix)).length;
     return { count, mayHaveMore: hasMoreObjects };
   };
@@ -1018,7 +1053,13 @@
   const createFolderRow = (folderPath, displayName = null) => {
     const folderName = displayName || folderPath.slice(currentPrefix.length).replace(/\/$/, '');
     const { count: objectCount, mayHaveMore } = countObjectsInFolder(folderPath);
-    const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
+    let countLine = '';
+    if (useDelimiterMode) {
+      countLine = '';
+    } else {
+      const countDisplay = mayHaveMore ? `${objectCount}+` : objectCount;
+      countLine = `<div class="text-muted small ms-4 ps-2">${countDisplay} object${objectCount !== 1 ? 's' : ''}</div>`;
+    }
 
     const tr = document.createElement('tr');
     tr.className = 'folder-row';
@@ -1036,7 +1077,7 @@
           </svg>
           <span>${escapeHtml(folderName)}/</span>
         </div>
-        <div class="text-muted small ms-4 ps-2">${countDisplay} object${objectCount !== 1 ? 's' : ''}</div>
+        ${countLine}
       </td>
       <td class="text-end text-nowrap">
         <span class="text-muted small">—</span>
