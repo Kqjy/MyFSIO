@@ -139,6 +139,7 @@ All configuration is done via environment variables. The table below lists every
 | `API_BASE_URL` | `http://127.0.0.1:5000` | Internal S3 API URL used by the web UI proxy. Also used for presigned URL generation. Set to your public URL if running behind a reverse proxy. |
 | `AWS_REGION` | `us-east-1` | Region embedded in SigV4 credential scope. |
 | `AWS_SERVICE` | `s3` | Service string for SigV4. |
+| `DISPLAY_TIMEZONE` | `UTC` | Timezone for timestamps in the web UI (e.g., `US/Eastern`, `Asia/Tokyo`). |
 
 ### IAM & Security
 
@@ -170,6 +171,7 @@ All configuration is done via environment variables. The table below lists every
 | `RATE_LIMIT_BUCKET_OPS` | `120 per minute` | Rate limit for bucket operations (PUT/DELETE/GET/POST on `/<bucket>`). |
 | `RATE_LIMIT_OBJECT_OPS` | `240 per minute` | Rate limit for object operations (PUT/GET/DELETE/POST on `/<bucket>/<key>`). |
 | `RATE_LIMIT_HEAD_OPS` | `100 per minute` | Rate limit for HEAD requests (bucket and object). |
+| `RATE_LIMIT_ADMIN` | `60 per minute` | Rate limit for admin API endpoints (`/admin/*`). |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Storage backend for rate limits. Use `redis://host:port` for distributed setups. |
 
 ### Server Configuration
@@ -256,6 +258,12 @@ Once enabled, configure lifecycle rules via:
 | `MULTIPART_MIN_PART_SIZE` | `5242880` (5 MB) | Minimum part size for multipart uploads. |
 | `BUCKET_STATS_CACHE_TTL` | `60` | Seconds to cache bucket statistics. |
 | `BULK_DELETE_MAX_KEYS` | `500` | Maximum keys per bulk delete request. |
+| `BULK_DOWNLOAD_MAX_BYTES` | `1073741824` (1 GiB) | Maximum total size for bulk ZIP downloads. |
+| `OBJECT_CACHE_TTL` | `60` | Seconds to cache object metadata. |
+
+#### Gzip Compression
+
+API responses for JSON, XML, HTML, CSS, and JavaScript are automatically gzip-compressed when the client sends `Accept-Encoding: gzip`. Compression activates for responses larger than 500 bytes and is handled by a WSGI middleware (`app/compression.py`). Binary object downloads and streaming responses are never compressed. No configuration is needed.
 
 ### Server Settings
 
@@ -284,6 +292,12 @@ If running behind a reverse proxy (e.g., Nginx, Cloudflare, or a tunnel), ensure
 - `X-Forwarded-Proto`
 
 The application automatically trusts these headers to generate correct presigned URLs (e.g., `https://s3.example.com/...` instead of `http://127.0.0.1:5000/...`). Alternatively, you can explicitly set `API_BASE_URL` to your public endpoint.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `NUM_TRUSTED_PROXIES` | `1` | Number of trusted reverse proxies for `X-Forwarded-*` header processing. |
+| `ALLOWED_REDIRECT_HOSTS` | `""` | Comma-separated whitelist of safe redirect targets. Empty allows only same-host redirects. |
+| `ALLOW_INTERNAL_ENDPOINTS` | `false` | Allow connections to internal/private IPs for webhooks and replication targets. **Keep disabled in production unless needed.** |
 
 ## 4. Upgrading and Updates
 
@@ -912,7 +926,7 @@ Objects with forward slashes (`/`) in their keys are displayed as a folder hiera
 
 - Select multiple objects using checkboxes
 - **Bulk Delete**: Delete multiple objects at once
-- **Bulk Download**: Download selected objects as individual files
+- **Bulk Download**: Download selected objects as a single ZIP archive (up to `BULK_DOWNLOAD_MAX_BYTES`, default 1 GiB)
 
 #### Search & Filter
 
@@ -985,6 +999,7 @@ MyFSIO supports **server-side encryption at rest** to protect your data. When en
 |------|-------------|
 | **AES-256 (SSE-S3)** | Server-managed encryption using a local master key |
 | **KMS (SSE-KMS)** | Encryption using customer-managed keys via the built-in KMS |
+| **SSE-C** | Server-side encryption with customer-provided keys (per-request) |
 
 ### Enabling Encryption
 
@@ -1082,6 +1097,44 @@ encrypted, metadata = ClientEncryptionHelper.encrypt_for_upload(plaintext, key)
 # Decrypt after download
 decrypted = ClientEncryptionHelper.decrypt_from_download(encrypted, metadata, key)
 ```
+
+### SSE-C (Customer-Provided Keys)
+
+With SSE-C, you provide your own 256-bit AES encryption key with each request. The server encrypts/decrypts using your key but never stores it. You must supply the same key for both upload and download.
+
+**Required headers:**
+
+| Header | Value |
+|--------|-------|
+| `x-amz-server-side-encryption-customer-algorithm` | `AES256` |
+| `x-amz-server-side-encryption-customer-key` | Base64-encoded 256-bit key |
+| `x-amz-server-side-encryption-customer-key-MD5` | Base64-encoded MD5 of the key |
+
+```bash
+# Generate a 256-bit key
+KEY=$(openssl rand -base64 32)
+KEY_MD5=$(echo -n "$KEY" | base64 -d | openssl dgst -md5 -binary | base64)
+
+# Upload with SSE-C
+curl -X PUT "http://localhost:5000/my-bucket/secret.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-server-side-encryption-customer-algorithm: AES256" \
+  -H "x-amz-server-side-encryption-customer-key: $KEY" \
+  -H "x-amz-server-side-encryption-customer-key-MD5: $KEY_MD5" \
+  --data-binary @secret.txt
+
+# Download with SSE-C (same key required)
+curl "http://localhost:5000/my-bucket/secret.txt" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -H "x-amz-server-side-encryption-customer-algorithm: AES256" \
+  -H "x-amz-server-side-encryption-customer-key: $KEY" \
+  -H "x-amz-server-side-encryption-customer-key-MD5: $KEY_MD5"
+```
+
+**Key points:**
+- SSE-C does not require `ENCRYPTION_ENABLED` or `KMS_ENABLED` — the key is provided per-request
+- If you lose your key, the data is irrecoverable
+- The MD5 header is optional but recommended for integrity verification
 
 ### Important Notes
 
@@ -1958,6 +2011,20 @@ curl -X PUT "http://localhost:5000/my-bucket/file.txt" \
   -H "x-amz-metadata-directive: REPLACE" \
   -H "x-amz-meta-newkey: newvalue"
 ```
+
+### MoveObject (UI)
+
+Move an object to a different key or bucket. This is a UI-only convenience operation that performs a copy followed by a delete of the source. Requires `read` and `delete` on the source, and `write` on the destination.
+
+```bash
+# Move via UI API
+curl -X POST "http://localhost:5100/ui/buckets/my-bucket/objects/old-path/file.txt/move" \
+  -H "Content-Type: application/json" \
+  --cookie "session=..." \
+  -d '{"dest_bucket": "other-bucket", "dest_key": "new-path/file.txt"}'
+```
+
+The move is atomic from the caller's perspective: if the copy succeeds but the delete fails, the object exists in both locations (no data loss).
 
 ### UploadPartCopy
 
