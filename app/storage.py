@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Dict, Generator, List, Optional
 
 try:
@@ -573,6 +573,10 @@ class ObjectStorage:
                         try:
                             st = entry.stat()
                             etag = meta_cache.get(key)
+                            if etag is None:
+                                safe_key = PurePosixPath(key)
+                                meta = self._read_metadata(bucket_id, Path(safe_key))
+                                etag = meta.get("__etag__") if meta else None
                             entries_files.append((key, st.st_size, st.st_mtime, etag))
                         except OSError:
                             pass
@@ -2094,16 +2098,15 @@ class ObjectStorage:
 
     def _update_etag_index(self, bucket_id: str, key: str, etag: Optional[str]) -> None:
         etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        if not etag_index_path.exists():
+            return
         try:
-            index: Dict[str, str] = {}
-            if etag_index_path.exists():
-                with open(etag_index_path, 'r', encoding='utf-8') as f:
-                    index = json.load(f)
+            with open(etag_index_path, 'r', encoding='utf-8') as f:
+                index = json.load(f)
             if etag is None:
                 index.pop(key, None)
             else:
                 index[key] = etag
-            etag_index_path.parent.mkdir(parents=True, exist_ok=True)
             with open(etag_index_path, 'w', encoding='utf-8') as f:
                 json.dump(index, f)
         except (OSError, json.JSONDecodeError):
