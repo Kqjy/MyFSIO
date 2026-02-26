@@ -2537,11 +2537,6 @@ cp -r logs/ logs-backup/</code></pre>
           <li><strong>Verify:</strong> <code>curl http://localhost:5000/myfsio/health</code></li>
         </ol>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Docker Update</h3>
-<pre class="mb-3"><code class="language-bash">docker pull myfsio:latest
-docker stop myfsio &amp;&amp; docker rm myfsio
-docker run -d --name myfsio -v myfsio-data:/app/data -p 5000:5000 -p 5100:5100 myfsio:latest</code></pre>
-
         <h3 class="h6 text-uppercase text-muted mt-4">Rollback</h3>
         <p class="small text-muted mb-0">If something goes wrong, stop the service, restore the backed-up config and data directories, then restart with the previous binary or code version. See <code>docs.md</code> Section 4 for detailed rollback procedures including blue-green deployment strategies.</p>
       </div>
