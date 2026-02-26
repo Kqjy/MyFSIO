@@ -374,19 +374,19 @@
 
     const items = [];
 
-    if (useDelimiterMode && streamFolders.length > 0) {
+    if (searchResults !== null) {
+      searchResults.forEach(obj => {
+        items.push({ type: 'file', data: obj, displayKey: obj.key });
+      });
+    } else if (useDelimiterMode && streamFolders.length > 0) {
       streamFolders.forEach(folderPath => {
         const folderName = folderPath.slice(currentPrefix.length).replace(/\/$/, '');
-        if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
-          items.push({ type: 'folder', path: folderPath, displayKey: folderName });
-        }
+        items.push({ type: 'folder', path: folderPath, displayKey: folderName });
       });
       allObjects.forEach(obj => {
         const remainder = obj.key.slice(currentPrefix.length);
         if (!remainder) return;
-        if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
-          items.push({ type: 'file', data: obj, displayKey: remainder });
-        }
+        items.push({ type: 'file', data: obj, displayKey: remainder });
       });
     } else {
       const folders = new Set();
@@ -402,9 +402,7 @@
         const slashIndex = remainder.indexOf('/');
 
         if (slashIndex === -1 && !isFolderMarker) {
-          if (!currentFilterTerm || remainder.toLowerCase().includes(currentFilterTerm)) {
-            items.push({ type: 'file', data: obj, displayKey: remainder });
-          }
+          items.push({ type: 'file', data: obj, displayKey: remainder });
         } else {
           const effectiveSlashIndex = isFolderMarker && slashIndex === remainder.length - 1
             ? slashIndex
@@ -413,9 +411,7 @@
           const folderPath = currentPrefix + folderName + '/';
           if (!folders.has(folderPath)) {
             folders.add(folderPath);
-            if (!currentFilterTerm || folderName.toLowerCase().includes(currentFilterTerm)) {
-              items.push({ type: 'folder', path: folderPath, displayKey: folderName });
-            }
+            items.push({ type: 'folder', path: folderPath, displayKey: folderName });
           }
         }
       });
@@ -2094,8 +2090,63 @@
     }
   };
 
+  let searchDebounceTimer = null;
+  let searchAbortController = null;
+  let searchResults = null;
+
+  const performServerSearch = async (term) => {
+    if (searchAbortController) searchAbortController.abort();
+    searchAbortController = new AbortController();
+
+    try {
+      const params = new URLSearchParams({ q: term, limit: '500' });
+      if (currentPrefix) params.set('prefix', currentPrefix);
+      const searchUrl = objectsStreamUrl.replace('/stream', '/search');
+      const response = await fetch(`${searchUrl}?${params}`, {
+        signal: searchAbortController.signal
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      searchResults = (data.results || []).map(obj => processStreamObject(obj));
+      memoizedVisibleItems = null;
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+      refreshVirtualList();
+      if (loadMoreStatus) {
+        const countText = searchResults.length.toLocaleString();
+        const truncated = data.truncated ? '+' : '';
+        loadMoreStatus.textContent = `${countText}${truncated} result${searchResults.length !== 1 ? 's' : ''}`;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      if (loadMoreStatus) {
+        loadMoreStatus.textContent = 'Search failed';
+      }
+    }
+  };
+
   document.getElementById('object-search')?.addEventListener('input', (event) => {
-    currentFilterTerm = event.target.value.toLowerCase();
+    const newTerm = event.target.value.toLowerCase();
+    const wasFiltering = currentFilterTerm.length > 0;
+    const isFiltering = newTerm.length > 0;
+    currentFilterTerm = newTerm;
+
+    clearTimeout(searchDebounceTimer);
+
+    if (isFiltering) {
+      searchDebounceTimer = setTimeout(() => performServerSearch(newTerm), 300);
+      return;
+    }
+
+    if (!isFiltering && wasFiltering) {
+      if (searchAbortController) searchAbortController.abort();
+      searchResults = null;
+      memoizedVisibleItems = null;
+      memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+      if (loadMoreStatus) {
+        loadMoreStatus.textContent = buildBottomStatusText(streamingComplete);
+      }
+    }
+
     updateFilterWarning();
     refreshVirtualList();
   });
@@ -2136,7 +2187,18 @@
       var searchInput = document.getElementById('object-search');
       if (searchInput && document.activeElement === searchInput) {
         searchInput.value = '';
+        const wasFiltering = currentFilterTerm.length > 0;
         currentFilterTerm = '';
+        if (wasFiltering) {
+          clearTimeout(searchDebounceTimer);
+          if (searchAbortController) searchAbortController.abort();
+          searchResults = null;
+          memoizedVisibleItems = null;
+          memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
+          if (loadMoreStatus) {
+            loadMoreStatus.textContent = buildBottomStatusText(streamingComplete);
+          }
+        }
         refreshVirtualList();
         searchInput.blur();
       }

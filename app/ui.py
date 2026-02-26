@@ -641,6 +641,33 @@ def stream_bucket_objects(bucket_name: str):
     )
 
 
+@ui_bp.get("/buckets/<bucket_name>/objects/search")
+@limiter.limit("30 per minute")
+def search_bucket_objects(bucket_name: str):
+    principal = _current_principal()
+    try:
+        _authorize_ui(principal, bucket_name, "list")
+    except IamError as exc:
+        return jsonify({"error": str(exc)}), 403
+
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"results": [], "truncated": False})
+
+    try:
+        limit = max(1, min(int(request.args.get("limit", 500)), 1000))
+    except (ValueError, TypeError):
+        limit = 500
+
+    prefix = request.args.get("prefix", "").strip()
+
+    storage = _storage()
+    try:
+        return jsonify(storage.search_objects(bucket_name, query, prefix=prefix, limit=limit))
+    except StorageError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
 @ui_bp.post("/buckets/<bucket_name>/upload")
 @limiter.limit("30 per minute")
 def upload_object(bucket_name: str):
