@@ -841,32 +841,61 @@ class ObjectStorage:
 
         tmp_dir = self._system_root_path() / self.SYSTEM_TMP_DIR
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = tmp_dir / f"{uuid.uuid4().hex}.tmp"
-        
-        try:
-            with tmp_path.open("wb") as target:
-                shutil.copyfileobj(stream, target)
 
-            new_size = tmp_path.stat().st_size
-            size_delta = new_size - existing_size
-            object_delta = 0 if is_overwrite else 1
-
-            if enforce_quota:
-                quota_check = self.check_quota(
-                    bucket_name,
-                    additional_bytes=max(0, size_delta),
-                    additional_objects=object_delta,
+        if _HAS_RUST:
+            tmp_path = None
+            try:
+                tmp_path_str, etag, new_size = _rc.stream_to_file_with_md5(
+                    stream, str(tmp_dir)
                 )
-                if not quota_check["allowed"]:
-                    raise QuotaExceededError(
-                        quota_check["message"] or "Quota exceeded",
-                        quota_check["quota"],
-                        quota_check["usage"],
-                    )
+                tmp_path = Path(tmp_path_str)
 
-            if _HAS_RUST:
-                etag = _rc.md5_file(str(tmp_path))
-            else:
+                size_delta = new_size - existing_size
+                object_delta = 0 if is_overwrite else 1
+
+                if enforce_quota:
+                    quota_check = self.check_quota(
+                        bucket_name,
+                        additional_bytes=max(0, size_delta),
+                        additional_objects=object_delta,
+                    )
+                    if not quota_check["allowed"]:
+                        raise QuotaExceededError(
+                            quota_check["message"] or "Quota exceeded",
+                            quota_check["quota"],
+                            quota_check["usage"],
+                        )
+
+                shutil.move(str(tmp_path), str(destination))
+            finally:
+                if tmp_path:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        else:
+            tmp_path = tmp_dir / f"{uuid.uuid4().hex}.tmp"
+            try:
+                with tmp_path.open("wb") as target:
+                    shutil.copyfileobj(stream, target)
+
+                new_size = tmp_path.stat().st_size
+                size_delta = new_size - existing_size
+                object_delta = 0 if is_overwrite else 1
+
+                if enforce_quota:
+                    quota_check = self.check_quota(
+                        bucket_name,
+                        additional_bytes=max(0, size_delta),
+                        additional_objects=object_delta,
+                    )
+                    if not quota_check["allowed"]:
+                        raise QuotaExceededError(
+                            quota_check["message"] or "Quota exceeded",
+                            quota_check["quota"],
+                            quota_check["usage"],
+                        )
+
                 checksum = hashlib.md5()
                 with tmp_path.open("rb") as f:
                     while True:
@@ -876,13 +905,12 @@ class ObjectStorage:
                         checksum.update(chunk)
                 etag = checksum.hexdigest()
 
-            shutil.move(str(tmp_path), str(destination))
-
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+                shutil.move(str(tmp_path), str(destination))
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         stat = destination.stat()
         
@@ -1702,19 +1730,29 @@ class ObjectStorage:
                 if versioning_enabled and destination.exists():
                     archived_version_size = destination.stat().st_size
                     self._archive_current_version(bucket_id, safe_key, reason="overwrite")
-                checksum = hashlib.md5()
-                with destination.open("wb") as target:
+                if _HAS_RUST:
+                    part_paths = []
                     for _, record in validated:
-                        part_path = upload_root / record["filename"]
-                        if not part_path.exists():
+                        pp = upload_root / record["filename"]
+                        if not pp.exists():
                             raise StorageError(f"Missing part file {record['filename']}")
-                        with part_path.open("rb") as chunk:
-                            while True:
-                                data = chunk.read(1024 * 1024)
-                                if not data:
-                                    break
-                                checksum.update(data)
-                                target.write(data)
+                        part_paths.append(str(pp))
+                    checksum_hex = _rc.assemble_parts_with_md5(part_paths, str(destination))
+                else:
+                    checksum = hashlib.md5()
+                    with destination.open("wb") as target:
+                        for _, record in validated:
+                            part_path = upload_root / record["filename"]
+                            if not part_path.exists():
+                                raise StorageError(f"Missing part file {record['filename']}")
+                            with part_path.open("rb") as chunk:
+                                while True:
+                                    data = chunk.read(1024 * 1024)
+                                    if not data:
+                                        break
+                                    checksum.update(data)
+                                    target.write(data)
+                    checksum_hex = checksum.hexdigest()
         except BlockingIOError:
             raise StorageError("Another upload to this key is in progress")
 
@@ -1729,7 +1767,7 @@ class ObjectStorage:
         )
 
         stat = destination.stat()
-        etag = checksum.hexdigest()
+        etag = checksum_hex
         metadata = manifest.get("metadata")
 
         internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}

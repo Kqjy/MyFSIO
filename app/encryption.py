@@ -19,6 +19,13 @@ from cryptography.hazmat.primitives import hashes
 if sys.platform != "win32":
     import fcntl
 
+try:
+    import myfsio_core as _rc
+    _HAS_RUST = True
+except ImportError:
+    _rc = None
+    _HAS_RUST = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -337,6 +344,69 @@ class StreamingEncryptor:
 
         output.seek(0)
         return output
+
+    def encrypt_file(self, input_path: str, output_path: str) -> EncryptionMetadata:
+        data_key, encrypted_data_key = self.provider.generate_data_key()
+        base_nonce = secrets.token_bytes(12)
+
+        if _HAS_RUST:
+            _rc.encrypt_stream_chunked(
+                input_path, output_path, data_key, base_nonce, self.chunk_size
+            )
+        else:
+            with open(input_path, "rb") as stream:
+                aesgcm = AESGCM(data_key)
+                with open(output_path, "wb") as out:
+                    out.write(b"\x00\x00\x00\x00")
+                    chunk_index = 0
+                    while True:
+                        chunk = stream.read(self.chunk_size)
+                        if not chunk:
+                            break
+                        chunk_nonce = self._derive_chunk_nonce(base_nonce, chunk_index)
+                        encrypted_chunk = aesgcm.encrypt(chunk_nonce, chunk, None)
+                        out.write(len(encrypted_chunk).to_bytes(self.HEADER_SIZE, "big"))
+                        out.write(encrypted_chunk)
+                        chunk_index += 1
+                    out.seek(0)
+                    out.write(chunk_index.to_bytes(4, "big"))
+
+        return EncryptionMetadata(
+            algorithm="AES256",
+            key_id=self.provider.KEY_ID if hasattr(self.provider, "KEY_ID") else "local",
+            nonce=base_nonce,
+            encrypted_data_key=encrypted_data_key,
+        )
+
+    def decrypt_file(self, input_path: str, output_path: str,
+                     metadata: EncryptionMetadata) -> None:
+        data_key = self.provider.decrypt_data_key(metadata.encrypted_data_key, metadata.key_id)
+        base_nonce = metadata.nonce
+
+        if _HAS_RUST:
+            _rc.decrypt_stream_chunked(input_path, output_path, data_key, base_nonce)
+        else:
+            with open(input_path, "rb") as stream:
+                chunk_count_bytes = stream.read(4)
+                if len(chunk_count_bytes) < 4:
+                    raise EncryptionError("Invalid encrypted stream: missing header")
+                chunk_count = int.from_bytes(chunk_count_bytes, "big")
+                aesgcm = AESGCM(data_key)
+                with open(output_path, "wb") as out:
+                    for chunk_index in range(chunk_count):
+                        size_bytes = stream.read(self.HEADER_SIZE)
+                        if len(size_bytes) < self.HEADER_SIZE:
+                            raise EncryptionError(f"Invalid encrypted stream: truncated at chunk {chunk_index}")
+                        chunk_size = int.from_bytes(size_bytes, "big")
+                        encrypted_chunk = stream.read(chunk_size)
+                        if len(encrypted_chunk) < chunk_size:
+                            raise EncryptionError(f"Invalid encrypted stream: incomplete chunk {chunk_index}")
+                        chunk_nonce = self._derive_chunk_nonce(base_nonce, chunk_index)
+                        try:
+                            decrypted_chunk = aesgcm.decrypt(chunk_nonce, encrypted_chunk, None)
+                            out.write(decrypted_chunk)
+                        except Exception as exc:
+                            raise EncryptionError(f"Failed to decrypt chunk {chunk_index}: {exc}") from exc
 
 
 class EncryptionManager:
