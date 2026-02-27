@@ -293,9 +293,7 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
              raise IamError("Required headers not signed")
 
     canonical_uri = _get_canonical_uri(req)
-    payload_hash = req.headers.get("X-Amz-Content-Sha256")
-    if not payload_hash:
-        payload_hash = hashlib.sha256(req.get_data()).hexdigest()
+    payload_hash = req.headers.get("X-Amz-Content-Sha256") or "UNSIGNED-PAYLOAD"
 
     if _HAS_RUST:
         query_params = list(req.args.items(multi=True))

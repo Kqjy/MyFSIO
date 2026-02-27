@@ -844,10 +844,9 @@ class ObjectStorage:
         tmp_path = tmp_dir / f"{uuid.uuid4().hex}.tmp"
         
         try:
-            checksum = hashlib.md5()
             with tmp_path.open("wb") as target:
-                shutil.copyfileobj(_HashingReader(stream, checksum), target)
-            
+                shutil.copyfileobj(stream, target)
+
             new_size = tmp_path.stat().st_size
             size_delta = new_size - existing_size
             object_delta = 0 if is_overwrite else 1
@@ -865,8 +864,20 @@ class ObjectStorage:
                         quota_check["usage"],
                     )
 
+            if _HAS_RUST:
+                etag = _rc.md5_file(str(tmp_path))
+            else:
+                checksum = hashlib.md5()
+                with tmp_path.open("rb") as f:
+                    while True:
+                        chunk = f.read(1048576)
+                        if not chunk:
+                            break
+                        checksum.update(chunk)
+                etag = checksum.hexdigest()
+
             shutil.move(str(tmp_path), str(destination))
-            
+
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
@@ -874,7 +885,6 @@ class ObjectStorage:
                 pass
 
         stat = destination.stat()
-        etag = checksum.hexdigest()
         
         internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
         combined_meta = {**internal_meta, **(metadata or {})}
@@ -1465,14 +1475,24 @@ class ObjectStorage:
         if not upload_root.exists():
             raise StorageError("Multipart upload not found")
 
-        checksum = hashlib.md5()
         part_filename = f"part-{part_number:05d}.part"
         part_path = upload_root / part_filename
         temp_path = upload_root / f".{part_filename}.tmp"
 
         try:
             with temp_path.open("wb") as target:
-                shutil.copyfileobj(_HashingReader(stream, checksum), target)
+                shutil.copyfileobj(stream, target)
+            if _HAS_RUST:
+                part_etag = _rc.md5_file(str(temp_path))
+            else:
+                checksum = hashlib.md5()
+                with temp_path.open("rb") as f:
+                    while True:
+                        chunk = f.read(1048576)
+                        if not chunk:
+                            break
+                        checksum.update(chunk)
+                part_etag = checksum.hexdigest()
             temp_path.replace(part_path)
         except OSError:
             try:
@@ -1482,7 +1502,7 @@ class ObjectStorage:
             raise
 
         record = {
-            "etag": checksum.hexdigest(),
+            "etag": part_etag,
             "size": part_path.stat().st_size,
             "filename": part_filename,
         }
