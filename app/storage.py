@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Dict, Generator, List, Optional
 
 try:
@@ -292,37 +292,43 @@ class ObjectStorage:
         bucket_str = str(bucket_path)
 
         try:
-            stack = [bucket_str]
-            while stack:
-                current = stack.pop()
-                try:
-                    with os.scandir(current) as it:
-                        for entry in it:
-                            if current == bucket_str and entry.name in internal:
-                                continue
-                            if entry.is_dir(follow_symlinks=False):
-                                stack.append(entry.path)
-                            elif entry.is_file(follow_symlinks=False):
-                                object_count += 1
-                                total_bytes += entry.stat(follow_symlinks=False).st_size
-                except PermissionError:
-                    continue
-
-            versions_root = self._bucket_versions_root(bucket_name)
-            if versions_root.exists():
-                v_stack = [str(versions_root)]
-                while v_stack:
-                    v_current = v_stack.pop()
+            if _HAS_RUST:
+                versions_root = str(self._bucket_versions_root(bucket_name))
+                object_count, total_bytes, version_count, version_bytes = _rc.bucket_stats_scan(
+                    bucket_str, versions_root
+                )
+            else:
+                stack = [bucket_str]
+                while stack:
+                    current = stack.pop()
                     try:
-                        with os.scandir(v_current) as it:
+                        with os.scandir(current) as it:
                             for entry in it:
+                                if current == bucket_str and entry.name in internal:
+                                    continue
                                 if entry.is_dir(follow_symlinks=False):
-                                    v_stack.append(entry.path)
-                                elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".bin"):
-                                    version_count += 1
-                                    version_bytes += entry.stat(follow_symlinks=False).st_size
+                                    stack.append(entry.path)
+                                elif entry.is_file(follow_symlinks=False):
+                                    object_count += 1
+                                    total_bytes += entry.stat(follow_symlinks=False).st_size
                     except PermissionError:
                         continue
+
+                versions_root = self._bucket_versions_root(bucket_name)
+                if versions_root.exists():
+                    v_stack = [str(versions_root)]
+                    while v_stack:
+                        v_current = v_stack.pop()
+                        try:
+                            with os.scandir(v_current) as it:
+                                for entry in it:
+                                    if entry.is_dir(follow_symlinks=False):
+                                        v_stack.append(entry.path)
+                                    elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".bin"):
+                                        version_count += 1
+                                        version_bytes += entry.stat(follow_symlinks=False).st_size
+                        except PermissionError:
+                            continue
         except OSError:
             if cached_stats is not None:
                 return cached_stats
@@ -559,47 +565,69 @@ class ObjectStorage:
         entries_files: list[tuple[str, int, float, Optional[str]]] = []
         entries_dirs: list[str] = []
 
-        try:
-            with os.scandir(str(target_dir)) as it:
-                for entry in it:
-                    name = entry.name
-                    if name in self.INTERNAL_FOLDERS:
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        cp = prefix + name + delimiter
-                        entries_dirs.append(cp)
-                    elif entry.is_file(follow_symlinks=False):
-                        key = prefix + name
-                        try:
-                            st = entry.stat()
-                            etag = meta_cache.get(key)
-                            entries_files.append((key, st.st_size, st.st_mtime, etag))
-                        except OSError:
-                            pass
-        except OSError:
-            return ShallowListResult(
-                objects=[], common_prefixes=[],
-                is_truncated=False, next_continuation_token=None,
-            )
+        if _HAS_RUST:
+            try:
+                raw = _rc.shallow_scan(str(target_dir), prefix, json.dumps(meta_cache))
+                entries_files = []
+                for key, size, mtime, etag in raw["files"]:
+                    if etag is None:
+                        safe_key = PurePosixPath(key)
+                        meta = self._read_metadata(bucket_id, Path(safe_key))
+                        etag = meta.get("__etag__") if meta else None
+                    entries_files.append((key, size, mtime, etag))
+                entries_dirs = raw["dirs"]
+                all_items = raw["merged_keys"]
+            except OSError:
+                return ShallowListResult(
+                    objects=[], common_prefixes=[],
+                    is_truncated=False, next_continuation_token=None,
+                )
+        else:
+            try:
+                with os.scandir(str(target_dir)) as it:
+                    for entry in it:
+                        name = entry.name
+                        if name in self.INTERNAL_FOLDERS:
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            cp = prefix + name + delimiter
+                            entries_dirs.append(cp)
+                        elif entry.is_file(follow_symlinks=False):
+                            key = prefix + name
+                            try:
+                                st = entry.stat()
+                                etag = meta_cache.get(key)
+                                if etag is None:
+                                    safe_key = PurePosixPath(key)
+                                    meta = self._read_metadata(bucket_id, Path(safe_key))
+                                    etag = meta.get("__etag__") if meta else None
+                                entries_files.append((key, st.st_size, st.st_mtime, etag))
+                            except OSError:
+                                pass
+            except OSError:
+                return ShallowListResult(
+                    objects=[], common_prefixes=[],
+                    is_truncated=False, next_continuation_token=None,
+                )
 
-        entries_dirs.sort()
-        entries_files.sort(key=lambda x: x[0])
+            entries_dirs.sort()
+            entries_files.sort(key=lambda x: x[0])
 
-        all_items: list[tuple[str, bool]] = []
-        fi, di = 0, 0
-        while fi < len(entries_files) and di < len(entries_dirs):
-            if entries_files[fi][0] <= entries_dirs[di]:
+            all_items: list[tuple[str, bool]] = []
+            fi, di = 0, 0
+            while fi < len(entries_files) and di < len(entries_dirs):
+                if entries_files[fi][0] <= entries_dirs[di]:
+                    all_items.append((entries_files[fi][0], False))
+                    fi += 1
+                else:
+                    all_items.append((entries_dirs[di], True))
+                    di += 1
+            while fi < len(entries_files):
                 all_items.append((entries_files[fi][0], False))
                 fi += 1
-            else:
+            while di < len(entries_dirs):
                 all_items.append((entries_dirs[di], True))
                 di += 1
-        while fi < len(entries_files):
-            all_items.append((entries_files[fi][0], False))
-            fi += 1
-        while di < len(entries_dirs):
-            all_items.append((entries_dirs[di], True))
-            di += 1
 
         files_map = {e[0]: e for e in entries_files}
 
@@ -713,6 +741,22 @@ class ObjectStorage:
                 return {"results": [], "truncated": False}
         else:
             search_root = bucket_path
+
+        if _HAS_RUST:
+            raw = _rc.search_objects_scan(
+                str(bucket_path), str(search_root), query, limit
+            )
+            results = [
+                {
+                    "key": k,
+                    "size": s,
+                    "last_modified": datetime.fromtimestamp(
+                        m, tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                }
+                for k, s, m in raw["results"]
+            ]
+            return {"results": results, "truncated": raw["truncated"]}
 
         query_lower = query.lower()
         results: list[Dict[str, Any]] = []
@@ -1838,21 +1882,41 @@ class ObjectStorage:
         return list(self._build_object_cache(bucket_path).keys())
 
     def _build_object_cache(self, bucket_path: Path) -> Dict[str, ObjectMeta]:
-        """Build a complete object metadata cache for a bucket.
-        
-        Uses os.scandir for fast directory walking and a persistent etag index.
-        """
         from concurrent.futures import ThreadPoolExecutor
-        
+
         bucket_id = bucket_path.name
         objects: Dict[str, ObjectMeta] = {}
         bucket_str = str(bucket_path)
         bucket_len = len(bucket_str) + 1
-        
+
+        if _HAS_RUST:
+            etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+            raw = _rc.build_object_cache(
+                bucket_str,
+                str(self._bucket_meta_root(bucket_id)),
+                str(etag_index_path),
+            )
+            if raw["etag_cache_changed"] and raw["etag_cache"]:
+                try:
+                    etag_index_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(etag_index_path, 'w', encoding='utf-8') as f:
+                        json.dump(raw["etag_cache"], f)
+                except OSError:
+                    pass
+            for key, size, mtime, etag in raw["objects"]:
+                objects[key] = ObjectMeta(
+                    key=key,
+                    size=size,
+                    last_modified=datetime.fromtimestamp(mtime, timezone.utc),
+                    etag=etag,
+                    metadata=None,
+                )
+            return objects
+
         etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
         meta_cache: Dict[str, str] = {}
         index_mtime: float = 0
-        
+
         if etag_index_path.exists():
             try:
                 index_mtime = etag_index_path.stat().st_mtime
@@ -1860,10 +1924,10 @@ class ObjectStorage:
                     meta_cache = json.load(f)
             except (OSError, json.JSONDecodeError):
                 meta_cache = {}
-        
+
         meta_root = self._bucket_meta_root(bucket_id)
         needs_rebuild = False
-        
+
         if meta_root.exists() and index_mtime > 0:
             def check_newer(dir_path: str) -> bool:
                 try:
@@ -1881,7 +1945,7 @@ class ObjectStorage:
             needs_rebuild = check_newer(str(meta_root))
         elif not meta_cache:
             needs_rebuild = True
-            
+
         if needs_rebuild and meta_root.exists():
             meta_str = str(meta_root)
             meta_len = len(meta_str) + 1
@@ -1962,7 +2026,7 @@ class ObjectStorage:
                         json.dump(meta_cache, f)
                 except OSError:
                     pass
-        
+
         def scan_dir(dir_path: str) -> None:
             try:
                 with os.scandir(dir_path) as it:
@@ -1977,11 +2041,11 @@ class ObjectStorage:
                             first_part = rel.split(os.sep)[0] if os.sep in rel else rel
                             if first_part in self.INTERNAL_FOLDERS:
                                 continue
-                            
+
                             key = rel.replace(os.sep, '/')
                             try:
                                 stat = entry.stat()
-                                
+
                                 etag = meta_cache.get(key)
 
                                 objects[key] = ObjectMeta(
@@ -1989,13 +2053,13 @@ class ObjectStorage:
                                     size=stat.st_size,
                                     last_modified=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
                                     etag=etag,
-                                    metadata=None, 
+                                    metadata=None,
                                 )
                             except OSError:
                                 pass
             except OSError:
                 pass
-        
+
         scan_dir(bucket_str)
         return objects
 
@@ -2094,16 +2158,15 @@ class ObjectStorage:
 
     def _update_etag_index(self, bucket_id: str, key: str, etag: Optional[str]) -> None:
         etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        if not etag_index_path.exists():
+            return
         try:
-            index: Dict[str, str] = {}
-            if etag_index_path.exists():
-                with open(etag_index_path, 'r', encoding='utf-8') as f:
-                    index = json.load(f)
+            with open(etag_index_path, 'r', encoding='utf-8') as f:
+                index = json.load(f)
             if etag is None:
                 index.pop(key, None)
             else:
                 index[key] = etag
-            etag_index_path.parent.mkdir(parents=True, exist_ok=True)
             with open(etag_index_path, 'w', encoding='utf-8') as f:
                 json.dump(index, f)
         except (OSError, json.JSONDecodeError):
@@ -2281,15 +2344,18 @@ class ObjectStorage:
         index_path, entry_name = self._index_file_for_key(bucket_name, key)
         lock = self._get_meta_index_lock(str(index_path))
         with lock:
-            index_path.parent.mkdir(parents=True, exist_ok=True)
-            index_data: Dict[str, Any] = {}
-            if index_path.exists():
-                try:
-                    index_data = json.loads(index_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    pass
-            index_data[entry_name] = entry
-            index_path.write_text(json.dumps(index_data), encoding="utf-8")
+            if _HAS_RUST:
+                _rc.write_index_entry(str(index_path), entry_name, json.dumps(entry))
+            else:
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                index_data: Dict[str, Any] = {}
+                if index_path.exists():
+                    try:
+                        index_data = json.loads(index_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                index_data[entry_name] = entry
+                index_path.write_text(json.dumps(index_data), encoding="utf-8")
         self._invalidate_meta_read_cache(bucket_name, key)
 
     def _delete_index_entry(self, bucket_name: str, key: Path) -> None:
@@ -2299,20 +2365,23 @@ class ObjectStorage:
             return
         lock = self._get_meta_index_lock(str(index_path))
         with lock:
-            try:
-                index_data = json.loads(index_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                self._invalidate_meta_read_cache(bucket_name, key)
-                return
-            if entry_name in index_data:
-                del index_data[entry_name]
-                if index_data:
-                    index_path.write_text(json.dumps(index_data), encoding="utf-8")
-                else:
-                    try:
-                        index_path.unlink()
-                    except OSError:
-                        pass
+            if _HAS_RUST:
+                _rc.delete_index_entry(str(index_path), entry_name)
+            else:
+                try:
+                    index_data = json.loads(index_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    self._invalidate_meta_read_cache(bucket_name, key)
+                    return
+                if entry_name in index_data:
+                    del index_data[entry_name]
+                    if index_data:
+                        index_path.write_text(json.dumps(index_data), encoding="utf-8")
+                    else:
+                        try:
+                            index_path.unlink()
+                        except OSError:
+                            pass
         self._invalidate_meta_read_cache(bucket_name, key)
 
     def _normalize_metadata(self, metadata: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
@@ -2410,15 +2479,24 @@ class ObjectStorage:
                 continue
 
     def _check_bucket_contents(self, bucket_path: Path) -> tuple[bool, bool, bool]:
-        """Check bucket for objects, versions, and multipart uploads in a single pass.
+        bucket_name = bucket_path.name
 
-        Returns (has_visible_objects, has_archived_versions, has_active_multipart_uploads).
-        Uses early exit when all three are found.
-        """
+        if _HAS_RUST:
+            return _rc.check_bucket_contents(
+                str(bucket_path),
+                [
+                    str(self._bucket_versions_root(bucket_name)),
+                    str(self._legacy_versions_root(bucket_name)),
+                ],
+                [
+                    str(self._multipart_bucket_root(bucket_name)),
+                    str(self._legacy_multipart_bucket_root(bucket_name)),
+                ],
+            )
+
         has_objects = False
         has_versions = False
         has_multipart = False
-        bucket_name = bucket_path.name
 
         for path in bucket_path.rglob("*"):
             if has_objects:

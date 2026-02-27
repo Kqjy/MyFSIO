@@ -305,16 +305,10 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
             header_values, payload_hash, amz_date, date_stamp, region,
             service, secret_key, signature,
         ):
-            if current_app.config.get("DEBUG_SIGV4"):
-                logger.warning("SigV4 signature mismatch for %s %s", req.method, req.path)
             raise IamError("SignatureDoesNotMatch")
     else:
         method = req.method
-        query_args = []
-        for key, value in req.args.items(multi=True):
-            query_args.append((key, value))
-        query_args.sort(key=lambda x: (x[0], x[1]))
-
+        query_args = sorted(req.args.items(multi=True), key=lambda x: (x[0], x[1]))
         canonical_query_parts = []
         for k, v in query_args:
             canonical_query_parts.append(f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}")
@@ -339,8 +333,6 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
         string_to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
         calculated_signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(calculated_signature, signature):
-            if current_app.config.get("DEBUG_SIGV4"):
-                logger.warning("SigV4 signature mismatch for %s %s", method, req.path)
             raise IamError("SignatureDoesNotMatch")
 
     session_token = req.headers.get("X-Amz-Security-Token")
@@ -682,7 +674,7 @@ def _extract_request_metadata() -> Dict[str, str]:
     for header, value in request.headers.items():
         if header.lower().startswith("x-amz-meta-"):
             key = header[11:]
-            if key:
+            if key and not (key.startswith("__") and key.endswith("__")):
                 metadata[key] = value
     return metadata
 
@@ -1039,6 +1031,8 @@ def _apply_object_headers(
     response.headers["ETag"] = f'"{etag}"'
     response.headers["Accept-Ranges"] = "bytes"
     for key, value in (metadata or {}).items():
+        if key.startswith("__") and key.endswith("__"):
+            continue
         safe_value = _sanitize_header_value(str(value))
         response.headers[f"X-Amz-Meta-{key}"] = safe_value
 
@@ -2467,7 +2461,7 @@ def _post_object(bucket_name: str) -> Response:
     for field_name, value in request.form.items():
         if field_name.lower().startswith("x-amz-meta-"):
             key = field_name[11:]
-            if key:
+            if key and not (key.startswith("__") and key.endswith("__")):
                 metadata[key] = value
     try:
         meta = storage.put_object(bucket_name, object_key, file.stream, metadata=metadata or None)
@@ -3445,8 +3439,8 @@ def _copy_object(dest_bucket: str, dest_key: str, copy_source: str) -> Response:
         if validation_error:
             return _error_response("InvalidArgument", validation_error, 400)
     else:
-        metadata = source_metadata
-    
+        metadata = {k: v for k, v in source_metadata.items() if not (k.startswith("__") and k.endswith("__"))}
+
     try:
         with source_path.open("rb") as stream:
             meta = storage.put_object(
