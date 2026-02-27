@@ -80,7 +80,7 @@ python run.py --mode api   # API only (port 5000)
 python run.py --mode ui    # UI only (port 5100)
 ```
 
-**Default Credentials:** `localadmin` / `localadmin`
+**Credentials:** Generated automatically on first run and printed to the console. If missed, check the IAM config file at `<STORAGE_ROOT>/.myfsio.sys/config/iam.json`.
 
 - **Web Console:** http://127.0.0.1:5100/ui
 - **API Endpoint:** http://127.0.0.1:5000
