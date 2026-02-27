@@ -1,6 +1,7 @@
 mod hashing;
 mod metadata;
 mod sigv4;
+mod storage;
 mod validation;
 
 use pyo3::prelude::*;
@@ -28,6 +29,14 @@ mod myfsio_core {
         m.add_function(wrap_pyfunction!(validation::validate_bucket_name, m)?)?;
 
         m.add_function(wrap_pyfunction!(metadata::read_index_entry, m)?)?;
+
+        m.add_function(wrap_pyfunction!(storage::write_index_entry, m)?)?;
+        m.add_function(wrap_pyfunction!(storage::delete_index_entry, m)?)?;
+        m.add_function(wrap_pyfunction!(storage::check_bucket_contents, m)?)?;
+        m.add_function(wrap_pyfunction!(storage::shallow_scan, m)?)?;
+        m.add_function(wrap_pyfunction!(storage::bucket_stats_scan, m)?)?;
+        m.add_function(wrap_pyfunction!(storage::search_objects_scan, m)?)?;
+        m.add_function(wrap_pyfunction!(storage::build_object_cache, m)?)?;
 
         Ok(())
     }
