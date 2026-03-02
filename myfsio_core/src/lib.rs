@@ -1,7 +1,9 @@
+mod crypto;
 mod hashing;
 mod metadata;
 mod sigv4;
 mod storage;
+mod streaming;
 mod validation;
 
 use pyo3::prelude::*;
@@ -37,6 +39,12 @@ mod myfsio_core {
         m.add_function(wrap_pyfunction!(storage::bucket_stats_scan, m)?)?;
         m.add_function(wrap_pyfunction!(storage::search_objects_scan, m)?)?;
         m.add_function(wrap_pyfunction!(storage::build_object_cache, m)?)?;
+
+        m.add_function(wrap_pyfunction!(streaming::stream_to_file_with_md5, m)?)?;
+        m.add_function(wrap_pyfunction!(streaming::assemble_parts_with_md5, m)?)?;
+
+        m.add_function(wrap_pyfunction!(crypto::encrypt_stream_chunked, m)?)?;
+        m.add_function(wrap_pyfunction!(crypto::decrypt_stream_chunked, m)?)?;
 
         Ok(())
     }

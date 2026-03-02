@@ -53,15 +53,17 @@ def test_special_characters_in_metadata(tmp_path: Path):
     assert meta["special"] == "!@#$%^&*()"
 
 def test_disk_full_scenario(tmp_path: Path, monkeypatch):
-    # Simulate disk full by mocking write to fail
+    import app.storage as _storage_mod
+    monkeypatch.setattr(_storage_mod, "_HAS_RUST", False)
+
     storage = ObjectStorage(tmp_path)
     storage.create_bucket("full")
-    
+
     def mock_copyfileobj(*args, **kwargs):
         raise OSError(28, "No space left on device")
-        
+
     import shutil
     monkeypatch.setattr(shutil, "copyfileobj", mock_copyfileobj)
-    
+
     with pytest.raises(OSError, match="No space left on device"):
         storage.put_object("full", "file", io.BytesIO(b"data"))

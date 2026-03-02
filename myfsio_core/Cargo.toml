@@ -19,3 +19,6 @@ regex = "1"
 lru = "0.14"
 parking_lot = "0.12"
 percent-encoding = "2"
+aes-gcm = "0.10"
+hkdf = "0.12"
+uuid = { version = "1", features = ["v4"] }
