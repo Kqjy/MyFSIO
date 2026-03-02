@@ -5,6 +5,7 @@ import logging
 import random
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,8 +139,8 @@ class OperationMetricsCollector:
         self.interval_seconds = interval_minutes * 60
         self.retention_hours = retention_hours
         self._lock = threading.Lock()
-        self._by_method: Dict[str, OperationStats] = {}
-        self._by_endpoint: Dict[str, OperationStats] = {}
+        self._by_method: Dict[str, OperationStats] = defaultdict(OperationStats)
+        self._by_endpoint: Dict[str, OperationStats] = defaultdict(OperationStats)
         self._by_status_class: Dict[str, int] = {}
         self._error_codes: Dict[str, int] = {}
         self._totals = OperationStats()
@@ -211,8 +212,8 @@ class OperationMetricsCollector:
             self._prune_old_snapshots()
             self._save_history()
 
-            self._by_method.clear()
-            self._by_endpoint.clear()
+            self._by_method = defaultdict(OperationStats)
+            self._by_endpoint = defaultdict(OperationStats)
             self._by_status_class.clear()
             self._error_codes.clear()
             self._totals = OperationStats()
@@ -232,12 +233,7 @@ class OperationMetricsCollector:
         status_class = f"{status_code // 100}xx"
 
         with self._lock:
-            if method not in self._by_method:
-                self._by_method[method] = OperationStats()
             self._by_method[method].record(latency_ms, success, bytes_in, bytes_out)
-
-            if endpoint_type not in self._by_endpoint:
-                self._by_endpoint[endpoint_type] = OperationStats()
             self._by_endpoint[endpoint_type].record(latency_ms, success, bytes_in, bytes_out)
 
             self._by_status_class[status_class] = self._by_status_class.get(status_class, 0) + 1

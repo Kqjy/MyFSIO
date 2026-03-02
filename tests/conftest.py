@@ -43,6 +43,11 @@ def app(tmp_path: Path):
         }
     )
     yield flask_app
+    storage = flask_app.extensions.get("object_storage")
+    if storage:
+        base = getattr(storage, "storage", storage)
+        if hasattr(base, "shutdown_stats"):
+            base.shutdown_stats()
 
 
 @pytest.fixture()
