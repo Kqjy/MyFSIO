@@ -321,7 +321,7 @@
     `;
   };
 
-  const bucketTotalObjects = objectsContainer ? parseInt(objectsContainer.dataset.bucketTotalObjects || '0', 10) : 0;
+  let bucketTotalObjects = objectsContainer ? parseInt(objectsContainer.dataset.bucketTotalObjects || '0', 10) : 0;
 
   const updateObjectCountBadge = () => {
     if (!objectCountBadge) return;
@@ -702,6 +702,7 @@
       flushPendingStreamObjects();
       hasMoreObjects = false;
       totalObjectCount = loadedObjectCount;
+      if (!currentPrefix) bucketTotalObjects = totalObjectCount;
       updateObjectCountBadge();
 
       if (objectsLoadingRow && objectsLoadingRow.parentNode) {
@@ -766,6 +767,7 @@
       }
 
       totalObjectCount = data.total_count || 0;
+      if (!append && !currentPrefix) bucketTotalObjects = totalObjectCount;
       nextContinuationToken = data.next_continuation_token;
 
       if (!append && objectsLoadingRow) {

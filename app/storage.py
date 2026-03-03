@@ -212,6 +212,7 @@ class ObjectStorage:
         self._cleanup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ParentCleanup")
         self._stats_mem: Dict[str, Dict[str, int]] = {}
         self._stats_serial: Dict[str, int] = {}
+        self._stats_mem_time: Dict[str, float] = {}
         self._stats_lock = threading.Lock()
         self._stats_dirty: set[str] = set()
         self._stats_flush_timer: Optional[threading.Timer] = None
@@ -273,7 +274,11 @@ class ObjectStorage:
 
         with self._stats_lock:
             if bucket_name in self._stats_mem:
-                return dict(self._stats_mem[bucket_name])
+                cached_at = self._stats_mem_time.get(bucket_name, 0.0)
+                if (time.monotonic() - cached_at) < cache_ttl:
+                    return dict(self._stats_mem[bucket_name])
+                self._stats_mem.pop(bucket_name, None)
+                self._stats_mem_time.pop(bucket_name, None)
 
         cache_path = self._system_bucket_root(bucket_name) / "stats.json"
         cached_stats = None
@@ -350,9 +355,9 @@ class ObjectStorage:
         }
 
         with self._stats_lock:
-            if bucket_name not in self._stats_mem:
-                self._stats_mem[bucket_name] = stats
-                self._stats_serial[bucket_name] = existing_serial
+            self._stats_mem[bucket_name] = stats
+            self._stats_mem_time[bucket_name] = time.monotonic()
+            self._stats_serial[bucket_name] = existing_serial
 
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,6 +370,7 @@ class ObjectStorage:
     def _invalidate_bucket_stats_cache(self, bucket_id: str) -> None:
         with self._stats_lock:
             self._stats_mem.pop(bucket_id, None)
+            self._stats_mem_time.pop(bucket_id, None)
             self._stats_serial[bucket_id] = self._stats_serial.get(bucket_id, 0) + 1
             self._stats_dirty.discard(bucket_id)
         cache_path = self._system_bucket_root(bucket_id) / "stats.json"
@@ -398,6 +404,7 @@ class ObjectStorage:
             data["total_bytes"] = max(0, data["total_bytes"] + bytes_delta + version_bytes_delta)
             data["_cache_serial"] = data["_cache_serial"] + 1
             self._stats_serial[bucket_id] = self._stats_serial.get(bucket_id, 0) + 1
+            self._stats_mem_time[bucket_id] = time.monotonic()
             self._stats_dirty.add(bucket_id)
             self._schedule_stats_flush()
 
@@ -454,6 +461,7 @@ class ObjectStorage:
                 del self._meta_read_cache[k]
         with self._stats_lock:
             self._stats_mem.pop(bucket_id, None)
+            self._stats_mem_time.pop(bucket_id, None)
             self._stats_serial.pop(bucket_id, None)
             self._stats_dirty.discard(bucket_id)
         self._etag_index_dirty.discard(bucket_id)
