@@ -2844,6 +2844,18 @@ def object_handler(bucket_name: str, object_key: str):
             if "Bucket" in message:
                 return _error_response("NoSuchBucket", message, 404)
             return _error_response("InvalidArgument", message, 400)
+
+        content_md5 = request.headers.get("Content-MD5")
+        if content_md5 and meta.etag:
+            try:
+                expected_md5 = base64.b64decode(content_md5).hex()
+            except Exception:
+                storage.delete_object(bucket_name, object_key)
+                return _error_response("InvalidDigest", "Content-MD5 header is not valid base64", 400)
+            if expected_md5 != meta.etag:
+                storage.delete_object(bucket_name, object_key)
+                return _error_response("BadDigest", "The Content-MD5 you specified did not match what we received", 400)
+
         if current_app.logger.isEnabledFor(logging.INFO):
             current_app.logger.info(
                 "Object uploaded",
@@ -3649,6 +3661,15 @@ def _upload_part(bucket_name: str, object_key: str) -> Response:
         if "Multipart upload not found" in str(exc):
             return _error_response("NoSuchUpload", str(exc), 404)
         return _error_response("InvalidArgument", str(exc), 400)
+
+    content_md5 = request.headers.get("Content-MD5")
+    if content_md5 and etag:
+        try:
+            expected_md5 = base64.b64decode(content_md5).hex()
+        except Exception:
+            return _error_response("InvalidDigest", "Content-MD5 header is not valid base64", 400)
+        if expected_md5 != etag:
+            return _error_response("BadDigest", "The Content-MD5 you specified did not match what we received", 400)
 
     response = Response(status=200)
     response.headers["ETag"] = f'"{etag}"'
