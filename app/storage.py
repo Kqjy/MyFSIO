@@ -959,7 +959,7 @@ class ObjectStorage:
 
         stat = destination.stat()
         
-        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
+        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size), "__last_modified__": str(stat.st_mtime)}
         combined_meta = {**internal_meta, **(metadata or {})}
         self._write_metadata(bucket_id, safe_key, combined_meta)
 
@@ -1815,7 +1815,7 @@ class ObjectStorage:
         etag = checksum_hex
         metadata = manifest.get("metadata")
 
-        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size)}
+        internal_meta = {"__etag__": etag, "__size__": str(stat.st_size), "__last_modified__": str(stat.st_mtime)}
         combined_meta = {**internal_meta, **(metadata or {})}
         self._write_metadata(bucket_id, safe_key, combined_meta)
 

@@ -486,10 +486,6 @@ def _configure_logging(app: Flask) -> None:
         g.request_id = f"{os.getpid():x}{next(_request_counter):012x}"
         g.request_started_at = time.perf_counter()
         g.request_bytes_in = request.content_length or 0
-        app.logger.info(
-            "Request started",
-            extra={"path": request.path, "method": request.method, "remote_addr": request.remote_addr},
-        )
 
     @app.before_request
     def _maybe_serve_website():
@@ -620,14 +616,15 @@ def _configure_logging(app: Flask) -> None:
             duration_ms = (time.perf_counter() - g.request_started_at) * 1000
         request_id = getattr(g, "request_id", f"{os.getpid():x}{next(_request_counter):012x}")
         response.headers.setdefault("X-Request-ID", request_id)
-        app.logger.info(
-            "Request completed",
-            extra={
-                "path": request.path,
-                "method": request.method,
-                "remote_addr": request.remote_addr,
-            },
-        )
+        if app.logger.isEnabledFor(logging.INFO):
+            app.logger.info(
+                "Request completed",
+                extra={
+                    "path": request.path,
+                    "method": request.method,
+                    "remote_addr": request.remote_addr,
+                },
+            )
         response.headers["X-Request-Duration-ms"] = f"{duration_ms:.2f}"
 
         operation_metrics = app.extensions.get("operation_metrics")

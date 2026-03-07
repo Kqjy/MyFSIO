@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -268,7 +269,7 @@ class BucketPolicyStore:
         self._last_mtime = self._current_mtime()
         # Performance: Avoid stat() on every request
         self._last_stat_check = 0.0
-        self._stat_check_interval = 1.0  # Only check mtime every 1 second
+        self._stat_check_interval = float(os.environ.get("BUCKET_POLICY_STAT_CHECK_INTERVAL_SECONDS", "2.0"))
 
     def maybe_reload(self) -> None:
         # Performance: Skip stat check if we checked recently
