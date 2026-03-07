@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import html as html_module
+import itertools
 import logging
 import mimetypes
 import os
 import shutil
 import sys
 import time
-import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import timedelta
@@ -38,6 +38,8 @@ from .site_registry import SiteRegistry, SiteInfo
 from .storage import ObjectStorage, StorageError
 from .version import get_version
 from .website_domains import WebsiteDomainStore
+
+_request_counter = itertools.count(1)
 
 
 def _migrate_config_file(active_path: Path, legacy_paths: List[Path]) -> Path:
@@ -481,7 +483,7 @@ def _configure_logging(app: Flask) -> None:
 
     @app.before_request
     def _log_request_start() -> None:
-        g.request_id = uuid.uuid4().hex
+        g.request_id = f"{os.getpid():x}{next(_request_counter):012x}"
         g.request_started_at = time.perf_counter()
         g.request_bytes_in = request.content_length or 0
         app.logger.info(
@@ -616,7 +618,7 @@ def _configure_logging(app: Flask) -> None:
         duration_ms = 0.0
         if hasattr(g, "request_started_at"):
             duration_ms = (time.perf_counter() - g.request_started_at) * 1000
-        request_id = getattr(g, "request_id", uuid.uuid4().hex)
+        request_id = getattr(g, "request_id", f"{os.getpid():x}{next(_request_counter):012x}")
         response.headers.setdefault("X-Request-ID", request_id)
         app.logger.info(
             "Request completed",
