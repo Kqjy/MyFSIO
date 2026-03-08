@@ -46,6 +46,8 @@ pub fn stream_to_file_with_md5(
 
             py.check_signals()?;
         }
+        file.sync_all()
+            .map_err(|e| PyIOError::new_err(format!("Failed to fsync: {}", e)))?;
         Ok(())
     })();
 
@@ -101,6 +103,9 @@ pub fn assemble_parts_with_md5(
                     .map_err(|e| PyIOError::new_err(format!("Failed to write: {}", e)))?;
             }
         }
+
+        target.sync_all()
+            .map_err(|e| PyIOError::new_err(format!("Failed to fsync: {}", e)))?;
 
         Ok(format!("{:x}", hasher.finalize()))
     })

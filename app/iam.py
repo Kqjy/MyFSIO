@@ -125,7 +125,7 @@ class IamService:
         self._secret_key_cache: Dict[str, Tuple[str, float]] = {}
         self._cache_ttl = float(os.environ.get("IAM_CACHE_TTL_SECONDS", "5.0"))
         self._last_stat_check = 0.0
-        self._stat_check_interval = 1.0
+        self._stat_check_interval = float(os.environ.get("IAM_STAT_CHECK_INTERVAL_SECONDS", "2.0"))
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._session_lock = threading.Lock()
         self._load()
