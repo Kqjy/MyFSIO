@@ -130,6 +130,7 @@ def create_app(
         Path(app.config["IAM_CONFIG"]),
         auth_max_attempts=app.config.get("AUTH_MAX_ATTEMPTS", 5),
         auth_lockout_minutes=app.config.get("AUTH_LOCKOUT_MINUTES", 15),
+        encryption_key=app.config.get("SECRET_KEY"),
     )
     bucket_policies = BucketPolicyStore(Path(app.config["BUCKET_POLICY_PATH"]))
     secret_store = EphemeralSecretStore(default_ttl=app.config.get("SECRET_TTL_SECONDS", 300))
