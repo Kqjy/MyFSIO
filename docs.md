@@ -145,13 +145,15 @@ All configuration is done via environment variables. The table below lists every
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `IAM_CONFIG` | `data/.myfsio.sys/config/iam.json` | Stores users, secrets, and inline policies. |
+| `IAM_CONFIG` | `data/.myfsio.sys/config/iam.json` | Stores users, secrets, and inline policies. Encrypted at rest when `SECRET_KEY` is set. |
 | `BUCKET_POLICY_PATH` | `data/.myfsio.sys/config/bucket_policies.json` | Bucket policy store (auto hot-reload). |
 | `AUTH_MAX_ATTEMPTS` | `5` | Failed login attempts before lockout. |
 | `AUTH_LOCKOUT_MINUTES` | `15` | Lockout duration after max failed attempts. |
 | `SESSION_LIFETIME_DAYS` | `30` | How long UI sessions remain valid. |
 | `SECRET_TTL_SECONDS` | `300` | TTL for ephemeral secrets (presigned URLs). |
 | `UI_ENFORCE_BUCKET_POLICIES` | `false` | Whether the UI should enforce bucket policies. |
+| `ADMIN_ACCESS_KEY` | (none) | Custom access key for the admin user on first run or credential reset. If unset, a random key is generated. |
+| `ADMIN_SECRET_KEY` | (none) | Custom secret key for the admin user on first run or credential reset. If unset, a random key is generated. |
 
 ### CORS (Cross-Origin Resource Sharing)
 
@@ -277,13 +279,14 @@ API responses for JSON, XML, HTML, CSS, and JavaScript are automatically gzip-co
 
 Before deploying to production, ensure you:
 
-1. **Set `SECRET_KEY`** - Use a strong, unique value (e.g., `openssl rand -base64 32`)
+1. **Set `SECRET_KEY`** - Use a strong, unique value (e.g., `openssl rand -base64 32`). This also enables IAM config encryption at rest.
 2. **Restrict CORS** - Set `CORS_ORIGINS` to your specific domains instead of `*`
 3. **Configure `API_BASE_URL`** - Required for correct presigned URLs behind proxies
 4. **Enable HTTPS** - Use a reverse proxy (nginx, Cloudflare) with TLS termination
 5. **Review rate limits** - Adjust `RATE_LIMIT_DEFAULT` based on your needs
 6. **Secure master keys** - Back up `ENCRYPTION_MASTER_KEY_PATH` if using encryption
 7. **Use `--prod` flag** - Runs with Waitress instead of Flask dev server
+8. **Set credential expiry** - Assign `expires_at` to non-admin users for time-limited access
 
 ### Proxy Configuration
 
@@ -633,9 +636,10 @@ MyFSIO implements a comprehensive Identity and Access Management (IAM) system th
 
 ### Getting Started
 
-1. On first boot, `data/.myfsio.sys/config/iam.json` is created with a randomly generated admin user. The access key and secret key are printed to the console during first startup. If you miss it, check the `iam.json` file directly—credentials are stored in plaintext.
+1. On first boot, `data/.myfsio.sys/config/iam.json` is created with a randomly generated admin user. The access key and secret key are printed to the console during first startup. You can set `ADMIN_ACCESS_KEY` and `ADMIN_SECRET_KEY` environment variables to use custom credentials instead of random ones. If `SECRET_KEY` is configured, the IAM config file is encrypted at rest using AES (Fernet). To reset admin credentials later, run `python run.py --reset-cred`.
 2. Sign into the UI using the generated credentials, then open **IAM**:
-   - **Create user**: supply a display name and optional JSON inline policy array.
+   - **Create user**: supply a display name, optional JSON inline policy array, and optional credential expiry date.
+   - **Set expiry**: assign an expiration date to any user's credentials. Expired credentials are rejected at authentication time. The UI shows expiry badges and preset durations (1h, 24h, 7d, 30d, 90d).
    - **Rotate secret**: generates a new secret key; the UI surfaces it once.
    - **Policy editor**: select a user, paste an array of objects (`{"bucket": "*", "actions": ["list", "read"]}`), and submit. Alias support includes AWS-style verbs (e.g., `s3:GetObject`).
 3. Wildcard action `iam:*` is supported for admin user definitions.
@@ -653,8 +657,11 @@ The API expects every request to include authentication headers. The UI persists
 
 **Security Features:**
 - **Lockout Protection**: After `AUTH_MAX_ATTEMPTS` (default: 5) failed login attempts, the account is locked for `AUTH_LOCKOUT_MINUTES` (default: 15 minutes).
+- **Credential Expiry**: Each user can have an optional `expires_at` timestamp (ISO 8601). Once expired, all API requests using those credentials are rejected. Set or clear expiry via the UI or API.
+- **IAM Config Encryption**: When `SECRET_KEY` is set, the IAM config file (`iam.json`) is encrypted at rest using Fernet (AES-256-CBC with HMAC). Existing plaintext configs are automatically encrypted on next load.
 - **Session Management**: UI sessions remain valid for `SESSION_LIFETIME_DAYS` (default: 30 days).
 - **Hot Reload**: IAM configuration changes take effect immediately without restart.
+- **Credential Reset**: Run `python run.py --reset-cred` to reset admin credentials. Supports `ADMIN_ACCESS_KEY` and `ADMIN_SECRET_KEY` env vars for deterministic keys.
 
 ### Permission Model
 
@@ -814,7 +821,8 @@ curl -X POST http://localhost:5000/iam/users \
   -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
   -d '{
     "display_name": "New User",
-    "policies": [{"bucket": "*", "actions": ["list", "read"]}]
+    "policies": [{"bucket": "*", "actions": ["list", "read"]}],
+    "expires_at": "2026-12-31T23:59:59Z"
   }'
 
 # Rotate user secret (requires iam:rotate_key)
@@ -827,6 +835,18 @@ curl -X PUT http://localhost:5000/iam/users/<access-key>/policies \
   -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
   -d '[{"bucket": "*", "actions": ["list", "read", "write"]}]'
 
+# Update credential expiry (requires iam:update_policy)
+curl -X POST http://localhost:5000/iam/users/<access-key>/expiry \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d 'expires_at=2026-12-31T23:59:59Z'
+
+# Remove credential expiry (never expires)
+curl -X POST http://localhost:5000/iam/users/<access-key>/expiry \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -H "X-Access-Key: ..." -H "X-Secret-Key: ..." \
+  -d 'expires_at='
+
 # Delete a user (requires iam:delete_user)
 curl -X DELETE http://localhost:5000/iam/users/<access-key> \
   -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
@@ -838,8 +858,9 @@ When a request is made, permissions are evaluated in this order:
 
 1. **Authentication** – Verify the access key and secret key are valid
 2. **Lockout Check** – Ensure the account is not locked due to failed attempts
-3. **IAM Policy Check** – Verify the user has the required action for the target bucket
-4. **Bucket Policy Check** – If a bucket policy exists, verify it allows the action
+3. **Expiry Check** – Reject requests if the user's credentials have expired (`expires_at`)
+4. **IAM Policy Check** – Verify the user has the required action for the target bucket
+5. **Bucket Policy Check** – If a bucket policy exists, verify it allows the action
 
 A request is allowed only if:
 - The IAM policy grants the action, AND

@@ -202,6 +202,16 @@ python run.py --mode ui
                 <td><code>60 per minute</code></td>
                 <td>Rate limit for admin API endpoints (<code>/admin/*</code>).</td>
               </tr>
+              <tr>
+                <td><code>ADMIN_ACCESS_KEY</code></td>
+                <td>(none)</td>
+                <td>Custom access key for the admin user on first run or credential reset. Random if unset.</td>
+              </tr>
+              <tr>
+                <td><code>ADMIN_SECRET_KEY</code></td>
+                <td>(none)</td>
+                <td>Custom secret key for the admin user on first run or credential reset. Random if unset.</td>
+              </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Server Settings</td>
               </tr>
@@ -428,7 +438,7 @@ python run.py --mode ui
           </table>
         </div>
         <div class="alert alert-warning mt-3 mb-0 small">
-          <strong>Production Checklist:</strong> Set <code>SECRET_KEY</code>, restrict <code>CORS_ORIGINS</code>, configure <code>API_BASE_URL</code>, enable HTTPS via reverse proxy, and use <code>--prod</code> flag.
+          <strong>Production Checklist:</strong> Set <code>SECRET_KEY</code> (also enables IAM config encryption at rest), restrict <code>CORS_ORIGINS</code>, configure <code>API_BASE_URL</code>, enable HTTPS via reverse proxy, use <code>--prod</code> flag, and set credential expiry on non-admin users.
         </div>
       </div>
     </article>
@@ -495,11 +505,12 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
           <span class="docs-section-kicker">03</span>
           <h2 class="h4 mb-0">Authenticate &amp; manage IAM</h2>
         </div>
-        <p class="text-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Missed it? Check <code>data/.myfsio.sys/config/iam.json</code> directly—credentials are stored in plaintext.</p>
+        <p class="text-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Set <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> env vars for custom credentials. When <code>SECRET_KEY</code> is configured, the IAM config is encrypted at rest. To reset credentials, run <code>python run.py --reset-cred</code>.</p>
         <div class="docs-highlight mb-3">
           <ol class="mb-0">
-            <li>Check the console output (or <code>iam.json</code>) for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/ui/login</code>.</li>
-            <li>Create additional users with descriptive display names and AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>).</li>
+            <li>Check the console output for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/ui/login</code>.</li>
+            <li>Create additional users with descriptive display names, AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>), and optional credential expiry dates.</li>
+            <li>Set credential expiry on users to grant time-limited access. The UI shows expiry badges and provides preset durations (1h, 24h, 7d, 30d, 90d). Expired credentials are rejected at authentication.</li>
             <li>Rotate secrets when sharing with CI jobs—new secrets display once and persist to <code>data/.myfsio.sys/config/iam.json</code>.</li>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
           </ol>
