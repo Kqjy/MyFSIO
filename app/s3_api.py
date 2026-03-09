@@ -1019,6 +1019,58 @@ def _method_not_allowed(allowed: list[str]) -> Response:
     return response
 
 
+def _check_conditional_headers(etag: str, last_modified: float | None) -> Response | None:
+    from email.utils import parsedate_to_datetime
+
+    if_match = request.headers.get("If-Match")
+    if if_match:
+        if if_match.strip() != "*":
+            match_etags = [e.strip().strip('"') for e in if_match.split(",")]
+            if etag not in match_etags:
+                return Response(status=412)
+
+    if_unmodified = request.headers.get("If-Unmodified-Since")
+    if not if_match and if_unmodified and last_modified is not None:
+        try:
+            dt = parsedate_to_datetime(if_unmodified)
+            obj_dt = datetime.fromtimestamp(last_modified, timezone.utc)
+            if obj_dt > dt:
+                return Response(status=412)
+        except (TypeError, ValueError):
+            pass
+
+    if_none_match = request.headers.get("If-None-Match")
+    if if_none_match:
+        if if_none_match.strip() == "*":
+            resp = Response(status=304)
+            resp.headers["ETag"] = f'"{etag}"'
+            if last_modified is not None:
+                resp.headers["Last-Modified"] = http_date(last_modified)
+            return resp
+        none_match_etags = [e.strip().strip('"') for e in if_none_match.split(",")]
+        if etag in none_match_etags:
+            resp = Response(status=304)
+            resp.headers["ETag"] = f'"{etag}"'
+            if last_modified is not None:
+                resp.headers["Last-Modified"] = http_date(last_modified)
+            return resp
+
+    if_modified = request.headers.get("If-Modified-Since")
+    if not if_none_match and if_modified and last_modified is not None:
+        try:
+            dt = parsedate_to_datetime(if_modified)
+            obj_dt = datetime.fromtimestamp(last_modified, timezone.utc)
+            if obj_dt <= dt:
+                resp = Response(status=304)
+                resp.headers["ETag"] = f'"{etag}"'
+                resp.headers["Last-Modified"] = http_date(last_modified)
+                return resp
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
 def _apply_object_headers(
     response: Response,
     *,
@@ -2897,7 +2949,24 @@ def object_handler(bucket_name: str, object_key: str):
         mimetype = metadata.get("__content_type__") or mimetypes.guess_type(object_key)[0] or "application/octet-stream"
         
         is_encrypted = "x-amz-server-side-encryption" in metadata
-        
+
+        cond_etag = metadata.get("__etag__")
+        if not cond_etag and not is_encrypted:
+            try:
+                cond_etag = storage._compute_etag(path)
+            except OSError:
+                cond_etag = None
+        if cond_etag:
+            cond_mtime = float(metadata["__last_modified__"]) if "__last_modified__" in metadata else None
+            if cond_mtime is None:
+                try:
+                    cond_mtime = path.stat().st_mtime
+                except OSError:
+                    pass
+            cond_resp = _check_conditional_headers(cond_etag, cond_mtime)
+            if cond_resp:
+                return cond_resp
+
         if request.method == "GET":
             range_header = request.headers.get("Range")
 
@@ -3366,6 +3435,16 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         path = _storage().get_object_path(bucket_name, object_key)
         metadata = _storage().get_object_metadata(bucket_name, object_key)
         etag = metadata.get("__etag__") or _storage()._compute_etag(path)
+
+        head_mtime = float(metadata["__last_modified__"]) if "__last_modified__" in metadata else None
+        if head_mtime is None:
+            try:
+                head_mtime = path.stat().st_mtime
+            except OSError:
+                pass
+        cond_resp = _check_conditional_headers(etag, head_mtime)
+        if cond_resp:
+            return cond_resp
 
         cached_size = metadata.get("__size__")
         cached_mtime = metadata.get("__last_modified__")
