@@ -40,6 +40,7 @@
             <li><a href="#quotas">Bucket Quotas</a></li>
             <li><a href="#encryption">Encryption</a></li>
             <li><a href="#lifecycle">Lifecycle Rules</a></li>
+            <li><a href="#garbage-collection">Garbage Collection</a></li>
             <li><a href="#metrics">Metrics History</a></li>
             <li><a href="#operation-metrics">Operation Metrics</a></li>
             <li><a href="#troubleshooting">Troubleshooting</a></li>
@@ -1627,10 +1628,113 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
         </div>
       </div>
     </article>
-    <article id="metrics" class="card shadow-sm docs-section">
+    <article id="garbage-collection" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
           <span class="docs-section-kicker">14</span>
+          <h2 class="h4 mb-0">Garbage Collection</h2>
+        </div>
+        <p class="text-muted">Automatically clean up orphaned data that accumulates over time: stale temp files, abandoned multipart uploads, stale lock files, orphaned metadata, orphaned versions, and empty directories.</p>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Enabling GC</h3>
+        <p class="small text-muted">Disabled by default. Enable via environment variable:</p>
+<pre class="mb-3"><code class="language-bash">GC_ENABLED=true python run.py</code></pre>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Variable</th>
+                <th>Default</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>GC_ENABLED</code></td><td><code>false</code></td><td>Enable garbage collection</td></tr>
+              <tr><td><code>GC_INTERVAL_HOURS</code></td><td><code>6</code></td><td>Hours between GC cycles</td></tr>
+              <tr><td><code>GC_TEMP_FILE_MAX_AGE_HOURS</code></td><td><code>24</code></td><td>Delete temp files older than this</td></tr>
+              <tr><td><code>GC_MULTIPART_MAX_AGE_DAYS</code></td><td><code>7</code></td><td>Delete orphaned multipart uploads older than this</td></tr>
+              <tr><td><code>GC_LOCK_FILE_MAX_AGE_HOURS</code></td><td><code>1</code></td><td>Delete stale lock files older than this</td></tr>
+              <tr><td><code>GC_DRY_RUN</code></td><td><code>false</code></td><td>Log what would be deleted without removing</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">What Gets Cleaned</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Type</th>
+                <th>Location</th>
+                <th>Condition</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>Temp files</strong></td><td><code>.myfsio.sys/tmp/</code></td><td>Older than configured max age</td></tr>
+              <tr><td><strong>Orphaned multipart</strong></td><td><code>.myfsio.sys/multipart/</code></td><td>Older than configured max age</td></tr>
+              <tr><td><strong>Stale lock files</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/locks/</code></td><td>Older than configured max age</td></tr>
+              <tr><td><strong>Orphaned metadata</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/meta/</code></td><td>Object file no longer exists</td></tr>
+              <tr><td><strong>Orphaned versions</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/versions/</code></td><td>Main object no longer exists</td></tr>
+              <tr><td><strong>Empty directories</strong></td><td>Various internal dirs</td><td>Directory is empty after cleanup</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="h6 text-uppercase text-muted mt-4">Admin API</h3>
+        <div class="table-responsive mb-3">
+          <table class="table table-sm table-bordered small">
+            <thead class="table-light">
+              <tr>
+                <th>Method</th>
+                <th>Route</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>GET</code></td><td><code>/admin/gc/status</code></td><td>Get GC status and configuration</td></tr>
+              <tr><td><code>POST</code></td><td><code>/admin/gc/run</code></td><td>Trigger manual GC run</td></tr>
+              <tr><td><code>GET</code></td><td><code>/admin/gc/history</code></td><td>Get execution history</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+<pre class="mb-3"><code class="language-bash"># Trigger a dry run (preview what would be cleaned)
+curl -X POST "{{ api_base }}/admin/gc/run" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}'
+
+# Trigger actual GC
+curl -X POST "{{ api_base }}/admin/gc/run" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Check status
+curl "{{ api_base }}/admin/gc/status" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# View history
+curl "{{ api_base }}/admin/gc/history?limit=10" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+
+        <div class="alert alert-light border mb-0">
+          <div class="d-flex gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-info-circle text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+            </svg>
+            <div>
+              <strong>Dry Run:</strong> Use <code>GC_DRY_RUN=true</code> or pass <code>{"dry_run": true}</code> to the API to preview what would be deleted without actually removing anything. Check the logs or API response for details.
+            </div>
+          </div>
+        </div>
+      </div>
+    </article>
+    <article id="metrics" class="card shadow-sm docs-section">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="docs-section-kicker">15</span>
           <h2 class="h4 mb-0">Metrics History</h2>
         </div>
         <p class="text-muted">Track CPU, memory, and disk usage over time with optional metrics history. Disabled by default to minimize overhead.</p>
@@ -1714,7 +1818,7 @@ curl -X PUT "{{ api_base | replace('/api', '/ui') }}/metrics/settings" \
     <article id="operation-metrics" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">15</span>
+          <span class="docs-section-kicker">16</span>
           <h2 class="h4 mb-0">Operation Metrics</h2>
         </div>
         <p class="text-muted">Track API request statistics including request counts, latency, error rates, and bandwidth usage. Provides real-time visibility into API operations.</p>
@@ -1821,7 +1925,7 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
     <article id="troubleshooting" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">16</span>
+          <span class="docs-section-kicker">17</span>
           <h2 class="h4 mb-0">Troubleshooting &amp; tips</h2>
         </div>
         <div class="table-responsive">
@@ -1872,7 +1976,7 @@ curl "{{ api_base | replace('/api', '/ui') }}/metrics/operations/history?hours=6
     <article id="health-check" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">17</span>
+          <span class="docs-section-kicker">18</span>
           <h2 class="h4 mb-0">Health Check Endpoint</h2>
         </div>
         <p class="text-muted">The API exposes a health check endpoint for monitoring and load balancer integration.</p>
@@ -1894,7 +1998,7 @@ curl {{ api_base }}/myfsio/health
     <article id="object-lock" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">18</span>
+          <span class="docs-section-kicker">19</span>
           <h2 class="h4 mb-0">Object Lock &amp; Retention</h2>
         </div>
         <p class="text-muted">Object Lock prevents objects from being deleted or overwritten for a specified retention period.</p>
@@ -1954,7 +2058,7 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
     <article id="access-logging" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">19</span>
+          <span class="docs-section-kicker">20</span>
           <h2 class="h4 mb-0">Access Logging</h2>
         </div>
         <p class="text-muted">Enable S3-style access logging to track all requests to your buckets for audit and analysis.</p>
@@ -1981,7 +2085,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?logging" \
     <article id="notifications" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">20</span>
+          <span class="docs-section-kicker">21</span>
           <h2 class="h4 mb-0">Notifications &amp; Webhooks</h2>
         </div>
         <p class="text-muted">Configure event notifications to trigger webhooks when objects are created or deleted.</p>
@@ -2044,7 +2148,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
     <article id="select-content" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">21</span>
+          <span class="docs-section-kicker">22</span>
           <h2 class="h4 mb-0">SelectObjectContent (SQL)</h2>
         </div>
         <p class="text-muted">Query CSV, JSON, or Parquet files directly using SQL without downloading the entire object.</p>
@@ -2089,7 +2193,7 @@ curl -X POST "{{ api_base }}/&lt;bucket&gt;/data.csv?select" \
     <article id="advanced-ops" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">22</span>
+          <span class="docs-section-kicker">23</span>
           <h2 class="h4 mb-0">Advanced S3 Operations</h2>
         </div>
         <p class="text-muted">Copy, move, and partially download objects using advanced S3 operations.</p>
@@ -2163,7 +2267,7 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
     <article id="acls" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">23</span>
+          <span class="docs-section-kicker">24</span>
           <h2 class="h4 mb-0">Access Control Lists (ACLs)</h2>
         </div>
         <p class="text-muted">ACLs provide legacy-style permission management for buckets and objects.</p>
@@ -2217,7 +2321,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
     <article id="tagging" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">24</span>
+          <span class="docs-section-kicker">25</span>
           <h2 class="h4 mb-0">Object &amp; Bucket Tagging</h2>
         </div>
         <p class="text-muted">Add metadata tags to buckets and objects for organization, cost allocation, or lifecycle rule filtering.</p>
@@ -2276,7 +2380,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
     <article id="website-hosting" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">25</span>
+          <span class="docs-section-kicker">26</span>
           <h2 class="h4 mb-0">Static Website Hosting</h2>
         </div>
         <p class="text-muted">Host static websites directly from S3 buckets with custom index and error pages, served via custom domain mapping.</p>
@@ -2369,7 +2473,7 @@ server {
     <article id="cors-config" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">26</span>
+          <span class="docs-section-kicker">27</span>
           <h2 class="h4 mb-0">CORS Configuration</h2>
         </div>
         <p class="text-muted">Configure per-bucket Cross-Origin Resource Sharing rules to control which origins can access your bucket from a browser.</p>
@@ -2436,7 +2540,7 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?cors" \
     <article id="post-object" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">27</span>
+          <span class="docs-section-kicker">28</span>
           <h2 class="h4 mb-0">PostObject (HTML Form Upload)</h2>
         </div>
         <p class="text-muted">Upload objects directly from an HTML form using browser-based POST uploads with policy-based authorization.</p>
@@ -2478,7 +2582,7 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?cors" \
     <article id="list-objects-v2" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">28</span>
+          <span class="docs-section-kicker">29</span>
           <h2 class="h4 mb-0">List Objects API v2</h2>
         </div>
         <p class="text-muted">Use the v2 list API for improved pagination with continuation tokens instead of markers.</p>
@@ -2522,7 +2626,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;start-after=photos/2025/" \
     <article id="upgrading" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">29</span>
+          <span class="docs-section-kicker">30</span>
           <h2 class="h4 mb-0">Upgrading &amp; Updates</h2>
         </div>
         <p class="text-muted">How to safely update MyFSIO to a new version.</p>
@@ -2555,7 +2659,7 @@ cp -r logs/ logs-backup/</code></pre>
     <article id="api-matrix" class="card shadow-sm docs-section">
       <div class="card-body">
         <div class="d-flex align-items-center gap-2 mb-3">
-          <span class="docs-section-kicker">30</span>
+          <span class="docs-section-kicker">31</span>
           <h2 class="h4 mb-0">Full API Reference</h2>
         </div>
         <p class="text-muted">Complete list of all S3-compatible, admin, and KMS endpoints.</p>
@@ -2653,6 +2757,7 @@ POST   /kms/generate-random             # Generate random bytes</code></pre>
           <li><a href="#quotas">Bucket Quotas</a></li>
           <li><a href="#encryption">Encryption</a></li>
           <li><a href="#lifecycle">Lifecycle Rules</a></li>
+          <li><a href="#garbage-collection">Garbage Collection</a></li>
           <li><a href="#metrics">Metrics History</a></li>
           <li><a href="#operation-metrics">Operation Metrics</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>

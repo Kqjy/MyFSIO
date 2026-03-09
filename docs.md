@@ -252,6 +252,60 @@ Once enabled, configure lifecycle rules via:
 </LifecycleConfiguration>
 ```
 
+## Garbage Collection
+
+The garbage collector (GC) automatically cleans up orphaned data that accumulates over time: stale temporary files from failed uploads, abandoned multipart uploads, stale lock files, orphaned metadata entries, orphaned version files, and empty directories.
+
+### Enabling GC
+
+By default, GC is disabled. Enable it by setting:
+
+```bash
+GC_ENABLED=true python run.py
+```
+
+Or in your `myfsio.env` file:
+```
+GC_ENABLED=true
+GC_INTERVAL_HOURS=6          # Run every 6 hours (default)
+GC_TEMP_FILE_MAX_AGE_HOURS=24  # Delete temp files older than 24h
+GC_MULTIPART_MAX_AGE_DAYS=7    # Delete orphaned multipart uploads older than 7 days
+GC_LOCK_FILE_MAX_AGE_HOURS=1   # Delete stale lock files older than 1h
+GC_DRY_RUN=false               # Set to true to log without deleting
+```
+
+### What Gets Cleaned
+
+| Type | Location | Condition |
+|------|----------|-----------|
+| **Temp files** | `.myfsio.sys/tmp/` | Older than `GC_TEMP_FILE_MAX_AGE_HOURS` |
+| **Orphaned multipart uploads** | `.myfsio.sys/multipart/` and `<bucket>/.multipart/` | Older than `GC_MULTIPART_MAX_AGE_DAYS` |
+| **Stale lock files** | `.myfsio.sys/buckets/<bucket>/locks/` | Older than `GC_LOCK_FILE_MAX_AGE_HOURS` |
+| **Orphaned metadata** | `.myfsio.sys/buckets/<bucket>/meta/` and `<bucket>/.meta/` | Object file no longer exists |
+| **Orphaned versions** | `.myfsio.sys/buckets/<bucket>/versions/` and `<bucket>/.versions/` | Main object no longer exists |
+| **Empty directories** | Various internal directories | Directory is empty after cleanup |
+
+### Admin API
+
+All GC endpoints require admin (`iam:*`) permissions.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/admin/gc/status` | Get GC status and configuration |
+| `POST` | `/admin/gc/run` | Trigger a manual GC run (body: `{"dry_run": true}` for preview) |
+| `GET` | `/admin/gc/history` | Get GC execution history (query: `?limit=50&offset=0`) |
+
+### Dry Run Mode
+
+Set `GC_DRY_RUN=true` to log what would be deleted without actually removing anything. You can also trigger a one-time dry run via the admin API:
+
+```bash
+curl -X POST "http://localhost:5000/admin/gc/run" \
+  -H "X-Access-Key: <key>" -H "X-Secret-Key: <secret>" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}'
+```
+
 ### Performance Tuning
 
 | Variable | Default | Notes |
