@@ -11,9 +11,11 @@ window.IAMManagement = (function() {
   var editUserModal = null;
   var deleteUserModal = null;
   var rotateSecretModal = null;
+  var expiryModal = null;
   var currentRotateKey = null;
   var currentEditKey = null;
   var currentDeleteKey = null;
+  var currentExpiryKey = null;
 
   var ALL_S3_ACTIONS = ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'lifecycle', 'cors'];
 
@@ -65,6 +67,7 @@ window.IAMManagement = (function() {
     setupEditUserModal();
     setupDeleteUserModal();
     setupRotateSecretModal();
+    setupExpiryModal();
     setupFormHandlers();
     setupSearch();
     setupCopyAccessKeyButtons();
@@ -75,11 +78,13 @@ window.IAMManagement = (function() {
     var editModalEl = document.getElementById('editUserModal');
     var deleteModalEl = document.getElementById('deleteUserModal');
     var rotateModalEl = document.getElementById('rotateSecretModal');
+    var expiryModalEl = document.getElementById('expiryModal');
 
     if (policyModalEl) policyModal = new bootstrap.Modal(policyModalEl);
     if (editModalEl) editUserModal = new bootstrap.Modal(editModalEl);
     if (deleteModalEl) deleteUserModal = new bootstrap.Modal(deleteModalEl);
     if (rotateModalEl) rotateSecretModal = new bootstrap.Modal(rotateModalEl);
+    if (expiryModalEl) expiryModal = new bootstrap.Modal(expiryModalEl);
   }
 
   function setupJsonAutoIndent() {
@@ -96,6 +101,15 @@ window.IAMManagement = (function() {
         await window.UICore.copyToClipboard(target.innerText, button, 'Copy JSON');
       });
     });
+
+    var accessKeyCopyButton = document.querySelector('[data-access-key-copy]');
+    if (accessKeyCopyButton) {
+      accessKeyCopyButton.addEventListener('click', async function() {
+        var accessKeyInput = document.getElementById('disclosedAccessKeyValue');
+        if (!accessKeyInput) return;
+        await window.UICore.copyToClipboard(accessKeyInput.value, accessKeyCopyButton, 'Copy');
+      });
+    }
 
     var secretCopyButton = document.querySelector('[data-secret-copy]');
     if (secretCopyButton) {
@@ -143,6 +157,22 @@ window.IAMManagement = (function() {
     });
   }
 
+  function generateSecureHex(byteCount) {
+    var arr = new Uint8Array(byteCount);
+    crypto.getRandomValues(arr);
+    return Array.from(arr).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
+
+  function generateSecureBase64(byteCount) {
+    var arr = new Uint8Array(byteCount);
+    crypto.getRandomValues(arr);
+    var binary = '';
+    for (var i = 0; i < arr.length; i++) {
+      binary += String.fromCharCode(arr[i]);
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
   function setupCreateUserModal() {
     var createUserPoliciesEl = document.getElementById('createUserPolicies');
 
@@ -151,6 +181,22 @@ window.IAMManagement = (function() {
         applyPolicyTemplate(button.dataset.createPolicyTemplate, createUserPoliciesEl);
       });
     });
+
+    var genAccessKeyBtn = document.getElementById('generateAccessKeyBtn');
+    if (genAccessKeyBtn) {
+      genAccessKeyBtn.addEventListener('click', function() {
+        var input = document.getElementById('createUserAccessKey');
+        if (input) input.value = generateSecureHex(8);
+      });
+    }
+
+    var genSecretKeyBtn = document.getElementById('generateSecretKeyBtn');
+    if (genSecretKeyBtn) {
+      genSecretKeyBtn.addEventListener('click', function() {
+        var input = document.getElementById('createUserSecretKey');
+        if (input) input.value = generateSecureBase64(24);
+      });
+    }
   }
 
   function setupEditUserModal() {
@@ -271,6 +317,77 @@ window.IAMManagement = (function() {
     }
   }
 
+  function openExpiryModal(key, expiresAt) {
+    currentExpiryKey = key;
+    var label = document.getElementById('expiryUserLabel');
+    var input = document.getElementById('expiryDateInput');
+    var form = document.getElementById('expiryForm');
+    if (label) label.textContent = key;
+    if (expiresAt) {
+      try {
+        var dt = new Date(expiresAt);
+        var local = new Date(dt.getTime() - dt.getTimezoneOffset() * 60000);
+        if (input) input.value = local.toISOString().slice(0, 16);
+      } catch(e) {
+        if (input) input.value = '';
+      }
+    } else {
+      if (input) input.value = '';
+    }
+    if (form) form.action = endpoints.updateExpiry.replace('ACCESS_KEY', key);
+    var modalEl = document.getElementById('expiryModal');
+    if (modalEl) {
+      var modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+      modal.show();
+    }
+  }
+
+  function setupExpiryModal() {
+    document.querySelectorAll('[data-expiry-user]').forEach(function(btn) {
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        openExpiryModal(btn.dataset.expiryUser, btn.dataset.expiresAt || '');
+      });
+    });
+
+    document.querySelectorAll('[data-expiry-preset]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var preset = btn.dataset.expiryPreset;
+        var input = document.getElementById('expiryDateInput');
+        if (!input) return;
+        if (preset === 'clear') {
+          input.value = '';
+          return;
+        }
+        var now = new Date();
+        var ms = 0;
+        if (preset === '1h') ms = 3600000;
+        else if (preset === '24h') ms = 86400000;
+        else if (preset === '7d') ms = 7 * 86400000;
+        else if (preset === '30d') ms = 30 * 86400000;
+        else if (preset === '90d') ms = 90 * 86400000;
+        var future = new Date(now.getTime() + ms);
+        var local = new Date(future.getTime() - future.getTimezoneOffset() * 60000);
+        input.value = local.toISOString().slice(0, 16);
+      });
+    });
+
+    var expiryForm = document.getElementById('expiryForm');
+    if (expiryForm) {
+      expiryForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        window.UICore.submitFormAjax(expiryForm, {
+          successMessage: 'Expiry updated',
+          onSuccess: function() {
+            var modalEl = document.getElementById('expiryModal');
+            if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+            window.location.reload();
+          }
+        });
+      });
+    }
+  }
+
   function createUserCardHtml(accessKey, displayName, policies) {
     var admin = isAdminUser(policies);
     var cardClass = 'card h-100 iam-user-card' + (admin ? ' iam-admin-card' : '');
@@ -324,6 +441,8 @@ window.IAMManagement = (function() {
       '<ul class="dropdown-menu dropdown-menu-end">' +
       '<li><button class="dropdown-item" type="button" data-edit-user="' + esc(accessKey) + '" data-display-name="' + esc(displayName) + '">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/></svg>Edit Name</button></li>' +
+      '<li><button class="dropdown-item" type="button" data-expiry-user="' + esc(accessKey) + '" data-expires-at="">' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>Set Expiry</button></li>' +
       '<li><button class="dropdown-item" type="button" data-rotate-user="' + esc(accessKey) + '">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/><path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/></svg>Rotate Secret</button></li>' +
       '<li><hr class="dropdown-divider"></li>' +
@@ -379,6 +498,14 @@ window.IAMManagement = (function() {
       });
     }
 
+    var expiryBtn = cardElement.querySelector('[data-expiry-user]');
+    if (expiryBtn) {
+      expiryBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        openExpiryModal(accessKey, '');
+      });
+    }
+
     var policyBtn = cardElement.querySelector('[data-policy-editor]');
     if (policyBtn) {
       policyBtn.addEventListener('click', function() {
@@ -428,9 +555,14 @@ window.IAMManagement = (function() {
                 '</svg>' +
                 '<div class="flex-grow-1">' +
                 '<div class="fw-semibold">New user created: <code>' + window.UICore.escapeHtml(data.access_key) + '</code></div>' +
-                '<p class="mb-2 small">This secret is only shown once. Copy it now and store it securely.</p>' +
+                '<p class="mb-2 small">These credentials are only shown once. Copy them now and store them securely.</p>' +
                 '</div>' +
                 '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>' +
+                '</div>' +
+                '<div class="input-group mb-2">' +
+                '<span class="input-group-text"><strong>Access key</strong></span>' +
+                '<input class="form-control font-monospace" type="text" value="' + window.UICore.escapeHtml(data.access_key) + '" readonly />' +
+                '<button class="btn btn-outline-primary" type="button" id="copyNewUserAccessKey">Copy</button>' +
                 '</div>' +
                 '<div class="input-group">' +
                 '<span class="input-group-text"><strong>Secret key</strong></span>' +
@@ -440,6 +572,9 @@ window.IAMManagement = (function() {
               var container = document.querySelector('.page-header');
               if (container) {
                 container.insertAdjacentHTML('afterend', alertHtml);
+                document.getElementById('copyNewUserAccessKey').addEventListener('click', async function() {
+                  await window.UICore.copyToClipboard(data.access_key, this, 'Copy');
+                });
                 document.getElementById('copyNewUserSecret').addEventListener('click', async function() {
                   await window.UICore.copyToClipboard(data.secret_key, this, 'Copy');
                 });

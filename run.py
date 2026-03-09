@@ -23,6 +23,7 @@ from typing import Optional
 
 from app import create_api_app, create_ui_app
 from app.config import AppConfig
+from app.iam import IamService, IamError, ALLOWED_ACTIONS, _derive_fernet_key
 
 
 def _server_host() -> str:
@@ -87,20 +88,120 @@ def serve_ui(port: int, prod: bool = False, config: Optional[AppConfig] = None) 
         app.run(host=_server_host(), port=port, debug=debug)
 
 
+def reset_credentials() -> None:
+    import json
+    import secrets
+    from cryptography.fernet import Fernet
+
+    config = AppConfig.from_env()
+    iam_path = config.iam_config_path
+    encryption_key = config.secret_key
+
+    access_key = os.environ.get("ADMIN_ACCESS_KEY", "").strip() or secrets.token_hex(12)
+    secret_key = os.environ.get("ADMIN_SECRET_KEY", "").strip() or secrets.token_urlsafe(32)
+    custom_keys = bool(os.environ.get("ADMIN_ACCESS_KEY", "").strip())
+
+    fernet = Fernet(_derive_fernet_key(encryption_key)) if encryption_key else None
+
+    raw_config = None
+    if iam_path.exists():
+        try:
+            raw_bytes = iam_path.read_bytes()
+            from app.iam import _IAM_ENCRYPTED_PREFIX
+            if raw_bytes.startswith(_IAM_ENCRYPTED_PREFIX):
+                if fernet:
+                    try:
+                        content = fernet.decrypt(raw_bytes[len(_IAM_ENCRYPTED_PREFIX):]).decode("utf-8")
+                        raw_config = json.loads(content)
+                    except Exception:
+                        print("WARNING: Could not decrypt existing IAM config. Creating fresh config.")
+                else:
+                    print("WARNING: IAM config is encrypted but no SECRET_KEY available. Creating fresh config.")
+            else:
+                try:
+                    raw_config = json.loads(raw_bytes.decode("utf-8"))
+                except json.JSONDecodeError:
+                    print("WARNING: Existing IAM config is corrupted. Creating fresh config.")
+        except OSError:
+            pass
+
+    if raw_config and raw_config.get("users"):
+        admin_user = None
+        for user in raw_config["users"]:
+            policies = user.get("policies", [])
+            for p in policies:
+                actions = p.get("actions", [])
+                if "iam:*" in actions or "*" in actions:
+                    admin_user = user
+                    break
+            if admin_user:
+                break
+        if not admin_user:
+            admin_user = raw_config["users"][0]
+
+        admin_user["access_key"] = access_key
+        admin_user["secret_key"] = secret_key
+    else:
+        raw_config = {
+            "users": [
+                {
+                    "access_key": access_key,
+                    "secret_key": secret_key,
+                    "display_name": "Local Admin",
+                    "policies": [
+                        {"bucket": "*", "actions": list(ALLOWED_ACTIONS)}
+                    ],
+                }
+            ]
+        }
+
+    json_text = json.dumps(raw_config, indent=2)
+    iam_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = iam_path.with_suffix(".json.tmp")
+    if fernet:
+        from app.iam import _IAM_ENCRYPTED_PREFIX
+        encrypted = fernet.encrypt(json_text.encode("utf-8"))
+        temp_path.write_bytes(_IAM_ENCRYPTED_PREFIX + encrypted)
+    else:
+        temp_path.write_text(json_text, encoding="utf-8")
+    temp_path.replace(iam_path)
+
+    print(f"\n{'='*60}")
+    print("MYFSIO - ADMIN CREDENTIALS RESET")
+    print(f"{'='*60}")
+    if custom_keys:
+        print(f"Access Key: {access_key} (from ADMIN_ACCESS_KEY)")
+        print(f"Secret Key: {'(from ADMIN_SECRET_KEY)' if os.environ.get('ADMIN_SECRET_KEY', '').strip() else secret_key}")
+    else:
+        print(f"Access Key: {access_key}")
+        print(f"Secret Key: {secret_key}")
+    print(f"{'='*60}")
+    if fernet:
+        print("IAM config saved (encrypted).")
+    else:
+        print(f"IAM config saved to: {iam_path}")
+    print(f"{'='*60}\n")
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     if _is_frozen():
         multiprocessing.set_start_method("spawn", force=True)
 
     parser = argparse.ArgumentParser(description="Run the S3 clone services.")
-    parser.add_argument("--mode", choices=["api", "ui", "both"], default="both")
+    parser.add_argument("--mode", choices=["api", "ui", "both", "reset-cred"], default="both")
     parser.add_argument("--api-port", type=int, default=5000)
     parser.add_argument("--ui-port", type=int, default=5100)
     parser.add_argument("--prod", action="store_true", help="Run in production mode using Waitress")
     parser.add_argument("--dev", action="store_true", help="Force development mode (Flask dev server)")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration and exit")
     parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
+    parser.add_argument("--reset-cred", action="store_true", help="Reset admin credentials and exit")
     args = parser.parse_args()
+
+    if args.reset_cred or args.mode == "reset-cred":
+        reset_credentials()
+        sys.exit(0)
 
     if args.check_config or args.show_config:
         config = AppConfig.from_env()

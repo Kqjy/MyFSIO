@@ -1754,6 +1754,10 @@ def iam_dashboard():
     users = iam_service.list_users() if not locked else []
     config_summary = iam_service.config_summary()
     config_document = json.dumps(iam_service.export_config(mask_secrets=True), indent=2)
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    _now = _dt.now(_tz.utc)
+    now_iso = _now.isoformat()
+    soon_iso = (_now + _td(days=7)).isoformat()
     return render_template(
         "iam.html",
         users=users,
@@ -1763,6 +1767,8 @@ def iam_dashboard():
         config_summary=config_summary,
         config_document=config_document,
         disclosed_secret=disclosed_secret,
+        now_iso=now_iso,
+        soon_iso=soon_iso,
     )
 
 
@@ -1782,6 +1788,8 @@ def create_iam_user():
             return jsonify({"error": "Display name must be 64 characters or fewer"}), 400
         flash("Display name must be 64 characters or fewer", "danger")
         return redirect(url_for("ui.iam_dashboard"))
+    custom_access_key = request.form.get("access_key", "").strip() or None
+    custom_secret_key = request.form.get("secret_key", "").strip() or None
     policies_text = request.form.get("policies", "").strip()
     policies = None
     if policies_text:
@@ -1792,8 +1800,21 @@ def create_iam_user():
                 return jsonify({"error": f"Invalid JSON: {exc}"}), 400
             flash(f"Invalid JSON: {exc}", "danger")
             return redirect(url_for("ui.iam_dashboard"))
+    expires_at = request.form.get("expires_at", "").strip() or None
+    if expires_at:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            exp_dt = _dt.fromisoformat(expires_at)
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=_tz.utc)
+            expires_at = exp_dt.isoformat()
+        except (ValueError, TypeError):
+            if _wants_json():
+                return jsonify({"error": "Invalid expiry date format"}), 400
+            flash("Invalid expiry date format", "danger")
+            return redirect(url_for("ui.iam_dashboard"))
     try:
-        created = _iam().create_user(display_name=display_name, policies=policies)
+        created = _iam().create_user(display_name=display_name, policies=policies, access_key=custom_access_key, secret_key=custom_secret_key, expires_at=expires_at)
     except IamError as exc:
         if _wants_json():
             return jsonify({"error": str(exc)}), 400
@@ -1959,6 +1980,45 @@ def update_iam_policies(access_key: str):
         if _wants_json():
             return jsonify({"success": True, "message": f"Updated policies for {access_key}", "policies": policies})
         flash(f"Updated policies for {access_key}", "success")
+    except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 400
+        flash(str(exc), "danger")
+
+    return redirect(url_for("ui.iam_dashboard"))
+
+
+@ui_bp.post("/iam/users/<access_key>/expiry")
+def update_iam_expiry(access_key: str):
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:update_policy")
+    except IamError as exc:
+        if _wants_json():
+            return jsonify({"error": str(exc)}), 403
+        flash(str(exc), "danger")
+        return redirect(url_for("ui.iam_dashboard"))
+
+    expires_at = request.form.get("expires_at", "").strip() or None
+    if expires_at:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            exp_dt = _dt.fromisoformat(expires_at)
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=_tz.utc)
+            expires_at = exp_dt.isoformat()
+        except (ValueError, TypeError):
+            if _wants_json():
+                return jsonify({"error": "Invalid expiry date format"}), 400
+            flash("Invalid expiry date format", "danger")
+            return redirect(url_for("ui.iam_dashboard"))
+
+    try:
+        _iam().update_user_expiry(access_key, expires_at)
+        if _wants_json():
+            return jsonify({"success": True, "message": f"Updated expiry for {access_key}", "expires_at": expires_at})
+        label = expires_at if expires_at else "never"
+        flash(f"Expiry for {access_key} set to {label}", "success")
     except IamError as exc:
         if _wants_json():
             return jsonify({"error": str(exc)}), 400

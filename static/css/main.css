@@ -1154,20 +1154,8 @@ html.sidebar-will-collapse .sidebar-user {
 	position: relative;
 	border: 1px solid var(--myfsio-card-border) !important;
 	border-radius: 1rem !important;
-	overflow: hidden;
+	overflow: visible;
 	transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.iam-user-card::before {
-	content: '';
-	position: absolute;
-	top: 0;
-	left: 0;
-	right: 0;
-	height: 4px;
-	background: linear-gradient(90deg, #3b82f6, #8b5cf6);
-	opacity: 0;
-	transition: opacity 0.2s ease;
 }
 
 .iam-user-card:hover {
@@ -1176,17 +1164,10 @@ html.sidebar-will-collapse .sidebar-user {
 	border-color: var(--myfsio-accent) !important;
 }
 
-.iam-user-card:hover::before {
-	opacity: 1;
-}
-
 [data-theme='dark'] .iam-user-card:hover {
 	box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.4), 0 4px 8px -4px rgba(0, 0, 0, 0.3);
 }
 
-.iam-admin-card::before {
-	background: linear-gradient(90deg, #f59e0b, #ef4444);
-}
 
 .iam-role-badge {
 	display: inline-flex;
