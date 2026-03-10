@@ -702,7 +702,7 @@
       flushPendingStreamObjects();
       hasMoreObjects = false;
       totalObjectCount = loadedObjectCount;
-      if (!currentPrefix) bucketTotalObjects = totalObjectCount;
+      if (!currentPrefix && !useDelimiterMode) bucketTotalObjects = totalObjectCount;
       updateObjectCountBadge();
 
       if (objectsLoadingRow && objectsLoadingRow.parentNode) {
@@ -767,7 +767,7 @@
       }
 
       totalObjectCount = data.total_count || 0;
-      if (!append && !currentPrefix) bucketTotalObjects = totalObjectCount;
+      if (!append && !currentPrefix && !useDelimiterMode) bucketTotalObjects = totalObjectCount;
       nextContinuationToken = data.next_continuation_token;
 
       if (!append && objectsLoadingRow) {

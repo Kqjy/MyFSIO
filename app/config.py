@@ -150,6 +150,12 @@ class AppConfig:
     allowed_redirect_hosts: list[str]
     allow_internal_endpoints: bool
     website_hosting_enabled: bool
+    gc_enabled: bool
+    gc_interval_hours: float
+    gc_temp_file_max_age_hours: float
+    gc_multipart_max_age_days: int
+    gc_lock_file_max_age_hours: float
+    gc_dry_run: bool
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -319,6 +325,12 @@ class AppConfig:
         allowed_redirect_hosts = [h.strip() for h in str(allowed_redirect_hosts_raw).split(",") if h.strip()]
         allow_internal_endpoints = str(_get("ALLOW_INTERNAL_ENDPOINTS", "0")).lower() in {"1", "true", "yes", "on"}
         website_hosting_enabled = str(_get("WEBSITE_HOSTING_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        gc_enabled = str(_get("GC_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        gc_interval_hours = float(_get("GC_INTERVAL_HOURS", 6.0))
+        gc_temp_file_max_age_hours = float(_get("GC_TEMP_FILE_MAX_AGE_HOURS", 24.0))
+        gc_multipart_max_age_days = int(_get("GC_MULTIPART_MAX_AGE_DAYS", 7))
+        gc_lock_file_max_age_hours = float(_get("GC_LOCK_FILE_MAX_AGE_HOURS", 1.0))
+        gc_dry_run = str(_get("GC_DRY_RUN", "0")).lower() in {"1", "true", "yes", "on"}
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -406,7 +418,13 @@ class AppConfig:
                    num_trusted_proxies=num_trusted_proxies,
                    allowed_redirect_hosts=allowed_redirect_hosts,
                    allow_internal_endpoints=allow_internal_endpoints,
-                   website_hosting_enabled=website_hosting_enabled)
+                   website_hosting_enabled=website_hosting_enabled,
+                   gc_enabled=gc_enabled,
+                   gc_interval_hours=gc_interval_hours,
+                   gc_temp_file_max_age_hours=gc_temp_file_max_age_hours,
+                   gc_multipart_max_age_days=gc_multipart_max_age_days,
+                   gc_lock_file_max_age_hours=gc_lock_file_max_age_hours,
+                   gc_dry_run=gc_dry_run)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -617,4 +635,10 @@ class AppConfig:
             "ALLOWED_REDIRECT_HOSTS": self.allowed_redirect_hosts,
             "ALLOW_INTERNAL_ENDPOINTS": self.allow_internal_endpoints,
             "WEBSITE_HOSTING_ENABLED": self.website_hosting_enabled,
+            "GC_ENABLED": self.gc_enabled,
+            "GC_INTERVAL_HOURS": self.gc_interval_hours,
+            "GC_TEMP_FILE_MAX_AGE_HOURS": self.gc_temp_file_max_age_hours,
+            "GC_MULTIPART_MAX_AGE_DAYS": self.gc_multipart_max_age_days,
+            "GC_LOCK_FILE_MAX_AGE_HOURS": self.gc_lock_file_max_age_hours,
+            "GC_DRY_RUN": self.gc_dry_run,
         }

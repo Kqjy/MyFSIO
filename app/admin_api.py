@@ -14,6 +14,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 
 from .connections import ConnectionStore
 from .extensions import limiter
+from .gc import GarbageCollector
 from .iam import IamError, Principal
 from .replication import ReplicationManager
 from .site_registry import PeerSite, SiteInfo, SiteRegistry
@@ -776,3 +777,55 @@ def delete_website_domain(domain: str):
         return _json_error("NotFound", f"No mapping found for domain '{domain}'", 404)
     logger.info("Website domain mapping deleted: %s", domain)
     return Response(status=204)
+
+
+def _gc() -> Optional[GarbageCollector]:
+    return current_app.extensions.get("gc")
+
+
+@admin_api_bp.route("/gc/status", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def gc_status():
+    principal, error = _require_admin()
+    if error:
+        return error
+    gc = _gc()
+    if not gc:
+        return jsonify({"enabled": False, "message": "GC is not enabled. Set GC_ENABLED=true to enable."})
+    return jsonify(gc.get_status())
+
+
+@admin_api_bp.route("/gc/run", methods=["POST"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def gc_run_now():
+    principal, error = _require_admin()
+    if error:
+        return error
+    gc = _gc()
+    if not gc:
+        return _json_error("InvalidRequest", "GC is not enabled", 400)
+    payload = request.get_json(silent=True) or {}
+    original_dry_run = gc.dry_run
+    if "dry_run" in payload:
+        gc.dry_run = bool(payload["dry_run"])
+    try:
+        result = gc.run_now()
+    finally:
+        gc.dry_run = original_dry_run
+    logger.info("GC manual run by %s", principal.access_key)
+    return jsonify(result.to_dict())
+
+
+@admin_api_bp.route("/gc/history", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def gc_history():
+    principal, error = _require_admin()
+    if error:
+        return error
+    gc = _gc()
+    if not gc:
+        return jsonify({"executions": []})
+    limit = min(int(request.args.get("limit", 50)), 200)
+    offset = int(request.args.get("offset", 0))
+    records = gc.get_history(limit=limit, offset=offset)
+    return jsonify({"executions": records})

@@ -29,6 +29,7 @@ from .encryption import EncryptionManager
 from .extensions import limiter, csrf
 from .iam import IamService
 from .kms import KMSManager
+from .gc import GarbageCollector
 from .lifecycle import LifecycleManager
 from .notifications import NotificationService
 from .object_lock import ObjectLockService
@@ -221,6 +222,18 @@ def create_app(
         )
         lifecycle_manager.start()
 
+    gc_collector = None
+    if app.config.get("GC_ENABLED", False):
+        gc_collector = GarbageCollector(
+            storage_root=storage_root,
+            interval_hours=app.config.get("GC_INTERVAL_HOURS", 6.0),
+            temp_file_max_age_hours=app.config.get("GC_TEMP_FILE_MAX_AGE_HOURS", 24.0),
+            multipart_max_age_days=app.config.get("GC_MULTIPART_MAX_AGE_DAYS", 7),
+            lock_file_max_age_hours=app.config.get("GC_LOCK_FILE_MAX_AGE_HOURS", 1.0),
+            dry_run=app.config.get("GC_DRY_RUN", False),
+        )
+        gc_collector.start()
+
     app.extensions["object_storage"] = storage
     app.extensions["iam"] = iam
     app.extensions["bucket_policies"] = bucket_policies
@@ -232,6 +245,7 @@ def create_app(
     app.extensions["kms"] = kms_manager
     app.extensions["acl"] = acl_service
     app.extensions["lifecycle"] = lifecycle_manager
+    app.extensions["gc"] = gc_collector
     app.extensions["object_lock"] = object_lock_service
     app.extensions["notifications"] = notification_service
     app.extensions["access_logging"] = access_logging_service
