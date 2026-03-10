@@ -562,30 +562,57 @@ def _configure_logging(app: Flask) -> None:
             is_encrypted = "x-amz-server-side-encryption" in metadata
         except (StorageError, OSError):
             pass
-        if request.method == "HEAD":
-            response = Response(status=200)
-            if is_encrypted and hasattr(storage, "get_object_data"):
-                try:
-                    data, _ = storage.get_object_data(bucket, object_key)
-                    response.headers["Content-Length"] = len(data)
-                except (StorageError, OSError):
-                    return _website_error_response(500, "Internal Server Error")
-            else:
-                try:
-                    stat = obj_path.stat()
-                    response.headers["Content-Length"] = stat.st_size
-                except OSError:
-                    return _website_error_response(500, "Internal Server Error")
-            response.headers["Content-Type"] = content_type
-            return response
         if is_encrypted and hasattr(storage, "get_object_data"):
             try:
                 data, _ = storage.get_object_data(bucket, object_key)
-                response = Response(data, mimetype=content_type)
-                response.headers["Content-Length"] = len(data)
-                return response
+                file_size = len(data)
             except (StorageError, OSError):
                 return _website_error_response(500, "Internal Server Error")
+        else:
+            data = None
+            try:
+                stat = obj_path.stat()
+                file_size = stat.st_size
+            except OSError:
+                return _website_error_response(500, "Internal Server Error")
+        if request.method == "HEAD":
+            response = Response(status=200)
+            response.headers["Content-Length"] = file_size
+            response.headers["Content-Type"] = content_type
+            response.headers["Accept-Ranges"] = "bytes"
+            return response
+        from .s3_api import _parse_range_header
+        range_header = request.headers.get("Range")
+        if range_header:
+            ranges = _parse_range_header(range_header, file_size)
+            if ranges is None:
+                return Response(status=416, headers={"Content-Range": f"bytes */{file_size}"})
+            start, end = ranges[0]
+            length = end - start + 1
+            if data is not None:
+                partial_data = data[start:end + 1]
+                response = Response(partial_data, status=206, mimetype=content_type)
+            else:
+                def _stream_range(file_path, start_pos, length_to_read):
+                    with file_path.open("rb") as f:
+                        f.seek(start_pos)
+                        remaining = length_to_read
+                        while remaining > 0:
+                            chunk = f.read(min(262144, remaining))
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
+                            yield chunk
+                response = Response(_stream_range(obj_path, start, length), status=206, mimetype=content_type, direct_passthrough=True)
+            response.headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+            response.headers["Content-Length"] = length
+            response.headers["Accept-Ranges"] = "bytes"
+            return response
+        if data is not None:
+            response = Response(data, mimetype=content_type)
+            response.headers["Content-Length"] = file_size
+            response.headers["Accept-Ranges"] = "bytes"
+            return response
         def _stream(file_path):
             with file_path.open("rb") as f:
                 while True:
@@ -593,13 +620,10 @@ def _configure_logging(app: Flask) -> None:
                     if not chunk:
                         break
                     yield chunk
-        try:
-            stat = obj_path.stat()
-            response = Response(_stream(obj_path), mimetype=content_type, direct_passthrough=True)
-            response.headers["Content-Length"] = stat.st_size
-            return response
-        except OSError:
-            return _website_error_response(500, "Internal Server Error")
+        response = Response(_stream(obj_path), mimetype=content_type, direct_passthrough=True)
+        response.headers["Content-Length"] = file_size
+        response.headers["Accept-Ranges"] = "bytes"
+        return response
 
     def _serve_website_error(storage, bucket, error_doc_key, status_code):
         if not error_doc_key:
