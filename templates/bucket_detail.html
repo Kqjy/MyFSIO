@@ -292,19 +292,28 @@
                 Edit
               </button>
             </div>
-            <div id="preview-tags-list" class="d-flex flex-wrap gap-1"></div>
+            <div id="preview-tags-list" class="d-flex flex-wrap gap-2"></div>
             <div id="preview-tags-empty" class="text-muted small p-2 bg-body-tertiary rounded">No tags</div>
             <div id="preview-tags-editor" class="d-none mt-2">
-              <div id="preview-tags-inputs" class="mb-2"></div>
-              <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-outline-secondary flex-grow-1" type="button" id="addTagRow">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                    <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
-                  </svg>
-                  Add Tag
-                </button>
-                <button class="btn btn-sm btn-primary" type="button" id="saveTagsButton">Save</button>
-                <button class="btn btn-sm btn-outline-secondary" type="button" id="cancelTagsButton">Cancel</button>
+              <div class="tag-editor-card">
+                <div class="tag-editor-header">
+                  <span>Key</span>
+                  <span>Value</span>
+                  <span></span>
+                </div>
+                <div id="preview-tags-inputs"></div>
+                <div class="tag-editor-actions">
+                  <button class="btn btn-sm btn-outline-secondary" type="button" id="addTagRow">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+                    </svg>
+                    Add Tag
+                  </button>
+                  <div class="ms-auto d-flex gap-2">
+                    <button class="btn btn-sm btn-outline-secondary" type="button" id="cancelTagsButton">Cancel</button>
+                    <button class="btn btn-sm btn-primary" type="button" id="saveTagsButton">Save</button>
+                  </div>
+                </div>
               </div>
               <div class="form-text mt-1">Maximum 10 tags. Keys and values up to 256 characters.</div>
             </div>

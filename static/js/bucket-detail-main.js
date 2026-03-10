@@ -3948,6 +3948,7 @@
   const cancelTagsButton = document.getElementById('cancelTagsButton');
   let currentObjectTags = [];
   let isEditingTags = false;
+  let savedObjectTags = [];
 
   const loadObjectTags = async (row) => {
     if (!row || !previewTagsPanel) return;
@@ -3976,17 +3977,26 @@
       previewTagsEmpty.classList.remove('d-none');
     } else {
       previewTagsEmpty.classList.add('d-none');
-      previewTagsList.innerHTML = currentObjectTags.map(t => `<span class="badge bg-info-subtle text-info">${escapeHtml(t.Key)}=${escapeHtml(t.Value)}</span>`).join('');
+      previewTagsList.innerHTML = currentObjectTags.map(t => `<span class="tag-pill"><span class="tag-pill-key">${escapeHtml(t.Key)}</span><span class="tag-pill-value">${escapeHtml(t.Value)}</span></span>`).join('');
     }
+  };
+
+  const syncTagInputs = () => {
+    previewTagsInputs?.querySelectorAll('.tag-editor-row').forEach((row, idx) => {
+      if (idx < currentObjectTags.length) {
+        currentObjectTags[idx].Key = row.querySelector(`[data-tag-key="${idx}"]`)?.value || '';
+        currentObjectTags[idx].Value = row.querySelector(`[data-tag-value="${idx}"]`)?.value || '';
+      }
+    });
   };
 
   const renderTagEditor = () => {
     if (!previewTagsInputs) return;
     previewTagsInputs.innerHTML = currentObjectTags.map((t, idx) => `
-      <div class="input-group input-group-sm mb-1">
-        <input type="text" class="form-control" placeholder="Key" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
-        <input type="text" class="form-control" placeholder="Value" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
-        <button class="btn btn-outline-danger" type="button" onclick="removeTagRow(${idx})">
+      <div class="tag-editor-row">
+        <input type="text" class="form-control form-control-sm" placeholder="e.g. Environment" value="${escapeHtml(t.Key)}" data-tag-key="${idx}">
+        <input type="text" class="form-control form-control-sm" placeholder="e.g. Production" value="${escapeHtml(t.Value)}" data-tag-value="${idx}">
+        <button class="tag-editor-delete" type="button" onclick="removeTagRow(${idx})">
           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
         </button>
       </div>
@@ -3994,20 +4004,29 @@
   };
 
   window.removeTagRow = (idx) => {
+    syncTagInputs();
     currentObjectTags.splice(idx, 1);
     renderTagEditor();
   };
 
   editTagsButton?.addEventListener('click', () => {
+    savedObjectTags = currentObjectTags.map(t => ({ Key: t.Key, Value: t.Value }));
     isEditingTags = true;
     previewTagsList.classList.add('d-none');
     previewTagsEmpty.classList.add('d-none');
     previewTagsEditor?.classList.remove('d-none');
+    const card = previewTagsEditor?.querySelector('.tag-editor-card');
+    if (card) {
+      card.style.opacity = '0';
+      card.style.transition = 'opacity 0.2s ease';
+      requestAnimationFrame(() => { card.style.opacity = '1'; });
+    }
     renderTagEditor();
   });
 
   cancelTagsButton?.addEventListener('click', () => {
     isEditingTags = false;
+    currentObjectTags = savedObjectTags.map(t => ({ Key: t.Key, Value: t.Value }));
     previewTagsEditor?.classList.add('d-none');
     previewTagsList.classList.remove('d-none');
     renderObjectTags();
@@ -4018,6 +4037,7 @@
       showMessage({ title: 'Limit reached', body: 'Maximum 10 tags allowed per object.', variant: 'warning' });
       return;
     }
+    syncTagInputs();
     currentObjectTags.push({ Key: '', Value: '' });
     renderTagEditor();
   });
@@ -4026,7 +4046,7 @@
     if (!activeRow) return;
     const tagsUrl = activeRow.dataset.tagsUrl;
     if (!tagsUrl) return;
-    const inputs = previewTagsInputs?.querySelectorAll('.input-group');
+    const inputs = previewTagsInputs?.querySelectorAll('.tag-editor-row');
     const newTags = [];
     inputs?.forEach((group, idx) => {
       const key = group.querySelector(`[data-tag-key="${idx}"]`)?.value?.trim() || '';
