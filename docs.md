@@ -356,6 +356,69 @@ The application automatically trusts these headers to generate correct presigned
 | `ALLOWED_REDIRECT_HOSTS` | `""` | Comma-separated whitelist of safe redirect targets. Empty allows only same-host redirects. |
 | `ALLOW_INTERNAL_ENDPOINTS` | `false` | Allow connections to internal/private IPs for webhooks and replication targets. **Keep disabled in production unless needed.** |
 
+## Integrity Scanner
+
+The integrity scanner detects and optionally auto-repairs data inconsistencies: corrupted objects (ETag mismatch), orphaned files without metadata, phantom metadata without files, stale version archives, ETag cache drift, and unmigrated legacy `.meta.json` files.
+
+### Enabling Integrity Scanner
+
+By default, the integrity scanner is disabled. Enable it by setting:
+
+```bash
+INTEGRITY_ENABLED=true python run.py
+```
+
+Or in your `myfsio.env` file:
+```
+INTEGRITY_ENABLED=true
+INTEGRITY_INTERVAL_HOURS=24     # Run every 24 hours (default)
+INTEGRITY_BATCH_SIZE=1000       # Max objects to scan per cycle
+INTEGRITY_AUTO_HEAL=false       # Automatically repair detected issues
+INTEGRITY_DRY_RUN=false         # Set to true to log without healing
+```
+
+### What Gets Checked
+
+| Check | Detection | Heal Action |
+|-------|-----------|-------------|
+| **Corrupted objects** | File MD5 does not match stored `__etag__` | Update `__etag__` in index (disk data is authoritative) |
+| **Orphaned objects** | File exists on disk without metadata entry | Create index entry with computed MD5/size/mtime |
+| **Phantom metadata** | Index entry exists but file is missing from disk | Remove stale entry from `_index.json` |
+| **Stale versions** | `.json` manifest without `.bin` data or vice versa | Remove orphaned version file |
+| **ETag cache inconsistency** | `etag_index.json` entry differs from metadata `__etag__` | Delete `etag_index.json` (auto-rebuilt on next list) |
+| **Legacy metadata drift** | Legacy `.meta.json` differs from index or is unmigrated | Migrate to index and delete legacy file |
+
+### Admin API
+
+All integrity endpoints require admin (`iam:*`) permissions.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/admin/integrity/status` | Get scanner status and configuration |
+| `POST` | `/admin/integrity/run` | Trigger a manual scan (body: `{"dry_run": true, "auto_heal": true}`) |
+| `GET` | `/admin/integrity/history` | Get scan history (query: `?limit=50&offset=0`) |
+
+### Dry Run Mode
+
+Set `INTEGRITY_DRY_RUN=true` to log detected issues without making any changes. You can also trigger a one-time dry run via the admin API:
+
+```bash
+curl -X POST "http://localhost:5000/admin/integrity/run" \
+  -H "X-Access-Key: <key>" -H "X-Secret-Key: <secret>" \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true, "auto_heal": true}'
+```
+
+### Configuration Reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INTEGRITY_ENABLED` | `false` | Enable background integrity scanning |
+| `INTEGRITY_INTERVAL_HOURS` | `24` | Hours between scan cycles |
+| `INTEGRITY_BATCH_SIZE` | `1000` | Max objects to scan per cycle |
+| `INTEGRITY_AUTO_HEAL` | `false` | Automatically repair detected issues |
+| `INTEGRITY_DRY_RUN` | `false` | Log issues without healing |
+
 ## 4. Upgrading and Updates
 
 ### Version Checking

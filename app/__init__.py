@@ -30,6 +30,7 @@ from .extensions import limiter, csrf
 from .iam import IamService
 from .kms import KMSManager
 from .gc import GarbageCollector
+from .integrity import IntegrityChecker
 from .lifecycle import LifecycleManager
 from .notifications import NotificationService
 from .object_lock import ObjectLockService
@@ -234,6 +235,17 @@ def create_app(
         )
         gc_collector.start()
 
+    integrity_checker = None
+    if app.config.get("INTEGRITY_ENABLED", False):
+        integrity_checker = IntegrityChecker(
+            storage_root=storage_root,
+            interval_hours=app.config.get("INTEGRITY_INTERVAL_HOURS", 24.0),
+            batch_size=app.config.get("INTEGRITY_BATCH_SIZE", 1000),
+            auto_heal=app.config.get("INTEGRITY_AUTO_HEAL", False),
+            dry_run=app.config.get("INTEGRITY_DRY_RUN", False),
+        )
+        integrity_checker.start()
+
     app.extensions["object_storage"] = storage
     app.extensions["iam"] = iam
     app.extensions["bucket_policies"] = bucket_policies
@@ -246,6 +258,7 @@ def create_app(
     app.extensions["acl"] = acl_service
     app.extensions["lifecycle"] = lifecycle_manager
     app.extensions["gc"] = gc_collector
+    app.extensions["integrity"] = integrity_checker
     app.extensions["object_lock"] = object_lock_service
     app.extensions["notifications"] = notification_service
     app.extensions["access_logging"] = access_logging_service
