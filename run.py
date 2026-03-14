@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
+import signal
 import sys
 import warnings
 import multiprocessing
@@ -248,10 +250,21 @@ if __name__ == "__main__":
 
     if args.mode in {"api", "both"}:
         print(f"Starting API server on port {args.api_port}...")
-        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode, config), daemon=True)
+        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode, config))
         api_proc.start()
     else:
         api_proc = None
+
+    def _cleanup_api():
+        if api_proc and api_proc.is_alive():
+            api_proc.terminate()
+            api_proc.join(timeout=5)
+            if api_proc.is_alive():
+                api_proc.kill()
+
+    if api_proc:
+        atexit.register(_cleanup_api)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     if args.mode in {"ui", "both"}:
         print(f"Starting UI server on port {args.ui_port}...")
