@@ -128,6 +128,7 @@ def reset_credentials() -> None:
             pass
 
     if raw_config and raw_config.get("users"):
+        is_v2 = raw_config.get("version", 1) >= 2
         admin_user = None
         for user in raw_config["users"]:
             policies = user.get("policies", [])
@@ -141,15 +142,39 @@ def reset_credentials() -> None:
         if not admin_user:
             admin_user = raw_config["users"][0]
 
-        admin_user["access_key"] = access_key
-        admin_user["secret_key"] = secret_key
-    else:
-        raw_config = {
-            "users": [
-                {
+        if is_v2:
+            admin_keys = admin_user.get("access_keys", [])
+            if admin_keys:
+                admin_keys[0]["access_key"] = access_key
+                admin_keys[0]["secret_key"] = secret_key
+            else:
+                from datetime import datetime as _dt, timezone as _tz
+                admin_user["access_keys"] = [{
                     "access_key": access_key,
                     "secret_key": secret_key,
+                    "status": "active",
+                    "created_at": _dt.now(_tz.utc).isoformat(),
+                }]
+        else:
+            admin_user["access_key"] = access_key
+            admin_user["secret_key"] = secret_key
+    else:
+        from datetime import datetime as _dt, timezone as _tz
+        raw_config = {
+            "version": 2,
+            "users": [
+                {
+                    "user_id": f"u-{secrets.token_hex(8)}",
                     "display_name": "Local Admin",
+                    "enabled": True,
+                    "access_keys": [
+                        {
+                            "access_key": access_key,
+                            "secret_key": secret_key,
+                            "status": "active",
+                            "created_at": _dt.now(_tz.utc).isoformat(),
+                        }
+                    ],
                     "policies": [
                         {"bucket": "*", "actions": list(ALLOWED_ACTIONS)}
                     ],

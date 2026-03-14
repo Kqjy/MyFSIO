@@ -488,7 +488,7 @@ def _authorize_action(principal: Principal | None, bucket_name: str | None, acti
     iam_error: IamError | None = None
     if principal is not None:
         try:
-            _iam().authorize(principal, bucket_name, action)
+            _iam().authorize(principal, bucket_name, action, object_key=object_key)
             iam_allowed = True
         except IamError as exc:
             iam_error = exc
@@ -1135,7 +1135,7 @@ def _bucket_versioning_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "versioning")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()
@@ -1182,7 +1182,7 @@ def _bucket_tagging_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "tagging")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()
@@ -1347,7 +1347,7 @@ def _bucket_cors_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "cors")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()
@@ -1400,7 +1400,7 @@ def _bucket_encryption_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "encryption")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()
@@ -1475,7 +1475,7 @@ def _bucket_acl_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "share")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()
@@ -1718,12 +1718,12 @@ def _bucket_lifecycle_handler(bucket_name: str) -> Response:
     """Handle bucket lifecycle configuration (GET/PUT/DELETE /<bucket>?lifecycle)."""
     if request.method not in {"GET", "PUT", "DELETE"}:
         return _method_not_allowed(["GET", "PUT", "DELETE"])
-    
+
     principal, error = _require_principal()
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "lifecycle")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     
@@ -1882,12 +1882,12 @@ def _bucket_quota_handler(bucket_name: str) -> Response:
     """Handle bucket quota configuration (GET/PUT/DELETE /<bucket>?quota)."""
     if request.method not in {"GET", "PUT", "DELETE"}:
         return _method_not_allowed(["GET", "PUT", "DELETE"])
-    
+
     principal, error = _require_principal()
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "quota")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     
@@ -1964,7 +1964,7 @@ def _bucket_object_lock_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "object_lock")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
 
@@ -2010,7 +2010,7 @@ def _bucket_notification_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "notification")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
 
@@ -2106,7 +2106,7 @@ def _bucket_logging_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "logging")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
 
@@ -2248,7 +2248,7 @@ def _object_retention_handler(bucket_name: str, object_key: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "write" if request.method == "PUT" else "read", object_key=object_key)
+        _authorize_action(principal, bucket_name, "object_lock", object_key=object_key)
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
 
@@ -2324,7 +2324,7 @@ def _object_legal_hold_handler(bucket_name: str, object_key: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "write" if request.method == "PUT" else "read", object_key=object_key)
+        _authorize_action(principal, bucket_name, "object_lock", object_key=object_key)
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
 
@@ -2657,7 +2657,7 @@ def bucket_handler(bucket_name: str) -> Response:
         if error:
             return error
         try:
-            _authorize_action(principal, bucket_name, "write")
+            _authorize_action(principal, bucket_name, "create_bucket")
         except IamError as exc:
             return _error_response("AccessDenied", str(exc), 403)
         try:
@@ -2674,7 +2674,7 @@ def bucket_handler(bucket_name: str) -> Response:
         if error:
             return error
         try:
-            _authorize_action(principal, bucket_name, "delete")
+            _authorize_action(principal, bucket_name, "delete_bucket")
         except IamError as exc:
             return _error_response("AccessDenied", str(exc), 403)
         try:
@@ -3229,7 +3229,7 @@ def _bucket_replication_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "replication")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()
@@ -3312,7 +3312,7 @@ def _bucket_website_handler(bucket_name: str) -> Response:
     if error:
         return error
     try:
-        _authorize_action(principal, bucket_name, "policy")
+        _authorize_action(principal, bucket_name, "website")
     except IamError as exc:
         return _error_response("AccessDenied", str(exc), 403)
     storage = _storage()

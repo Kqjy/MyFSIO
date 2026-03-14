@@ -235,7 +235,7 @@
                   {% set bucket_label = 'All Buckets' if policy.bucket == '*' else policy.bucket %}
                   {% if '*' in policy.actions %}
                     {% set perm_label = 'Full Access' %}
-                  {% elif policy.actions|length >= 9 %}
+                  {% elif policy.actions|length >= 19 %}
                     {% set perm_label = 'Full Access' %}
                   {% elif 'list' in policy.actions and 'read' in policy.actions and 'write' in policy.actions and 'delete' in policy.actions %}
                     {% set perm_label = 'Read + Write + Delete' %}
@@ -354,6 +354,8 @@
             <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="full">Full Control</button>
             <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="readonly">Read-Only</button>
             <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="writer">Read + Write</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="operator">Operator</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="bucketadmin">Bucket Admin</button>
           </div>
         </div>
         <div class="modal-footer">
@@ -404,6 +406,8 @@
             <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="full">Full Control</button>
             <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="readonly">Read-Only</button>
             <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="writer">Read + Write</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="operator">Operator</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="bucketadmin">Bucket Admin</button>
           </div>
         </form>
       </div>

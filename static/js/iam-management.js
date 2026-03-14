@@ -17,12 +17,20 @@ window.IAMManagement = (function() {
   var currentDeleteKey = null;
   var currentExpiryKey = null;
 
-  var ALL_S3_ACTIONS = ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'lifecycle', 'cors'];
+  var ALL_S3_ACTIONS = [
+    'list', 'read', 'write', 'delete', 'share', 'policy',
+    'replication', 'lifecycle', 'cors',
+    'create_bucket', 'delete_bucket',
+    'versioning', 'tagging', 'encryption', 'quota',
+    'object_lock', 'notification', 'logging', 'website'
+  ];
 
   var policyTemplates = {
-    full: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'replication', 'lifecycle', 'cors', 'iam:*'] }],
+    full: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'create_bucket', 'delete_bucket', 'replication', 'lifecycle', 'cors', 'versioning', 'tagging', 'encryption', 'quota', 'object_lock', 'notification', 'logging', 'website', 'iam:*'] }],
     readonly: [{ bucket: '*', actions: ['list', 'read'] }],
-    writer: [{ bucket: '*', actions: ['list', 'read', 'write'] }]
+    writer: [{ bucket: '*', actions: ['list', 'read', 'write'] }],
+    operator: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'create_bucket', 'delete_bucket'] }],
+    bucketadmin: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'create_bucket', 'delete_bucket', 'versioning', 'tagging', 'encryption', 'cors', 'lifecycle', 'quota', 'object_lock', 'notification', 'logging', 'website', 'replication'] }]
   };
 
   function isAdminUser(policies) {

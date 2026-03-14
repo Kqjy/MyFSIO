@@ -758,7 +758,7 @@ MyFSIO implements a comprehensive Identity and Access Management (IAM) system th
    - **Create user**: supply a display name, optional JSON inline policy array, and optional credential expiry date.
    - **Set expiry**: assign an expiration date to any user's credentials. Expired credentials are rejected at authentication time. The UI shows expiry badges and preset durations (1h, 24h, 7d, 30d, 90d).
    - **Rotate secret**: generates a new secret key; the UI surfaces it once.
-   - **Policy editor**: select a user, paste an array of objects (`{"bucket": "*", "actions": ["list", "read"]}`), and submit. Alias support includes AWS-style verbs (e.g., `s3:GetObject`).
+   - **Policy editor**: select a user, paste an array of objects (`{"bucket": "*", "actions": ["list", "read"]}`), and submit. An optional `"prefix"` field restricts object-level actions to a key prefix (e.g., `"uploads/"`). Alias support includes AWS-style verbs (e.g., `s3:GetObject`).
 3. Wildcard action `iam:*` is supported for admin user definitions.
 
 > **Breaking Change (v0.2.0+):** Previous versions used fixed default credentials (`localadmin/localadmin`). If upgrading from an older version, your existing credentials remain unchanged, but new installations will generate random credentials.
@@ -797,13 +797,23 @@ Both layers are evaluated for each request. A user must have permission in their
 | --- | --- | --- |
 | `list` | List buckets and objects | `s3:ListBucket`, `s3:ListAllMyBuckets`, `s3:ListBucketVersions`, `s3:ListMultipartUploads`, `s3:ListParts` |
 | `read` | Download objects, get metadata | `s3:GetObject`, `s3:GetObjectVersion`, `s3:GetObjectTagging`, `s3:GetObjectVersionTagging`, `s3:GetObjectAcl`, `s3:GetBucketVersioning`, `s3:HeadObject`, `s3:HeadBucket` |
-| `write` | Upload objects, create buckets, manage tags | `s3:PutObject`, `s3:CreateBucket`, `s3:PutObjectTagging`, `s3:PutBucketVersioning`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload`, `s3:CopyObject` |
-| `delete` | Remove objects, versions, and buckets | `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteBucket`, `s3:DeleteObjectTagging` |
+| `write` | Upload objects, manage object tags | `s3:PutObject`, `s3:PutObjectTagging`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload`, `s3:CopyObject` |
+| `delete` | Remove objects and versions | `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteObjectTagging` |
+| `create_bucket` | Create new buckets | `s3:CreateBucket` |
+| `delete_bucket` | Delete buckets | `s3:DeleteBucket` |
 | `share` | Manage Access Control Lists (ACLs) | `s3:PutObjectAcl`, `s3:PutBucketAcl`, `s3:GetBucketAcl` |
 | `policy` | Manage bucket policies | `s3:PutBucketPolicy`, `s3:GetBucketPolicy`, `s3:DeleteBucketPolicy` |
+| `versioning` | Manage bucket versioning configuration | `s3:GetBucketVersioning`, `s3:PutBucketVersioning` |
+| `tagging` | Manage bucket-level tags | `s3:GetBucketTagging`, `s3:PutBucketTagging`, `s3:DeleteBucketTagging` |
+| `encryption` | Manage bucket encryption configuration | `s3:GetEncryptionConfiguration`, `s3:PutEncryptionConfiguration`, `s3:DeleteEncryptionConfiguration` |
 | `lifecycle` | Manage lifecycle rules | `s3:GetLifecycleConfiguration`, `s3:PutLifecycleConfiguration`, `s3:DeleteLifecycleConfiguration`, `s3:GetBucketLifecycle`, `s3:PutBucketLifecycle` |
 | `cors` | Manage CORS configuration | `s3:GetBucketCors`, `s3:PutBucketCors`, `s3:DeleteBucketCors` |
 | `replication` | Configure and manage replication | `s3:GetReplicationConfiguration`, `s3:PutReplicationConfiguration`, `s3:DeleteReplicationConfiguration`, `s3:ReplicateObject`, `s3:ReplicateTags`, `s3:ReplicateDelete` |
+| `quota` | Manage bucket storage quotas | `s3:GetBucketQuota`, `s3:PutBucketQuota`, `s3:DeleteBucketQuota` |
+| `object_lock` | Manage object lock, retention, and legal holds | `s3:GetObjectLockConfiguration`, `s3:PutObjectLockConfiguration`, `s3:PutObjectRetention`, `s3:GetObjectRetention`, `s3:PutObjectLegalHold`, `s3:GetObjectLegalHold` |
+| `notification` | Manage bucket event notifications | `s3:GetBucketNotificationConfiguration`, `s3:PutBucketNotificationConfiguration`, `s3:DeleteBucketNotificationConfiguration` |
+| `logging` | Manage bucket access logging | `s3:GetBucketLogging`, `s3:PutBucketLogging`, `s3:DeleteBucketLogging` |
+| `website` | Manage static website hosting configuration | `s3:GetBucketWebsite`, `s3:PutBucketWebsite`, `s3:DeleteBucketWebsite` |
 
 #### IAM Actions (User Management)
 
@@ -814,25 +824,31 @@ Both layers are evaluated for each request. A user must have permission in their
 | `iam:delete_user` | Delete IAM users | `iam:DeleteUser` |
 | `iam:rotate_key` | Rotate user secret keys | `iam:RotateAccessKey` |
 | `iam:update_policy` | Modify user policies | `iam:PutUserPolicy` |
+| `iam:create_key` | Create additional access keys for a user | `iam:CreateAccessKey` |
+| `iam:delete_key` | Delete an access key from a user | `iam:DeleteAccessKey` |
+| `iam:get_user` | View user details and access keys | `iam:GetUser` |
+| `iam:get_policy` | View user policy configuration | `iam:GetPolicy` |
+| `iam:disable_user` | Temporarily disable/enable a user account | `iam:DisableUser` |
 | `iam:*` | **Admin wildcard** – grants all IAM actions | — |
 
 #### Wildcards
 
 | Wildcard | Scope | Description |
 | --- | --- | --- |
-| `*` (in actions) | All S3 actions | Grants `list`, `read`, `write`, `delete`, `share`, `policy`, `lifecycle`, `cors`, `replication` |
+| `*` (in actions) | All S3 actions | Grants all 19 S3 actions including `list`, `read`, `write`, `delete`, `create_bucket`, `delete_bucket`, `share`, `policy`, `versioning`, `tagging`, `encryption`, `lifecycle`, `cors`, `replication`, `quota`, `object_lock`, `notification`, `logging`, `website` |
 | `iam:*` | All IAM actions | Grants all `iam:*` actions for user management |
 | `*` (in bucket) | All buckets | Policy applies to every bucket |
 
 ### IAM Policy Structure
 
-User policies are stored as a JSON array of policy objects. Each object specifies a bucket and the allowed actions:
+User policies are stored as a JSON array of policy objects. Each object specifies a bucket, the allowed actions, and an optional prefix for object-level scoping:
 
 ```json
 [
   {
     "bucket": "<bucket-name-or-wildcard>",
-    "actions": ["<action1>", "<action2>", ...]
+    "actions": ["<action1>", "<action2>", ...],
+    "prefix": "<optional-key-prefix>"
   }
 ]
 ```
@@ -840,12 +856,13 @@ User policies are stored as a JSON array of policy objects. Each object specifie
 **Fields:**
 - `bucket`: The bucket name (case-insensitive) or `*` for all buckets
 - `actions`: Array of action strings (simple names or AWS aliases)
+- `prefix`: *(optional)* Restrict object-level actions to keys starting with this prefix. Defaults to `*` (all objects). Example: `"uploads/"` restricts to keys under `uploads/`
 
 ### Example User Policies
 
 **Full Administrator (complete system access):**
 ```json
-[{"bucket": "*", "actions": ["list", "read", "write", "delete", "share", "policy", "lifecycle", "cors", "replication", "iam:*"]}]
+[{"bucket": "*", "actions": ["list", "read", "write", "delete", "share", "policy", "create_bucket", "delete_bucket", "versioning", "tagging", "encryption", "lifecycle", "cors", "replication", "quota", "object_lock", "notification", "logging", "website", "iam:*"]}]
 ```
 
 **Read-Only User (browse and download only):**
@@ -858,6 +875,11 @@ User policies are stored as a JSON array of policy objects. Each object specifie
 [{"bucket": "user-bucket", "actions": ["list", "read", "write", "delete"]}]
 ```
 
+**Operator (data operations + bucket management, no config):**
+```json
+[{"bucket": "*", "actions": ["list", "read", "write", "delete", "create_bucket", "delete_bucket"]}]
+```
+
 **Multiple Bucket Access (different permissions per bucket):**
 ```json
 [
@@ -867,9 +889,14 @@ User policies are stored as a JSON array of policy objects. Each object specifie
 ]
 ```
 
+**Prefix-Scoped Access (restrict to a folder inside a shared bucket):**
+```json
+[{"bucket": "shared-data", "actions": ["list", "read", "write", "delete"], "prefix": "team-a/"}]
+```
+
 **IAM Manager (manage users but no data access):**
 ```json
-[{"bucket": "*", "actions": ["iam:list_users", "iam:create_user", "iam:delete_user", "iam:rotate_key", "iam:update_policy"]}]
+[{"bucket": "*", "actions": ["iam:list_users", "iam:create_user", "iam:delete_user", "iam:rotate_key", "iam:update_policy", "iam:create_key", "iam:delete_key", "iam:get_user", "iam:get_policy", "iam:disable_user"]}]
 ```
 
 **Replication Operator (manage replication only):**
@@ -889,10 +916,10 @@ User policies are stored as a JSON array of policy objects. Each object specifie
 
 **Bucket Administrator (full bucket config, no IAM access):**
 ```json
-[{"bucket": "my-bucket", "actions": ["list", "read", "write", "delete", "policy", "lifecycle", "cors"]}]
+[{"bucket": "my-bucket", "actions": ["list", "read", "write", "delete", "create_bucket", "delete_bucket", "share", "policy", "versioning", "tagging", "encryption", "lifecycle", "cors", "replication", "quota", "object_lock", "notification", "logging", "website"]}]
 ```
 
-**Upload-Only User (write but cannot read back):**
+**Upload-Only User (write but cannot create/delete buckets):**
 ```json
 [{"bucket": "drop-box", "actions": ["write"]}]
 ```
@@ -967,6 +994,30 @@ curl -X POST http://localhost:5000/iam/users/<access-key>/expiry \
 # Delete a user (requires iam:delete_user)
 curl -X DELETE http://localhost:5000/iam/users/<access-key> \
   -H "X-Access-Key: ..." -H "X-Secret-Key: ..."
+
+# Get user details (requires iam:get_user) — via Admin API
+curl http://localhost:5000/admin/iam/users/<user-id-or-access-key> \
+  -H "Authorization: AWS4-HMAC-SHA256 ..."
+
+# Get user policies (requires iam:get_policy) — via Admin API
+curl http://localhost:5000/admin/iam/users/<user-id-or-access-key>/policies \
+  -H "Authorization: AWS4-HMAC-SHA256 ..."
+
+# Create additional access key for a user (requires iam:create_key)
+curl -X POST http://localhost:5000/admin/iam/users/<user-id-or-access-key>/keys \
+  -H "Authorization: AWS4-HMAC-SHA256 ..."
+
+# Delete an access key (requires iam:delete_key)
+curl -X DELETE http://localhost:5000/admin/iam/users/<user-id>/keys/<access-key> \
+  -H "Authorization: AWS4-HMAC-SHA256 ..."
+
+# Disable a user account (requires iam:disable_user)
+curl -X POST http://localhost:5000/admin/iam/users/<user-id-or-access-key>/disable \
+  -H "Authorization: AWS4-HMAC-SHA256 ..."
+
+# Re-enable a user account (requires iam:disable_user)
+curl -X POST http://localhost:5000/admin/iam/users/<user-id-or-access-key>/enable \
+  -H "Authorization: AWS4-HMAC-SHA256 ..."
 ```
 
 ### Permission Precedence
