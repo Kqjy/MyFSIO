@@ -15,6 +15,12 @@
 	--myfsio-hover-bg: rgba(59, 130, 246, 0.12);
 	--myfsio-accent: #3b82f6;
 	--myfsio-accent-hover: #2563eb;
+	--myfsio-tag-key-bg: #e0e7ff;
+	--myfsio-tag-key-text: #3730a3;
+	--myfsio-tag-value-bg: #f0f1fa;
+	--myfsio-tag-value-text: #4338ca;
+	--myfsio-tag-border: #c7d2fe;
+	--myfsio-tag-delete-hover: #ef4444;
 }
 
 [data-theme='dark'] {
@@ -34,6 +40,12 @@
 	--myfsio-hover-bg: rgba(59, 130, 246, 0.2);
 	--myfsio-accent: #60a5fa;
 	--myfsio-accent-hover: #3b82f6;
+	--myfsio-tag-key-bg: #312e81;
+	--myfsio-tag-key-text: #c7d2fe;
+	--myfsio-tag-value-bg: #1e1b4b;
+	--myfsio-tag-value-text: #a5b4fc;
+	--myfsio-tag-border: #4338ca;
+	--myfsio-tag-delete-hover: #f87171;
 }
 
 [data-theme='dark'] body,
@@ -3000,6 +3012,89 @@ body:has(.login-card) .main-wrapper {
 .sort-dropdown .dropdown-item {
 	font-size: 0.875rem;
 	padding: 0.375rem 1rem;
+}
+
+.tag-pill {
+	display: inline-flex;
+	border-radius: 9999px;
+	border: 1px solid var(--myfsio-tag-border);
+	overflow: hidden;
+	font-size: 0.75rem;
+	line-height: 1;
+}
+
+.tag-pill-key {
+	padding: 0.3rem 0.5rem;
+	background: var(--myfsio-tag-key-bg);
+	color: var(--myfsio-tag-key-text);
+	font-weight: 600;
+}
+
+.tag-pill-value {
+	padding: 0.3rem 0.5rem;
+	background: var(--myfsio-tag-value-bg);
+	color: var(--myfsio-tag-value-text);
+	font-weight: 400;
+}
+
+.tag-editor-card {
+	background: var(--myfsio-preview-bg);
+	border-radius: 0.5rem;
+	padding: 0.75rem;
+}
+
+.tag-editor-header,
+.tag-editor-row {
+	display: grid;
+	grid-template-columns: 1fr 1fr 28px;
+	gap: 0.5rem;
+	align-items: center;
+}
+
+.tag-editor-header {
+	padding-bottom: 0.375rem;
+	border-bottom: 1px solid var(--myfsio-card-border);
+	margin-bottom: 0.5rem;
+}
+
+.tag-editor-header span {
+	font-size: 0.7rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	color: var(--myfsio-muted);
+	letter-spacing: 0.05em;
+}
+
+.tag-editor-row {
+	margin-bottom: 0.375rem;
+}
+
+.tag-editor-delete {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	border: none;
+	background: transparent;
+	color: var(--myfsio-muted);
+	border-radius: 0.375rem;
+	cursor: pointer;
+	transition: color 0.15s, background 0.15s;
+}
+
+.tag-editor-delete:hover {
+	color: var(--myfsio-tag-delete-hover);
+	background: rgba(239, 68, 68, 0.1);
+}
+
+.tag-editor-actions {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-top: 0.75rem;
+	padding-top: 0.5rem;
+	border-top: 1px solid var(--myfsio-card-border);
 }
 
 @media (prefers-reduced-motion: reduce) {

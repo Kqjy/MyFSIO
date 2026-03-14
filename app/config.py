@@ -156,6 +156,11 @@ class AppConfig:
     gc_multipart_max_age_days: int
     gc_lock_file_max_age_hours: float
     gc_dry_run: bool
+    integrity_enabled: bool
+    integrity_interval_hours: float
+    integrity_batch_size: int
+    integrity_auto_heal: bool
+    integrity_dry_run: bool
 
     @classmethod
     def from_env(cls, overrides: Optional[Dict[str, Any]] = None) -> "AppConfig":
@@ -331,6 +336,11 @@ class AppConfig:
         gc_multipart_max_age_days = int(_get("GC_MULTIPART_MAX_AGE_DAYS", 7))
         gc_lock_file_max_age_hours = float(_get("GC_LOCK_FILE_MAX_AGE_HOURS", 1.0))
         gc_dry_run = str(_get("GC_DRY_RUN", "0")).lower() in {"1", "true", "yes", "on"}
+        integrity_enabled = str(_get("INTEGRITY_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
+        integrity_interval_hours = float(_get("INTEGRITY_INTERVAL_HOURS", 24.0))
+        integrity_batch_size = int(_get("INTEGRITY_BATCH_SIZE", 1000))
+        integrity_auto_heal = str(_get("INTEGRITY_AUTO_HEAL", "0")).lower() in {"1", "true", "yes", "on"}
+        integrity_dry_run = str(_get("INTEGRITY_DRY_RUN", "0")).lower() in {"1", "true", "yes", "on"}
 
         return cls(storage_root=storage_root,
                    max_upload_size=max_upload_size,
@@ -424,7 +434,12 @@ class AppConfig:
                    gc_temp_file_max_age_hours=gc_temp_file_max_age_hours,
                    gc_multipart_max_age_days=gc_multipart_max_age_days,
                    gc_lock_file_max_age_hours=gc_lock_file_max_age_hours,
-                   gc_dry_run=gc_dry_run)
+                   gc_dry_run=gc_dry_run,
+                   integrity_enabled=integrity_enabled,
+                   integrity_interval_hours=integrity_interval_hours,
+                   integrity_batch_size=integrity_batch_size,
+                   integrity_auto_heal=integrity_auto_heal,
+                   integrity_dry_run=integrity_dry_run)
 
     def validate_and_report(self) -> list[str]:
         """Validate configuration and return a list of warnings/issues.
@@ -641,4 +656,9 @@ class AppConfig:
             "GC_MULTIPART_MAX_AGE_DAYS": self.gc_multipart_max_age_days,
             "GC_LOCK_FILE_MAX_AGE_HOURS": self.gc_lock_file_max_age_hours,
             "GC_DRY_RUN": self.gc_dry_run,
+            "INTEGRITY_ENABLED": self.integrity_enabled,
+            "INTEGRITY_INTERVAL_HOURS": self.integrity_interval_hours,
+            "INTEGRITY_BATCH_SIZE": self.integrity_batch_size,
+            "INTEGRITY_AUTO_HEAL": self.integrity_auto_heal,
+            "INTEGRITY_DRY_RUN": self.integrity_dry_run,
         }

@@ -15,6 +15,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 from .connections import ConnectionStore
 from .extensions import limiter
 from .gc import GarbageCollector
+from .integrity import IntegrityChecker
 from .iam import IamError, Principal
 from .replication import ReplicationManager
 from .site_registry import PeerSite, SiteInfo, SiteRegistry
@@ -828,4 +829,55 @@ def gc_history():
     limit = min(int(request.args.get("limit", 50)), 200)
     offset = int(request.args.get("offset", 0))
     records = gc.get_history(limit=limit, offset=offset)
+    return jsonify({"executions": records})
+
+
+def _integrity() -> Optional[IntegrityChecker]:
+    return current_app.extensions.get("integrity")
+
+
+@admin_api_bp.route("/integrity/status", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def integrity_status():
+    principal, error = _require_admin()
+    if error:
+        return error
+    checker = _integrity()
+    if not checker:
+        return jsonify({"enabled": False, "message": "Integrity checker is not enabled. Set INTEGRITY_ENABLED=true to enable."})
+    return jsonify(checker.get_status())
+
+
+@admin_api_bp.route("/integrity/run", methods=["POST"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def integrity_run_now():
+    principal, error = _require_admin()
+    if error:
+        return error
+    checker = _integrity()
+    if not checker:
+        return _json_error("InvalidRequest", "Integrity checker is not enabled", 400)
+    payload = request.get_json(silent=True) or {}
+    override_dry_run = payload.get("dry_run")
+    override_auto_heal = payload.get("auto_heal")
+    result = checker.run_now(
+        auto_heal=override_auto_heal if override_auto_heal is not None else None,
+        dry_run=override_dry_run if override_dry_run is not None else None,
+    )
+    logger.info("Integrity manual run by %s", principal.access_key)
+    return jsonify(result.to_dict())
+
+
+@admin_api_bp.route("/integrity/history", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def integrity_history():
+    principal, error = _require_admin()
+    if error:
+        return error
+    checker = _integrity()
+    if not checker:
+        return jsonify({"executions": []})
+    limit = min(int(request.args.get("limit", 50)), 200)
+    offset = int(request.args.get("offset", 0))
+    records = checker.get_history(limit=limit, offset=offset)
     return jsonify({"executions": records})
