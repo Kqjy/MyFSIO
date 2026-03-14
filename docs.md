@@ -180,9 +180,9 @@ All configuration is done via environment variables. The table below lists every
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SERVER_THREADS` | `0` (auto) | Waitress worker threads (1-64). Set to `0` for auto-calculation based on CPU cores (×2). |
-| `SERVER_CONNECTION_LIMIT` | `0` (auto) | Maximum concurrent connections (10-1000). Set to `0` for auto-calculation based on available RAM. |
-| `SERVER_BACKLOG` | `0` (auto) | TCP listen backlog (64-4096). Set to `0` for auto-calculation (connection_limit × 2). |
+| `SERVER_THREADS` | `0` (auto) | Granian blocking threads (1-64). Set to `0` for auto-calculation based on CPU cores (×2). |
+| `SERVER_CONNECTION_LIMIT` | `0` (auto) | Maximum concurrent requests per worker (10-1000). Set to `0` for auto-calculation based on available RAM. |
+| `SERVER_BACKLOG` | `0` (auto) | TCP listen backlog (128-4096). Set to `0` for auto-calculation (connection_limit × 2). |
 | `SERVER_CHANNEL_TIMEOUT` | `120` | Seconds before idle connections are closed (10-300). |
 
 ### Logging
@@ -339,7 +339,7 @@ Before deploying to production, ensure you:
 4. **Enable HTTPS** - Use a reverse proxy (nginx, Cloudflare) with TLS termination
 5. **Review rate limits** - Adjust `RATE_LIMIT_DEFAULT` based on your needs
 6. **Secure master keys** - Back up `ENCRYPTION_MASTER_KEY_PATH` if using encryption
-7. **Use `--prod` flag** - Runs with Waitress instead of Flask dev server
+7. **Use `--prod` flag** - Runs with Granian instead of Flask dev server
 8. **Set credential expiry** - Assign `expires_at` to non-admin users for time-limited access
 
 ### Proxy Configuration

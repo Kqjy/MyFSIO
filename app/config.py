@@ -25,7 +25,7 @@ def _calculate_auto_connection_limit() -> int:
 
 
 def _calculate_auto_backlog(connection_limit: int) -> int:
-    return max(64, min(connection_limit * 2, 4096))
+    return max(128, min(connection_limit * 2, 4096))
 
 
 def _validate_rate_limit(value: str) -> str:
@@ -504,8 +504,8 @@ class AppConfig:
             issues.append(f"CRITICAL: SERVER_THREADS={self.server_threads} is outside valid range (1-64). Server cannot start.")
         if not (10 <= self.server_connection_limit <= 1000):
             issues.append(f"CRITICAL: SERVER_CONNECTION_LIMIT={self.server_connection_limit} is outside valid range (10-1000). Server cannot start.")
-        if not (64 <= self.server_backlog <= 4096):
-            issues.append(f"CRITICAL: SERVER_BACKLOG={self.server_backlog} is outside valid range (64-4096). Server cannot start.")
+        if not (128 <= self.server_backlog <= 4096):
+            issues.append(f"CRITICAL: SERVER_BACKLOG={self.server_backlog} is outside valid range (128-4096). Server cannot start.")
         if not (10 <= self.server_channel_timeout <= 300):
             issues.append(f"CRITICAL: SERVER_CHANNEL_TIMEOUT={self.server_channel_timeout} is outside valid range (10-300). Server cannot start.")
 

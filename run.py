@@ -40,24 +40,37 @@ def _is_frozen() -> bool:
     return getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
 
+def _serve_granian(target: str, port: int, config: Optional[AppConfig] = None) -> None:
+    from granian import Granian
+    from granian.constants import Interfaces
+    from granian.http import HTTP1Settings
+
+    kwargs: dict = {
+        "target": target,
+        "address": _server_host(),
+        "port": port,
+        "interface": Interfaces.WSGI,
+        "factory": True,
+        "workers": 1,
+    }
+
+    if config:
+        kwargs["blocking_threads"] = config.server_threads
+        kwargs["backlog"] = config.server_backlog
+        kwargs["backpressure"] = config.server_connection_limit
+        kwargs["http1_settings"] = HTTP1Settings(
+            header_read_timeout=config.server_channel_timeout * 1000,
+        )
+
+    server = Granian(**kwargs)
+    server.serve()
+
+
 def serve_api(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
-    app = create_api_app()
     if prod:
-        from waitress import serve
-        if config:
-            serve(
-                app,
-                host=_server_host(),
-                port=port,
-                ident="MyFSIO",
-                threads=config.server_threads,
-                connection_limit=config.server_connection_limit,
-                backlog=config.server_backlog,
-                channel_timeout=config.server_channel_timeout,
-            )
-        else:
-            serve(app, host=_server_host(), port=port, ident="MyFSIO")
+        _serve_granian("app:create_api_app", port, config)
     else:
+        app = create_api_app()
         debug = _is_debug_enabled()
         if debug:
             warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
@@ -65,23 +78,10 @@ def serve_api(port: int, prod: bool = False, config: Optional[AppConfig] = None)
 
 
 def serve_ui(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
-    app = create_ui_app()
     if prod:
-        from waitress import serve
-        if config:
-            serve(
-                app,
-                host=_server_host(),
-                port=port,
-                ident="MyFSIO",
-                threads=config.server_threads,
-                connection_limit=config.server_connection_limit,
-                backlog=config.server_backlog,
-                channel_timeout=config.server_channel_timeout,
-            )
-        else:
-            serve(app, host=_server_host(), port=port, ident="MyFSIO")
+        _serve_granian("app:create_ui_app", port, config)
     else:
+        app = create_ui_app()
         debug = _is_debug_enabled()
         if debug:
             warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["api", "ui", "both", "reset-cred"], default="both")
     parser.add_argument("--api-port", type=int, default=5000)
     parser.add_argument("--ui-port", type=int, default=5100)
-    parser.add_argument("--prod", action="store_true", help="Run in production mode using Waitress")
+    parser.add_argument("--prod", action="store_true", help="Run in production mode using Granian")
     parser.add_argument("--dev", action="store_true", help="Force development mode (Flask dev server)")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration and exit")
     parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
@@ -235,7 +235,7 @@ if __name__ == "__main__":
             pass
     
     if prod_mode:
-        print("Running in production mode (Waitress)")
+        print("Running in production mode (Granian)")
         issues = config.validate_and_report()
         critical_issues = [i for i in issues if i.startswith("CRITICAL:")]
         if critical_issues:

@@ -84,7 +84,7 @@ pip install -r requirements.txt
 # Run both API and UI (Development)
 python run.py
 
-# Run in Production (Waitress server)
+# Run in Production (Granian server)
 python run.py --prod
 
 # Or run individually
@@ -220,7 +220,7 @@ python run.py --mode ui
               <tr>
                 <td><code>SERVER_THREADS</code></td>
                 <td><code>0</code> (auto)</td>
-                <td>Waitress worker threads (1-64). 0 = auto (CPU cores × 2).</td>
+                <td>Granian blocking threads (1-64). 0 = auto (CPU cores × 2).</td>
               </tr>
               <tr>
                 <td><code>SERVER_CONNECTION_LIMIT</code></td>

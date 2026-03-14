@@ -107,7 +107,6 @@ def create_app(
             )
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=num_proxies, x_proto=num_proxies, x_host=num_proxies, x_prefix=num_proxies)
 
-    # Enable gzip compression for responses (10-20x smaller JSON payloads)
     if app.config.get("ENABLE_GZIP", True):
         app.wsgi_app = GzipMiddleware(app.wsgi_app, compression_level=6)
 
@@ -678,6 +677,7 @@ def _configure_logging(app: Flask) -> None:
                 },
             )
         response.headers["X-Request-Duration-ms"] = f"{duration_ms:.2f}"
+        response.headers["Server"] = "MyFSIO"
 
         operation_metrics = app.extensions.get("operation_metrics")
         if operation_metrics:
