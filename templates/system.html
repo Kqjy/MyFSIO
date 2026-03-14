@@ -1,0 +1,502 @@
+{% extends "base.html" %}
+
+{% block title %}System - MyFSIO Console{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <p class="text-uppercase text-muted small mb-1">Administration</p>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+        <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
+      </svg>
+      System
+    </h1>
+    <p class="text-muted mb-0 mt-1">Server information, feature flags, and maintenance tools.</p>
+  </div>
+  <div class="d-none d-md-block">
+    <span class="badge bg-primary bg-opacity-10 text-primary fs-6 px-3 py-2">v{{ app_version }}</span>
+  </div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-6">
+    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+        <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M5 0a.5.5 0 0 1 .5.5V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2A2.5 2.5 0 0 1 14 4.5h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14a2.5 2.5 0 0 1-2.5 2.5v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14A2.5 2.5 0 0 1 2 11.5H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2A2.5 2.5 0 0 1 4.5 2V.5A.5.5 0 0 1 5 0zm-.5 3A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13h7a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 11.5 3h-7zM5 6.5A1.5 1.5 0 0 1 6.5 5h3A1.5 1.5 0 0 1 11 6.5v3A1.5 1.5 0 0 1 9.5 11h-3A1.5 1.5 0 0 1 5 9.5v-3zM6.5 6a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3z"/>
+          </svg>
+          Server Information
+        </h5>
+        <p class="text-muted small mb-0">Runtime environment and configuration</p>
+      </div>
+      <div class="card-body px-4 pb-4">
+        <table class="table table-sm mb-0">
+          <tbody>
+            <tr><td class="text-muted" style="width:40%">Version</td><td class="fw-medium">{{ app_version }}</td></tr>
+            <tr><td class="text-muted">Storage Root</td><td><code>{{ storage_root }}</code></td></tr>
+            <tr><td class="text-muted">Platform</td><td>{{ platform }}</td></tr>
+            <tr><td class="text-muted">Python</td><td>{{ python_version }}</td></tr>
+            <tr><td class="text-muted">Rust Extension</td><td>
+              {% if has_rust %}
+              <span class="badge bg-success bg-opacity-10 text-success">Loaded</span>
+              {% else %}
+              <span class="badge bg-secondary bg-opacity-10 text-secondary">Not loaded</span>
+              {% endif %}
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+        <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M11.5 2a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM9.05 3a2.5 2.5 0 0 1 4.9 0H16v1h-2.05a2.5 2.5 0 0 1-4.9 0H0V3h9.05zM4.5 7a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM2.05 8a2.5 2.5 0 0 1 4.9 0H16v1H6.95a2.5 2.5 0 0 1-4.9 0H0V8h2.05zm9.45 4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm-2.45 1a2.5 2.5 0 0 1 4.9 0H16v1h-2.05a2.5 2.5 0 0 1-4.9 0H0v-1h9.05z"/>
+          </svg>
+          Feature Flags
+        </h5>
+        <p class="text-muted small mb-0">Features configured via environment variables</p>
+      </div>
+      <div class="card-body px-4 pb-4">
+        <table class="table table-sm mb-0">
+          <tbody>
+            {% for feat in features %}
+            <tr>
+              <td class="text-muted" style="width:55%">{{ feat.label }}</td>
+              <td class="text-end">
+                {% if feat.enabled %}
+                <span class="badge bg-success bg-opacity-10 text-success">Enabled</span>
+                {% else %}
+                <span class="badge bg-secondary bg-opacity-10 text-secondary">Disabled</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4 mb-4">
+  <div class="col-lg-6">
+    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                <path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/>
+              </svg>
+              Garbage Collection
+            </h5>
+            <p class="text-muted small mb-0">Clean up temporary files, orphaned uploads, and stale locks</p>
+          </div>
+          <div>
+            {% if gc_status.enabled %}
+            <span class="badge bg-success bg-opacity-10 text-success">Active</span>
+            {% else %}
+            <span class="badge bg-secondary bg-opacity-10 text-secondary">Disabled</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      <div class="card-body px-4 pb-4">
+        {% if gc_status.enabled %}
+        <div class="d-flex gap-2 mb-3">
+          <button class="btn btn-primary btn-sm d-inline-flex align-items-center" id="gcRunBtn" onclick="runGC(false)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+              <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+            </svg>
+            Run Now
+          </button>
+          <button class="btn btn-outline-secondary btn-sm" id="gcDryRunBtn" onclick="runGC(true)">
+            Dry Run
+          </button>
+        </div>
+
+        <div id="gcResult" class="mb-3 d-none">
+          <div class="alert mb-0 small" id="gcResultAlert">
+            <div class="d-flex justify-content-between align-items-start">
+              <div class="fw-semibold mb-1" id="gcResultTitle"></div>
+              <button type="button" class="btn-close btn-close-sm" style="font-size:0.65rem" onclick="document.getElementById('gcResult').classList.add('d-none')"></button>
+            </div>
+            <div id="gcResultBody"></div>
+          </div>
+        </div>
+
+        <div class="border rounded p-3 mb-3" style="background: var(--bs-tertiary-bg, #f8f9fa);">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+              <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
+            </svg>
+            <span class="small fw-semibold text-muted">Configuration</span>
+          </div>
+          <div class="row small">
+            <div class="col-6 mb-1"><span class="text-muted">Interval:</span> {{ gc_status.interval_hours }}h</div>
+            <div class="col-6 mb-1"><span class="text-muted">Dry run:</span> {{ "Yes" if gc_status.dry_run else "No" }}</div>
+            <div class="col-6 mb-1"><span class="text-muted">Temp max age:</span> {{ gc_status.temp_file_max_age_hours }}h</div>
+            <div class="col-6 mb-1"><span class="text-muted">Lock max age:</span> {{ gc_status.lock_file_max_age_hours }}h</div>
+            <div class="col-6"><span class="text-muted">Multipart max age:</span> {{ gc_status.multipart_max_age_days }}d</div>
+          </div>
+        </div>
+
+        {% if gc_history %}
+        <h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
+            <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
+            <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 8V3.5a.5.5 0 0 1 .5-.5z"/>
+          </svg>
+          Recent Executions
+        </h6>
+        <div class="table-responsive">
+          <table class="table table-sm small mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Time</th>
+                <th class="text-center">Cleaned</th>
+                <th class="text-center">Freed</th>
+                <th class="text-center">Mode</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for exec in gc_history %}
+              <tr>
+                <td class="text-nowrap">{{ exec.timestamp_display }}</td>
+                <td class="text-center">
+                  {% set r = exec.result %}
+                  {{ (r.temp_files_deleted|d(0)) + (r.multipart_uploads_deleted|d(0)) + (r.lock_files_deleted|d(0)) + (r.orphaned_metadata_deleted|d(0)) + (r.orphaned_versions_deleted|d(0)) + (r.empty_dirs_removed|d(0)) }}
+                </td>
+                <td class="text-center">{{ exec.bytes_freed_display }}</td>
+                <td class="text-center">
+                  {% if exec.dry_run %}
+                  <span class="badge bg-warning bg-opacity-10 text-warning">Dry run</span>
+                  {% else %}
+                  <span class="badge bg-primary bg-opacity-10 text-primary">Live</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="text-center py-2">
+          <p class="text-muted small mb-0">No executions recorded yet.</p>
+        </div>
+        {% endif %}
+
+        {% else %}
+        <div class="text-center py-4">
+          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="currentColor" class="text-muted mb-2 opacity-50" viewBox="0 0 16 16">
+            <path d="M2.5 1a1 1 0 0 0-1 1v1a1 1 0 0 0 1 1H3v9a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V4h.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H10a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1H2.5zm3 4a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 .5-.5zM8 5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-1 0v-7A.5.5 0 0 1 8 5zm3 .5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z"/>
+          </svg>
+          <p class="text-muted mb-1">Garbage collection is not enabled.</p>
+          <p class="text-muted small mb-0">Set <code>GC_ENABLED=true</code> to enable automatic cleanup.</p>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                <path d="M10.854 5.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 7.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
+              </svg>
+              Integrity Scanner
+            </h5>
+            <p class="text-muted small mb-0">Detect and heal corrupted objects, orphaned files, and metadata drift</p>
+          </div>
+          <div>
+            {% if integrity_status.enabled %}
+            <span class="badge bg-success bg-opacity-10 text-success">Active</span>
+            {% else %}
+            <span class="badge bg-secondary bg-opacity-10 text-secondary">Disabled</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      <div class="card-body px-4 pb-4">
+        {% if integrity_status.enabled %}
+        <div class="d-flex gap-2 flex-wrap mb-3">
+          <button class="btn btn-primary btn-sm d-inline-flex align-items-center" id="integrityRunBtn" onclick="runIntegrity(false, false)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+              <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+            </svg>
+            Scan Now
+          </button>
+          <button class="btn btn-outline-warning btn-sm" id="integrityHealBtn" onclick="runIntegrity(false, true)">
+            Scan &amp; Heal
+          </button>
+          <button class="btn btn-outline-secondary btn-sm" id="integrityDryRunBtn" onclick="runIntegrity(true, false)">
+            Dry Run
+          </button>
+        </div>
+
+        <div id="integrityResult" class="mb-3 d-none">
+          <div class="alert mb-0 small" id="integrityResultAlert">
+            <div class="d-flex justify-content-between align-items-start">
+              <div class="fw-semibold mb-1" id="integrityResultTitle"></div>
+              <button type="button" class="btn-close btn-close-sm" style="font-size:0.65rem" onclick="document.getElementById('integrityResult').classList.add('d-none')"></button>
+            </div>
+            <div id="integrityResultBody"></div>
+          </div>
+        </div>
+
+        <div class="border rounded p-3 mb-3" style="background: var(--bs-tertiary-bg, #f8f9fa);">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+              <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
+            </svg>
+            <span class="small fw-semibold text-muted">Configuration</span>
+          </div>
+          <div class="row small">
+            <div class="col-6 mb-1"><span class="text-muted">Interval:</span> {{ integrity_status.interval_hours }}h</div>
+            <div class="col-6 mb-1"><span class="text-muted">Dry run:</span> {{ "Yes" if integrity_status.dry_run else "No" }}</div>
+            <div class="col-6"><span class="text-muted">Batch size:</span> {{ integrity_status.batch_size }}</div>
+            <div class="col-6"><span class="text-muted">Auto-heal:</span> {{ "Yes" if integrity_status.auto_heal else "No" }}</div>
+          </div>
+        </div>
+
+        {% if integrity_history %}
+        <h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>
+            <path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>
+            <path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 8V3.5a.5.5 0 0 1 .5-.5z"/>
+          </svg>
+          Recent Scans
+        </h6>
+        <div class="table-responsive">
+          <table class="table table-sm small mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Time</th>
+                <th class="text-center">Scanned</th>
+                <th class="text-center">Issues</th>
+                <th class="text-center">Healed</th>
+                <th class="text-center">Mode</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for exec in integrity_history %}
+              <tr>
+                <td class="text-nowrap">{{ exec.timestamp_display }}</td>
+                <td class="text-center">{{ exec.result.objects_scanned|d(0) }}</td>
+                <td class="text-center">
+                  {% set total_issues = (exec.result.corrupted_objects|d(0)) + (exec.result.orphaned_objects|d(0)) + (exec.result.phantom_metadata|d(0)) + (exec.result.stale_versions|d(0)) + (exec.result.etag_cache_inconsistencies|d(0)) + (exec.result.legacy_metadata_drifts|d(0)) %}
+                  {% if total_issues > 0 %}
+                  <span class="text-danger fw-medium">{{ total_issues }}</span>
+                  {% else %}
+                  <span class="text-success">0</span>
+                  {% endif %}
+                </td>
+                <td class="text-center">{{ exec.result.issues_healed|d(0) }}</td>
+                <td class="text-center">
+                  {% if exec.dry_run %}
+                  <span class="badge bg-warning bg-opacity-10 text-warning">Dry</span>
+                  {% elif exec.auto_heal %}
+                  <span class="badge bg-success bg-opacity-10 text-success">Heal</span>
+                  {% else %}
+                  <span class="badge bg-primary bg-opacity-10 text-primary">Scan</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="text-center py-2">
+          <p class="text-muted small mb-0">No scans recorded yet.</p>
+        </div>
+        {% endif %}
+
+        {% else %}
+        <div class="text-center py-4">
+          <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="currentColor" class="text-muted mb-2 opacity-50" viewBox="0 0 16 16">
+            <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+            <path d="M10.854 5.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 7.793l2.646-2.647a.5.5 0 0 1 .708 0z"/>
+          </svg>
+          <p class="text-muted mb-1">Integrity scanner is not enabled.</p>
+          <p class="text-muted small mb-0">Set <code>INTEGRITY_ENABLED=true</code> to enable automatic scanning.</p>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function () {
+  var csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+  function setLoading(btnId, loading) {
+    var btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.disabled = loading;
+    if (loading) {
+      btn.dataset.originalHtml = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Running...';
+    } else if (btn.dataset.originalHtml) {
+      btn.innerHTML = btn.dataset.originalHtml;
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    var units = ['B', 'KB', 'MB', 'GB'];
+    var i = 0;
+    var b = bytes;
+    while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+    return (i === 0 ? b : b.toFixed(1)) + ' ' + units[i];
+  }
+
+  window.runGC = function (dryRun) {
+    setLoading('gcRunBtn', true);
+    setLoading('gcDryRunBtn', true);
+
+    fetch('{{ url_for("ui.system_gc_run") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+      body: JSON.stringify({dry_run: dryRun})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      var container = document.getElementById('gcResult');
+      var alert = document.getElementById('gcResultAlert');
+      var title = document.getElementById('gcResultTitle');
+      var body = document.getElementById('gcResultBody');
+      container.classList.remove('d-none');
+
+      if (data.error) {
+        alert.className = 'alert alert-danger mb-0 small';
+        title.textContent = 'Error';
+        body.textContent = data.error;
+        return;
+      }
+
+      var totalItems = (data.temp_files_deleted || 0) + (data.multipart_uploads_deleted || 0) +
+                        (data.lock_files_deleted || 0) + (data.orphaned_metadata_deleted || 0) +
+                        (data.orphaned_versions_deleted || 0) + (data.empty_dirs_removed || 0);
+      var totalFreed = (data.temp_bytes_freed || 0) + (data.multipart_bytes_freed || 0) +
+                       (data.orphaned_version_bytes_freed || 0);
+
+      alert.className = totalItems > 0 ? 'alert alert-success mb-0 small' : 'alert alert-info mb-0 small';
+      title.textContent = (dryRun ? '[Dry Run] ' : '') + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
+
+      var lines = [];
+      if (data.temp_files_deleted) lines.push('Temp files: ' + data.temp_files_deleted + ' (' + formatBytes(data.temp_bytes_freed) + ')');
+      if (data.multipart_uploads_deleted) lines.push('Multipart uploads: ' + data.multipart_uploads_deleted + ' (' + formatBytes(data.multipart_bytes_freed) + ')');
+      if (data.lock_files_deleted) lines.push('Lock files: ' + data.lock_files_deleted);
+      if (data.orphaned_metadata_deleted) lines.push('Orphaned metadata: ' + data.orphaned_metadata_deleted);
+      if (data.orphaned_versions_deleted) lines.push('Orphaned versions: ' + data.orphaned_versions_deleted + ' (' + formatBytes(data.orphaned_version_bytes_freed) + ')');
+      if (data.empty_dirs_removed) lines.push('Empty directories: ' + data.empty_dirs_removed);
+      if (totalItems === 0) lines.push('Nothing to clean up.');
+      if (totalFreed > 0) lines.push('Total freed: ' + formatBytes(totalFreed));
+      if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
+
+      body.innerHTML = lines.join('<br>');
+    })
+    .catch(function (err) {
+      var container = document.getElementById('gcResult');
+      var alert = document.getElementById('gcResultAlert');
+      var title = document.getElementById('gcResultTitle');
+      var body = document.getElementById('gcResultBody');
+      container.classList.remove('d-none');
+      alert.className = 'alert alert-danger mb-0 small';
+      title.textContent = 'Error';
+      body.textContent = err.message;
+    })
+    .finally(function () {
+      setLoading('gcRunBtn', false);
+      setLoading('gcDryRunBtn', false);
+    });
+  };
+
+  window.runIntegrity = function (dryRun, autoHeal) {
+    setLoading('integrityRunBtn', true);
+    setLoading('integrityHealBtn', true);
+    setLoading('integrityDryRunBtn', true);
+
+    fetch('{{ url_for("ui.system_integrity_run") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+      body: JSON.stringify({dry_run: dryRun, auto_heal: autoHeal})
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      var container = document.getElementById('integrityResult');
+      var alert = document.getElementById('integrityResultAlert');
+      var title = document.getElementById('integrityResultTitle');
+      var body = document.getElementById('integrityResultBody');
+      container.classList.remove('d-none');
+
+      if (data.error) {
+        alert.className = 'alert alert-danger mb-0 small';
+        title.textContent = 'Error';
+        body.textContent = data.error;
+        return;
+      }
+
+      var totalIssues = (data.corrupted_objects || 0) + (data.orphaned_objects || 0) +
+                         (data.phantom_metadata || 0) + (data.stale_versions || 0) +
+                         (data.etag_cache_inconsistencies || 0) + (data.legacy_metadata_drifts || 0);
+
+      var prefix = dryRun ? '[Dry Run] ' : (autoHeal ? '[Heal] ' : '');
+      alert.className = totalIssues > 0 ? 'alert alert-warning mb-0 small' : 'alert alert-success mb-0 small';
+      title.textContent = prefix + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
+
+      var lines = [];
+      lines.push('Scanned: ' + (data.objects_scanned || 0) + ' objects in ' + (data.buckets_scanned || 0) + ' buckets');
+      if (totalIssues === 0) {
+        lines.push('No issues found.');
+      } else {
+        if (data.corrupted_objects) lines.push('Corrupted objects: ' + data.corrupted_objects);
+        if (data.orphaned_objects) lines.push('Orphaned objects: ' + data.orphaned_objects);
+        if (data.phantom_metadata) lines.push('Phantom metadata: ' + data.phantom_metadata);
+        if (data.stale_versions) lines.push('Stale versions: ' + data.stale_versions);
+        if (data.etag_cache_inconsistencies) lines.push('ETag inconsistencies: ' + data.etag_cache_inconsistencies);
+        if (data.legacy_metadata_drifts) lines.push('Legacy metadata drifts: ' + data.legacy_metadata_drifts);
+        if (data.issues_healed) lines.push('Issues healed: ' + data.issues_healed);
+      }
+      if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
+
+      body.innerHTML = lines.join('<br>');
+    })
+    .catch(function (err) {
+      var container = document.getElementById('integrityResult');
+      var alert = document.getElementById('integrityResultAlert');
+      var title = document.getElementById('integrityResultTitle');
+      var body = document.getElementById('integrityResultBody');
+      container.classList.remove('d-none');
+      alert.className = 'alert alert-danger mb-0 small';
+      title.textContent = 'Error';
+      body.textContent = err.message;
+    })
+    .finally(function () {
+      setLoading('integrityRunBtn', false);
+      setLoading('integrityHealBtn', false);
+      setLoading('integrityDryRunBtn', false);
+    });
+  };
+})();
+</script>
+{% endblock %}

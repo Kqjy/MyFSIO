@@ -4041,6 +4041,117 @@ def get_peer_sync_stats(site_id: str):
     return jsonify(stats)
 
 
+@ui_bp.get("/system")
+def system_dashboard():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied: System page requires admin permissions", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+
+    import platform as _platform
+    import sys
+    from app.version import APP_VERSION
+
+    try:
+        import myfsio_core as _rc
+        has_rust = True
+    except ImportError:
+        has_rust = False
+
+    gc = current_app.extensions.get("gc")
+    gc_status = gc.get_status() if gc else {"enabled": False}
+    gc_history_records = []
+    if gc:
+        raw = gc.get_history(limit=10, offset=0)
+        for rec in raw:
+            r = rec.get("result", {})
+            total_freed = r.get("temp_bytes_freed", 0) + r.get("multipart_bytes_freed", 0) + r.get("orphaned_version_bytes_freed", 0)
+            rec["bytes_freed_display"] = _format_bytes(total_freed)
+            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            gc_history_records.append(rec)
+
+    checker = current_app.extensions.get("integrity")
+    integrity_status = checker.get_status() if checker else {"enabled": False}
+    integrity_history_records = []
+    if checker:
+        raw = checker.get_history(limit=10, offset=0)
+        for rec in raw:
+            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            integrity_history_records.append(rec)
+
+    features = [
+        {"label": "Encryption (SSE-S3)", "enabled": current_app.config.get("ENCRYPTION_ENABLED", False)},
+        {"label": "KMS", "enabled": current_app.config.get("KMS_ENABLED", False)},
+        {"label": "Versioning Lifecycle", "enabled": current_app.config.get("LIFECYCLE_ENABLED", False)},
+        {"label": "Metrics History", "enabled": current_app.config.get("METRICS_HISTORY_ENABLED", False)},
+        {"label": "Operation Metrics", "enabled": current_app.config.get("OPERATION_METRICS_ENABLED", False)},
+        {"label": "Site Sync", "enabled": current_app.config.get("SITE_SYNC_ENABLED", False)},
+        {"label": "Website Hosting", "enabled": current_app.config.get("WEBSITE_HOSTING_ENABLED", False)},
+        {"label": "Garbage Collection", "enabled": current_app.config.get("GC_ENABLED", False)},
+        {"label": "Integrity Scanner", "enabled": current_app.config.get("INTEGRITY_ENABLED", False)},
+    ]
+
+    return render_template(
+        "system.html",
+        principal=principal,
+        app_version=APP_VERSION,
+        storage_root=current_app.config.get("STORAGE_ROOT", "./data"),
+        platform=_platform.platform(),
+        python_version=sys.version.split()[0],
+        has_rust=has_rust,
+        features=features,
+        gc_status=gc_status,
+        gc_history=gc_history_records,
+        integrity_status=integrity_status,
+        integrity_history=integrity_history_records,
+    )
+
+
+@ui_bp.post("/system/gc/run")
+def system_gc_run():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    gc = current_app.extensions.get("gc")
+    if not gc:
+        return jsonify({"error": "GC is not enabled"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    original_dry_run = gc.dry_run
+    if "dry_run" in payload:
+        gc.dry_run = bool(payload["dry_run"])
+    try:
+        result = gc.run_now()
+    finally:
+        gc.dry_run = original_dry_run
+    return jsonify(result.to_dict())
+
+
+@ui_bp.post("/system/integrity/run")
+def system_integrity_run():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    checker = current_app.extensions.get("integrity")
+    if not checker:
+        return jsonify({"error": "Integrity checker is not enabled"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    result = checker.run_now(
+        auto_heal=payload.get("auto_heal"),
+        dry_run=payload.get("dry_run"),
+    )
+    return jsonify(result.to_dict())
+
+
 @ui_bp.app_errorhandler(404)
 def ui_not_found(error):  # type: ignore[override]
     prefix = ui_bp.url_prefix or ""
