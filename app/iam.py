@@ -482,7 +482,7 @@ class IamService:
                 "expires_at": record.get("expires_at"),
                 "access_keys": access_keys,
                 "policies": [
-                    {"bucket": policy.bucket, "actions": sorted(policy.actions), "prefix": policy.prefix}
+                    {**{"bucket": policy.bucket, "actions": sorted(policy.actions)}, **({"prefix": policy.prefix} if policy.prefix != "*" else {})}
                     for policy in record["policies"]
                 ],
             }
@@ -614,7 +614,7 @@ class IamService:
         if not record:
             raise IamError("User not found")
         return [
-            {"bucket": p.bucket, "actions": sorted(p.actions), "prefix": p.prefix}
+            {**{"bucket": p.bucket, "actions": sorted(p.actions)}, **({"prefix": p.prefix} if p.prefix != "*" else {})}
             for p in record["policies"]
         ]
 
