@@ -406,6 +406,10 @@ class ObjectStorage:
             self._stats_serial[bucket_id] = self._stats_serial.get(bucket_id, 0) + 1
             self._stats_mem_time[bucket_id] = time.monotonic()
             self._stats_dirty.add(bucket_id)
+            needs_immediate = data["objects"] == 0 and objects_delta < 0
+        if needs_immediate:
+            self._flush_stats()
+        else:
             self._schedule_stats_flush()
 
     def _schedule_stats_flush(self) -> None:
