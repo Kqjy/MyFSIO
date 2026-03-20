@@ -618,20 +618,77 @@ def stream_bucket_objects(bucket_name: str):
     prefix = request.args.get("prefix") or None
     delimiter = request.args.get("delimiter") or None
 
+    storage = _storage()
     try:
-        client = get_session_s3_client()
-    except (PermissionError, RuntimeError) as exc:
-        return jsonify({"error": str(exc)}), 403
-
-    versioning_enabled = get_versioning_via_s3(client, bucket_name)
+        versioning_enabled = storage.is_versioning_enabled(bucket_name)
+    except StorageError:
+        versioning_enabled = False
     url_templates = build_url_templates(bucket_name)
     display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
 
+    def generate():
+        yield json.dumps({
+            "type": "meta",
+            "versioning_enabled": versioning_enabled,
+            "url_templates": url_templates,
+        }) + "\n"
+        yield json.dumps({"type": "count", "total_count": 0}) + "\n"
+
+        running_count = 0
+        try:
+            if delimiter:
+                for item_type, item in storage.iter_objects_shallow(
+                    bucket_name, prefix=prefix or "", delimiter=delimiter,
+                ):
+                    if item_type == "folder":
+                        yield json.dumps({"type": "folder", "prefix": item}) + "\n"
+                    else:
+                        last_mod = item.last_modified
+                        yield json.dumps({
+                            "type": "object",
+                            "key": item.key,
+                            "size": item.size,
+                            "last_modified": last_mod.isoformat(),
+                            "last_modified_display": _format_datetime_display(last_mod, display_tz),
+                            "last_modified_iso": _format_datetime_iso(last_mod, display_tz),
+                            "etag": item.etag or "",
+                        }) + "\n"
+                        running_count += 1
+                        if running_count % 1000 == 0:
+                            yield json.dumps({"type": "count", "total_count": running_count}) + "\n"
+            else:
+                continuation_token = None
+                while True:
+                    result = storage.list_objects(
+                        bucket_name,
+                        max_keys=1000,
+                        continuation_token=continuation_token,
+                        prefix=prefix,
+                    )
+                    for obj in result.objects:
+                        last_mod = obj.last_modified
+                        yield json.dumps({
+                            "type": "object",
+                            "key": obj.key,
+                            "size": obj.size,
+                            "last_modified": last_mod.isoformat(),
+                            "last_modified_display": _format_datetime_display(last_mod, display_tz),
+                            "last_modified_iso": _format_datetime_iso(last_mod, display_tz),
+                            "etag": obj.etag or "",
+                        }) + "\n"
+                    running_count += len(result.objects)
+                    yield json.dumps({"type": "count", "total_count": running_count}) + "\n"
+                    if not result.is_truncated:
+                        break
+                    continuation_token = result.next_continuation_token
+        except StorageError as exc:
+            yield json.dumps({"type": "error", "error": str(exc)}) + "\n"
+            return
+        yield json.dumps({"type": "count", "total_count": running_count}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
     return Response(
-        stream_objects_ndjson(
-            client, bucket_name, prefix, url_templates, display_tz, versioning_enabled,
-            delimiter=delimiter,
-        ),
+        generate(),
         mimetype='application/x-ndjson',
         headers={
             'Cache-Control': 'no-cache',

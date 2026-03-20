@@ -714,6 +714,73 @@ class ObjectStorage:
             next_continuation_token=next_token,
         )
 
+    def iter_objects_shallow(
+        self,
+        bucket_name: str,
+        *,
+        prefix: str = "",
+        delimiter: str = "/",
+    ) -> Generator[tuple[str, ObjectMeta | str], None, None]:
+        bucket_path = self._bucket_path(bucket_name)
+        if not bucket_path.exists():
+            raise BucketNotFoundError("Bucket does not exist")
+        bucket_id = bucket_path.name
+
+        target_dir = bucket_path
+        if prefix:
+            safe_prefix_path = Path(prefix.rstrip("/"))
+            if ".." in safe_prefix_path.parts:
+                return
+            target_dir = bucket_path / safe_prefix_path
+            try:
+                resolved = target_dir.resolve()
+                bucket_resolved = bucket_path.resolve()
+                if not str(resolved).startswith(str(bucket_resolved) + os.sep) and resolved != bucket_resolved:
+                    return
+            except (OSError, ValueError):
+                return
+
+        if not target_dir.exists() or not target_dir.is_dir():
+            return
+
+        etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        meta_cache: Dict[str, str] = {}
+        if etag_index_path.exists():
+            try:
+                with open(etag_index_path, 'r', encoding='utf-8') as f:
+                    meta_cache = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        try:
+            with os.scandir(str(target_dir)) as it:
+                for entry in it:
+                    name = entry.name
+                    if name in self.INTERNAL_FOLDERS:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        yield ("folder", prefix + name + delimiter)
+                    elif entry.is_file(follow_symlinks=False):
+                        key = prefix + name
+                        try:
+                            st = entry.stat()
+                            etag = meta_cache.get(key)
+                            if etag is None:
+                                safe_key = PurePosixPath(key)
+                                meta = self._read_metadata(bucket_id, Path(safe_key))
+                                etag = meta.get("__etag__") if meta else None
+                            yield ("object", ObjectMeta(
+                                key=key,
+                                size=st.st_size,
+                                last_modified=datetime.fromtimestamp(st.st_mtime, timezone.utc),
+                                etag=etag,
+                                metadata=None,
+                            ))
+                        except OSError:
+                            pass
+        except OSError:
+            return
+
     def _shallow_via_full_scan(
         self,
         bucket_name: str,
