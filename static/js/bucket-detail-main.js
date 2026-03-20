@@ -849,6 +849,11 @@
         selectCheckbox.checked = true;
         row.classList.add('table-active');
       }
+
+      if (activeRow && activeRow.dataset.key === row.dataset.key) {
+        row.classList.add('table-active');
+        activeRow = row;
+      }
     });
 
     const folderRows = document.querySelectorAll('.folder-row');
