@@ -18,6 +18,8 @@ from flask_cors import CORS
 from flask_wtf.csrf import CSRFError
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+import io
+
 from .access_logging import AccessLoggingService
 from .operation_metrics import OperationMetricsCollector, classify_endpoint
 from .compression import GzipMiddleware
@@ -42,6 +44,20 @@ from .version import get_version
 from .website_domains import WebsiteDomainStore
 
 _request_counter = itertools.count(1)
+
+
+class _ChunkedTransferMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    def __call__(self, environ, start_response):
+        transfer_encoding = environ.get("HTTP_TRANSFER_ENCODING", "")
+        if "chunked" in transfer_encoding.lower() and "CONTENT_LENGTH" not in environ:
+            raw = environ["wsgi.input"]
+            body = raw.read()
+            environ["wsgi.input"] = io.BytesIO(body)
+            environ["CONTENT_LENGTH"] = str(len(body))
+        return self.app(environ, start_response)
 
 
 def _migrate_config_file(active_path: Path, legacy_paths: List[Path]) -> Path:
@@ -109,6 +125,8 @@ def create_app(
 
     if app.config.get("ENABLE_GZIP", True):
         app.wsgi_app = GzipMiddleware(app.wsgi_app, compression_level=6)
+
+    app.wsgi_app = _ChunkedTransferMiddleware(app.wsgi_app)
 
     _configure_cors(app)
     _configure_logging(app)
