@@ -115,6 +115,7 @@ class AppConfig:
     server_connection_limit: int
     server_backlog: int
     server_channel_timeout: int
+    server_max_buffer_size: int
     server_threads_auto: bool
     server_connection_limit_auto: bool
     server_backlog_auto: bool
@@ -293,6 +294,7 @@ class AppConfig:
             server_backlog_auto = False
 
         server_channel_timeout = int(_get("SERVER_CHANNEL_TIMEOUT", 120))
+        server_max_buffer_size = int(_get("SERVER_MAX_BUFFER_SIZE", 1024 * 1024 * 128))
         site_sync_enabled = str(_get("SITE_SYNC_ENABLED", "0")).lower() in {"1", "true", "yes", "on"}
         site_sync_interval_seconds = int(_get("SITE_SYNC_INTERVAL_SECONDS", 60))
         site_sync_batch_size = int(_get("SITE_SYNC_BATCH_SIZE", 100))
@@ -394,6 +396,7 @@ class AppConfig:
                    server_connection_limit=server_connection_limit,
                    server_backlog=server_backlog,
                    server_channel_timeout=server_channel_timeout,
+                   server_max_buffer_size=server_max_buffer_size,
                    server_threads_auto=server_threads_auto,
                    server_connection_limit_auto=server_connection_limit_auto,
                    server_backlog_auto=server_backlog_auto,
@@ -508,6 +511,8 @@ class AppConfig:
             issues.append(f"CRITICAL: SERVER_BACKLOG={self.server_backlog} is outside valid range (128-4096). Server cannot start.")
         if not (10 <= self.server_channel_timeout <= 300):
             issues.append(f"CRITICAL: SERVER_CHANNEL_TIMEOUT={self.server_channel_timeout} is outside valid range (10-300). Server cannot start.")
+        if self.server_max_buffer_size < 1024 * 1024:
+            issues.append(f"WARNING: SERVER_MAX_BUFFER_SIZE={self.server_max_buffer_size} is less than 1MB. Large uploads will fail.")
 
         if sys.platform != "win32":
             try:
@@ -553,6 +558,7 @@ class AppConfig:
         print(f"  CONNECTION_LIMIT: {self.server_connection_limit}{_auto(self.server_connection_limit_auto)}")
         print(f"  BACKLOG:          {self.server_backlog}{_auto(self.server_backlog_auto)}")
         print(f"  CHANNEL_TIMEOUT:  {self.server_channel_timeout}s")
+        print(f"  MAX_BUFFER_SIZE:  {self.server_max_buffer_size // (1024 * 1024)}MB")
         print("=" * 60)
         
         issues = self.validate_and_report()
@@ -618,6 +624,7 @@ class AppConfig:
             "SERVER_CONNECTION_LIMIT": self.server_connection_limit,
             "SERVER_BACKLOG": self.server_backlog,
             "SERVER_CHANNEL_TIMEOUT": self.server_channel_timeout,
+            "SERVER_MAX_BUFFER_SIZE": self.server_max_buffer_size,
             "SITE_SYNC_ENABLED": self.site_sync_enabled,
             "SITE_SYNC_INTERVAL_SECONDS": self.site_sync_interval_seconds,
             "SITE_SYNC_BATCH_SIZE": self.site_sync_batch_size,

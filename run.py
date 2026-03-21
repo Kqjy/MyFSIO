@@ -62,6 +62,11 @@ def _serve_granian(target: str, port: int, config: Optional[AppConfig] = None) -
         kwargs["backpressure"] = config.server_connection_limit
         kwargs["http1_settings"] = HTTP1Settings(
             header_read_timeout=config.server_channel_timeout * 1000,
+            max_buffer_size=config.server_max_buffer_size,
+        )
+    else:
+        kwargs["http1_settings"] = HTTP1Settings(
+            max_buffer_size=1024 * 1024 * 128,
         )
 
     server = Granian(**kwargs)
