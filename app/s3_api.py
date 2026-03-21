@@ -301,7 +301,12 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
 
     if _HAS_RUST:
         query_params = list(req.args.items(multi=True))
-        header_values = [(h, req.headers.get(h) or "") for h in signed_headers_str.split(";")]
+        header_values = []
+        for h in signed_headers_str.split(";"):
+            val = req.headers.get(h) or ""
+            if h.lower() == "expect" and val == "":
+                val = "100-continue"
+            header_values.append((h, val))
         if not _rc.verify_sigv4_signature(
             req.method, canonical_uri, query_params, signed_headers_str,
             header_values, payload_hash, amz_date, date_stamp, region,
@@ -390,7 +395,12 @@ def _verify_sigv4_query(req: Any) -> Principal | None:
 
     if _HAS_RUST:
         query_params = [(k, v) for k, v in req.args.items(multi=True) if k != "X-Amz-Signature"]
-        header_values = [(h, req.headers.get(h) or "") for h in signed_headers_str.split(";")]
+        header_values = []
+        for h in signed_headers_str.split(";"):
+            val = req.headers.get(h) or ""
+            if h.lower() == "expect" and val == "":
+                val = "100-continue"
+            header_values.append((h, val))
         if not _rc.verify_sigv4_signature(
             req.method, canonical_uri, query_params, signed_headers_str,
             header_values, "UNSIGNED-PAYLOAD", amz_date, date_stamp, region,
