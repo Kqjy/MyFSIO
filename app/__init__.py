@@ -51,12 +51,21 @@ class _ChunkedTransferMiddleware:
         self.app = app
 
     def __call__(self, environ, start_response):
-        transfer_encoding = environ.get("HTTP_TRANSFER_ENCODING", "")
-        if "chunked" in transfer_encoding.lower() and "CONTENT_LENGTH" not in environ:
-            raw = environ["wsgi.input"]
-            body = raw.read()
-            environ["wsgi.input"] = io.BytesIO(body)
-            environ["CONTENT_LENGTH"] = str(len(body))
+        has_content_length = environ.get("CONTENT_LENGTH")
+        if not has_content_length and environ.get("REQUEST_METHOD") in ("PUT", "POST"):
+            transfer_chunked = "chunked" in environ.get("HTTP_TRANSFER_ENCODING", "").lower()
+            has_body_hint = bool(environ.get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH"))
+            content_encoding = environ.get("HTTP_CONTENT_ENCODING", "")
+            has_aws_chunked = "aws-chunked" in content_encoding.lower()
+            if transfer_chunked or has_body_hint or has_aws_chunked:
+                try:
+                    raw = environ["wsgi.input"]
+                    body = raw.read()
+                except Exception:
+                    body = b""
+                if body:
+                    environ["wsgi.input"] = io.BytesIO(body)
+                    environ["CONTENT_LENGTH"] = str(len(body))
         return self.app(environ, start_response)
 
 
