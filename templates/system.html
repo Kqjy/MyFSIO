@@ -348,14 +348,14 @@
 (function () {
   var csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
 
-  function setLoading(btnId, loading) {
+  function setLoading(btnId, loading, spinnerOnly) {
     var btn = document.getElementById(btnId);
     if (!btn) return;
     btn.disabled = loading;
-    if (loading) {
+    if (loading && !spinnerOnly) {
       btn.dataset.originalHtml = btn.innerHTML;
       btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Running...';
-    } else if (btn.dataset.originalHtml) {
+    } else if (!loading && btn.dataset.originalHtml) {
       btn.innerHTML = btn.dataset.originalHtml;
     }
   }
@@ -370,8 +370,8 @@
   }
 
   window.runGC = function (dryRun) {
-    setLoading('gcRunBtn', true);
-    setLoading('gcDryRunBtn', true);
+    setLoading(dryRun ? 'gcDryRunBtn' : 'gcRunBtn', true);
+    setLoading(dryRun ? 'gcRunBtn' : 'gcDryRunBtn', true, true);
 
     fetch('{{ url_for("ui.system_gc_run") }}', {
       method: 'POST',
@@ -432,9 +432,10 @@
   };
 
   window.runIntegrity = function (dryRun, autoHeal) {
-    setLoading('integrityRunBtn', true);
-    setLoading('integrityHealBtn', true);
-    setLoading('integrityDryRunBtn', true);
+    var activeBtn = dryRun ? 'integrityDryRunBtn' : (autoHeal ? 'integrityHealBtn' : 'integrityRunBtn');
+    ['integrityRunBtn', 'integrityHealBtn', 'integrityDryRunBtn'].forEach(function (id) {
+      setLoading(id, true, id !== activeBtn);
+    });
 
     fetch('{{ url_for("ui.system_integrity_run") }}', {
       method: 'POST',
