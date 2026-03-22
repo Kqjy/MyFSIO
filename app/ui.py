@@ -618,20 +618,77 @@ def stream_bucket_objects(bucket_name: str):
     prefix = request.args.get("prefix") or None
     delimiter = request.args.get("delimiter") or None
 
+    storage = _storage()
     try:
-        client = get_session_s3_client()
-    except (PermissionError, RuntimeError) as exc:
-        return jsonify({"error": str(exc)}), 403
-
-    versioning_enabled = get_versioning_via_s3(client, bucket_name)
+        versioning_enabled = storage.is_versioning_enabled(bucket_name)
+    except StorageError:
+        versioning_enabled = False
     url_templates = build_url_templates(bucket_name)
     display_tz = current_app.config.get("DISPLAY_TIMEZONE", "UTC")
 
+    def generate():
+        yield json.dumps({
+            "type": "meta",
+            "versioning_enabled": versioning_enabled,
+            "url_templates": url_templates,
+        }) + "\n"
+        yield json.dumps({"type": "count", "total_count": 0}) + "\n"
+
+        running_count = 0
+        try:
+            if delimiter:
+                for item_type, item in storage.iter_objects_shallow(
+                    bucket_name, prefix=prefix or "", delimiter=delimiter,
+                ):
+                    if item_type == "folder":
+                        yield json.dumps({"type": "folder", "prefix": item}) + "\n"
+                    else:
+                        last_mod = item.last_modified
+                        yield json.dumps({
+                            "type": "object",
+                            "key": item.key,
+                            "size": item.size,
+                            "last_modified": last_mod.isoformat(),
+                            "last_modified_display": _format_datetime_display(last_mod, display_tz),
+                            "last_modified_iso": _format_datetime_iso(last_mod, display_tz),
+                            "etag": item.etag or "",
+                        }) + "\n"
+                        running_count += 1
+                        if running_count % 1000 == 0:
+                            yield json.dumps({"type": "count", "total_count": running_count}) + "\n"
+            else:
+                continuation_token = None
+                while True:
+                    result = storage.list_objects(
+                        bucket_name,
+                        max_keys=1000,
+                        continuation_token=continuation_token,
+                        prefix=prefix,
+                    )
+                    for obj in result.objects:
+                        last_mod = obj.last_modified
+                        yield json.dumps({
+                            "type": "object",
+                            "key": obj.key,
+                            "size": obj.size,
+                            "last_modified": last_mod.isoformat(),
+                            "last_modified_display": _format_datetime_display(last_mod, display_tz),
+                            "last_modified_iso": _format_datetime_iso(last_mod, display_tz),
+                            "etag": obj.etag or "",
+                        }) + "\n"
+                    running_count += len(result.objects)
+                    yield json.dumps({"type": "count", "total_count": running_count}) + "\n"
+                    if not result.is_truncated:
+                        break
+                    continuation_token = result.next_continuation_token
+        except StorageError as exc:
+            yield json.dumps({"type": "error", "error": str(exc)}) + "\n"
+            return
+        yield json.dumps({"type": "count", "total_count": running_count}) + "\n"
+        yield json.dumps({"type": "done"}) + "\n"
+
     return Response(
-        stream_objects_ndjson(
-            client, bucket_name, prefix, url_templates, display_tz, versioning_enabled,
-            delimiter=delimiter,
-        ),
+        generate(),
         mimetype='application/x-ndjson',
         headers={
             'Cache-Control': 'no-cache',
@@ -4039,6 +4096,117 @@ def get_peer_sync_stats(site_id: str):
         stats["buckets"].append(bucket_stats)
 
     return jsonify(stats)
+
+
+@ui_bp.get("/system")
+def system_dashboard():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        flash("Access denied: System page requires admin permissions", "danger")
+        return redirect(url_for("ui.buckets_overview"))
+
+    import platform as _platform
+    import sys
+    from app.version import APP_VERSION
+
+    try:
+        import myfsio_core as _rc
+        has_rust = True
+    except ImportError:
+        has_rust = False
+
+    gc = current_app.extensions.get("gc")
+    gc_status = gc.get_status() if gc else {"enabled": False}
+    gc_history_records = []
+    if gc:
+        raw = gc.get_history(limit=10, offset=0)
+        for rec in raw:
+            r = rec.get("result", {})
+            total_freed = r.get("temp_bytes_freed", 0) + r.get("multipart_bytes_freed", 0) + r.get("orphaned_version_bytes_freed", 0)
+            rec["bytes_freed_display"] = _format_bytes(total_freed)
+            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            gc_history_records.append(rec)
+
+    checker = current_app.extensions.get("integrity")
+    integrity_status = checker.get_status() if checker else {"enabled": False}
+    integrity_history_records = []
+    if checker:
+        raw = checker.get_history(limit=10, offset=0)
+        for rec in raw:
+            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            integrity_history_records.append(rec)
+
+    features = [
+        {"label": "Encryption (SSE-S3)", "enabled": current_app.config.get("ENCRYPTION_ENABLED", False)},
+        {"label": "KMS", "enabled": current_app.config.get("KMS_ENABLED", False)},
+        {"label": "Versioning Lifecycle", "enabled": current_app.config.get("LIFECYCLE_ENABLED", False)},
+        {"label": "Metrics History", "enabled": current_app.config.get("METRICS_HISTORY_ENABLED", False)},
+        {"label": "Operation Metrics", "enabled": current_app.config.get("OPERATION_METRICS_ENABLED", False)},
+        {"label": "Site Sync", "enabled": current_app.config.get("SITE_SYNC_ENABLED", False)},
+        {"label": "Website Hosting", "enabled": current_app.config.get("WEBSITE_HOSTING_ENABLED", False)},
+        {"label": "Garbage Collection", "enabled": current_app.config.get("GC_ENABLED", False)},
+        {"label": "Integrity Scanner", "enabled": current_app.config.get("INTEGRITY_ENABLED", False)},
+    ]
+
+    return render_template(
+        "system.html",
+        principal=principal,
+        app_version=APP_VERSION,
+        storage_root=current_app.config.get("STORAGE_ROOT", "./data"),
+        platform=_platform.platform(),
+        python_version=sys.version.split()[0],
+        has_rust=has_rust,
+        features=features,
+        gc_status=gc_status,
+        gc_history=gc_history_records,
+        integrity_status=integrity_status,
+        integrity_history=integrity_history_records,
+    )
+
+
+@ui_bp.post("/system/gc/run")
+def system_gc_run():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    gc = current_app.extensions.get("gc")
+    if not gc:
+        return jsonify({"error": "GC is not enabled"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    original_dry_run = gc.dry_run
+    if "dry_run" in payload:
+        gc.dry_run = bool(payload["dry_run"])
+    try:
+        result = gc.run_now()
+    finally:
+        gc.dry_run = original_dry_run
+    return jsonify(result.to_dict())
+
+
+@ui_bp.post("/system/integrity/run")
+def system_integrity_run():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    checker = current_app.extensions.get("integrity")
+    if not checker:
+        return jsonify({"error": "Integrity checker is not enabled"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    result = checker.run_now(
+        auto_heal=payload.get("auto_heal"),
+        dry_run=payload.get("dry_run"),
+    )
+    return jsonify(result.to_dict())
 
 
 @ui_bp.app_errorhandler(404)

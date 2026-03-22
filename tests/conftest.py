@@ -27,7 +27,10 @@ def app(tmp_path: Path):
                 "access_key": "test",
                 "secret_key": "secret",
                 "display_name": "Test User",
-                "policies": [{"bucket": "*", "actions": ["list", "read", "write", "delete", "policy"]}],
+                "policies": [{"bucket": "*", "actions": ["list", "read", "write", "delete", "policy",
+                    "create_bucket", "delete_bucket", "share", "versioning", "tagging",
+                    "encryption", "cors", "lifecycle", "replication", "quota",
+                    "object_lock", "notification", "logging", "website"]}],
             }
         ]
     }

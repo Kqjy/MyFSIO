@@ -379,29 +379,25 @@ if [[ "$SKIP_SYSTEMD" != true ]]; then
         echo "  ---------------"
         if systemctl is-active --quiet myfsio; then
             echo "  [OK] MyFSIO is running"
-
-            IAM_FILE="$DATA_DIR/.myfsio.sys/config/iam.json"
-            if [[ -f "$IAM_FILE" ]]; then
-                echo ""
-                echo "  ============================================"
-                echo "  ADMIN CREDENTIALS (save these securely!)"
-                echo "  ============================================"
-                if command -v jq &>/dev/null; then
-                    ACCESS_KEY=$(jq -r '.users[0].access_key' "$IAM_FILE" 2>/dev/null)
-                    SECRET_KEY=$(jq -r '.users[0].secret_key' "$IAM_FILE" 2>/dev/null)
-                else
-                    ACCESS_KEY=$(grep -o '"access_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$IAM_FILE" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-                    SECRET_KEY=$(grep -o '"secret_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$IAM_FILE" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-                fi
-                if [[ -n "$ACCESS_KEY" && -n "$SECRET_KEY" ]]; then
-                    echo "  Access Key: $ACCESS_KEY"
-                    echo "  Secret Key: $SECRET_KEY"
-                else
-                    echo "  [!] Could not parse credentials from $IAM_FILE"
-                    echo "      Check the file manually or view service logs."
-                fi
-                echo "  ============================================"
+            echo ""
+            echo "  ============================================"
+            echo "  ADMIN CREDENTIALS (save these securely!)"
+            echo "  ============================================"
+            CRED_OUTPUT=$(journalctl -u myfsio --no-pager -n 50 2>/dev/null | grep -A 5 "FIRST RUN - ADMIN CREDENTIALS")
+            ACCESS_KEY=$(echo "$CRED_OUTPUT" | grep "Access Key:" | head -1 | sed 's/.*Access Key: //' | awk '{print $1}')
+            SECRET_KEY=$(echo "$CRED_OUTPUT" | grep "Secret Key:" | head -1 | sed 's/.*Secret Key: //' | awk '{print $1}')
+            if [[ -n "$ACCESS_KEY" && "$ACCESS_KEY" != *"from"* && -n "$SECRET_KEY" && "$SECRET_KEY" != *"from"* ]]; then
+                echo "  Access Key: $ACCESS_KEY"
+                echo "  Secret Key: $SECRET_KEY"
+            else
+                echo "  [!] Could not extract credentials from service logs."
+                echo "      Check startup output: journalctl -u myfsio --no-pager | grep -A 5 'ADMIN CREDENTIALS'"
+                echo "      Or reset credentials: $INSTALL_DIR/myfsio reset-cred"
             fi
+            echo "  ============================================"
+            echo ""
+            echo "  NOTE: The IAM config file is encrypted at rest."
+            echo "  Credentials are only shown on first run or after reset."
         else
             echo "  [WARNING] MyFSIO may not have started correctly"
             echo "            Check logs with: journalctl -u myfsio -f"
@@ -427,12 +423,13 @@ echo "  API:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo "local
 echo "  UI:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost"):$UI_PORT/ui"
 echo ""
 echo "Credentials:"
-echo "  Admin credentials were shown above (if service was started)."
-echo "  You can also find them in: $DATA_DIR/.myfsio.sys/config/iam.json"
+echo "  Admin credentials are shown on first service start (see above)."
+echo "  The IAM config is encrypted at rest and cannot be read directly."
+echo "  To reset credentials: $INSTALL_DIR/myfsio reset-cred"
 echo ""
 echo "Configuration Files:"
 echo "  Environment:     $INSTALL_DIR/myfsio.env"
-echo "  IAM Users:       $DATA_DIR/.myfsio.sys/config/iam.json"
+echo "  IAM Users:       $DATA_DIR/.myfsio.sys/config/iam.json (encrypted)"
 echo "  Bucket Policies: $DATA_DIR/.myfsio.sys/config/bucket_policies.json"
 echo "  Secret Key:      $DATA_DIR/.myfsio.sys/config/.secret (auto-generated)"
 echo ""

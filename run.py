@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
+import signal
 import sys
 import warnings
 import multiprocessing
@@ -40,24 +42,42 @@ def _is_frozen() -> bool:
     return getattr(sys, 'frozen', False) or '__compiled__' in globals()
 
 
-def serve_api(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
-    app = create_api_app()
-    if prod:
-        from waitress import serve
-        if config:
-            serve(
-                app,
-                host=_server_host(),
-                port=port,
-                ident="MyFSIO",
-                threads=config.server_threads,
-                connection_limit=config.server_connection_limit,
-                backlog=config.server_backlog,
-                channel_timeout=config.server_channel_timeout,
-            )
-        else:
-            serve(app, host=_server_host(), port=port, ident="MyFSIO")
+def _serve_granian(target: str, port: int, config: Optional[AppConfig] = None) -> None:
+    from granian import Granian
+    from granian.constants import Interfaces
+    from granian.http import HTTP1Settings
+
+    kwargs: dict = {
+        "target": target,
+        "address": _server_host(),
+        "port": port,
+        "interface": Interfaces.WSGI,
+        "factory": True,
+        "workers": 1,
+    }
+
+    if config:
+        kwargs["blocking_threads"] = config.server_threads
+        kwargs["backlog"] = config.server_backlog
+        kwargs["backpressure"] = config.server_connection_limit
+        kwargs["http1_settings"] = HTTP1Settings(
+            header_read_timeout=config.server_channel_timeout * 1000,
+            max_buffer_size=config.server_max_buffer_size,
+        )
     else:
+        kwargs["http1_settings"] = HTTP1Settings(
+            max_buffer_size=1024 * 1024 * 128,
+        )
+
+    server = Granian(**kwargs)
+    server.serve()
+
+
+def serve_api(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
+    if prod:
+        _serve_granian("app:create_api_app", port, config)
+    else:
+        app = create_api_app()
         debug = _is_debug_enabled()
         if debug:
             warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
@@ -65,23 +85,10 @@ def serve_api(port: int, prod: bool = False, config: Optional[AppConfig] = None)
 
 
 def serve_ui(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
-    app = create_ui_app()
     if prod:
-        from waitress import serve
-        if config:
-            serve(
-                app,
-                host=_server_host(),
-                port=port,
-                ident="MyFSIO",
-                threads=config.server_threads,
-                connection_limit=config.server_connection_limit,
-                backlog=config.server_backlog,
-                channel_timeout=config.server_channel_timeout,
-            )
-        else:
-            serve(app, host=_server_host(), port=port, ident="MyFSIO")
+        _serve_granian("app:create_ui_app", port, config)
     else:
+        app = create_ui_app()
         debug = _is_debug_enabled()
         if debug:
             warnings.warn("DEBUG MODE ENABLED - DO NOT USE IN PRODUCTION", RuntimeWarning)
@@ -126,6 +133,7 @@ def reset_credentials() -> None:
             pass
 
     if raw_config and raw_config.get("users"):
+        is_v2 = raw_config.get("version", 1) >= 2
         admin_user = None
         for user in raw_config["users"]:
             policies = user.get("policies", [])
@@ -139,15 +147,39 @@ def reset_credentials() -> None:
         if not admin_user:
             admin_user = raw_config["users"][0]
 
-        admin_user["access_key"] = access_key
-        admin_user["secret_key"] = secret_key
-    else:
-        raw_config = {
-            "users": [
-                {
+        if is_v2:
+            admin_keys = admin_user.get("access_keys", [])
+            if admin_keys:
+                admin_keys[0]["access_key"] = access_key
+                admin_keys[0]["secret_key"] = secret_key
+            else:
+                from datetime import datetime as _dt, timezone as _tz
+                admin_user["access_keys"] = [{
                     "access_key": access_key,
                     "secret_key": secret_key,
+                    "status": "active",
+                    "created_at": _dt.now(_tz.utc).isoformat(),
+                }]
+        else:
+            admin_user["access_key"] = access_key
+            admin_user["secret_key"] = secret_key
+    else:
+        from datetime import datetime as _dt, timezone as _tz
+        raw_config = {
+            "version": 2,
+            "users": [
+                {
+                    "user_id": f"u-{secrets.token_hex(8)}",
                     "display_name": "Local Admin",
+                    "enabled": True,
+                    "access_keys": [
+                        {
+                            "access_key": access_key,
+                            "secret_key": secret_key,
+                            "status": "active",
+                            "created_at": _dt.now(_tz.utc).isoformat(),
+                        }
+                    ],
                     "policies": [
                         {"bucket": "*", "actions": list(ALLOWED_ACTIONS)}
                     ],
@@ -192,7 +224,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["api", "ui", "both", "reset-cred"], default="both")
     parser.add_argument("--api-port", type=int, default=5000)
     parser.add_argument("--ui-port", type=int, default=5100)
-    parser.add_argument("--prod", action="store_true", help="Run in production mode using Waitress")
+    parser.add_argument("--prod", action="store_true", help="Run in production mode using Granian")
     parser.add_argument("--dev", action="store_true", help="Force development mode (Flask dev server)")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration and exit")
     parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
@@ -235,7 +267,7 @@ if __name__ == "__main__":
             pass
     
     if prod_mode:
-        print("Running in production mode (Waitress)")
+        print("Running in production mode (Granian)")
         issues = config.validate_and_report()
         critical_issues = [i for i in issues if i.startswith("CRITICAL:")]
         if critical_issues:
@@ -248,10 +280,21 @@ if __name__ == "__main__":
 
     if args.mode in {"api", "both"}:
         print(f"Starting API server on port {args.api_port}...")
-        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode, config), daemon=True)
+        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode, config))
         api_proc.start()
     else:
         api_proc = None
+
+    def _cleanup_api():
+        if api_proc and api_proc.is_alive():
+            api_proc.terminate()
+            api_proc.join(timeout=5)
+            if api_proc.is_alive():
+                api_proc.kill()
+
+    if api_proc:
+        atexit.register(_cleanup_api)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     if args.mode in {"ui", "both"}:
         print(f"Starting UI server on port {args.ui_port}...")

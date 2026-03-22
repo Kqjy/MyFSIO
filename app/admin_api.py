@@ -686,6 +686,107 @@ def _storage():
     return current_app.extensions["object_storage"]
 
 
+def _require_iam_action(action: str):
+    principal, error = _require_principal()
+    if error:
+        return None, error
+    try:
+        _iam().authorize(principal, None, action)
+        return principal, None
+    except IamError:
+        return None, _json_error("AccessDenied", f"Requires {action} permission", 403)
+
+
+@admin_api_bp.route("/iam/users", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def iam_list_users():
+    principal, error = _require_iam_action("iam:list_users")
+    if error:
+        return error
+    return jsonify({"users": _iam().list_users()})
+
+
+@admin_api_bp.route("/iam/users/<identifier>", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def iam_get_user(identifier):
+    principal, error = _require_iam_action("iam:get_user")
+    if error:
+        return error
+    try:
+        user_id = _iam().resolve_user_id(identifier)
+        return jsonify(_iam().get_user_by_id(user_id))
+    except IamError as exc:
+        return _json_error("NotFound", str(exc), 404)
+
+
+@admin_api_bp.route("/iam/users/<identifier>/policies", methods=["GET"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def iam_get_user_policies(identifier):
+    principal, error = _require_iam_action("iam:get_policy")
+    if error:
+        return error
+    try:
+        return jsonify({"policies": _iam().get_user_policies(identifier)})
+    except IamError as exc:
+        return _json_error("NotFound", str(exc), 404)
+
+
+@admin_api_bp.route("/iam/users/<identifier>/keys", methods=["POST"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def iam_create_access_key(identifier):
+    principal, error = _require_iam_action("iam:create_key")
+    if error:
+        return error
+    try:
+        result = _iam().create_access_key(identifier)
+        logger.info("Access key created for %s by %s", identifier, principal.access_key)
+        return jsonify(result), 201
+    except IamError as exc:
+        return _json_error("InvalidRequest", str(exc), 400)
+
+
+@admin_api_bp.route("/iam/users/<identifier>/keys/<access_key>", methods=["DELETE"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def iam_delete_access_key(identifier, access_key):
+    principal, error = _require_iam_action("iam:delete_key")
+    if error:
+        return error
+    try:
+        _iam().delete_access_key(access_key)
+        logger.info("Access key %s deleted by %s", access_key, principal.access_key)
+        return "", 204
+    except IamError as exc:
+        return _json_error("InvalidRequest", str(exc), 400)
+
+
+@admin_api_bp.route("/iam/users/<identifier>/disable", methods=["POST"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def iam_disable_user(identifier):
+    principal, error = _require_iam_action("iam:disable_user")
+    if error:
+        return error
+    try:
+        _iam().disable_user(identifier)
+        logger.info("User %s disabled by %s", identifier, principal.access_key)
+        return jsonify({"status": "disabled"})
+    except IamError as exc:
+        return _json_error("InvalidRequest", str(exc), 400)
+
+
+@admin_api_bp.route("/iam/users/<identifier>/enable", methods=["POST"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def iam_enable_user(identifier):
+    principal, error = _require_iam_action("iam:disable_user")
+    if error:
+        return error
+    try:
+        _iam().enable_user(identifier)
+        logger.info("User %s enabled by %s", identifier, principal.access_key)
+        return jsonify({"status": "enabled"})
+    except IamError as exc:
+        return _json_error("InvalidRequest", str(exc), 400)
+
+
 @admin_api_bp.route("/website-domains", methods=["GET"])
 @limiter.limit(lambda: _get_admin_rate_limit())
 def list_website_domains():
@@ -881,3 +982,5 @@ def integrity_history():
     offset = int(request.args.get("offset", 0))
     records = checker.get_history(limit=limit, offset=offset)
     return jsonify({"executions": records})
+
+
