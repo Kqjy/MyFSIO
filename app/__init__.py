@@ -47,7 +47,6 @@ _request_counter = itertools.count(1)
 
 
 class _ChunkedTransferMiddleware:
-    _logger = logging.getLogger("chunked_middleware")
 
     def __init__(self, app):
         self.app = app
@@ -72,6 +71,13 @@ class _ChunkedTransferMiddleware:
         if not is_streaming:
             return self.app(environ, start_response)
 
+        raw = environ.get("wsgi.input")
+        if raw and hasattr(raw, "seek"):
+            try:
+                raw.seek(0)
+            except Exception:
+                pass
+
         cl_int = 0
         try:
             cl_int = int(content_length) if content_length else 0
@@ -80,8 +86,7 @@ class _ChunkedTransferMiddleware:
 
         if cl_int <= 0:
             try:
-                raw = environ["wsgi.input"]
-                body = raw.read()
+                body = raw.read() if raw else b""
             except Exception:
                 body = b""
             if body:

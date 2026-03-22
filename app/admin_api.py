@@ -1006,6 +1006,32 @@ def debug_upload():
         "request.content_length": request.content_length,
     }
 
+    raw = env.get("wsgi.input")
+    if raw:
+        try:
+            info["wsgi_input_pos"] = raw.tell() if hasattr(raw, "tell") else "N/A"
+        except Exception:
+            info["wsgi_input_pos"] = "error"
+        if hasattr(raw, "getvalue"):
+            try:
+                full = raw.getvalue()
+                info["wsgi_input_getvalue_len"] = len(full)
+                if full:
+                    info["wsgi_input_getvalue_hex"] = full[:200].hex()
+            except Exception as e:
+                info["wsgi_input_getvalue_error"] = str(e)
+        try:
+            if hasattr(raw, "seek"):
+                raw.seek(0)
+            seek_body = raw.read()
+            info["wsgi_input_after_seek0_len"] = len(seek_body)
+            if seek_body:
+                info["wsgi_input_after_seek0_hex"] = seek_body[:200].hex()
+            if hasattr(raw, "seek"):
+                raw.seek(0)
+        except Exception as e:
+            info["wsgi_input_seek_read_error"] = str(e)
+
     try:
         body = request.get_data(cache=False)
         info["body_length"] = len(body)
