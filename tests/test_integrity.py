@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.integrity import IntegrityChecker, IntegrityResult
+
+
+def _wait_scan_done(client, headers, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = client.get("/admin/integrity/status", headers=headers)
+        data = resp.get_json()
+        if not data.get("scanning"):
+            return
+        time.sleep(0.1)
+    raise TimeoutError("scan did not complete")
 
 
 def _md5(data: bytes) -> str:
@@ -413,8 +425,13 @@ class TestAdminAPI:
         resp = client.post("/admin/integrity/run", headers=AUTH_HEADERS, json={})
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "corrupted_objects" in data
-        assert "objects_scanned" in data
+        assert data["status"] == "started"
+        _wait_scan_done(client, AUTH_HEADERS)
+        resp = client.get("/admin/integrity/history?limit=1", headers=AUTH_HEADERS)
+        hist = resp.get_json()
+        assert len(hist["executions"]) >= 1
+        assert "corrupted_objects" in hist["executions"][0]["result"]
+        assert "objects_scanned" in hist["executions"][0]["result"]
 
     def test_run_with_overrides(self, integrity_app):
         client = integrity_app.test_client()
@@ -424,10 +441,12 @@ class TestAdminAPI:
             json={"dry_run": True, "auto_heal": True},
         )
         assert resp.status_code == 200
+        _wait_scan_done(client, AUTH_HEADERS)
 
     def test_history_endpoint(self, integrity_app):
         client = integrity_app.test_client()
         client.post("/admin/integrity/run", headers=AUTH_HEADERS, json={})
+        _wait_scan_done(client, AUTH_HEADERS)
         resp = client.get("/admin/integrity/history", headers=AUTH_HEADERS)
         assert resp.status_code == 200
         data = resp.get_json()

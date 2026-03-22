@@ -4202,11 +4202,46 @@ def system_integrity_run():
         return jsonify({"error": "Integrity checker is not enabled"}), 400
 
     payload = request.get_json(silent=True) or {}
-    result = checker.run_now(
+    started = checker.run_async(
         auto_heal=payload.get("auto_heal"),
         dry_run=payload.get("dry_run"),
     )
-    return jsonify(result.to_dict())
+    if not started:
+        return jsonify({"error": "A scan is already in progress"}), 409
+    return jsonify({"status": "started"})
+
+
+@ui_bp.get("/system/integrity/status")
+def system_integrity_status():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    checker = current_app.extensions.get("integrity")
+    if not checker:
+        return jsonify({"error": "Integrity checker is not enabled"}), 400
+
+    return jsonify(checker.get_status())
+
+
+@ui_bp.get("/system/integrity/history")
+def system_integrity_history():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    checker = current_app.extensions.get("integrity")
+    if not checker:
+        return jsonify({"executions": []})
+
+    limit = min(int(request.args.get("limit", 10)), 200)
+    offset = int(request.args.get("offset", 0))
+    records = checker.get_history(limit=limit, offset=offset)
+    return jsonify({"executions": records})
 
 
 @ui_bp.app_errorhandler(404)

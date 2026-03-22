@@ -961,12 +961,14 @@ def integrity_run_now():
     payload = request.get_json(silent=True) or {}
     override_dry_run = payload.get("dry_run")
     override_auto_heal = payload.get("auto_heal")
-    result = checker.run_now(
+    started = checker.run_async(
         auto_heal=override_auto_heal if override_auto_heal is not None else None,
         dry_run=override_dry_run if override_dry_run is not None else None,
     )
     logger.info("Integrity manual run by %s", principal.access_key)
-    return jsonify(result.to_dict())
+    if not started:
+        return _json_error("Conflict", "A scan is already in progress", 409)
+    return jsonify({"status": "started"})
 
 
 @admin_api_bp.route("/integrity/history", methods=["GET"])
