@@ -982,3 +982,42 @@ def integrity_history():
     offset = int(request.args.get("offset", 0))
     records = checker.get_history(limit=limit, offset=offset)
     return jsonify({"executions": records})
+
+
+@admin_api_bp.route("/debug/upload", methods=["PUT", "POST"])
+@limiter.limit(lambda: _get_admin_rate_limit())
+def debug_upload():
+    principal, error = _require_admin()
+    if error:
+        return error
+
+    env = request.environ
+    info = {
+        "CONTENT_LENGTH": env.get("CONTENT_LENGTH"),
+        "CONTENT_TYPE": env.get("CONTENT_TYPE"),
+        "HTTP_TRANSFER_ENCODING": env.get("HTTP_TRANSFER_ENCODING"),
+        "HTTP_CONTENT_ENCODING": env.get("HTTP_CONTENT_ENCODING"),
+        "HTTP_EXPECT": env.get("HTTP_EXPECT"),
+        "HTTP_X_AMZ_CONTENT_SHA256": env.get("HTTP_X_AMZ_CONTENT_SHA256"),
+        "HTTP_X_AMZ_DECODED_CONTENT_LENGTH": env.get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH"),
+        "REQUEST_METHOD": env.get("REQUEST_METHOD"),
+        "SERVER_PROTOCOL": env.get("SERVER_PROTOCOL"),
+        "wsgi.input_type": type(env.get("wsgi.input")).__name__,
+        "request.content_length": request.content_length,
+    }
+
+    try:
+        body = request.get_data(cache=False)
+        info["body_length"] = len(body)
+        if body:
+            info["body_preview_hex"] = body[:200].hex()
+    except Exception as e:
+        info["body_error"] = str(e)
+
+    all_http = {}
+    for k, v in env.items():
+        if k.startswith("HTTP_") and isinstance(v, str):
+            all_http[k] = v
+    info["all_http_headers"] = all_http
+
+    return jsonify(info)

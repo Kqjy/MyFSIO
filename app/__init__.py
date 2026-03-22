@@ -47,6 +47,8 @@ _request_counter = itertools.count(1)
 
 
 class _ChunkedTransferMiddleware:
+    _logger = logging.getLogger("chunked_middleware")
+
     def __init__(self, app):
         self.app = app
 
@@ -54,14 +56,29 @@ class _ChunkedTransferMiddleware:
         if environ.get("REQUEST_METHOD") not in ("PUT", "POST"):
             return self.app(environ, start_response)
 
+        sha256 = environ.get("HTTP_X_AMZ_CONTENT_SHA256", "")
+        decoded_len = environ.get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH", "")
+        content_encoding = environ.get("HTTP_CONTENT_ENCODING", "")
+        transfer_encoding = environ.get("HTTP_TRANSFER_ENCODING", "")
         content_length = environ.get("CONTENT_LENGTH")
-        body_expected = (
-            environ.get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH")
-            or "chunked" in environ.get("HTTP_TRANSFER_ENCODING", "").lower()
-            or "aws-chunked" in environ.get("HTTP_CONTENT_ENCODING", "").lower()
+
+        is_streaming = (
+            "STREAMING" in sha256.upper()
+            or decoded_len
+            or "aws-chunked" in content_encoding.lower()
+            or "chunked" in transfer_encoding.lower()
         )
 
-        if body_expected and (not content_length or content_length == "0"):
+        if not is_streaming:
+            return self.app(environ, start_response)
+
+        cl_int = 0
+        try:
+            cl_int = int(content_length) if content_length else 0
+        except (ValueError, TypeError):
+            pass
+
+        if cl_int <= 0:
             try:
                 raw = environ["wsgi.input"]
                 body = raw.read()
