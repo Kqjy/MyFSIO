@@ -55,21 +55,44 @@ class _ChunkedTransferMiddleware:
         if environ.get("REQUEST_METHOD") not in ("PUT", "POST"):
             return self.app(environ, start_response)
 
-        sha256 = environ.get("HTTP_X_AMZ_CONTENT_SHA256", "")
-        decoded_len = environ.get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH", "")
-        content_encoding = environ.get("HTTP_CONTENT_ENCODING", "")
         transfer_encoding = environ.get("HTTP_TRANSFER_ENCODING", "")
         content_length = environ.get("CONTENT_LENGTH")
 
-        is_streaming = (
-            "STREAMING" in sha256.upper()
-            or decoded_len
-            or "aws-chunked" in content_encoding.lower()
-            or "chunked" in transfer_encoding.lower()
-        )
+        if "chunked" in transfer_encoding.lower():
+            if content_length:
+                del environ["HTTP_TRANSFER_ENCODING"]
+            else:
+                raw = environ.get("wsgi.input")
+                if raw:
+                    try:
+                        if hasattr(raw, "seek"):
+                            raw.seek(0)
+                        body = raw.read()
+                    except Exception:
+                        body = b""
+                    if body:
+                        environ["wsgi.input"] = io.BytesIO(body)
+                        environ["CONTENT_LENGTH"] = str(len(body))
+                del environ["HTTP_TRANSFER_ENCODING"]
 
-        if not is_streaming:
-            return self.app(environ, start_response)
+        content_length = environ.get("CONTENT_LENGTH")
+        if not content_length or content_length == "0":
+            sha256 = environ.get("HTTP_X_AMZ_CONTENT_SHA256", "")
+            decoded_len = environ.get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH", "")
+            content_encoding = environ.get("HTTP_CONTENT_ENCODING", "")
+            if ("STREAMING" in sha256.upper() or decoded_len
+                    or "aws-chunked" in content_encoding.lower()):
+                raw = environ.get("wsgi.input")
+                if raw:
+                    try:
+                        if hasattr(raw, "seek"):
+                            raw.seek(0)
+                        body = raw.read()
+                    except Exception:
+                        body = b""
+                    if body:
+                        environ["wsgi.input"] = io.BytesIO(body)
+                        environ["CONTENT_LENGTH"] = str(len(body))
 
         raw = environ.get("wsgi.input")
         if raw and hasattr(raw, "seek"):
@@ -77,21 +100,6 @@ class _ChunkedTransferMiddleware:
                 raw.seek(0)
             except Exception:
                 pass
-
-        cl_int = 0
-        try:
-            cl_int = int(content_length) if content_length else 0
-        except (ValueError, TypeError):
-            pass
-
-        if cl_int <= 0:
-            try:
-                body = raw.read() if raw else b""
-            except Exception:
-                body = b""
-            if body:
-                environ["wsgi.input"] = io.BytesIO(body)
-                environ["CONTENT_LENGTH"] = str(len(body))
 
         return self.app(environ, start_response)
 
