@@ -173,6 +173,8 @@ class GarbageCollector:
         self._timer: Optional[threading.Timer] = None
         self._shutdown = False
         self._lock = threading.Lock()
+        self._scanning = False
+        self._scan_start_time: Optional[float] = None
         self._io_throttle = max(0, io_throttle_ms) / 1000.0
         self.history_store = GCHistoryStore(storage_root, max_records=max_history)
 
@@ -214,45 +216,70 @@ class GarbageCollector:
         finally:
             self._schedule_next()
 
-    def run_now(self) -> GCResult:
-        start = time.time()
-        result = GCResult()
+    def run_now(self, dry_run: Optional[bool] = None) -> GCResult:
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("GC is already in progress")
 
-        self._clean_temp_files(result)
-        self._clean_orphaned_multipart(result)
-        self._clean_stale_locks(result)
-        self._clean_orphaned_metadata(result)
-        self._clean_orphaned_versions(result)
-        self._clean_empty_dirs(result)
+        effective_dry_run = dry_run if dry_run is not None else self.dry_run
 
-        result.execution_time_seconds = time.time() - start
+        try:
+            self._scanning = True
+            self._scan_start_time = time.time()
 
-        if result.has_work or result.errors:
-            logger.info(
-                "GC completed in %.2fs: temp=%d (%.1f MB), multipart=%d (%.1f MB), "
-                "locks=%d, meta=%d, versions=%d (%.1f MB), dirs=%d, errors=%d%s",
-                result.execution_time_seconds,
-                result.temp_files_deleted,
-                result.temp_bytes_freed / (1024 * 1024),
-                result.multipart_uploads_deleted,
-                result.multipart_bytes_freed / (1024 * 1024),
-                result.lock_files_deleted,
-                result.orphaned_metadata_deleted,
-                result.orphaned_versions_deleted,
-                result.orphaned_version_bytes_freed / (1024 * 1024),
-                result.empty_dirs_removed,
-                len(result.errors),
-                " (dry run)" if self.dry_run else "",
+            start = self._scan_start_time
+            result = GCResult()
+
+            original_dry_run = self.dry_run
+            self.dry_run = effective_dry_run
+            try:
+                self._clean_temp_files(result)
+                self._clean_orphaned_multipart(result)
+                self._clean_stale_locks(result)
+                self._clean_orphaned_metadata(result)
+                self._clean_orphaned_versions(result)
+                self._clean_empty_dirs(result)
+            finally:
+                self.dry_run = original_dry_run
+
+            result.execution_time_seconds = time.time() - start
+
+            if result.has_work or result.errors:
+                logger.info(
+                    "GC completed in %.2fs: temp=%d (%.1f MB), multipart=%d (%.1f MB), "
+                    "locks=%d, meta=%d, versions=%d (%.1f MB), dirs=%d, errors=%d%s",
+                    result.execution_time_seconds,
+                    result.temp_files_deleted,
+                    result.temp_bytes_freed / (1024 * 1024),
+                    result.multipart_uploads_deleted,
+                    result.multipart_bytes_freed / (1024 * 1024),
+                    result.lock_files_deleted,
+                    result.orphaned_metadata_deleted,
+                    result.orphaned_versions_deleted,
+                    result.orphaned_version_bytes_freed / (1024 * 1024),
+                    result.empty_dirs_removed,
+                    len(result.errors),
+                    " (dry run)" if effective_dry_run else "",
+                )
+
+            record = GCExecutionRecord(
+                timestamp=time.time(),
+                result=result.to_dict(),
+                dry_run=effective_dry_run,
             )
+            self.history_store.add(record)
 
-        record = GCExecutionRecord(
-            timestamp=time.time(),
-            result=result.to_dict(),
-            dry_run=self.dry_run,
-        )
-        self.history_store.add(record)
+            return result
+        finally:
+            self._scanning = False
+            self._scan_start_time = None
+            self._lock.release()
 
-        return result
+    def run_async(self, dry_run: Optional[bool] = None) -> bool:
+        if self._scanning:
+            return False
+        t = threading.Thread(target=self.run_now, args=(dry_run,), daemon=True)
+        t.start()
+        return True
 
     def _system_path(self) -> Path:
         return self.storage_root / self.SYSTEM_ROOT
@@ -553,9 +580,10 @@ class GarbageCollector:
         return [r.to_dict() for r in records]
 
     def get_status(self) -> dict:
-        return {
+        status: Dict[str, Any] = {
             "enabled": not self._shutdown or self._timer is not None,
             "running": self._timer is not None and not self._shutdown,
+            "scanning": self._scanning,
             "interval_hours": self.interval_seconds / 3600.0,
             "temp_file_max_age_hours": self.temp_file_max_age_hours,
             "multipart_max_age_days": self.multipart_max_age_days,
@@ -563,3 +591,6 @@ class GarbageCollector:
             "dry_run": self.dry_run,
             "io_throttle_ms": round(self._io_throttle * 1000),
         }
+        if self._scanning and self._scan_start_time:
+            status["scan_elapsed_seconds"] = time.time() - self._scan_start_time
+        return status

@@ -4179,14 +4179,43 @@ def system_gc_run():
         return jsonify({"error": "GC is not enabled"}), 400
 
     payload = request.get_json(silent=True) or {}
-    original_dry_run = gc.dry_run
-    if "dry_run" in payload:
-        gc.dry_run = bool(payload["dry_run"])
+    started = gc.run_async(dry_run=payload.get("dry_run"))
+    if not started:
+        return jsonify({"error": "GC is already in progress"}), 409
+    return jsonify({"status": "started"})
+
+
+@ui_bp.get("/system/gc/status")
+def system_gc_status():
+    principal = _current_principal()
     try:
-        result = gc.run_now()
-    finally:
-        gc.dry_run = original_dry_run
-    return jsonify(result.to_dict())
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    gc = current_app.extensions.get("gc")
+    if not gc:
+        return jsonify({"error": "GC is not enabled"}), 400
+
+    return jsonify(gc.get_status())
+
+
+@ui_bp.get("/system/gc/history")
+def system_gc_history():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    gc = current_app.extensions.get("gc")
+    if not gc:
+        return jsonify({"executions": []})
+
+    limit = min(int(request.args.get("limit", 10)), 200)
+    offset = int(request.args.get("offset", 0))
+    records = gc.get_history(limit=limit, offset=offset)
+    return jsonify({"executions": records})
 
 
 @ui_bp.post("/system/integrity/run")

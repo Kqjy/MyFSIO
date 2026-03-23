@@ -122,6 +122,13 @@
           </button>
         </div>
 
+        <div id="gcScanningBanner" class="mb-3 {% if not gc_status.scanning %}d-none{% endif %}">
+          <div class="alert alert-info mb-0 small d-flex align-items-center gap-2">
+            <div class="spinner-border spinner-border-sm text-info" role="status"></div>
+            <span>GC in progress<span id="gcScanElapsed"></span></span>
+          </div>
+        </div>
+
         <div id="gcResult" class="mb-3 d-none">
           <div class="alert mb-0 small" id="gcResultAlert">
             <div class="d-flex justify-content-between align-items-start">
@@ -376,9 +383,92 @@
     return (i === 0 ? b : b.toFixed(1)) + ' ' + units[i];
   }
 
+  var _gcPollTimer = null;
+  var _gcLastDryRun = false;
+
+  function _gcSetScanning(scanning) {
+    var banner = document.getElementById('gcScanningBanner');
+    var btns = ['gcRunBtn', 'gcDryRunBtn'];
+    if (scanning) {
+      banner.classList.remove('d-none');
+      btns.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = true;
+      });
+    } else {
+      banner.classList.add('d-none');
+      document.getElementById('gcScanElapsed').textContent = '';
+      btns.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = false;
+      });
+    }
+  }
+
+  function _gcShowResult(data, dryRun) {
+    var container = document.getElementById('gcResult');
+    var alert = document.getElementById('gcResultAlert');
+    var title = document.getElementById('gcResultTitle');
+    var body = document.getElementById('gcResultBody');
+    container.classList.remove('d-none');
+
+    var totalItems = (data.temp_files_deleted || 0) + (data.multipart_uploads_deleted || 0) +
+                      (data.lock_files_deleted || 0) + (data.orphaned_metadata_deleted || 0) +
+                      (data.orphaned_versions_deleted || 0) + (data.empty_dirs_removed || 0);
+    var totalFreed = (data.temp_bytes_freed || 0) + (data.multipart_bytes_freed || 0) +
+                     (data.orphaned_version_bytes_freed || 0);
+
+    alert.className = totalItems > 0 ? 'alert alert-success mb-0 small' : 'alert alert-info mb-0 small';
+    title.textContent = (dryRun ? '[Dry Run] ' : '') + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
+
+    var lines = [];
+    if (data.temp_files_deleted) lines.push('Temp files: ' + data.temp_files_deleted + ' (' + formatBytes(data.temp_bytes_freed) + ')');
+    if (data.multipart_uploads_deleted) lines.push('Multipart uploads: ' + data.multipart_uploads_deleted + ' (' + formatBytes(data.multipart_bytes_freed) + ')');
+    if (data.lock_files_deleted) lines.push('Lock files: ' + data.lock_files_deleted);
+    if (data.orphaned_metadata_deleted) lines.push('Orphaned metadata: ' + data.orphaned_metadata_deleted);
+    if (data.orphaned_versions_deleted) lines.push('Orphaned versions: ' + data.orphaned_versions_deleted + ' (' + formatBytes(data.orphaned_version_bytes_freed) + ')');
+    if (data.empty_dirs_removed) lines.push('Empty directories: ' + data.empty_dirs_removed);
+    if (totalItems === 0) lines.push('Nothing to clean up.');
+    if (totalFreed > 0) lines.push('Total freed: ' + formatBytes(totalFreed));
+    if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
+
+    body.innerHTML = lines.join('<br>');
+  }
+
+  function _gcPoll() {
+    fetch('{{ url_for("ui.system_gc_status") }}', {
+      headers: {'X-CSRFToken': csrfToken}
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (status) {
+      if (status.scanning) {
+        var elapsed = status.scan_elapsed_seconds || 0;
+        document.getElementById('gcScanElapsed').textContent = ' (' + elapsed.toFixed(0) + 's)';
+        _gcPollTimer = setTimeout(_gcPoll, 2000);
+      } else {
+        _gcSetScanning(false);
+        fetch('{{ url_for("ui.system_gc_history") }}?limit=1', {
+          headers: {'X-CSRFToken': csrfToken}
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (hist) {
+          if (hist.executions && hist.executions.length > 0) {
+            var latest = hist.executions[0];
+            _gcShowResult(latest.result, latest.dry_run);
+          }
+        })
+        .catch(function () {});
+      }
+    })
+    .catch(function () {
+      _gcPollTimer = setTimeout(_gcPoll, 3000);
+    });
+  }
+
   window.runGC = function (dryRun) {
-    setLoading(dryRun ? 'gcDryRunBtn' : 'gcRunBtn', true);
-    setLoading(dryRun ? 'gcRunBtn' : 'gcDryRunBtn', true, true);
+    _gcLastDryRun = dryRun;
+    document.getElementById('gcResult').classList.add('d-none');
+    _gcSetScanning(true);
 
     fetch('{{ url_for("ui.system_gc_run") }}', {
       method: 'POST',
@@ -387,42 +477,22 @@
     })
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      var container = document.getElementById('gcResult');
-      var alert = document.getElementById('gcResultAlert');
-      var title = document.getElementById('gcResultTitle');
-      var body = document.getElementById('gcResultBody');
-      container.classList.remove('d-none');
-
       if (data.error) {
+        _gcSetScanning(false);
+        var container = document.getElementById('gcResult');
+        var alert = document.getElementById('gcResultAlert');
+        var title = document.getElementById('gcResultTitle');
+        var body = document.getElementById('gcResultBody');
+        container.classList.remove('d-none');
         alert.className = 'alert alert-danger mb-0 small';
         title.textContent = 'Error';
         body.textContent = data.error;
         return;
       }
-
-      var totalItems = (data.temp_files_deleted || 0) + (data.multipart_uploads_deleted || 0) +
-                        (data.lock_files_deleted || 0) + (data.orphaned_metadata_deleted || 0) +
-                        (data.orphaned_versions_deleted || 0) + (data.empty_dirs_removed || 0);
-      var totalFreed = (data.temp_bytes_freed || 0) + (data.multipart_bytes_freed || 0) +
-                       (data.orphaned_version_bytes_freed || 0);
-
-      alert.className = totalItems > 0 ? 'alert alert-success mb-0 small' : 'alert alert-info mb-0 small';
-      title.textContent = (dryRun ? '[Dry Run] ' : '') + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
-
-      var lines = [];
-      if (data.temp_files_deleted) lines.push('Temp files: ' + data.temp_files_deleted + ' (' + formatBytes(data.temp_bytes_freed) + ')');
-      if (data.multipart_uploads_deleted) lines.push('Multipart uploads: ' + data.multipart_uploads_deleted + ' (' + formatBytes(data.multipart_bytes_freed) + ')');
-      if (data.lock_files_deleted) lines.push('Lock files: ' + data.lock_files_deleted);
-      if (data.orphaned_metadata_deleted) lines.push('Orphaned metadata: ' + data.orphaned_metadata_deleted);
-      if (data.orphaned_versions_deleted) lines.push('Orphaned versions: ' + data.orphaned_versions_deleted + ' (' + formatBytes(data.orphaned_version_bytes_freed) + ')');
-      if (data.empty_dirs_removed) lines.push('Empty directories: ' + data.empty_dirs_removed);
-      if (totalItems === 0) lines.push('Nothing to clean up.');
-      if (totalFreed > 0) lines.push('Total freed: ' + formatBytes(totalFreed));
-      if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
-
-      body.innerHTML = lines.join('<br>');
+      _gcPollTimer = setTimeout(_gcPoll, 2000);
     })
     .catch(function (err) {
+      _gcSetScanning(false);
       var container = document.getElementById('gcResult');
       var alert = document.getElementById('gcResultAlert');
       var title = document.getElementById('gcResultTitle');
@@ -431,12 +501,13 @@
       alert.className = 'alert alert-danger mb-0 small';
       title.textContent = 'Error';
       body.textContent = err.message;
-    })
-    .finally(function () {
-      setLoading('gcRunBtn', false);
-      setLoading('gcDryRunBtn', false);
     });
   };
+
+  {% if gc_status.scanning %}
+  _gcSetScanning(true);
+  _gcPollTimer = setTimeout(_gcPoll, 2000);
+  {% endif %}
 
   var _integrityPollTimer = null;
   var _integrityLastMode = {dryRun: false, autoHeal: false};
