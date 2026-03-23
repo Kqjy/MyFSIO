@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.integrity import IntegrityChecker, IntegrityResult
+from app.integrity import IntegrityChecker, IntegrityCursorStore, IntegrityResult
 
 
 def _wait_scan_done(client, headers, timeout=10):
@@ -118,7 +118,7 @@ class TestCorruptedObjects:
 
         result = checker.run_now()
         assert result.corrupted_objects == 0
-        assert result.objects_scanned == 1
+        assert result.objects_scanned >= 1
 
     def test_corrupted_nested_key(self, storage_root, checker):
         _setup_bucket(storage_root, "mybucket", {"sub/dir/file.txt": b"nested content"})
@@ -503,7 +503,7 @@ class TestMultipleBuckets:
 
         result = checker.run_now()
         assert result.buckets_scanned == 2
-        assert result.objects_scanned == 2
+        assert result.objects_scanned >= 2
         assert result.corrupted_objects == 0
 
 
@@ -516,3 +516,133 @@ class TestGetStatus:
         assert "batch_size" in status
         assert "auto_heal" in status
         assert "dry_run" in status
+
+    def test_status_includes_cursor(self, storage_root, checker):
+        _setup_bucket(storage_root, "mybucket", {"file.txt": b"hello"})
+        checker.run_now()
+        status = checker.get_status()
+        assert "cursor" in status
+        assert status["cursor"]["tracked_buckets"] == 1
+        assert "mybucket" in status["cursor"]["buckets"]
+
+
+class TestUnifiedBatchCounter:
+    def test_orphaned_objects_count_toward_batch(self, storage_root):
+        _setup_bucket(storage_root, "mybucket", {})
+        for i in range(10):
+            (storage_root / "mybucket" / f"orphan{i}.txt").write_bytes(f"data{i}".encode())
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=3)
+        result = checker.run_now()
+        assert result.objects_scanned <= 3
+
+    def test_phantom_metadata_counts_toward_batch(self, storage_root):
+        objects = {f"file{i}.txt": f"data{i}".encode() for i in range(10)}
+        _setup_bucket(storage_root, "mybucket", objects)
+        for i in range(10):
+            (storage_root / "mybucket" / f"file{i}.txt").unlink()
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=5)
+        result = checker.run_now()
+        assert result.objects_scanned <= 5
+
+    def test_all_check_types_contribute(self, storage_root):
+        _setup_bucket(storage_root, "mybucket", {"valid.txt": b"hello"})
+        (storage_root / "mybucket" / "orphan.txt").write_bytes(b"orphan")
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=1000)
+        result = checker.run_now()
+        assert result.objects_scanned > 2
+
+
+class TestCursorRotation:
+    def test_oldest_bucket_scanned_first(self, storage_root):
+        _setup_bucket(storage_root, "bucket-a", {"a.txt": b"aaa"})
+        _setup_bucket(storage_root, "bucket-b", {"b.txt": b"bbb"})
+        _setup_bucket(storage_root, "bucket-c", {"c.txt": b"ccc"})
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=5)
+
+        checker.cursor_store.update_bucket("bucket-a", 1000.0)
+        checker.cursor_store.update_bucket("bucket-b", 3000.0)
+        checker.cursor_store.update_bucket("bucket-c", 2000.0)
+
+        ordered = checker.cursor_store.get_bucket_order(["bucket-a", "bucket-b", "bucket-c"])
+        assert ordered[0] == "bucket-a"
+        assert ordered[1] == "bucket-c"
+        assert ordered[2] == "bucket-b"
+
+    def test_never_scanned_buckets_first(self, storage_root):
+        _setup_bucket(storage_root, "bucket-old", {"a.txt": b"aaa"})
+        _setup_bucket(storage_root, "bucket-new", {"b.txt": b"bbb"})
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=1000)
+
+        checker.cursor_store.update_bucket("bucket-old", time.time())
+
+        ordered = checker.cursor_store.get_bucket_order(["bucket-old", "bucket-new"])
+        assert ordered[0] == "bucket-new"
+
+    def test_rotation_covers_all_buckets(self, storage_root):
+        for name in ["bucket-a", "bucket-b", "bucket-c"]:
+            _setup_bucket(storage_root, name, {f"{name}.txt": name.encode()})
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=4)
+
+        result1 = checker.run_now()
+        scanned_buckets_1 = set()
+        for issue_bucket in [storage_root]:
+            pass
+        assert result1.buckets_scanned >= 1
+
+        result2 = checker.run_now()
+        result3 = checker.run_now()
+
+        cursor_info = checker.cursor_store.get_info()
+        assert cursor_info["tracked_buckets"] == 3
+
+    def test_cursor_persistence(self, storage_root):
+        _setup_bucket(storage_root, "mybucket", {"file.txt": b"hello"})
+
+        checker1 = IntegrityChecker(storage_root=storage_root, batch_size=1000)
+        checker1.run_now()
+
+        cursor1 = checker1.cursor_store.get_info()
+        assert cursor1["tracked_buckets"] == 1
+        assert "mybucket" in cursor1["buckets"]
+
+        checker2 = IntegrityChecker(storage_root=storage_root, batch_size=1000)
+        cursor2 = checker2.cursor_store.get_info()
+        assert cursor2["tracked_buckets"] == 1
+        assert "mybucket" in cursor2["buckets"]
+
+    def test_stale_cursor_cleanup(self, storage_root):
+        _setup_bucket(storage_root, "bucket-a", {"a.txt": b"aaa"})
+        _setup_bucket(storage_root, "bucket-b", {"b.txt": b"bbb"})
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=1000)
+        checker.run_now()
+
+        import shutil
+        shutil.rmtree(storage_root / "bucket-b")
+        meta_b = storage_root / ".myfsio.sys" / "buckets" / "bucket-b"
+        if meta_b.exists():
+            shutil.rmtree(meta_b)
+
+        checker.run_now()
+
+        cursor_info = checker.cursor_store.get_info()
+        assert "bucket-b" not in cursor_info["buckets"]
+        assert "bucket-a" in cursor_info["buckets"]
+
+    def test_cursor_updates_after_scan(self, storage_root):
+        _setup_bucket(storage_root, "mybucket", {"file.txt": b"hello"})
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=1000)
+        before = time.time()
+        checker.run_now()
+        after = time.time()
+
+        cursor_info = checker.cursor_store.get_info()
+        ts = cursor_info["buckets"]["mybucket"]
+        assert before <= ts <= after

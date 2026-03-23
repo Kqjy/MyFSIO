@@ -162,6 +162,76 @@ class IntegrityHistoryStore:
         return self.load()[offset : offset + limit]
 
 
+class IntegrityCursorStore:
+    def __init__(self, storage_root: Path) -> None:
+        self.storage_root = storage_root
+        self._lock = threading.Lock()
+
+    def _get_path(self) -> Path:
+        return self.storage_root / ".myfsio.sys" / "config" / "integrity_cursor.json"
+
+    def load(self) -> Dict[str, Any]:
+        path = self._get_path()
+        if not path.exists():
+            return {"buckets": {}}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not isinstance(data.get("buckets"), dict):
+                    return {"buckets": {}}
+                return data
+        except (OSError, ValueError, KeyError):
+            return {"buckets": {}}
+
+    def save(self, data: Dict[str, Any]) -> None:
+        path = self._get_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except OSError as e:
+            logger.error("Failed to save integrity cursor: %s", e)
+
+    def update_bucket(self, bucket_name: str, timestamp: float) -> None:
+        with self._lock:
+            data = self.load()
+            data["buckets"][bucket_name] = {"last_scanned": timestamp}
+            self.save(data)
+
+    def clean_stale(self, existing_buckets: List[str]) -> None:
+        with self._lock:
+            data = self.load()
+            existing_set = set(existing_buckets)
+            stale_keys = [k for k in data["buckets"] if k not in existing_set]
+            if stale_keys:
+                for k in stale_keys:
+                    del data["buckets"][k]
+                self.save(data)
+
+    def get_bucket_order(self, bucket_names: List[str]) -> List[str]:
+        data = self.load()
+        buckets_info = data.get("buckets", {})
+
+        def sort_key(name: str) -> float:
+            entry = buckets_info.get(name)
+            if entry is None:
+                return 0.0
+            return entry.get("last_scanned", 0.0)
+
+        return sorted(bucket_names, key=sort_key)
+
+    def get_info(self) -> Dict[str, Any]:
+        data = self.load()
+        buckets = data.get("buckets", {})
+        return {
+            "tracked_buckets": len(buckets),
+            "buckets": {
+                name: info.get("last_scanned")
+                for name, info in buckets.items()
+            },
+        }
+
+
 MAX_ISSUES = 500
 
 
@@ -194,6 +264,7 @@ class IntegrityChecker:
         self._scan_start_time: Optional[float] = None
         self._io_throttle = max(0, io_throttle_ms) / 1000.0
         self.history_store = IntegrityHistoryStore(storage_root, max_records=max_history)
+        self.cursor_store = IntegrityCursorStore(self.storage_root)
 
     def start(self) -> None:
         if self._timer is not None:
@@ -247,9 +318,11 @@ class IntegrityChecker:
             result = IntegrityResult()
 
             bucket_names = self._list_bucket_names()
+            self.cursor_store.clean_stale(bucket_names)
+            ordered_buckets = self.cursor_store.get_bucket_order(bucket_names)
 
-            for bucket_name in bucket_names:
-                if self._shutdown or result.objects_scanned >= self.batch_size:
+            for bucket_name in ordered_buckets:
+                if self._batch_exhausted(result):
                     break
                 result.buckets_scanned += 1
                 self._check_corrupted_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
@@ -258,6 +331,7 @@ class IntegrityChecker:
                 self._check_stale_versions(bucket_name, result, effective_auto_heal, effective_dry_run)
                 self._check_etag_cache(bucket_name, result, effective_auto_heal, effective_dry_run)
                 self._check_legacy_metadata(bucket_name, result, effective_auto_heal, effective_dry_run)
+                self.cursor_store.update_bucket(bucket_name, time.time())
 
             result.execution_time_seconds = time.time() - start
 
@@ -318,6 +392,9 @@ class IntegrityChecker:
             time.sleep(self._io_throttle)
         return self._shutdown
 
+    def _batch_exhausted(self, result: IntegrityResult) -> bool:
+        return self._shutdown or result.objects_scanned >= self.batch_size
+
     def _add_issue(self, result: IntegrityResult, issue: IntegrityIssue) -> None:
         if len(result.issues) < MAX_ISSUES:
             result.issues.append(issue)
@@ -335,7 +412,7 @@ class IntegrityChecker:
             for index_file in meta_root.rglob("_index.json"):
                 if self._throttle():
                     return
-                if result.objects_scanned >= self.batch_size:
+                if self._batch_exhausted(result):
                     return
                 if not index_file.is_file():
                     continue
@@ -347,7 +424,7 @@ class IntegrityChecker:
                 for key_name, entry in list(index_data.items()):
                     if self._throttle():
                         return
-                    if result.objects_scanned >= self.batch_size:
+                    if self._batch_exhausted(result):
                         return
 
                     rel_dir = index_file.parent.relative_to(meta_root)
@@ -409,7 +486,7 @@ class IntegrityChecker:
             for entry in bucket_path.rglob("*"):
                 if self._throttle():
                     return
-                if result.objects_scanned >= self.batch_size:
+                if self._batch_exhausted(result):
                     return
                 if not entry.is_file():
                     continue
@@ -420,6 +497,7 @@ class IntegrityChecker:
                 if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
                     continue
 
+                result.objects_scanned += 1
                 full_key = rel.as_posix()
                 key_name = rel.name
                 parent = rel.parent
@@ -486,6 +564,8 @@ class IntegrityChecker:
             for index_file in meta_root.rglob("_index.json"):
                 if self._throttle():
                     return
+                if self._batch_exhausted(result):
+                    return
                 if not index_file.is_file():
                     continue
                 try:
@@ -495,6 +575,9 @@ class IntegrityChecker:
 
                 keys_to_remove = []
                 for key_name in list(index_data.keys()):
+                    if self._batch_exhausted(result):
+                        break
+                    result.objects_scanned += 1
                     rel_dir = index_file.parent.relative_to(meta_root)
                     if rel_dir == Path("."):
                         full_key = key_name
@@ -542,6 +625,8 @@ class IntegrityChecker:
             for key_dir in versions_root.rglob("*"):
                 if self._throttle():
                     return
+                if self._batch_exhausted(result):
+                    return
                 if not key_dir.is_dir():
                     continue
 
@@ -549,6 +634,9 @@ class IntegrityChecker:
                 json_files = {f.stem: f for f in key_dir.glob("*.json")}
 
                 for stem, bin_file in bin_files.items():
+                    if self._batch_exhausted(result):
+                        return
+                    result.objects_scanned += 1
                     if stem not in json_files:
                         result.stale_versions += 1
                         issue = IntegrityIssue(
@@ -568,6 +656,9 @@ class IntegrityChecker:
                         self._add_issue(result, issue)
 
                 for stem, json_file in json_files.items():
+                    if self._batch_exhausted(result):
+                        return
+                    result.objects_scanned += 1
                     if stem not in bin_files:
                         result.stale_versions += 1
                         issue = IntegrityIssue(
@@ -608,6 +699,9 @@ class IntegrityChecker:
         found_mismatch = False
 
         for full_key, cached_etag in etag_cache.items():
+            if self._batch_exhausted(result):
+                break
+            result.objects_scanned += 1
             key_path = Path(full_key)
             key_name = key_path.name
             parent = key_path.parent
@@ -667,9 +761,12 @@ class IntegrityChecker:
             for meta_file in legacy_meta_root.rglob("*.meta.json"):
                 if self._throttle():
                     return
+                if self._batch_exhausted(result):
+                    return
                 if not meta_file.is_file():
                     continue
 
+                result.objects_scanned += 1
                 try:
                     rel = meta_file.relative_to(legacy_meta_root)
                 except ValueError:
@@ -781,4 +878,5 @@ class IntegrityChecker:
         }
         if self._scanning and self._scan_start_time is not None:
             status["scan_elapsed_seconds"] = round(time.time() - self._scan_start_time, 1)
+        status["cursor"] = self.cursor_store.get_info()
         return status
