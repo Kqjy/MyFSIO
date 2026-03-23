@@ -4126,7 +4126,7 @@ def system_dashboard():
             r = rec.get("result", {})
             total_freed = r.get("temp_bytes_freed", 0) + r.get("multipart_bytes_freed", 0) + r.get("orphaned_version_bytes_freed", 0)
             rec["bytes_freed_display"] = _format_bytes(total_freed)
-            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            rec["timestamp_display"] = _format_datetime_display(datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc))
             gc_history_records.append(rec)
 
     checker = current_app.extensions.get("integrity")
@@ -4135,7 +4135,7 @@ def system_dashboard():
     if checker:
         raw = checker.get_history(limit=10, offset=0)
         for rec in raw:
-            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            rec["timestamp_display"] = _format_datetime_display(datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc))
             integrity_history_records.append(rec)
 
     features = [
@@ -4163,6 +4163,7 @@ def system_dashboard():
         gc_history=gc_history_records,
         integrity_status=integrity_status,
         integrity_history=integrity_history_records,
+        display_timezone=current_app.config.get("DISPLAY_TIMEZONE", "UTC"),
     )
 
 

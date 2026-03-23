@@ -387,11 +387,18 @@
     return (i === 0 ? b : b.toFixed(1)) + ' ' + units[i];
   }
 
+  var _displayTimezone = {{ display_timezone|tojson }};
+
   function formatTimestamp(ts) {
     var d = new Date(ts * 1000);
-    var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
-    return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
-           ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
+    try {
+      var opts = {year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: _displayTimezone, timeZoneName: 'short'};
+      return d.toLocaleString('en-US', opts);
+    } catch (e) {
+      var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+      return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
+             ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
+    }
   }
 
   var _gcHistoryIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">' +
