@@ -2655,7 +2655,7 @@ pre code {
 	}
 	
 	.objects-table-container {
-		max-height: none;
+		max-height: 60vh;
 	}
 	
 	.preview-card {

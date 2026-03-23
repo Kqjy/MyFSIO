@@ -98,6 +98,7 @@
   const previewMetadata = document.getElementById('preview-metadata');
   const previewMetadataList = document.getElementById('preview-metadata-list');
   const previewPlaceholder = document.getElementById('preview-placeholder');
+  const previewPlaceholderDefault = previewPlaceholder ? previewPlaceholder.innerHTML : '';
   const previewImage = document.getElementById('preview-image');
   const previewVideo = document.getElementById('preview-video');
   const previewAudio = document.getElementById('preview-audio');
@@ -1957,6 +1958,10 @@
     [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
       if (!el) return;
       el.classList.add('d-none');
+      if (el.tagName === 'IMG') {
+        el.removeAttribute('src');
+        el.onload = null;
+      }
       if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') {
         el.pause();
         el.removeAttribute('src');
@@ -1969,6 +1974,7 @@
       previewText.classList.add('d-none');
       previewText.textContent = '';
     }
+    previewPlaceholder.innerHTML = previewPlaceholderDefault;
     previewPlaceholder.classList.remove('d-none');
   };
 
@@ -2016,9 +2022,18 @@
     const previewUrl = row.dataset.previewUrl;
     const lower = row.dataset.key.toLowerCase();
     if (previewUrl && lower.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp)$/)) {
+      previewPlaceholder.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary" role="status"></div><div class="small mt-2">Loading preview\u2026</div>';
+      const currentRow = row;
+      previewImage.onload = () => {
+        if (activeRow !== currentRow) return;
+        previewImage.classList.remove('d-none');
+        previewPlaceholder.classList.add('d-none');
+      };
+      previewImage.onerror = () => {
+        if (activeRow !== currentRow) return;
+        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+      };
       previewImage.src = previewUrl;
-      previewImage.classList.remove('d-none');
-      previewPlaceholder.classList.add('d-none');
     } else if (previewUrl && lower.match(/\.(mp4|webm|ogv|mov|avi|mkv)$/)) {
       previewVideo.src = previewUrl;
       previewVideo.classList.remove('d-none');
