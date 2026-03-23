@@ -180,6 +180,7 @@ class IntegrityChecker:
         auto_heal: bool = False,
         dry_run: bool = False,
         max_history: int = 50,
+        io_throttle_ms: int = 10,
     ) -> None:
         self.storage_root = Path(storage_root)
         self.interval_seconds = interval_hours * 3600.0
@@ -191,6 +192,7 @@ class IntegrityChecker:
         self._lock = threading.Lock()
         self._scanning = False
         self._scan_start_time: Optional[float] = None
+        self._io_throttle = max(0, io_throttle_ms) / 1000.0
         self.history_store = IntegrityHistoryStore(storage_root, max_records=max_history)
 
     def start(self) -> None:
@@ -247,7 +249,7 @@ class IntegrityChecker:
             bucket_names = self._list_bucket_names()
 
             for bucket_name in bucket_names:
-                if result.objects_scanned >= self.batch_size:
+                if self._shutdown or result.objects_scanned >= self.batch_size:
                     break
                 result.buckets_scanned += 1
                 self._check_corrupted_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
@@ -309,6 +311,13 @@ class IntegrityChecker:
             pass
         return names
 
+    def _throttle(self) -> bool:
+        if self._shutdown:
+            return True
+        if self._io_throttle > 0:
+            time.sleep(self._io_throttle)
+        return self._shutdown
+
     def _add_issue(self, result: IntegrityResult, issue: IntegrityIssue) -> None:
         if len(result.issues) < MAX_ISSUES:
             result.issues.append(issue)
@@ -324,6 +333,8 @@ class IntegrityChecker:
 
         try:
             for index_file in meta_root.rglob("_index.json"):
+                if self._throttle():
+                    return
                 if result.objects_scanned >= self.batch_size:
                     return
                 if not index_file.is_file():
@@ -334,6 +345,8 @@ class IntegrityChecker:
                     continue
 
                 for key_name, entry in list(index_data.items()):
+                    if self._throttle():
+                        return
                     if result.objects_scanned >= self.batch_size:
                         return
 
@@ -394,6 +407,8 @@ class IntegrityChecker:
 
         try:
             for entry in bucket_path.rglob("*"):
+                if self._throttle():
+                    return
                 if result.objects_scanned >= self.batch_size:
                     return
                 if not entry.is_file():
@@ -469,6 +484,8 @@ class IntegrityChecker:
 
         try:
             for index_file in meta_root.rglob("_index.json"):
+                if self._throttle():
+                    return
                 if not index_file.is_file():
                     continue
                 try:
@@ -523,6 +540,8 @@ class IntegrityChecker:
 
         try:
             for key_dir in versions_root.rglob("*"):
+                if self._throttle():
+                    return
                 if not key_dir.is_dir():
                     continue
 
@@ -646,6 +665,8 @@ class IntegrityChecker:
 
         try:
             for meta_file in legacy_meta_root.rglob("*.meta.json"):
+                if self._throttle():
+                    return
                 if not meta_file.is_file():
                     continue
 
@@ -756,6 +777,7 @@ class IntegrityChecker:
             "batch_size": self.batch_size,
             "auto_heal": self.auto_heal,
             "dry_run": self.dry_run,
+            "io_throttle_ms": round(self._io_throttle * 1000),
         }
         if self._scanning and self._scan_start_time is not None:
             status["scan_elapsed_seconds"] = round(time.time() - self._scan_start_time, 1)

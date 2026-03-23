@@ -162,6 +162,7 @@ class GarbageCollector:
         lock_file_max_age_hours: float = 1.0,
         dry_run: bool = False,
         max_history: int = 50,
+        io_throttle_ms: int = 10,
     ) -> None:
         self.storage_root = Path(storage_root)
         self.interval_seconds = interval_hours * 3600.0
@@ -172,6 +173,7 @@ class GarbageCollector:
         self._timer: Optional[threading.Timer] = None
         self._shutdown = False
         self._lock = threading.Lock()
+        self._io_throttle = max(0, io_throttle_ms) / 1000.0
         self.history_store = GCHistoryStore(storage_root, max_records=max_history)
 
     def start(self) -> None:
@@ -255,6 +257,13 @@ class GarbageCollector:
     def _system_path(self) -> Path:
         return self.storage_root / self.SYSTEM_ROOT
 
+    def _throttle(self) -> bool:
+        if self._shutdown:
+            return True
+        if self._io_throttle > 0:
+            time.sleep(self._io_throttle)
+        return self._shutdown
+
     def _list_bucket_names(self) -> List[str]:
         names = []
         try:
@@ -271,6 +280,8 @@ class GarbageCollector:
             return
         try:
             for entry in tmp_dir.iterdir():
+                if self._throttle():
+                    return
                 if not entry.is_file():
                     continue
                 age = _file_age_hours(entry)
@@ -292,6 +303,8 @@ class GarbageCollector:
         bucket_names = self._list_bucket_names()
 
         for bucket_name in bucket_names:
+            if self._shutdown:
+                return
             for multipart_root in (
                 self._system_path() / self.SYSTEM_MULTIPART_DIR / bucket_name,
                 self.storage_root / bucket_name / ".multipart",
@@ -300,6 +313,8 @@ class GarbageCollector:
                     continue
                 try:
                     for upload_dir in multipart_root.iterdir():
+                        if self._throttle():
+                            return
                         if not upload_dir.is_dir():
                             continue
                         self._maybe_clean_upload(upload_dir, cutoff_hours, result)
@@ -329,6 +344,8 @@ class GarbageCollector:
 
         try:
             for bucket_dir in buckets_root.iterdir():
+                if self._shutdown:
+                    return
                 if not bucket_dir.is_dir():
                     continue
                 locks_dir = bucket_dir / "locks"
@@ -336,6 +353,8 @@ class GarbageCollector:
                     continue
                 try:
                     for lock_file in locks_dir.iterdir():
+                        if self._throttle():
+                            return
                         if not lock_file.is_file() or not lock_file.name.endswith(".lock"):
                             continue
                         age = _file_age_hours(lock_file)
@@ -356,6 +375,8 @@ class GarbageCollector:
         bucket_names = self._list_bucket_names()
 
         for bucket_name in bucket_names:
+            if self._shutdown:
+                return
             legacy_meta = self.storage_root / bucket_name / ".meta"
             if legacy_meta.exists():
                 self._clean_legacy_metadata(bucket_name, legacy_meta, result)
@@ -368,6 +389,8 @@ class GarbageCollector:
         bucket_path = self.storage_root / bucket_name
         try:
             for meta_file in meta_root.rglob("*.meta.json"):
+                if self._throttle():
+                    return
                 if not meta_file.is_file():
                     continue
                 try:
@@ -387,6 +410,8 @@ class GarbageCollector:
         bucket_path = self.storage_root / bucket_name
         try:
             for index_file in meta_root.rglob("_index.json"):
+                if self._throttle():
+                    return
                 if not index_file.is_file():
                     continue
                 try:
@@ -430,6 +455,8 @@ class GarbageCollector:
         bucket_names = self._list_bucket_names()
 
         for bucket_name in bucket_names:
+            if self._shutdown:
+                return
             bucket_path = self.storage_root / bucket_name
             for versions_root in (
                 self._system_path() / self.SYSTEM_BUCKETS_DIR / bucket_name / self.BUCKET_VERSIONS_DIR,
@@ -439,6 +466,8 @@ class GarbageCollector:
                     continue
                 try:
                     for key_dir in versions_root.iterdir():
+                        if self._throttle():
+                            return
                         if not key_dir.is_dir():
                             continue
                         self._clean_versions_for_key(bucket_path, versions_root, key_dir, result)
@@ -489,6 +518,8 @@ class GarbageCollector:
             self._remove_empty_dirs_recursive(root, root, result)
 
     def _remove_empty_dirs_recursive(self, path: Path, stop_at: Path, result: GCResult) -> bool:
+        if self._shutdown:
+            return False
         if not path.is_dir():
             return False
 
@@ -499,6 +530,8 @@ class GarbageCollector:
 
         all_empty = True
         for child in children:
+            if self._throttle():
+                return False
             if child.is_dir():
                 if not self._remove_empty_dirs_recursive(child, stop_at, result):
                     all_empty = False
@@ -528,4 +561,5 @@ class GarbageCollector:
             "multipart_max_age_days": self.multipart_max_age_days,
             "lock_file_max_age_hours": self.lock_file_max_age_hours,
             "dry_run": self.dry_run,
+            "io_throttle_ms": round(self._io_throttle * 1000),
         }
