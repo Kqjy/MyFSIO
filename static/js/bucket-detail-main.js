@@ -1514,7 +1514,7 @@
       };
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
         body: JSON.stringify(payload),
       });
       const data = await response.json();
