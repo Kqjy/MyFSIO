@@ -1063,6 +1063,27 @@ def bulk_delete_objects(bucket_name: str):
         return _respond(False, f"A maximum of {MAX_KEYS} objects can be deleted per request", status_code=400)
 
     unique_keys = list(dict.fromkeys(cleaned))
+
+    folder_prefixes = [k for k in unique_keys if k.endswith("/")]
+    if folder_prefixes:
+        try:
+            client = get_session_s3_client()
+            for prefix in folder_prefixes:
+                unique_keys.remove(prefix)
+                paginator = client.get_paginator("list_objects_v2")
+                for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+                    for obj in page.get("Contents", []):
+                        if obj["Key"] not in unique_keys:
+                            unique_keys.append(obj["Key"])
+        except (ClientError, EndpointConnectionError, ConnectionClosedError) as exc:
+            if isinstance(exc, ClientError):
+                err, status = handle_client_error(exc)
+                return _respond(False, err["error"], status_code=status)
+            return _respond(False, "S3 API server is unreachable", status_code=502)
+
+    if not unique_keys:
+        return _respond(False, "No objects found under the selected folders", status_code=400)
+
     try:
         _authorize_ui(principal, bucket_name, "delete")
     except IamError as exc:
@@ -1093,13 +1114,17 @@ def bulk_delete_objects(bucket_name: str):
     else:
         try:
             client = get_session_s3_client()
-            objects_to_delete = [{"Key": k} for k in unique_keys]
-            resp = client.delete_objects(
-                Bucket=bucket_name,
-                Delete={"Objects": objects_to_delete, "Quiet": False},
-            )
-            deleted = [d["Key"] for d in resp.get("Deleted", [])]
-            errors = [{"key": e["Key"], "error": e.get("Message", e.get("Code", "Unknown error"))} for e in resp.get("Errors", [])]
+            deleted = []
+            errors = []
+            for i in range(0, len(unique_keys), 1000):
+                batch = unique_keys[i:i + 1000]
+                objects_to_delete = [{"Key": k} for k in batch]
+                resp = client.delete_objects(
+                    Bucket=bucket_name,
+                    Delete={"Objects": objects_to_delete, "Quiet": False},
+                )
+                deleted.extend(d["Key"] for d in resp.get("Deleted", []))
+                errors.extend({"key": e["Key"], "error": e.get("Message", e.get("Code", "Unknown error"))} for e in resp.get("Errors", []))
             for key in deleted:
                 _replication_manager().trigger_replication(bucket_name, key, action="delete")
         except (ClientError, EndpointConnectionError, ConnectionClosedError) as exc:

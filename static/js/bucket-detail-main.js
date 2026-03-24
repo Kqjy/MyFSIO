@@ -867,6 +867,11 @@
       const checkbox = row.querySelector('[data-folder-select]');
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
+        if (checkbox.checked) {
+          selectedRows.set(folderPath, { key: folderPath, isFolder: true });
+        } else {
+          selectedRows.delete(folderPath);
+        }
         const folderObjects = allObjects.filter(obj => obj.key.startsWith(folderPath));
         folderObjects.forEach(obj => {
           if (checkbox.checked) {
@@ -1351,8 +1356,11 @@
     }
     if (selectAllCheckbox) {
       const filesInView = visibleItems.filter(item => item.type === 'file');
-      const total = filesInView.length;
-      const visibleSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
+      const foldersInView = visibleItems.filter(item => item.type === 'folder');
+      const total = filesInView.length + foldersInView.length;
+      const fileSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
+      const folderSelectedCount = foldersInView.filter(item => selectedRows.has(item.path)).length;
+      const visibleSelectedCount = fileSelectedCount + folderSelectedCount;
       selectAllCheckbox.disabled = total === 0;
       selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
       selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
@@ -1374,8 +1382,12 @@
     const keys = Array.from(selectedRows.keys());
     bulkDeleteList.innerHTML = '';
     if (bulkDeleteCount) {
-      const label = keys.length === 1 ? 'object' : 'objects';
-      bulkDeleteCount.textContent = `${keys.length} ${label} selected`;
+      const folderCount = keys.filter(k => k.endsWith('/')).length;
+      const objectCount = keys.length - folderCount;
+      const parts = [];
+      if (folderCount) parts.push(`${folderCount} folder${folderCount !== 1 ? 's' : ''}`);
+      if (objectCount) parts.push(`${objectCount} object${objectCount !== 1 ? 's' : ''}`);
+      bulkDeleteCount.textContent = `${parts.join(' and ')} selected`;
     }
     if (!keys.length) {
       const empty = document.createElement('li');
@@ -3169,6 +3181,15 @@
         selectedRows.set(item.data.key, item.data);
       } else {
         selectedRows.delete(item.data.key);
+      }
+    });
+
+    const foldersInView = visibleItems.filter(item => item.type === 'folder');
+    foldersInView.forEach(item => {
+      if (shouldSelect) {
+        selectedRows.set(item.path, { key: item.path, isFolder: true });
+      } else {
+        selectedRows.delete(item.path);
       }
     });
 
