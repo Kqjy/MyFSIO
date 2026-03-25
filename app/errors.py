@@ -175,13 +175,21 @@ def handle_app_error(error: AppError) -> Response:
 
 def handle_rate_limit_exceeded(e: RateLimitExceeded) -> Response:
     g.s3_error_code = "SlowDown"
+    if request.path.startswith("/ui") or request.path.startswith("/buckets"):
+        wants_json = (
+            request.is_json or
+            request.headers.get("X-Requested-With") == "XMLHttpRequest" or
+            "application/json" in request.accept_mimetypes.values()
+        )
+        if wants_json:
+            return jsonify({"success": False, "error": {"code": "SlowDown", "message": "Please reduce your request rate."}}), 429
     error = Element("Error")
     SubElement(error, "Code").text = "SlowDown"
     SubElement(error, "Message").text = "Please reduce your request rate."
     SubElement(error, "Resource").text = request.path
     SubElement(error, "RequestId").text = getattr(g, "request_id", "")
     xml_bytes = tostring(error, encoding="utf-8")
-    return Response(xml_bytes, status=429, mimetype="application/xml")
+    return Response(xml_bytes, status="429 Too Many Requests", mimetype="application/xml")
 
 
 def register_error_handlers(app):

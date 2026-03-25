@@ -3,6 +3,8 @@ window.BucketDetailUpload = (function() {
 
   const MULTIPART_THRESHOLD = 8 * 1024 * 1024;
   const CHUNK_SIZE = 8 * 1024 * 1024;
+  const MAX_PART_RETRIES = 3;
+  const RETRY_BASE_DELAY_MS = 1000;
 
   let state = {
     isUploading: false,
@@ -204,6 +206,67 @@ window.BucketDetailUpload = (function() {
     }
   }
 
+  function uploadPartXHR(url, chunk, csrfToken, baseBytes, fileSize, progressItem, partNumber, totalParts) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url, true);
+      xhr.setRequestHeader('X-CSRFToken', csrfToken || '');
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          updateProgressItem(progressItem, {
+            status: `Part ${partNumber}/${totalParts}`,
+            loaded: baseBytes + e.loaded,
+            total: fileSize
+          });
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject(new Error(`Part ${partNumber}: invalid response`));
+          }
+        } else {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            reject(new Error(data.error || `Part ${partNumber} failed (${xhr.status})`));
+          } catch {
+            reject(new Error(`Part ${partNumber} failed (${xhr.status})`));
+          }
+        }
+      });
+
+      xhr.addEventListener('error', () => reject(new Error(`Part ${partNumber}: network error`)));
+      xhr.addEventListener('abort', () => reject(new Error(`Part ${partNumber}: aborted`)));
+
+      xhr.send(chunk);
+    });
+  }
+
+  async function uploadPartWithRetry(url, chunk, csrfToken, baseBytes, fileSize, progressItem, partNumber, totalParts) {
+    let lastError;
+    for (let attempt = 0; attempt <= MAX_PART_RETRIES; attempt++) {
+      try {
+        return await uploadPartXHR(url, chunk, csrfToken, baseBytes, fileSize, progressItem, partNumber, totalParts);
+      } catch (err) {
+        lastError = err;
+        if (attempt < MAX_PART_RETRIES) {
+          const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+          updateProgressItem(progressItem, {
+            status: `Part ${partNumber}/${totalParts} retry ${attempt + 1}/${MAX_PART_RETRIES}...`,
+            loaded: baseBytes,
+            total: fileSize
+          });
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+    }
+    throw lastError;
+  }
+
   async function uploadMultipart(file, objectKey, metadata, progressItem, urls) {
     const csrfToken = document.querySelector('input[name="csrf_token"]')?.value;
 
@@ -233,26 +296,14 @@ window.BucketDetailUpload = (function() {
         const end = Math.min(start + CHUNK_SIZE, file.size);
         const chunk = file.slice(start, end);
 
-        updateProgressItem(progressItem, {
-          status: `Part ${partNumber}/${totalParts}`,
-          loaded: uploadedBytes,
-          total: file.size
-        });
+        const partData = await uploadPartWithRetry(
+          `${partUrl}?partNumber=${partNumber}`,
+          chunk, csrfToken, uploadedBytes, file.size,
+          progressItem, partNumber, totalParts
+        );
 
-        const partResp = await fetch(`${partUrl}?partNumber=${partNumber}`, {
-          method: 'PUT',
-          headers: { 'X-CSRFToken': csrfToken || '' },
-          body: chunk
-        });
-
-        if (!partResp.ok) {
-          const err = await partResp.json().catch(() => ({}));
-          throw new Error(err.error || `Part ${partNumber} failed`);
-        }
-
-        const partData = await partResp.json();
         parts.push({ part_number: partNumber, etag: partData.etag });
-        uploadedBytes += chunk.size;
+        uploadedBytes += (end - start);
 
         updateProgressItem(progressItem, {
           loaded: uploadedBytes,

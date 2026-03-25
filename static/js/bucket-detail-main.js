@@ -98,6 +98,9 @@
   const previewMetadata = document.getElementById('preview-metadata');
   const previewMetadataList = document.getElementById('preview-metadata-list');
   const previewPlaceholder = document.getElementById('preview-placeholder');
+  const previewPlaceholderDefault = previewPlaceholder ? previewPlaceholder.innerHTML : '';
+  const previewErrorAlert = document.getElementById('preview-error-alert');
+  const previewDetailsMeta = document.getElementById('preview-details-meta');
   const previewImage = document.getElementById('preview-image');
   const previewVideo = document.getElementById('preview-video');
   const previewAudio = document.getElementById('preview-audio');
@@ -866,6 +869,11 @@
       const checkbox = row.querySelector('[data-folder-select]');
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
+        if (checkbox.checked) {
+          selectedRows.set(folderPath, { key: folderPath, isFolder: true });
+        } else {
+          selectedRows.delete(folderPath);
+        }
         const folderObjects = allObjects.filter(obj => obj.key.startsWith(folderPath));
         folderObjects.forEach(obj => {
           if (checkbox.checked) {
@@ -1350,8 +1358,11 @@
     }
     if (selectAllCheckbox) {
       const filesInView = visibleItems.filter(item => item.type === 'file');
-      const total = filesInView.length;
-      const visibleSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
+      const foldersInView = visibleItems.filter(item => item.type === 'folder');
+      const total = filesInView.length + foldersInView.length;
+      const fileSelectedCount = filesInView.filter(item => selectedRows.has(item.data.key)).length;
+      const folderSelectedCount = foldersInView.filter(item => selectedRows.has(item.path)).length;
+      const visibleSelectedCount = fileSelectedCount + folderSelectedCount;
       selectAllCheckbox.disabled = total === 0;
       selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
       selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
@@ -1373,8 +1384,12 @@
     const keys = Array.from(selectedRows.keys());
     bulkDeleteList.innerHTML = '';
     if (bulkDeleteCount) {
-      const label = keys.length === 1 ? 'object' : 'objects';
-      bulkDeleteCount.textContent = `${keys.length} ${label} selected`;
+      const folderCount = keys.filter(k => k.endsWith('/')).length;
+      const objectCount = keys.length - folderCount;
+      const parts = [];
+      if (folderCount) parts.push(`${folderCount} folder${folderCount !== 1 ? 's' : ''}`);
+      if (objectCount) parts.push(`${objectCount} object${objectCount !== 1 ? 's' : ''}`);
+      bulkDeleteCount.textContent = `${parts.join(' and ')} selected`;
     }
     if (!keys.length) {
       const empty = document.createElement('li');
@@ -1513,7 +1528,7 @@
       };
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': window.getCsrfToken ? window.getCsrfToken() : '' },
         body: JSON.stringify(payload),
       });
       const data = await response.json();
@@ -1957,6 +1972,10 @@
     [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
       if (!el) return;
       el.classList.add('d-none');
+      if (el.tagName === 'IMG') {
+        el.removeAttribute('src');
+        el.onload = null;
+      }
       if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') {
         el.pause();
         el.removeAttribute('src');
@@ -1969,7 +1988,36 @@
       previewText.classList.add('d-none');
       previewText.textContent = '';
     }
+    previewPlaceholder.innerHTML = previewPlaceholderDefault;
     previewPlaceholder.classList.remove('d-none');
+  };
+
+  let previewFailed = false;
+
+  const handlePreviewError = () => {
+    previewFailed = true;
+    if (downloadButton) {
+      downloadButton.classList.add('disabled');
+      downloadButton.removeAttribute('href');
+    }
+    if (presignButton) presignButton.disabled = true;
+    if (generatePresignButton) generatePresignButton.disabled = true;
+    if (previewDetailsMeta) previewDetailsMeta.classList.add('d-none');
+    if (previewMetadata) previewMetadata.classList.add('d-none');
+    const tagsPanel = document.getElementById('preview-tags');
+    if (tagsPanel) tagsPanel.classList.add('d-none');
+    const versionPanel = document.getElementById('version-panel');
+    if (versionPanel) versionPanel.classList.add('d-none');
+    if (previewErrorAlert) {
+      previewErrorAlert.textContent = 'Unable to load object \u2014 it may have been deleted, or the server returned an error.';
+      previewErrorAlert.classList.remove('d-none');
+    }
+  };
+
+  const clearPreviewError = () => {
+    previewFailed = false;
+    if (previewErrorAlert) previewErrorAlert.classList.add('d-none');
+    if (previewDetailsMeta) previewDetailsMeta.classList.remove('d-none');
   };
 
   async function fetchMetadata(metadataUrl) {
@@ -1993,6 +2041,7 @@
     previewPanel.classList.remove('d-none');
     activeRow = row;
     renderMetadata(null);
+    clearPreviewError();
 
     previewKey.textContent = row.dataset.key;
     previewSize.textContent = formatBytes(Number(row.dataset.size));
@@ -2016,18 +2065,71 @@
     const previewUrl = row.dataset.previewUrl;
     const lower = row.dataset.key.toLowerCase();
     if (previewUrl && lower.match(/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp)$/)) {
-      previewImage.src = previewUrl;
-      previewImage.classList.remove('d-none');
-      previewPlaceholder.classList.add('d-none');
+      previewPlaceholder.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary" role="status"></div><div class="small mt-2">Loading preview\u2026</div>';
+      const currentRow = row;
+      fetch(previewUrl)
+        .then((r) => {
+          if (activeRow !== currentRow) return;
+          if (!r.ok) {
+            previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+            handlePreviewError();
+            return;
+          }
+          return r.blob();
+        })
+        .then((blob) => {
+          if (!blob || activeRow !== currentRow) return;
+          const url = URL.createObjectURL(blob);
+          previewImage.onload = () => {
+            if (activeRow !== currentRow) { URL.revokeObjectURL(url); return; }
+            previewImage.classList.remove('d-none');
+            previewPlaceholder.classList.add('d-none');
+          };
+          previewImage.onerror = () => {
+            if (activeRow !== currentRow) { URL.revokeObjectURL(url); return; }
+            URL.revokeObjectURL(url);
+            previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          };
+          previewImage.src = url;
+        })
+        .catch(() => {
+          if (activeRow !== currentRow) return;
+          previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          handlePreviewError();
+        });
     } else if (previewUrl && lower.match(/\.(mp4|webm|ogv|mov|avi|mkv)$/)) {
+      const currentRow = row;
+      previewVideo.onerror = () => {
+        if (activeRow !== currentRow) return;
+        previewVideo.classList.add('d-none');
+        previewPlaceholder.classList.remove('d-none');
+        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+        handlePreviewError();
+      };
       previewVideo.src = previewUrl;
       previewVideo.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
     } else if (previewUrl && lower.match(/\.(mp3|wav|flac|ogg|aac|m4a|wma)$/)) {
+      const currentRow = row;
+      previewAudio.onerror = () => {
+        if (activeRow !== currentRow) return;
+        previewAudio.classList.add('d-none');
+        previewPlaceholder.classList.remove('d-none');
+        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+        handlePreviewError();
+      };
       previewAudio.src = previewUrl;
       previewAudio.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
     } else if (previewUrl && lower.match(/\.(pdf)$/)) {
+      const currentRow = row;
+      previewIframe.onerror = () => {
+        if (activeRow !== currentRow) return;
+        previewIframe.classList.add('d-none');
+        previewPlaceholder.classList.remove('d-none');
+        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+        handlePreviewError();
+      };
       previewIframe.src = previewUrl;
       previewIframe.style.minHeight = '500px';
       previewIframe.classList.remove('d-none');
@@ -2052,14 +2154,17 @@
         })
         .catch(() => {
           if (activeRow !== currentRow) return;
-          previewText.textContent = 'Failed to load preview';
+          previewText.classList.add('d-none');
+          previewPlaceholder.classList.remove('d-none');
+          previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
+          handlePreviewError();
         });
     }
 
     const metadataUrl = row.dataset.metadataUrl;
     if (metadataUrl) {
       const metadata = await fetchMetadata(metadataUrl);
-      if (activeRow === row) {
+      if (activeRow === row && !previewFailed) {
         renderMetadata(metadata);
       }
     }
@@ -3157,6 +3262,15 @@
       }
     });
 
+    const foldersInView = visibleItems.filter(item => item.type === 'folder');
+    foldersInView.forEach(item => {
+      if (shouldSelect) {
+        selectedRows.set(item.path, { key: item.path, isFolder: true });
+      } else {
+        selectedRows.delete(item.path);
+      }
+    });
+
     document.querySelectorAll('[data-folder-select]').forEach(cb => {
       cb.checked = shouldSelect;
     });
@@ -3957,6 +4071,10 @@
 
   const loadObjectTags = async (row) => {
     if (!row || !previewTagsPanel) return;
+    if (previewFailed) {
+      previewTagsPanel.classList.add('d-none');
+      return;
+    }
     const tagsUrl = row.dataset.tagsUrl;
     if (!tagsUrl) {
       previewTagsPanel.classList.add('d-none');

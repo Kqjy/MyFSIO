@@ -1063,6 +1063,27 @@ def bulk_delete_objects(bucket_name: str):
         return _respond(False, f"A maximum of {MAX_KEYS} objects can be deleted per request", status_code=400)
 
     unique_keys = list(dict.fromkeys(cleaned))
+
+    folder_prefixes = [k for k in unique_keys if k.endswith("/")]
+    if folder_prefixes:
+        try:
+            client = get_session_s3_client()
+            for prefix in folder_prefixes:
+                unique_keys.remove(prefix)
+                paginator = client.get_paginator("list_objects_v2")
+                for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+                    for obj in page.get("Contents", []):
+                        if obj["Key"] not in unique_keys:
+                            unique_keys.append(obj["Key"])
+        except (ClientError, EndpointConnectionError, ConnectionClosedError) as exc:
+            if isinstance(exc, ClientError):
+                err, status = handle_client_error(exc)
+                return _respond(False, err["error"], status_code=status)
+            return _respond(False, "S3 API server is unreachable", status_code=502)
+
+    if not unique_keys:
+        return _respond(False, "No objects found under the selected folders", status_code=400)
+
     try:
         _authorize_ui(principal, bucket_name, "delete")
     except IamError as exc:
@@ -1093,13 +1114,17 @@ def bulk_delete_objects(bucket_name: str):
     else:
         try:
             client = get_session_s3_client()
-            objects_to_delete = [{"Key": k} for k in unique_keys]
-            resp = client.delete_objects(
-                Bucket=bucket_name,
-                Delete={"Objects": objects_to_delete, "Quiet": False},
-            )
-            deleted = [d["Key"] for d in resp.get("Deleted", [])]
-            errors = [{"key": e["Key"], "error": e.get("Message", e.get("Code", "Unknown error"))} for e in resp.get("Errors", [])]
+            deleted = []
+            errors = []
+            for i in range(0, len(unique_keys), 1000):
+                batch = unique_keys[i:i + 1000]
+                objects_to_delete = [{"Key": k} for k in batch]
+                resp = client.delete_objects(
+                    Bucket=bucket_name,
+                    Delete={"Objects": objects_to_delete, "Quiet": False},
+                )
+                deleted.extend(d["Key"] for d in resp.get("Deleted", []))
+                errors.extend({"key": e["Key"], "error": e.get("Message", e.get("Code", "Unknown error"))} for e in resp.get("Errors", []))
             for key in deleted:
                 _replication_manager().trigger_replication(bucket_name, key, action="delete")
         except (ClientError, EndpointConnectionError, ConnectionClosedError) as exc:
@@ -4126,7 +4151,7 @@ def system_dashboard():
             r = rec.get("result", {})
             total_freed = r.get("temp_bytes_freed", 0) + r.get("multipart_bytes_freed", 0) + r.get("orphaned_version_bytes_freed", 0)
             rec["bytes_freed_display"] = _format_bytes(total_freed)
-            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            rec["timestamp_display"] = _format_datetime_display(datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc))
             gc_history_records.append(rec)
 
     checker = current_app.extensions.get("integrity")
@@ -4135,7 +4160,7 @@ def system_dashboard():
     if checker:
         raw = checker.get_history(limit=10, offset=0)
         for rec in raw:
-            rec["timestamp_display"] = datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            rec["timestamp_display"] = _format_datetime_display(datetime.fromtimestamp(rec["timestamp"], tz=dt_timezone.utc))
             integrity_history_records.append(rec)
 
     features = [
@@ -4163,6 +4188,7 @@ def system_dashboard():
         gc_history=gc_history_records,
         integrity_status=integrity_status,
         integrity_history=integrity_history_records,
+        display_timezone=current_app.config.get("DISPLAY_TIMEZONE", "UTC"),
     )
 
 
@@ -4179,14 +4205,43 @@ def system_gc_run():
         return jsonify({"error": "GC is not enabled"}), 400
 
     payload = request.get_json(silent=True) or {}
-    original_dry_run = gc.dry_run
-    if "dry_run" in payload:
-        gc.dry_run = bool(payload["dry_run"])
+    started = gc.run_async(dry_run=payload.get("dry_run"))
+    if not started:
+        return jsonify({"error": "GC is already in progress"}), 409
+    return jsonify({"status": "started"})
+
+
+@ui_bp.get("/system/gc/status")
+def system_gc_status():
+    principal = _current_principal()
     try:
-        result = gc.run_now()
-    finally:
-        gc.dry_run = original_dry_run
-    return jsonify(result.to_dict())
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    gc = current_app.extensions.get("gc")
+    if not gc:
+        return jsonify({"error": "GC is not enabled"}), 400
+
+    return jsonify(gc.get_status())
+
+
+@ui_bp.get("/system/gc/history")
+def system_gc_history():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    gc = current_app.extensions.get("gc")
+    if not gc:
+        return jsonify({"executions": []})
+
+    limit = min(int(request.args.get("limit", 10)), 200)
+    offset = int(request.args.get("offset", 0))
+    records = gc.get_history(limit=limit, offset=offset)
+    return jsonify({"executions": records})
 
 
 @ui_bp.post("/system/integrity/run")
@@ -4202,11 +4257,46 @@ def system_integrity_run():
         return jsonify({"error": "Integrity checker is not enabled"}), 400
 
     payload = request.get_json(silent=True) or {}
-    result = checker.run_now(
+    started = checker.run_async(
         auto_heal=payload.get("auto_heal"),
         dry_run=payload.get("dry_run"),
     )
-    return jsonify(result.to_dict())
+    if not started:
+        return jsonify({"error": "A scan is already in progress"}), 409
+    return jsonify({"status": "started"})
+
+
+@ui_bp.get("/system/integrity/status")
+def system_integrity_status():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    checker = current_app.extensions.get("integrity")
+    if not checker:
+        return jsonify({"error": "Integrity checker is not enabled"}), 400
+
+    return jsonify(checker.get_status())
+
+
+@ui_bp.get("/system/integrity/history")
+def system_integrity_history():
+    principal = _current_principal()
+    try:
+        _iam().authorize(principal, None, "iam:*")
+    except IamError:
+        return jsonify({"error": "Access denied"}), 403
+
+    checker = current_app.extensions.get("integrity")
+    if not checker:
+        return jsonify({"executions": []})
+
+    limit = min(int(request.args.get("limit", 10)), 200)
+    offset = int(request.args.get("offset", 0))
+    records = checker.get_history(limit=limit, offset=offset)
+    return jsonify({"executions": records})
 
 
 @ui_bp.app_errorhandler(404)

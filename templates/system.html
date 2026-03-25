@@ -122,6 +122,13 @@
           </button>
         </div>
 
+        <div id="gcScanningBanner" class="mb-3 {% if not gc_status.scanning %}d-none{% endif %}">
+          <div class="alert alert-info mb-0 small d-flex align-items-center gap-2">
+            <div class="spinner-border spinner-border-sm text-info" role="status"></div>
+            <span>GC in progress<span id="gcScanElapsed"></span></span>
+          </div>
+        </div>
+
         <div id="gcResult" class="mb-3 d-none">
           <div class="alert mb-0 small" id="gcResultAlert">
             <div class="d-flex justify-content-between align-items-start">
@@ -148,6 +155,7 @@
           </div>
         </div>
 
+        <div id="gcHistoryContainer">
         {% if gc_history %}
         <h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
@@ -193,6 +201,7 @@
           <p class="text-muted small mb-0">No executions recorded yet.</p>
         </div>
         {% endif %}
+        </div>
 
         {% else %}
         <div class="text-center py-4">
@@ -233,19 +242,26 @@
       <div class="card-body px-4 pb-4">
         {% if integrity_status.enabled %}
         <div class="d-flex gap-2 flex-wrap mb-3">
-          <button class="btn btn-primary btn-sm d-inline-flex align-items-center" id="integrityRunBtn" onclick="runIntegrity(false, false)">
+          <button class="btn btn-primary btn-sm d-inline-flex align-items-center" id="integrityRunBtn" onclick="runIntegrity(false, false)" {% if integrity_status.scanning %}disabled{% endif %}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 flex-shrink-0" viewBox="0 0 16 16">
               <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
               <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
             </svg>
             Scan Now
           </button>
-          <button class="btn btn-outline-warning btn-sm" id="integrityHealBtn" onclick="runIntegrity(false, true)">
+          <button class="btn btn-outline-warning btn-sm" id="integrityHealBtn" onclick="runIntegrity(false, true)" {% if integrity_status.scanning %}disabled{% endif %}>
             Scan &amp; Heal
           </button>
-          <button class="btn btn-outline-secondary btn-sm" id="integrityDryRunBtn" onclick="runIntegrity(true, false)">
+          <button class="btn btn-outline-secondary btn-sm" id="integrityDryRunBtn" onclick="runIntegrity(true, false)" {% if integrity_status.scanning %}disabled{% endif %}>
             Dry Run
           </button>
+        </div>
+
+        <div id="integrityScanningBanner" class="mb-3 {% if not integrity_status.scanning %}d-none{% endif %}">
+          <div class="alert alert-info mb-0 small d-flex align-items-center gap-2">
+            <div class="spinner-border spinner-border-sm text-info" role="status"></div>
+            <span>Scan in progress<span id="integrityScanElapsed"></span></span>
+          </div>
         </div>
 
         <div id="integrityResult" class="mb-3 d-none">
@@ -273,6 +289,7 @@
           </div>
         </div>
 
+        <div id="integrityHistoryContainer">
         {% if integrity_history %}
         <h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
@@ -326,6 +343,7 @@
           <p class="text-muted small mb-0">No scans recorded yet.</p>
         </div>
         {% endif %}
+        </div>
 
         {% else %}
         <div class="text-center py-4">
@@ -369,9 +387,195 @@
     return (i === 0 ? b : b.toFixed(1)) + ' ' + units[i];
   }
 
+  var _displayTimezone = {{ display_timezone|tojson }};
+
+  function formatTimestamp(ts) {
+    var d = new Date(ts * 1000);
+    try {
+      var opts = {year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: _displayTimezone, timeZoneName: 'short'};
+      return d.toLocaleString('en-US', opts);
+    } catch (e) {
+      var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+      return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) +
+             ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC';
+    }
+  }
+
+  var _gcHistoryIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">' +
+    '<path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022l-.074.997zm2.004.45a7.003 7.003 0 0 0-.985-.299l.219-.976c.383.086.76.2 1.126.342l-.36.933zm1.37.71a7.01 7.01 0 0 0-.439-.27l.493-.87a8.025 8.025 0 0 1 .979.654l-.615.789a6.996 6.996 0 0 0-.418-.302zm1.834 1.79a6.99 6.99 0 0 0-.653-.796l.724-.69c.27.285.52.59.747.91l-.818.576zm.744 1.352a7.08 7.08 0 0 0-.214-.468l.893-.45a7.976 7.976 0 0 1 .45 1.088l-.95.313a7.023 7.023 0 0 0-.179-.483zm.53 2.507a6.991 6.991 0 0 0-.1-1.025l.985-.17c.067.386.106.778.116 1.17l-1 .025zm-.131 1.538c.033-.17.06-.339.081-.51l.993.123a7.957 7.957 0 0 1-.23 1.155l-.964-.267c.046-.165.086-.332.12-.501zm-.952 2.379c.184-.29.346-.594.486-.908l.914.405c-.16.36-.345.706-.555 1.038l-.845-.535zm-.964 1.205c.122-.122.239-.248.35-.378l.758.653a8.073 8.073 0 0 1-.401.432l-.707-.707z"/>' +
+    '<path d="M8 1a7 7 0 1 0 4.95 11.95l.707.707A8.001 8.001 0 1 1 8 0v1z"/>' +
+    '<path d="M7.5 3a.5.5 0 0 1 .5.5v5.21l3.248 1.856a.5.5 0 0 1-.496.868l-3.5-2A.5.5 0 0 1 7 8V3.5a.5.5 0 0 1 .5-.5z"/></svg>';
+
+  function _gcRefreshHistory() {
+    fetch('{{ url_for("ui.system_gc_history") }}?limit=10', {
+      headers: {'X-CSRFToken': csrfToken}
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (hist) {
+      var container = document.getElementById('gcHistoryContainer');
+      if (!container) return;
+      var execs = hist.executions || [];
+      if (execs.length === 0) {
+        container.innerHTML = '<div class="text-center py-2"><p class="text-muted small mb-0">No executions recorded yet.</p></div>';
+        return;
+      }
+      var html = '<h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">' +
+        _gcHistoryIcon + ' Recent Executions</h6>' +
+        '<div class="table-responsive"><table class="table table-sm small mb-0">' +
+        '<thead class="table-light"><tr><th>Time</th><th class="text-center">Cleaned</th>' +
+        '<th class="text-center">Freed</th><th class="text-center">Mode</th></tr></thead><tbody>';
+      execs.forEach(function (exec) {
+        var r = exec.result || {};
+        var cleaned = (r.temp_files_deleted || 0) + (r.multipart_uploads_deleted || 0) +
+          (r.lock_files_deleted || 0) + (r.orphaned_metadata_deleted || 0) +
+          (r.orphaned_versions_deleted || 0) + (r.empty_dirs_removed || 0);
+        var freed = (r.temp_bytes_freed || 0) + (r.multipart_bytes_freed || 0) +
+          (r.orphaned_version_bytes_freed || 0);
+        var mode = exec.dry_run
+          ? '<span class="badge bg-warning bg-opacity-10 text-warning">Dry run</span>'
+          : '<span class="badge bg-primary bg-opacity-10 text-primary">Live</span>';
+        html += '<tr><td class="text-nowrap">' + formatTimestamp(exec.timestamp) + '</td>' +
+          '<td class="text-center">' + cleaned + '</td>' +
+          '<td class="text-center">' + formatBytes(freed) + '</td>' +
+          '<td class="text-center">' + mode + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+      container.innerHTML = html;
+    })
+    .catch(function () {});
+  }
+
+  function _integrityRefreshHistory() {
+    fetch('{{ url_for("ui.system_integrity_history") }}?limit=10', {
+      headers: {'X-CSRFToken': csrfToken}
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (hist) {
+      var container = document.getElementById('integrityHistoryContainer');
+      if (!container) return;
+      var execs = hist.executions || [];
+      if (execs.length === 0) {
+        container.innerHTML = '<div class="text-center py-2"><p class="text-muted small mb-0">No scans recorded yet.</p></div>';
+        return;
+      }
+      var html = '<h6 class="fw-semibold small text-muted mb-2 d-flex align-items-center gap-2">' +
+        _gcHistoryIcon + ' Recent Scans</h6>' +
+        '<div class="table-responsive"><table class="table table-sm small mb-0">' +
+        '<thead class="table-light"><tr><th>Time</th><th class="text-center">Scanned</th>' +
+        '<th class="text-center">Issues</th><th class="text-center">Healed</th>' +
+        '<th class="text-center">Mode</th></tr></thead><tbody>';
+      execs.forEach(function (exec) {
+        var r = exec.result || {};
+        var issues = (r.corrupted_objects || 0) + (r.orphaned_objects || 0) +
+          (r.phantom_metadata || 0) + (r.stale_versions || 0) +
+          (r.etag_cache_inconsistencies || 0) + (r.legacy_metadata_drifts || 0);
+        var issueHtml = issues > 0
+          ? '<span class="text-danger fw-medium">' + issues + '</span>'
+          : '<span class="text-success">0</span>';
+        var mode = exec.dry_run
+          ? '<span class="badge bg-warning bg-opacity-10 text-warning">Dry</span>'
+          : (exec.auto_heal
+            ? '<span class="badge bg-success bg-opacity-10 text-success">Heal</span>'
+            : '<span class="badge bg-primary bg-opacity-10 text-primary">Scan</span>');
+        html += '<tr><td class="text-nowrap">' + formatTimestamp(exec.timestamp) + '</td>' +
+          '<td class="text-center">' + (r.objects_scanned || 0) + '</td>' +
+          '<td class="text-center">' + issueHtml + '</td>' +
+          '<td class="text-center">' + (r.issues_healed || 0) + '</td>' +
+          '<td class="text-center">' + mode + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+      container.innerHTML = html;
+    })
+    .catch(function () {});
+  }
+
+  var _gcPollTimer = null;
+  var _gcLastDryRun = false;
+
+  function _gcSetScanning(scanning) {
+    var banner = document.getElementById('gcScanningBanner');
+    var btns = ['gcRunBtn', 'gcDryRunBtn'];
+    if (scanning) {
+      banner.classList.remove('d-none');
+      btns.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = true;
+      });
+    } else {
+      banner.classList.add('d-none');
+      document.getElementById('gcScanElapsed').textContent = '';
+      btns.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = false;
+      });
+    }
+  }
+
+  function _gcShowResult(data, dryRun) {
+    var container = document.getElementById('gcResult');
+    var alert = document.getElementById('gcResultAlert');
+    var title = document.getElementById('gcResultTitle');
+    var body = document.getElementById('gcResultBody');
+    container.classList.remove('d-none');
+
+    var totalItems = (data.temp_files_deleted || 0) + (data.multipart_uploads_deleted || 0) +
+                      (data.lock_files_deleted || 0) + (data.orphaned_metadata_deleted || 0) +
+                      (data.orphaned_versions_deleted || 0) + (data.empty_dirs_removed || 0);
+    var totalFreed = (data.temp_bytes_freed || 0) + (data.multipart_bytes_freed || 0) +
+                     (data.orphaned_version_bytes_freed || 0);
+
+    alert.className = totalItems > 0 ? 'alert alert-success mb-0 small' : 'alert alert-info mb-0 small';
+    title.textContent = (dryRun ? '[Dry Run] ' : '') + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
+
+    var lines = [];
+    if (data.temp_files_deleted) lines.push('Temp files: ' + data.temp_files_deleted + ' (' + formatBytes(data.temp_bytes_freed) + ')');
+    if (data.multipart_uploads_deleted) lines.push('Multipart uploads: ' + data.multipart_uploads_deleted + ' (' + formatBytes(data.multipart_bytes_freed) + ')');
+    if (data.lock_files_deleted) lines.push('Lock files: ' + data.lock_files_deleted);
+    if (data.orphaned_metadata_deleted) lines.push('Orphaned metadata: ' + data.orphaned_metadata_deleted);
+    if (data.orphaned_versions_deleted) lines.push('Orphaned versions: ' + data.orphaned_versions_deleted + ' (' + formatBytes(data.orphaned_version_bytes_freed) + ')');
+    if (data.empty_dirs_removed) lines.push('Empty directories: ' + data.empty_dirs_removed);
+    if (totalItems === 0) lines.push('Nothing to clean up.');
+    if (totalFreed > 0) lines.push('Total freed: ' + formatBytes(totalFreed));
+    if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
+
+    body.innerHTML = lines.join('<br>');
+  }
+
+  function _gcPoll() {
+    fetch('{{ url_for("ui.system_gc_status") }}', {
+      headers: {'X-CSRFToken': csrfToken}
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (status) {
+      if (status.scanning) {
+        var elapsed = status.scan_elapsed_seconds || 0;
+        document.getElementById('gcScanElapsed').textContent = ' (' + elapsed.toFixed(0) + 's)';
+        _gcPollTimer = setTimeout(_gcPoll, 2000);
+      } else {
+        _gcSetScanning(false);
+        _gcRefreshHistory();
+        fetch('{{ url_for("ui.system_gc_history") }}?limit=1', {
+          headers: {'X-CSRFToken': csrfToken}
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (hist) {
+          if (hist.executions && hist.executions.length > 0) {
+            var latest = hist.executions[0];
+            _gcShowResult(latest.result, latest.dry_run);
+          }
+        })
+        .catch(function () {});
+      }
+    })
+    .catch(function () {
+      _gcPollTimer = setTimeout(_gcPoll, 3000);
+    });
+  }
+
   window.runGC = function (dryRun) {
-    setLoading(dryRun ? 'gcDryRunBtn' : 'gcRunBtn', true);
-    setLoading(dryRun ? 'gcRunBtn' : 'gcDryRunBtn', true, true);
+    _gcLastDryRun = dryRun;
+    document.getElementById('gcResult').classList.add('d-none');
+    _gcSetScanning(true);
 
     fetch('{{ url_for("ui.system_gc_run") }}', {
       method: 'POST',
@@ -380,42 +584,22 @@
     })
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      var container = document.getElementById('gcResult');
-      var alert = document.getElementById('gcResultAlert');
-      var title = document.getElementById('gcResultTitle');
-      var body = document.getElementById('gcResultBody');
-      container.classList.remove('d-none');
-
       if (data.error) {
+        _gcSetScanning(false);
+        var container = document.getElementById('gcResult');
+        var alert = document.getElementById('gcResultAlert');
+        var title = document.getElementById('gcResultTitle');
+        var body = document.getElementById('gcResultBody');
+        container.classList.remove('d-none');
         alert.className = 'alert alert-danger mb-0 small';
         title.textContent = 'Error';
         body.textContent = data.error;
         return;
       }
-
-      var totalItems = (data.temp_files_deleted || 0) + (data.multipart_uploads_deleted || 0) +
-                        (data.lock_files_deleted || 0) + (data.orphaned_metadata_deleted || 0) +
-                        (data.orphaned_versions_deleted || 0) + (data.empty_dirs_removed || 0);
-      var totalFreed = (data.temp_bytes_freed || 0) + (data.multipart_bytes_freed || 0) +
-                       (data.orphaned_version_bytes_freed || 0);
-
-      alert.className = totalItems > 0 ? 'alert alert-success mb-0 small' : 'alert alert-info mb-0 small';
-      title.textContent = (dryRun ? '[Dry Run] ' : '') + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
-
-      var lines = [];
-      if (data.temp_files_deleted) lines.push('Temp files: ' + data.temp_files_deleted + ' (' + formatBytes(data.temp_bytes_freed) + ')');
-      if (data.multipart_uploads_deleted) lines.push('Multipart uploads: ' + data.multipart_uploads_deleted + ' (' + formatBytes(data.multipart_bytes_freed) + ')');
-      if (data.lock_files_deleted) lines.push('Lock files: ' + data.lock_files_deleted);
-      if (data.orphaned_metadata_deleted) lines.push('Orphaned metadata: ' + data.orphaned_metadata_deleted);
-      if (data.orphaned_versions_deleted) lines.push('Orphaned versions: ' + data.orphaned_versions_deleted + ' (' + formatBytes(data.orphaned_version_bytes_freed) + ')');
-      if (data.empty_dirs_removed) lines.push('Empty directories: ' + data.empty_dirs_removed);
-      if (totalItems === 0) lines.push('Nothing to clean up.');
-      if (totalFreed > 0) lines.push('Total freed: ' + formatBytes(totalFreed));
-      if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
-
-      body.innerHTML = lines.join('<br>');
+      _gcPollTimer = setTimeout(_gcPoll, 2000);
     })
     .catch(function (err) {
+      _gcSetScanning(false);
       var container = document.getElementById('gcResult');
       var alert = document.getElementById('gcResultAlert');
       var title = document.getElementById('gcResultTitle');
@@ -424,18 +608,104 @@
       alert.className = 'alert alert-danger mb-0 small';
       title.textContent = 'Error';
       body.textContent = err.message;
-    })
-    .finally(function () {
-      setLoading('gcRunBtn', false);
-      setLoading('gcDryRunBtn', false);
     });
   };
 
-  window.runIntegrity = function (dryRun, autoHeal) {
-    var activeBtn = dryRun ? 'integrityDryRunBtn' : (autoHeal ? 'integrityHealBtn' : 'integrityRunBtn');
-    ['integrityRunBtn', 'integrityHealBtn', 'integrityDryRunBtn'].forEach(function (id) {
-      setLoading(id, true, id !== activeBtn);
+  {% if gc_status.scanning %}
+  _gcSetScanning(true);
+  _gcPollTimer = setTimeout(_gcPoll, 2000);
+  {% endif %}
+
+  var _integrityPollTimer = null;
+  var _integrityLastMode = {dryRun: false, autoHeal: false};
+
+  function _integritySetScanning(scanning) {
+    var banner = document.getElementById('integrityScanningBanner');
+    var btns = ['integrityRunBtn', 'integrityHealBtn', 'integrityDryRunBtn'];
+    if (scanning) {
+      banner.classList.remove('d-none');
+      btns.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = true;
+      });
+    } else {
+      banner.classList.add('d-none');
+      document.getElementById('integrityScanElapsed').textContent = '';
+      btns.forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.disabled = false;
+      });
+    }
+  }
+
+  function _integrityShowResult(data, dryRun, autoHeal) {
+    var container = document.getElementById('integrityResult');
+    var alert = document.getElementById('integrityResultAlert');
+    var title = document.getElementById('integrityResultTitle');
+    var body = document.getElementById('integrityResultBody');
+    container.classList.remove('d-none');
+
+    var totalIssues = (data.corrupted_objects || 0) + (data.orphaned_objects || 0) +
+                       (data.phantom_metadata || 0) + (data.stale_versions || 0) +
+                       (data.etag_cache_inconsistencies || 0) + (data.legacy_metadata_drifts || 0);
+
+    var prefix = dryRun ? '[Dry Run] ' : (autoHeal ? '[Heal] ' : '');
+    alert.className = totalIssues > 0 ? 'alert alert-warning mb-0 small' : 'alert alert-success mb-0 small';
+    title.textContent = prefix + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
+
+    var lines = [];
+    lines.push('Scanned: ' + (data.objects_scanned || 0) + ' objects in ' + (data.buckets_scanned || 0) + ' buckets');
+    if (totalIssues === 0) {
+      lines.push('No issues found.');
+    } else {
+      if (data.corrupted_objects) lines.push('Corrupted objects: ' + data.corrupted_objects);
+      if (data.orphaned_objects) lines.push('Orphaned objects: ' + data.orphaned_objects);
+      if (data.phantom_metadata) lines.push('Phantom metadata: ' + data.phantom_metadata);
+      if (data.stale_versions) lines.push('Stale versions: ' + data.stale_versions);
+      if (data.etag_cache_inconsistencies) lines.push('ETag inconsistencies: ' + data.etag_cache_inconsistencies);
+      if (data.legacy_metadata_drifts) lines.push('Legacy metadata drifts: ' + data.legacy_metadata_drifts);
+      if (data.issues_healed) lines.push('Issues healed: ' + data.issues_healed);
+    }
+    if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
+
+    body.innerHTML = lines.join('<br>');
+  }
+
+  function _integrityPoll() {
+    fetch('{{ url_for("ui.system_integrity_status") }}', {
+      headers: {'X-CSRFToken': csrfToken}
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (status) {
+      if (status.scanning) {
+        var elapsed = status.scan_elapsed_seconds || 0;
+        document.getElementById('integrityScanElapsed').textContent = ' (' + elapsed.toFixed(0) + 's)';
+        _integrityPollTimer = setTimeout(_integrityPoll, 2000);
+      } else {
+        _integritySetScanning(false);
+        _integrityRefreshHistory();
+        fetch('{{ url_for("ui.system_integrity_history") }}?limit=1', {
+          headers: {'X-CSRFToken': csrfToken}
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (hist) {
+          if (hist.executions && hist.executions.length > 0) {
+            var latest = hist.executions[0];
+            _integrityShowResult(latest.result, latest.dry_run, latest.auto_heal);
+          }
+        })
+        .catch(function () {});
+      }
+    })
+    .catch(function () {
+      _integrityPollTimer = setTimeout(_integrityPoll, 3000);
     });
+  }
+
+  window.runIntegrity = function (dryRun, autoHeal) {
+    _integrityLastMode = {dryRun: dryRun, autoHeal: autoHeal};
+    document.getElementById('integrityResult').classList.add('d-none');
+    _integritySetScanning(true);
 
     fetch('{{ url_for("ui.system_integrity_run") }}', {
       method: 'POST',
@@ -444,45 +714,22 @@
     })
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      var container = document.getElementById('integrityResult');
-      var alert = document.getElementById('integrityResultAlert');
-      var title = document.getElementById('integrityResultTitle');
-      var body = document.getElementById('integrityResultBody');
-      container.classList.remove('d-none');
-
       if (data.error) {
+        _integritySetScanning(false);
+        var container = document.getElementById('integrityResult');
+        var alert = document.getElementById('integrityResultAlert');
+        var title = document.getElementById('integrityResultTitle');
+        var body = document.getElementById('integrityResultBody');
+        container.classList.remove('d-none');
         alert.className = 'alert alert-danger mb-0 small';
         title.textContent = 'Error';
         body.textContent = data.error;
         return;
       }
-
-      var totalIssues = (data.corrupted_objects || 0) + (data.orphaned_objects || 0) +
-                         (data.phantom_metadata || 0) + (data.stale_versions || 0) +
-                         (data.etag_cache_inconsistencies || 0) + (data.legacy_metadata_drifts || 0);
-
-      var prefix = dryRun ? '[Dry Run] ' : (autoHeal ? '[Heal] ' : '');
-      alert.className = totalIssues > 0 ? 'alert alert-warning mb-0 small' : 'alert alert-success mb-0 small';
-      title.textContent = prefix + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
-
-      var lines = [];
-      lines.push('Scanned: ' + (data.objects_scanned || 0) + ' objects in ' + (data.buckets_scanned || 0) + ' buckets');
-      if (totalIssues === 0) {
-        lines.push('No issues found.');
-      } else {
-        if (data.corrupted_objects) lines.push('Corrupted objects: ' + data.corrupted_objects);
-        if (data.orphaned_objects) lines.push('Orphaned objects: ' + data.orphaned_objects);
-        if (data.phantom_metadata) lines.push('Phantom metadata: ' + data.phantom_metadata);
-        if (data.stale_versions) lines.push('Stale versions: ' + data.stale_versions);
-        if (data.etag_cache_inconsistencies) lines.push('ETag inconsistencies: ' + data.etag_cache_inconsistencies);
-        if (data.legacy_metadata_drifts) lines.push('Legacy metadata drifts: ' + data.legacy_metadata_drifts);
-        if (data.issues_healed) lines.push('Issues healed: ' + data.issues_healed);
-      }
-      if (data.errors && data.errors.length > 0) lines.push('Errors: ' + data.errors.join(', '));
-
-      body.innerHTML = lines.join('<br>');
+      _integrityPollTimer = setTimeout(_integrityPoll, 2000);
     })
     .catch(function (err) {
+      _integritySetScanning(false);
       var container = document.getElementById('integrityResult');
       var alert = document.getElementById('integrityResultAlert');
       var title = document.getElementById('integrityResultTitle');
@@ -491,13 +738,13 @@
       alert.className = 'alert alert-danger mb-0 small';
       title.textContent = 'Error';
       body.textContent = err.message;
-    })
-    .finally(function () {
-      setLoading('integrityRunBtn', false);
-      setLoading('integrityHealBtn', false);
-      setLoading('integrityDryRunBtn', false);
     });
   };
+
+  {% if integrity_status.scanning %}
+  _integritySetScanning(true);
+  _integrityPollTimer = setTimeout(_integrityPoll, 2000);
+  {% endif %}
 })();
 </script>
 {% endblock %}

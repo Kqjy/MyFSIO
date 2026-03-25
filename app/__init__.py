@@ -293,6 +293,7 @@ def create_app(
             multipart_max_age_days=app.config.get("GC_MULTIPART_MAX_AGE_DAYS", 7),
             lock_file_max_age_hours=app.config.get("GC_LOCK_FILE_MAX_AGE_HOURS", 1.0),
             dry_run=app.config.get("GC_DRY_RUN", False),
+            io_throttle_ms=app.config.get("GC_IO_THROTTLE_MS", 10),
         )
         gc_collector.start()
 
@@ -304,6 +305,7 @@ def create_app(
             batch_size=app.config.get("INTEGRITY_BATCH_SIZE", 1000),
             auto_heal=app.config.get("INTEGRITY_AUTO_HEAL", False),
             dry_run=app.config.get("INTEGRITY_DRY_RUN", False),
+            io_throttle_ms=app.config.get("INTEGRITY_IO_THROTTLE_MS", 10),
         )
         integrity_checker.start()
 

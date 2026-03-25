@@ -162,6 +162,76 @@ class IntegrityHistoryStore:
         return self.load()[offset : offset + limit]
 
 
+class IntegrityCursorStore:
+    def __init__(self, storage_root: Path) -> None:
+        self.storage_root = storage_root
+        self._lock = threading.Lock()
+
+    def _get_path(self) -> Path:
+        return self.storage_root / ".myfsio.sys" / "config" / "integrity_cursor.json"
+
+    def load(self) -> Dict[str, Any]:
+        path = self._get_path()
+        if not path.exists():
+            return {"buckets": {}}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not isinstance(data.get("buckets"), dict):
+                    return {"buckets": {}}
+                return data
+        except (OSError, ValueError, KeyError):
+            return {"buckets": {}}
+
+    def save(self, data: Dict[str, Any]) -> None:
+        path = self._get_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except OSError as e:
+            logger.error("Failed to save integrity cursor: %s", e)
+
+    def update_bucket(self, bucket_name: str, timestamp: float) -> None:
+        with self._lock:
+            data = self.load()
+            data["buckets"][bucket_name] = {"last_scanned": timestamp}
+            self.save(data)
+
+    def clean_stale(self, existing_buckets: List[str]) -> None:
+        with self._lock:
+            data = self.load()
+            existing_set = set(existing_buckets)
+            stale_keys = [k for k in data["buckets"] if k not in existing_set]
+            if stale_keys:
+                for k in stale_keys:
+                    del data["buckets"][k]
+                self.save(data)
+
+    def get_bucket_order(self, bucket_names: List[str]) -> List[str]:
+        data = self.load()
+        buckets_info = data.get("buckets", {})
+
+        def sort_key(name: str) -> float:
+            entry = buckets_info.get(name)
+            if entry is None:
+                return 0.0
+            return entry.get("last_scanned", 0.0)
+
+        return sorted(bucket_names, key=sort_key)
+
+    def get_info(self) -> Dict[str, Any]:
+        data = self.load()
+        buckets = data.get("buckets", {})
+        return {
+            "tracked_buckets": len(buckets),
+            "buckets": {
+                name: info.get("last_scanned")
+                for name, info in buckets.items()
+            },
+        }
+
+
 MAX_ISSUES = 500
 
 
@@ -180,6 +250,7 @@ class IntegrityChecker:
         auto_heal: bool = False,
         dry_run: bool = False,
         max_history: int = 50,
+        io_throttle_ms: int = 10,
     ) -> None:
         self.storage_root = Path(storage_root)
         self.interval_seconds = interval_hours * 3600.0
@@ -189,7 +260,11 @@ class IntegrityChecker:
         self._timer: Optional[threading.Timer] = None
         self._shutdown = False
         self._lock = threading.Lock()
+        self._scanning = False
+        self._scan_start_time: Optional[float] = None
+        self._io_throttle = max(0, io_throttle_ms) / 1000.0
         self.history_store = IntegrityHistoryStore(storage_root, max_records=max_history)
+        self.cursor_store = IntegrityCursorStore(self.storage_root)
 
     def start(self) -> None:
         if self._timer is not None:
@@ -229,52 +304,73 @@ class IntegrityChecker:
             self._schedule_next()
 
     def run_now(self, auto_heal: Optional[bool] = None, dry_run: Optional[bool] = None) -> IntegrityResult:
-        effective_auto_heal = auto_heal if auto_heal is not None else self.auto_heal
-        effective_dry_run = dry_run if dry_run is not None else self.dry_run
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("Integrity scan is already in progress")
 
-        start = time.time()
-        result = IntegrityResult()
+        try:
+            self._scanning = True
+            self._scan_start_time = time.time()
 
-        bucket_names = self._list_bucket_names()
+            effective_auto_heal = auto_heal if auto_heal is not None else self.auto_heal
+            effective_dry_run = dry_run if dry_run is not None else self.dry_run
 
-        for bucket_name in bucket_names:
-            if result.objects_scanned >= self.batch_size:
-                break
-            result.buckets_scanned += 1
-            self._check_corrupted_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
-            self._check_orphaned_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
-            self._check_phantom_metadata(bucket_name, result, effective_auto_heal, effective_dry_run)
-            self._check_stale_versions(bucket_name, result, effective_auto_heal, effective_dry_run)
-            self._check_etag_cache(bucket_name, result, effective_auto_heal, effective_dry_run)
-            self._check_legacy_metadata(bucket_name, result, effective_auto_heal, effective_dry_run)
+            start = self._scan_start_time
+            result = IntegrityResult()
 
-        result.execution_time_seconds = time.time() - start
+            bucket_names = self._list_bucket_names()
+            self.cursor_store.clean_stale(bucket_names)
+            ordered_buckets = self.cursor_store.get_bucket_order(bucket_names)
 
-        if result.has_issues or result.errors:
-            logger.info(
-                "Integrity check completed in %.2fs: corrupted=%d, orphaned=%d, phantom=%d, "
-                "stale_versions=%d, etag_cache=%d, legacy_drift=%d, healed=%d, errors=%d%s",
-                result.execution_time_seconds,
-                result.corrupted_objects,
-                result.orphaned_objects,
-                result.phantom_metadata,
-                result.stale_versions,
-                result.etag_cache_inconsistencies,
-                result.legacy_metadata_drifts,
-                result.issues_healed,
-                len(result.errors),
-                " (dry run)" if effective_dry_run else "",
+            for bucket_name in ordered_buckets:
+                if self._batch_exhausted(result):
+                    break
+                result.buckets_scanned += 1
+                self._check_corrupted_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
+                self._check_orphaned_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
+                self._check_phantom_metadata(bucket_name, result, effective_auto_heal, effective_dry_run)
+                self._check_stale_versions(bucket_name, result, effective_auto_heal, effective_dry_run)
+                self._check_etag_cache(bucket_name, result, effective_auto_heal, effective_dry_run)
+                self._check_legacy_metadata(bucket_name, result, effective_auto_heal, effective_dry_run)
+                self.cursor_store.update_bucket(bucket_name, time.time())
+
+            result.execution_time_seconds = time.time() - start
+
+            if result.has_issues or result.errors:
+                logger.info(
+                    "Integrity check completed in %.2fs: corrupted=%d, orphaned=%d, phantom=%d, "
+                    "stale_versions=%d, etag_cache=%d, legacy_drift=%d, healed=%d, errors=%d%s",
+                    result.execution_time_seconds,
+                    result.corrupted_objects,
+                    result.orphaned_objects,
+                    result.phantom_metadata,
+                    result.stale_versions,
+                    result.etag_cache_inconsistencies,
+                    result.legacy_metadata_drifts,
+                    result.issues_healed,
+                    len(result.errors),
+                    " (dry run)" if effective_dry_run else "",
+                )
+
+            record = IntegrityExecutionRecord(
+                timestamp=time.time(),
+                result=result.to_dict(),
+                dry_run=effective_dry_run,
+                auto_heal=effective_auto_heal,
             )
+            self.history_store.add(record)
 
-        record = IntegrityExecutionRecord(
-            timestamp=time.time(),
-            result=result.to_dict(),
-            dry_run=effective_dry_run,
-            auto_heal=effective_auto_heal,
-        )
-        self.history_store.add(record)
+            return result
+        finally:
+            self._scanning = False
+            self._scan_start_time = None
+            self._lock.release()
 
-        return result
+    def run_async(self, auto_heal: Optional[bool] = None, dry_run: Optional[bool] = None) -> bool:
+        if self._scanning:
+            return False
+        t = threading.Thread(target=self.run_now, args=(auto_heal, dry_run), daemon=True)
+        t.start()
+        return True
 
     def _system_path(self) -> Path:
         return self.storage_root / self.SYSTEM_ROOT
@@ -288,6 +384,16 @@ class IntegrityChecker:
         except OSError:
             pass
         return names
+
+    def _throttle(self) -> bool:
+        if self._shutdown:
+            return True
+        if self._io_throttle > 0:
+            time.sleep(self._io_throttle)
+        return self._shutdown
+
+    def _batch_exhausted(self, result: IntegrityResult) -> bool:
+        return self._shutdown or result.objects_scanned >= self.batch_size
 
     def _add_issue(self, result: IntegrityResult, issue: IntegrityIssue) -> None:
         if len(result.issues) < MAX_ISSUES:
@@ -304,7 +410,9 @@ class IntegrityChecker:
 
         try:
             for index_file in meta_root.rglob("_index.json"):
-                if result.objects_scanned >= self.batch_size:
+                if self._throttle():
+                    return
+                if self._batch_exhausted(result):
                     return
                 if not index_file.is_file():
                     continue
@@ -314,7 +422,9 @@ class IntegrityChecker:
                     continue
 
                 for key_name, entry in list(index_data.items()):
-                    if result.objects_scanned >= self.batch_size:
+                    if self._throttle():
+                        return
+                    if self._batch_exhausted(result):
                         return
 
                     rel_dir = index_file.parent.relative_to(meta_root)
@@ -374,7 +484,9 @@ class IntegrityChecker:
 
         try:
             for entry in bucket_path.rglob("*"):
-                if result.objects_scanned >= self.batch_size:
+                if self._throttle():
+                    return
+                if self._batch_exhausted(result):
                     return
                 if not entry.is_file():
                     continue
@@ -385,6 +497,7 @@ class IntegrityChecker:
                 if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
                     continue
 
+                result.objects_scanned += 1
                 full_key = rel.as_posix()
                 key_name = rel.name
                 parent = rel.parent
@@ -449,6 +562,10 @@ class IntegrityChecker:
 
         try:
             for index_file in meta_root.rglob("_index.json"):
+                if self._throttle():
+                    return
+                if self._batch_exhausted(result):
+                    return
                 if not index_file.is_file():
                     continue
                 try:
@@ -458,6 +575,9 @@ class IntegrityChecker:
 
                 keys_to_remove = []
                 for key_name in list(index_data.keys()):
+                    if self._batch_exhausted(result):
+                        break
+                    result.objects_scanned += 1
                     rel_dir = index_file.parent.relative_to(meta_root)
                     if rel_dir == Path("."):
                         full_key = key_name
@@ -503,6 +623,10 @@ class IntegrityChecker:
 
         try:
             for key_dir in versions_root.rglob("*"):
+                if self._throttle():
+                    return
+                if self._batch_exhausted(result):
+                    return
                 if not key_dir.is_dir():
                     continue
 
@@ -510,6 +634,9 @@ class IntegrityChecker:
                 json_files = {f.stem: f for f in key_dir.glob("*.json")}
 
                 for stem, bin_file in bin_files.items():
+                    if self._batch_exhausted(result):
+                        return
+                    result.objects_scanned += 1
                     if stem not in json_files:
                         result.stale_versions += 1
                         issue = IntegrityIssue(
@@ -529,6 +656,9 @@ class IntegrityChecker:
                         self._add_issue(result, issue)
 
                 for stem, json_file in json_files.items():
+                    if self._batch_exhausted(result):
+                        return
+                    result.objects_scanned += 1
                     if stem not in bin_files:
                         result.stale_versions += 1
                         issue = IntegrityIssue(
@@ -569,6 +699,9 @@ class IntegrityChecker:
         found_mismatch = False
 
         for full_key, cached_etag in etag_cache.items():
+            if self._batch_exhausted(result):
+                break
+            result.objects_scanned += 1
             key_path = Path(full_key)
             key_name = key_path.name
             parent = key_path.parent
@@ -626,9 +759,14 @@ class IntegrityChecker:
 
         try:
             for meta_file in legacy_meta_root.rglob("*.meta.json"):
+                if self._throttle():
+                    return
+                if self._batch_exhausted(result):
+                    return
                 if not meta_file.is_file():
                     continue
 
+                result.objects_scanned += 1
                 try:
                     rel = meta_file.relative_to(legacy_meta_root)
                 except ValueError:
@@ -728,11 +866,17 @@ class IntegrityChecker:
         return [r.to_dict() for r in records]
 
     def get_status(self) -> dict:
-        return {
+        status: Dict[str, Any] = {
             "enabled": not self._shutdown or self._timer is not None,
             "running": self._timer is not None and not self._shutdown,
+            "scanning": self._scanning,
             "interval_hours": self.interval_seconds / 3600.0,
             "batch_size": self.batch_size,
             "auto_heal": self.auto_heal,
             "dry_run": self.dry_run,
+            "io_throttle_ms": round(self._io_throttle * 1000),
         }
+        if self._scanning and self._scan_start_time is not None:
+            status["scan_elapsed_seconds"] = round(time.time() - self._scan_start_time, 1)
+        status["cursor"] = self.cursor_store.get_info()
+        return status

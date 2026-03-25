@@ -317,7 +317,7 @@ class TestAdminAPI:
         )
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "temp_files_deleted" in data
+        assert data["status"] == "started"
 
     def test_gc_dry_run(self, gc_app):
         client = gc_app.test_client()
@@ -329,11 +329,17 @@ class TestAdminAPI:
         )
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "temp_files_deleted" in data
+        assert data["status"] == "started"
 
     def test_gc_history(self, gc_app):
+        import time
         client = gc_app.test_client()
         client.post("/admin/gc/run", headers={"X-Access-Key": "admin", "X-Secret-Key": "adminsecret"})
+        for _ in range(50):
+            time.sleep(0.1)
+            status = client.get("/admin/gc/status", headers={"X-Access-Key": "admin", "X-Secret-Key": "adminsecret"}).get_json()
+            if not status.get("scanning"):
+                break
         resp = client.get("/admin/gc/history", headers={"X-Access-Key": "admin", "X-Secret-Key": "adminsecret"})
         assert resp.status_code == 200
         data = resp.get_json()
