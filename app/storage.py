@@ -190,6 +190,7 @@ class ObjectStorage:
         object_cache_max_size: int = 100,
         bucket_config_cache_ttl: float = 30.0,
         object_key_max_length_bytes: int = 1024,
+        meta_read_cache_max: int = 2048,
     ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -208,7 +209,7 @@ class ObjectStorage:
         self._sorted_key_cache: Dict[str, tuple[list[str], int]] = {}
         self._meta_index_locks: Dict[str, threading.Lock] = {}
         self._meta_read_cache: OrderedDict[tuple, Optional[Dict[str, Any]]] = OrderedDict()
-        self._meta_read_cache_max = 2048
+        self._meta_read_cache_max = meta_read_cache_max
         self._cleanup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ParentCleanup")
         self._stats_mem: Dict[str, Dict[str, int]] = {}
         self._stats_serial: Dict[str, int] = {}
@@ -218,6 +219,7 @@ class ObjectStorage:
         self._stats_flush_timer: Optional[threading.Timer] = None
         self._etag_index_dirty: set[str] = set()
         self._etag_index_flush_timer: Optional[threading.Timer] = None
+        self._etag_index_mem: Dict[str, tuple[Dict[str, str], float]] = {}
 
     def _get_bucket_lock(self, bucket_id: str) -> threading.Lock:
         with self._registry_lock:
@@ -427,7 +429,7 @@ class ObjectStorage:
             cache_path = self._system_bucket_root(bucket_id) / "stats.json"
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                self._atomic_write_json(cache_path, data)
+                self._atomic_write_json(cache_path, data, sync=False)
             except OSError:
                 pass
 
@@ -602,14 +604,7 @@ class ObjectStorage:
                 is_truncated=False, next_continuation_token=None,
             )
 
-        etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
-        meta_cache: Dict[str, str] = {}
-        if etag_index_path.exists():
-            try:
-                with open(etag_index_path, 'r', encoding='utf-8') as f:
-                    meta_cache = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                pass
+        meta_cache: Dict[str, str] = self._get_etag_index(bucket_id)
 
         entries_files: list[tuple[str, int, float, Optional[str]]] = []
         entries_dirs: list[str] = []
@@ -2088,6 +2083,7 @@ class ObjectStorage:
                     etag_index_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(etag_index_path, 'w', encoding='utf-8') as f:
                         json.dump(raw["etag_cache"], f)
+                    self._etag_index_mem[bucket_id] = (dict(raw["etag_cache"]), etag_index_path.stat().st_mtime)
                 except OSError:
                     pass
             for key, size, mtime, etag in raw["objects"]:
@@ -2211,6 +2207,7 @@ class ObjectStorage:
                     etag_index_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(etag_index_path, 'w', encoding='utf-8') as f:
                         json.dump(meta_cache, f)
+                    self._etag_index_mem[bucket_id] = (dict(meta_cache), etag_index_path.stat().st_mtime)
                 except OSError:
                     pass
 
@@ -2324,6 +2321,25 @@ class ObjectStorage:
         self._etag_index_dirty.add(bucket_id)
         self._schedule_etag_index_flush()
 
+    def _get_etag_index(self, bucket_id: str) -> Dict[str, str]:
+        etag_index_path = self._system_bucket_root(bucket_id) / "etag_index.json"
+        try:
+            current_mtime = etag_index_path.stat().st_mtime
+        except OSError:
+            return {}
+        cached = self._etag_index_mem.get(bucket_id)
+        if cached:
+            cache_dict, cached_mtime = cached
+            if current_mtime == cached_mtime:
+                return cache_dict
+        try:
+            with open(etag_index_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self._etag_index_mem[bucket_id] = (data, current_mtime)
+            return data
+        except (OSError, json.JSONDecodeError):
+            return {}
+
     def _schedule_etag_index_flush(self) -> None:
         if self._etag_index_flush_timer is None or not self._etag_index_flush_timer.is_alive():
             self._etag_index_flush_timer = threading.Timer(5.0, self._flush_etag_indexes)
@@ -2345,6 +2361,7 @@ class ObjectStorage:
                 etag_index_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(etag_index_path, 'w', encoding='utf-8') as f:
                     json.dump(index, f)
+                self._etag_index_mem[bucket_id] = (index, etag_index_path.stat().st_mtime)
             except OSError:
                 pass
 
@@ -2388,14 +2405,15 @@ class ObjectStorage:
             path.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _atomic_write_json(path: Path, data: Any) -> None:
+    def _atomic_write_json(path: Path, data: Any, *, sync: bool = True) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".tmp")
         try:
             with tmp_path.open("w", encoding="utf-8") as f:
                 json.dump(data, f)
-                f.flush()
-                os.fsync(f.fileno())
+                if sync:
+                    f.flush()
+                    os.fsync(f.fileno())
             tmp_path.replace(path)
         except BaseException:
             try:

@@ -201,6 +201,11 @@ _SIGNING_KEY_CACHE_LOCK = threading.Lock()
 _SIGNING_KEY_CACHE_TTL = 60.0
 _SIGNING_KEY_CACHE_MAX_SIZE = 256
 
+_SIGV4_HEADER_RE = re.compile(
+    r"AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request, SignedHeaders=([^,]+), Signature=(.+)"
+)
+_SIGV4_REQUIRED_HEADERS = frozenset({'host', 'x-amz-date'})
+
 
 def clear_signing_key_cache() -> None:
     if _HAS_RUST:
@@ -259,10 +264,7 @@ def _get_canonical_uri(req: Any) -> str:
 
 
 def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
-    match = re.match(
-        r"AWS4-HMAC-SHA256 Credential=([^/]+)/([^/]+)/([^/]+)/([^/]+)/aws4_request, SignedHeaders=([^,]+), Signature=(.+)",
-        auth_header,
-    )
+    match = _SIGV4_HEADER_RE.match(auth_header)
     if not match:
         return None
 
@@ -286,14 +288,9 @@ def _verify_sigv4_header(req: Any, auth_header: str) -> Principal | None:
     if time_diff > tolerance:
         raise IamError("Request timestamp too old or too far in the future")
 
-    required_headers = {'host', 'x-amz-date'}
     signed_headers_set = set(signed_headers_str.split(';'))
-    if not required_headers.issubset(signed_headers_set):
-        if 'date' in signed_headers_set:
-            required_headers.remove('x-amz-date')
-            required_headers.add('date')
-
-        if not required_headers.issubset(signed_headers_set):
+    if not _SIGV4_REQUIRED_HEADERS.issubset(signed_headers_set):
+        if not ({'host', 'date'}.issubset(signed_headers_set)):
              raise IamError("Required headers not signed")
 
     canonical_uri = _get_canonical_uri(req)
@@ -1010,7 +1007,7 @@ def _render_encryption_document(config: dict[str, Any]) -> Element:
     return root
 
 
-def _stream_file(path, chunk_size: int = 256 * 1024):
+def _stream_file(path, chunk_size: int = 1024 * 1024):
     with path.open("rb") as handle:
         while True:
             chunk = handle.read(chunk_size)
