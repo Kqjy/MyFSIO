@@ -2833,9 +2833,12 @@ def object_handler(bucket_name: str, object_key: str):
         is_encrypted = "x-amz-server-side-encryption" in metadata
 
         cond_etag = metadata.get("__etag__")
+        _etag_was_healed = False
         if not cond_etag and not is_encrypted:
             try:
                 cond_etag = storage._compute_etag(path)
+                _etag_was_healed = True
+                storage.heal_missing_etag(bucket_name, object_key, cond_etag)
             except OSError:
                 cond_etag = None
         if cond_etag:
@@ -2881,7 +2884,7 @@ def object_handler(bucket_name: str, object_key: str):
                 try:
                     stat = path.stat()
                     file_size = stat.st_size
-                    etag = metadata.get("__etag__") or storage._compute_etag(path)
+                    etag = cond_etag or storage._compute_etag(path)
                 except PermissionError:
                     return _error_response("AccessDenied", "Permission denied accessing object", 403)
                 except OSError as exc:
@@ -2929,7 +2932,7 @@ def object_handler(bucket_name: str, object_key: str):
                 try:
                     stat = path.stat()
                     response = Response(status=200)
-                    etag = metadata.get("__etag__") or storage._compute_etag(path)
+                    etag = cond_etag or storage._compute_etag(path)
                 except PermissionError:
                     return _error_response("AccessDenied", "Permission denied accessing object", 403)
                 except OSError as exc:
@@ -3314,9 +3317,13 @@ def head_object(bucket_name: str, object_key: str) -> Response:
         return error
     try:
         _authorize_action(principal, bucket_name, "read", object_key=object_key)
-        path = _storage().get_object_path(bucket_name, object_key)
-        metadata = _storage().get_object_metadata(bucket_name, object_key)
-        etag = metadata.get("__etag__") or _storage()._compute_etag(path)
+        storage = _storage()
+        path = storage.get_object_path(bucket_name, object_key)
+        metadata = storage.get_object_metadata(bucket_name, object_key)
+        etag = metadata.get("__etag__")
+        if not etag:
+            etag = storage._compute_etag(path)
+            storage.heal_missing_etag(bucket_name, object_key, etag)
 
         head_mtime = float(metadata["__last_modified__"]) if "__last_modified__" in metadata else None
         if head_mtime is None:
