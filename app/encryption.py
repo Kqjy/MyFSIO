@@ -21,6 +21,10 @@ if sys.platform != "win32":
 
 try:
     import myfsio_core as _rc
+    if not all(hasattr(_rc, f) for f in (
+        "encrypt_stream_chunked", "decrypt_stream_chunked",
+    )):
+        raise ImportError("myfsio_core is outdated, rebuild with: cd myfsio_core && maturin develop --release")
     _HAS_RUST = True
 except ImportError:
     _rc = None

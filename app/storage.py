@@ -20,6 +20,14 @@ from typing import Any, BinaryIO, Dict, Generator, List, Optional
 
 try:
     import myfsio_core as _rc
+    if not all(hasattr(_rc, f) for f in (
+        "validate_bucket_name", "validate_object_key", "md5_file",
+        "shallow_scan", "bucket_stats_scan", "search_objects_scan",
+        "stream_to_file_with_md5", "assemble_parts_with_md5",
+        "build_object_cache", "read_index_entry", "write_index_entry",
+        "delete_index_entry", "check_bucket_contents",
+    )):
+        raise ImportError("myfsio_core is outdated, rebuild with: cd myfsio_core && maturin develop --release")
     _HAS_RUST = True
 except ImportError:
     _rc = None

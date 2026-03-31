@@ -19,6 +19,10 @@ from defusedxml.ElementTree import fromstring
 
 try:
     import myfsio_core as _rc
+    if not all(hasattr(_rc, f) for f in (
+        "verify_sigv4_signature", "derive_signing_key", "clear_signing_key_cache",
+    )):
+        raise ImportError("myfsio_core is outdated, rebuild with: cd myfsio_core && maturin develop --release")
     _HAS_RUST = True
 except ImportError:
     _rc = None

@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 try:
     import myfsio_core as _rc
+    if not hasattr(_rc, "md5_file"):
+        raise ImportError("myfsio_core is outdated, rebuild with: cd myfsio_core && maturin develop --release")
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
