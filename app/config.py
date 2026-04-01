@@ -136,6 +136,7 @@ class AppConfig:
     site_sync_clock_skew_tolerance_seconds: float
     object_key_max_length_bytes: int
     object_cache_max_size: int
+    meta_read_cache_max: int
     bucket_config_cache_ttl_seconds: float
     object_tag_limit: int
     encryption_chunk_size_bytes: int
@@ -315,6 +316,7 @@ class AppConfig:
         site_sync_clock_skew_tolerance_seconds = float(_get("SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS", 1.0))
         object_key_max_length_bytes = int(_get("OBJECT_KEY_MAX_LENGTH_BYTES", 1024))
         object_cache_max_size = int(_get("OBJECT_CACHE_MAX_SIZE", 100))
+        meta_read_cache_max = int(_get("META_READ_CACHE_MAX", 2048))
         bucket_config_cache_ttl_seconds = float(_get("BUCKET_CONFIG_CACHE_TTL_SECONDS", 30.0))
         object_tag_limit = int(_get("OBJECT_TAG_LIMIT", 50))
         encryption_chunk_size_bytes = int(_get("ENCRYPTION_CHUNK_SIZE_BYTES", 64 * 1024))
@@ -421,6 +423,7 @@ class AppConfig:
                    site_sync_clock_skew_tolerance_seconds=site_sync_clock_skew_tolerance_seconds,
                    object_key_max_length_bytes=object_key_max_length_bytes,
                    object_cache_max_size=object_cache_max_size,
+                   meta_read_cache_max=meta_read_cache_max,
                    bucket_config_cache_ttl_seconds=bucket_config_cache_ttl_seconds,
                    object_tag_limit=object_tag_limit,
                    encryption_chunk_size_bytes=encryption_chunk_size_bytes,
@@ -648,6 +651,7 @@ class AppConfig:
             "SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS": self.site_sync_clock_skew_tolerance_seconds,
             "OBJECT_KEY_MAX_LENGTH_BYTES": self.object_key_max_length_bytes,
             "OBJECT_CACHE_MAX_SIZE": self.object_cache_max_size,
+            "META_READ_CACHE_MAX": self.meta_read_cache_max,
             "BUCKET_CONFIG_CACHE_TTL_SECONDS": self.bucket_config_cache_ttl_seconds,
             "OBJECT_TAG_LIMIT": self.object_tag_limit,
             "ENCRYPTION_CHUNK_SIZE_BYTES": self.encryption_chunk_size_bytes,

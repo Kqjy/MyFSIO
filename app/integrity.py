@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 try:
     import myfsio_core as _rc
+    if not hasattr(_rc, "md5_file"):
+        raise ImportError("myfsio_core is outdated, rebuild with: cd myfsio_core && maturin develop --release")
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
@@ -192,10 +194,26 @@ class IntegrityCursorStore:
         except OSError as e:
             logger.error("Failed to save integrity cursor: %s", e)
 
-    def update_bucket(self, bucket_name: str, timestamp: float) -> None:
+    def update_bucket(
+        self,
+        bucket_name: str,
+        timestamp: float,
+        last_key: Optional[str] = None,
+        completed: bool = False,
+    ) -> None:
         with self._lock:
             data = self.load()
-            data["buckets"][bucket_name] = {"last_scanned": timestamp}
+            entry = data["buckets"].get(bucket_name, {})
+            if completed:
+                entry["last_scanned"] = timestamp
+                entry.pop("last_key", None)
+                entry["completed"] = True
+            else:
+                entry["last_scanned"] = timestamp
+                if last_key is not None:
+                    entry["last_key"] = last_key
+                entry["completed"] = False
+            data["buckets"][bucket_name] = entry
             self.save(data)
 
     def clean_stale(self, existing_buckets: List[str]) -> None:
@@ -208,17 +226,32 @@ class IntegrityCursorStore:
                     del data["buckets"][k]
                 self.save(data)
 
+    def get_last_key(self, bucket_name: str) -> Optional[str]:
+        data = self.load()
+        entry = data.get("buckets", {}).get(bucket_name)
+        if entry is None:
+            return None
+        return entry.get("last_key")
+
     def get_bucket_order(self, bucket_names: List[str]) -> List[str]:
         data = self.load()
         buckets_info = data.get("buckets", {})
 
-        def sort_key(name: str) -> float:
+        incomplete = []
+        complete = []
+        for name in bucket_names:
             entry = buckets_info.get(name)
             if entry is None:
-                return 0.0
-            return entry.get("last_scanned", 0.0)
+                incomplete.append((name, 0.0))
+            elif entry.get("last_key") is not None:
+                incomplete.append((name, entry.get("last_scanned", 0.0)))
+            else:
+                complete.append((name, entry.get("last_scanned", 0.0)))
 
-        return sorted(bucket_names, key=sort_key)
+        incomplete.sort(key=lambda x: x[1])
+        complete.sort(key=lambda x: x[1])
+
+        return [n for n, _ in incomplete] + [n for n, _ in complete]
 
     def get_info(self) -> Dict[str, Any]:
         data = self.load()
@@ -226,7 +259,11 @@ class IntegrityCursorStore:
         return {
             "tracked_buckets": len(buckets),
             "buckets": {
-                name: info.get("last_scanned")
+                name: {
+                    "last_scanned": info.get("last_scanned"),
+                    "last_key": info.get("last_key"),
+                    "completed": info.get("completed", False),
+                }
                 for name, info in buckets.items()
             },
         }
@@ -325,13 +362,19 @@ class IntegrityChecker:
                 if self._batch_exhausted(result):
                     break
                 result.buckets_scanned += 1
-                self._check_corrupted_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
-                self._check_orphaned_objects(bucket_name, result, effective_auto_heal, effective_dry_run)
-                self._check_phantom_metadata(bucket_name, result, effective_auto_heal, effective_dry_run)
+                cursor_key = self.cursor_store.get_last_key(bucket_name)
+                key_corrupted = self._check_corrupted_objects(bucket_name, result, effective_auto_heal, effective_dry_run, cursor_key)
+                key_orphaned = self._check_orphaned_objects(bucket_name, result, effective_auto_heal, effective_dry_run, cursor_key)
+                key_phantom = self._check_phantom_metadata(bucket_name, result, effective_auto_heal, effective_dry_run, cursor_key)
                 self._check_stale_versions(bucket_name, result, effective_auto_heal, effective_dry_run)
                 self._check_etag_cache(bucket_name, result, effective_auto_heal, effective_dry_run)
                 self._check_legacy_metadata(bucket_name, result, effective_auto_heal, effective_dry_run)
-                self.cursor_store.update_bucket(bucket_name, time.time())
+                returned_keys = [k for k in (key_corrupted, key_orphaned, key_phantom) if k is not None]
+                bucket_exhausted = self._batch_exhausted(result)
+                if bucket_exhausted and returned_keys:
+                    self.cursor_store.update_bucket(bucket_name, time.time(), last_key=min(returned_keys))
+                else:
+                    self.cursor_store.update_bucket(bucket_name, time.time(), completed=True)
 
             result.execution_time_seconds = time.time() - start
 
@@ -399,108 +442,172 @@ class IntegrityChecker:
         if len(result.issues) < MAX_ISSUES:
             result.issues.append(issue)
 
-    def _check_corrupted_objects(
-        self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool
-    ) -> None:
-        bucket_path = self.storage_root / bucket_name
-        meta_root = self._system_path() / self.SYSTEM_BUCKETS_DIR / bucket_name / self.BUCKET_META_DIR
-
+    def _collect_index_keys(
+        self, meta_root: Path, cursor_key: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        all_keys: Dict[str, Dict[str, Any]] = {}
         if not meta_root.exists():
-            return
-
+            return all_keys
         try:
             for index_file in meta_root.rglob("_index.json"):
-                if self._throttle():
-                    return
-                if self._batch_exhausted(result):
-                    return
                 if not index_file.is_file():
                     continue
+                rel_dir = index_file.parent.relative_to(meta_root)
+                dir_prefix = "" if rel_dir == Path(".") else rel_dir.as_posix()
+                if cursor_key is not None and dir_prefix:
+                    full_prefix = dir_prefix + "/"
+                    if not cursor_key.startswith(full_prefix) and cursor_key > full_prefix:
+                        continue
                 try:
                     index_data = json.loads(index_file.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     continue
-
-                for key_name, entry in list(index_data.items()):
-                    if self._throttle():
-                        return
-                    if self._batch_exhausted(result):
-                        return
-
-                    rel_dir = index_file.parent.relative_to(meta_root)
-                    if rel_dir == Path("."):
-                        full_key = key_name
-                    else:
-                        full_key = rel_dir.as_posix() + "/" + key_name
-
-                    object_path = bucket_path / full_key
-                    if not object_path.exists():
+                for key_name, entry in index_data.items():
+                    full_key = (dir_prefix + "/" + key_name) if dir_prefix else key_name
+                    if cursor_key is not None and full_key <= cursor_key:
                         continue
+                    all_keys[full_key] = {
+                        "entry": entry,
+                        "index_file": index_file,
+                        "key_name": key_name,
+                    }
+        except OSError:
+            pass
+        return all_keys
 
-                    result.objects_scanned += 1
+    def _walk_bucket_files_sorted(
+        self, bucket_path: Path, cursor_key: Optional[str] = None,
+    ):
+        def _walk(dir_path: Path, prefix: str):
+            try:
+                entries = list(os.scandir(dir_path))
+            except OSError:
+                return
 
-                    meta = entry.get("metadata", {}) if isinstance(entry, dict) else {}
-                    stored_etag = meta.get("__etag__")
-                    if not stored_etag:
+            def _sort_key(e):
+                if e.is_dir(follow_symlinks=False):
+                    return e.name + "/"
+                return e.name
+
+            entries.sort(key=_sort_key)
+
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    if not prefix and entry.name in self.INTERNAL_FOLDERS:
                         continue
-
-                    try:
-                        actual_etag = _compute_etag(object_path)
-                    except OSError:
+                    new_prefix = (prefix + "/" + entry.name) if prefix else entry.name
+                    if cursor_key is not None:
+                        full_prefix = new_prefix + "/"
+                        if not cursor_key.startswith(full_prefix) and cursor_key > full_prefix:
+                            continue
+                    yield from _walk(Path(entry.path), new_prefix)
+                elif entry.is_file(follow_symlinks=False):
+                    full_key = (prefix + "/" + entry.name) if prefix else entry.name
+                    if cursor_key is not None and full_key <= cursor_key:
                         continue
+                    yield full_key
 
-                    if actual_etag != stored_etag:
-                        result.corrupted_objects += 1
-                        issue = IntegrityIssue(
-                            issue_type="corrupted_object",
-                            bucket=bucket_name,
-                            key=full_key,
-                            detail=f"stored_etag={stored_etag} actual_etag={actual_etag}",
-                        )
+        yield from _walk(bucket_path, "")
 
-                        if auto_heal and not dry_run:
-                            try:
-                                stat = object_path.stat()
-                                meta["__etag__"] = actual_etag
-                                meta["__size__"] = str(stat.st_size)
-                                meta["__last_modified__"] = str(stat.st_mtime)
-                                index_data[key_name] = {"metadata": meta}
-                                self._atomic_write_index(index_file, index_data)
-                                issue.healed = True
-                                issue.heal_action = "updated etag in index"
-                                result.issues_healed += 1
-                            except OSError as e:
-                                result.errors.append(f"heal corrupted {bucket_name}/{full_key}: {e}")
-
-                        self._add_issue(result, issue)
-        except OSError as e:
-            result.errors.append(f"check corrupted {bucket_name}: {e}")
-
-    def _check_orphaned_objects(
-        self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool
-    ) -> None:
+    def _check_corrupted_objects(
+        self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool,
+        cursor_key: Optional[str] = None,
+    ) -> Optional[str]:
+        if self._batch_exhausted(result):
+            return None
         bucket_path = self.storage_root / bucket_name
         meta_root = self._system_path() / self.SYSTEM_BUCKETS_DIR / bucket_name / self.BUCKET_META_DIR
 
+        if not meta_root.exists():
+            return None
+
+        last_key = None
         try:
-            for entry in bucket_path.rglob("*"):
+            all_keys = self._collect_index_keys(meta_root, cursor_key)
+            sorted_keys = sorted(all_keys.keys())
+
+            for full_key in sorted_keys:
                 if self._throttle():
-                    return
+                    return last_key
                 if self._batch_exhausted(result):
-                    return
-                if not entry.is_file():
-                    continue
-                try:
-                    rel = entry.relative_to(bucket_path)
-                except ValueError:
-                    continue
-                if rel.parts and rel.parts[0] in self.INTERNAL_FOLDERS:
+                    return last_key
+
+                info = all_keys[full_key]
+                entry = info["entry"]
+                index_file = info["index_file"]
+                key_name = info["key_name"]
+
+                object_path = bucket_path / full_key
+                if not object_path.exists():
                     continue
 
                 result.objects_scanned += 1
-                full_key = rel.as_posix()
-                key_name = rel.name
-                parent = rel.parent
+                last_key = full_key
+
+                meta = entry.get("metadata", {}) if isinstance(entry, dict) else {}
+                stored_etag = meta.get("__etag__")
+                if not stored_etag:
+                    continue
+
+                try:
+                    actual_etag = _compute_etag(object_path)
+                except OSError:
+                    continue
+
+                if actual_etag != stored_etag:
+                    result.corrupted_objects += 1
+                    issue = IntegrityIssue(
+                        issue_type="corrupted_object",
+                        bucket=bucket_name,
+                        key=full_key,
+                        detail=f"stored_etag={stored_etag} actual_etag={actual_etag}",
+                    )
+
+                    if auto_heal and not dry_run:
+                        try:
+                            stat = object_path.stat()
+                            meta["__etag__"] = actual_etag
+                            meta["__size__"] = str(stat.st_size)
+                            meta["__last_modified__"] = str(stat.st_mtime)
+                            try:
+                                index_data = json.loads(index_file.read_text(encoding="utf-8"))
+                            except (OSError, json.JSONDecodeError):
+                                index_data = {}
+                            index_data[key_name] = {"metadata": meta}
+                            self._atomic_write_index(index_file, index_data)
+                            issue.healed = True
+                            issue.heal_action = "updated etag in index"
+                            result.issues_healed += 1
+                        except OSError as e:
+                            result.errors.append(f"heal corrupted {bucket_name}/{full_key}: {e}")
+
+                    self._add_issue(result, issue)
+        except OSError as e:
+            result.errors.append(f"check corrupted {bucket_name}: {e}")
+        return last_key
+
+    def _check_orphaned_objects(
+        self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool,
+        cursor_key: Optional[str] = None,
+    ) -> Optional[str]:
+        if self._batch_exhausted(result):
+            return None
+        bucket_path = self.storage_root / bucket_name
+        meta_root = self._system_path() / self.SYSTEM_BUCKETS_DIR / bucket_name / self.BUCKET_META_DIR
+
+        last_key = None
+        try:
+            for full_key in self._walk_bucket_files_sorted(bucket_path, cursor_key):
+                if self._throttle():
+                    return last_key
+                if self._batch_exhausted(result):
+                    return last_key
+
+                result.objects_scanned += 1
+                last_key = full_key
+                key_path = Path(full_key)
+                key_name = key_path.name
+                parent = key_path.parent
 
                 if parent == Path("."):
                     index_path = meta_root / "_index.json"
@@ -526,8 +633,9 @@ class IntegrityChecker:
 
                     if auto_heal and not dry_run:
                         try:
-                            etag = _compute_etag(entry)
-                            stat = entry.stat()
+                            object_path = bucket_path / full_key
+                            etag = _compute_etag(object_path)
+                            stat = object_path.stat()
                             meta = {
                                 "__etag__": etag,
                                 "__size__": str(stat.st_size),
@@ -550,58 +658,56 @@ class IntegrityChecker:
                     self._add_issue(result, issue)
         except OSError as e:
             result.errors.append(f"check orphaned {bucket_name}: {e}")
+        return last_key
 
     def _check_phantom_metadata(
-        self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool
-    ) -> None:
+        self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool,
+        cursor_key: Optional[str] = None,
+    ) -> Optional[str]:
+        if self._batch_exhausted(result):
+            return None
         bucket_path = self.storage_root / bucket_name
         meta_root = self._system_path() / self.SYSTEM_BUCKETS_DIR / bucket_name / self.BUCKET_META_DIR
 
         if not meta_root.exists():
-            return
+            return None
 
+        last_key = None
         try:
-            for index_file in meta_root.rglob("_index.json"):
-                if self._throttle():
-                    return
+            all_keys = self._collect_index_keys(meta_root, cursor_key)
+            sorted_keys = sorted(all_keys.keys())
+
+            heal_by_index: Dict[Path, List[str]] = {}
+
+            for full_key in sorted_keys:
                 if self._batch_exhausted(result):
-                    return
-                if not index_file.is_file():
-                    continue
-                try:
-                    index_data = json.loads(index_file.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
+                    break
 
-                keys_to_remove = []
-                for key_name in list(index_data.keys()):
-                    if self._batch_exhausted(result):
-                        break
-                    result.objects_scanned += 1
-                    rel_dir = index_file.parent.relative_to(meta_root)
-                    if rel_dir == Path("."):
-                        full_key = key_name
-                    else:
-                        full_key = rel_dir.as_posix() + "/" + key_name
+                result.objects_scanned += 1
+                last_key = full_key
 
-                    object_path = bucket_path / full_key
-                    if not object_path.exists():
-                        result.phantom_metadata += 1
-                        issue = IntegrityIssue(
-                            issue_type="phantom_metadata",
-                            bucket=bucket_name,
-                            key=full_key,
-                            detail="metadata entry without file on disk",
-                        )
-                        if auto_heal and not dry_run:
-                            keys_to_remove.append(key_name)
-                            issue.healed = True
-                            issue.heal_action = "removed stale index entry"
-                            result.issues_healed += 1
-                        self._add_issue(result, issue)
+                object_path = bucket_path / full_key
+                if not object_path.exists():
+                    result.phantom_metadata += 1
+                    info = all_keys[full_key]
+                    issue = IntegrityIssue(
+                        issue_type="phantom_metadata",
+                        bucket=bucket_name,
+                        key=full_key,
+                        detail="metadata entry without file on disk",
+                    )
+                    if auto_heal and not dry_run:
+                        index_file = info["index_file"]
+                        heal_by_index.setdefault(index_file, []).append(info["key_name"])
+                        issue.healed = True
+                        issue.heal_action = "removed stale index entry"
+                        result.issues_healed += 1
+                    self._add_issue(result, issue)
 
-                if keys_to_remove and auto_heal and not dry_run:
+            if heal_by_index and auto_heal and not dry_run:
+                for index_file, keys_to_remove in heal_by_index.items():
                     try:
+                        index_data = json.loads(index_file.read_text(encoding="utf-8"))
                         for k in keys_to_remove:
                             index_data.pop(k, None)
                         if index_data:
@@ -612,10 +718,13 @@ class IntegrityChecker:
                         result.errors.append(f"heal phantom {bucket_name}: {e}")
         except OSError as e:
             result.errors.append(f"check phantom {bucket_name}: {e}")
+        return last_key
 
     def _check_stale_versions(
         self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool
     ) -> None:
+        if self._batch_exhausted(result):
+            return
         versions_root = self._system_path() / self.SYSTEM_BUCKETS_DIR / bucket_name / self.BUCKET_VERSIONS_DIR
 
         if not versions_root.exists():
@@ -682,6 +791,8 @@ class IntegrityChecker:
     def _check_etag_cache(
         self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool
     ) -> None:
+        if self._batch_exhausted(result):
+            return
         etag_index_path = self._system_path() / self.SYSTEM_BUCKETS_DIR / bucket_name / "etag_index.json"
 
         if not etag_index_path.exists():
@@ -751,6 +862,8 @@ class IntegrityChecker:
     def _check_legacy_metadata(
         self, bucket_name: str, result: IntegrityResult, auto_heal: bool, dry_run: bool
     ) -> None:
+        if self._batch_exhausted(result):
+            return
         legacy_meta_root = self.storage_root / bucket_name / ".meta"
         if not legacy_meta_root.exists():
             return

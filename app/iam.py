@@ -398,9 +398,11 @@ class IamService:
                     record = self._user_records.get(user_id)
                     if record:
                         self._check_expiry(access_key, record)
+                self._enforce_key_and_user_status(access_key)
                 return principal
 
         self._maybe_reload()
+        self._enforce_key_and_user_status(access_key)
         user_id = self._key_index.get(access_key)
         if not user_id:
             raise IamError("Unknown access key")
@@ -414,6 +416,7 @@ class IamService:
 
     def secret_for_key(self, access_key: str) -> str:
         self._maybe_reload()
+        self._enforce_key_and_user_status(access_key)
         secret = self._key_secrets.get(access_key)
         if not secret:
             raise IamError("Unknown access key")
@@ -1028,6 +1031,16 @@ class IamService:
         user, _ = self._resolve_raw_user(access_key)
         return user
 
+    def _enforce_key_and_user_status(self, access_key: str) -> None:
+        key_status = self._key_status.get(access_key, "active")
+        if key_status != "active":
+            raise IamError("Access key is inactive")
+        user_id = self._key_index.get(access_key)
+        if user_id:
+            record = self._user_records.get(user_id)
+            if record and not record.get("enabled", True):
+                raise IamError("User account is disabled")
+
     def get_secret_key(self, access_key: str) -> str | None:
         now = time.time()
         cached = self._secret_key_cache.get(access_key)
@@ -1039,6 +1052,7 @@ class IamService:
                     record = self._user_records.get(user_id)
                     if record:
                         self._check_expiry(access_key, record)
+                self._enforce_key_and_user_status(access_key)
                 return secret_key
 
         self._maybe_reload()
@@ -1049,6 +1063,7 @@ class IamService:
                 record = self._user_records.get(user_id)
                 if record:
                     self._check_expiry(access_key, record)
+            self._enforce_key_and_user_status(access_key)
             self._secret_key_cache[access_key] = (secret, now)
             return secret
         return None
@@ -1064,9 +1079,11 @@ class IamService:
                     record = self._user_records.get(user_id)
                     if record:
                         self._check_expiry(access_key, record)
+                self._enforce_key_and_user_status(access_key)
                 return principal
 
         self._maybe_reload()
+        self._enforce_key_and_user_status(access_key)
         user_id = self._key_index.get(access_key)
         if user_id:
             record = self._user_records.get(user_id)

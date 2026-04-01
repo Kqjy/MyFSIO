@@ -644,5 +644,145 @@ class TestCursorRotation:
         after = time.time()
 
         cursor_info = checker.cursor_store.get_info()
-        ts = cursor_info["buckets"]["mybucket"]
-        assert before <= ts <= after
+        entry = cursor_info["buckets"]["mybucket"]
+        assert before <= entry["last_scanned"] <= after
+        assert entry["completed"] is True
+
+
+class TestIntraBucketCursor:
+    def test_resumes_from_cursor_key(self, storage_root):
+        objects = {f"file_{chr(ord('a') + i)}.txt": f"data{i}".encode() for i in range(10)}
+        _setup_bucket(storage_root, "mybucket", objects)
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=3)
+        result1 = checker.run_now()
+        assert result1.objects_scanned == 3
+
+        cursor_info = checker.cursor_store.get_info()
+        entry = cursor_info["buckets"]["mybucket"]
+        assert entry["last_key"] is not None
+        assert entry["completed"] is False
+
+        result2 = checker.run_now()
+        assert result2.objects_scanned == 3
+
+        cursor_after = checker.cursor_store.get_info()["buckets"]["mybucket"]
+        assert cursor_after["last_key"] > entry["last_key"]
+
+    def test_cursor_resets_after_full_pass(self, storage_root):
+        objects = {f"file_{i}.txt": f"data{i}".encode() for i in range(3)}
+        _setup_bucket(storage_root, "mybucket", objects)
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=100)
+        checker.run_now()
+
+        cursor_info = checker.cursor_store.get_info()
+        entry = cursor_info["buckets"]["mybucket"]
+        assert entry["last_key"] is None
+        assert entry["completed"] is True
+
+    def test_full_coverage_across_cycles(self, storage_root):
+        objects = {f"obj_{chr(ord('a') + i)}.txt": f"data{i}".encode() for i in range(10)}
+        _setup_bucket(storage_root, "mybucket", objects)
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=4)
+        all_scanned = 0
+        for _ in range(10):
+            result = checker.run_now()
+            all_scanned += result.objects_scanned
+            if checker.cursor_store.get_info()["buckets"]["mybucket"]["completed"]:
+                break
+
+        assert all_scanned >= 10
+
+    def test_deleted_cursor_key_skips_gracefully(self, storage_root):
+        objects = {f"file_{chr(ord('a') + i)}.txt": f"data{i}".encode() for i in range(6)}
+        _setup_bucket(storage_root, "mybucket", objects)
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=3)
+        checker.run_now()
+
+        cursor_info = checker.cursor_store.get_info()
+        cursor_key = cursor_info["buckets"]["mybucket"]["last_key"]
+        assert cursor_key is not None
+
+        obj_path = storage_root / "mybucket" / cursor_key
+        meta_root = storage_root / ".myfsio.sys" / "buckets" / "mybucket" / "meta"
+        key_path = Path(cursor_key)
+        index_path = meta_root / key_path.parent / "_index.json" if key_path.parent != Path(".") else meta_root / "_index.json"
+        if key_path.parent == Path("."):
+            index_path = meta_root / "_index.json"
+        else:
+            index_path = meta_root / key_path.parent / "_index.json"
+        if obj_path.exists():
+            obj_path.unlink()
+        if index_path.exists():
+            index_data = json.loads(index_path.read_text())
+            index_data.pop(key_path.name, None)
+            index_path.write_text(json.dumps(index_data))
+
+        result2 = checker.run_now()
+        assert result2.objects_scanned > 0
+
+    def test_incomplete_buckets_prioritized(self, storage_root):
+        _setup_bucket(storage_root, "bucket-a", {f"a{i}.txt": b"a" for i in range(5)})
+        _setup_bucket(storage_root, "bucket-b", {f"b{i}.txt": b"b" for i in range(5)})
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=3)
+        checker.run_now()
+
+        cursor_info = checker.cursor_store.get_info()
+        incomplete = [
+            name for name, info in cursor_info["buckets"].items()
+            if info.get("last_key") is not None
+        ]
+        assert len(incomplete) >= 1
+
+        result2 = checker.run_now()
+        assert result2.objects_scanned > 0
+
+    def test_cursor_skips_nested_directories(self, storage_root):
+        objects = {
+            "aaa/file1.txt": b"a1",
+            "aaa/file2.txt": b"a2",
+            "bbb/file1.txt": b"b1",
+            "bbb/file2.txt": b"b2",
+            "ccc/file1.txt": b"c1",
+            "ccc/file2.txt": b"c2",
+        }
+        _setup_bucket(storage_root, "mybucket", objects)
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=4)
+        result1 = checker.run_now()
+        assert result1.objects_scanned == 4
+
+        cursor_info = checker.cursor_store.get_info()
+        cursor_key = cursor_info["buckets"]["mybucket"]["last_key"]
+        assert cursor_key is not None
+        assert cursor_key.startswith("aaa/") or cursor_key.startswith("bbb/")
+
+        result2 = checker.run_now()
+        assert result2.objects_scanned >= 2
+
+        all_scanned = result1.objects_scanned + result2.objects_scanned
+        for _ in range(10):
+            if checker.cursor_store.get_info()["buckets"]["mybucket"]["completed"]:
+                break
+            r = checker.run_now()
+            all_scanned += r.objects_scanned
+
+        assert all_scanned >= 6
+
+    def test_sorted_walk_order(self, storage_root):
+        objects = {
+            "bar.txt": b"bar",
+            "bar/inner.txt": b"inner",
+            "abc.txt": b"abc",
+            "zzz/deep.txt": b"deep",
+        }
+        _setup_bucket(storage_root, "mybucket", objects)
+
+        checker = IntegrityChecker(storage_root=storage_root, batch_size=100)
+        result = checker.run_now()
+        assert result.objects_scanned >= 4
+        assert result.total_issues == 0

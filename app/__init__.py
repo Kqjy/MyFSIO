@@ -184,6 +184,7 @@ def create_app(
         object_cache_max_size=app.config.get("OBJECT_CACHE_MAX_SIZE", 100),
         bucket_config_cache_ttl=app.config.get("BUCKET_CONFIG_CACHE_TTL_SECONDS", 30.0),
         object_key_max_length_bytes=app.config.get("OBJECT_KEY_MAX_LENGTH_BYTES", 1024),
+        meta_read_cache_max=app.config.get("META_READ_CACHE_MAX", 2048),
     )
 
     if app.config.get("WARM_CACHE_ON_STARTUP", True) and not app.config.get("TESTING"):

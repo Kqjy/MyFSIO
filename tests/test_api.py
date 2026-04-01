@@ -1,3 +1,56 @@
+import hashlib
+import hmac
+from datetime import datetime, timezone
+from urllib.parse import quote
+
+
+def _build_presigned_query(path: str, *, access_key: str = "test", secret_key: str = "secret", expires: int = 60) -> str:
+    now = datetime.now(timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+    region = "us-east-1"
+    service = "s3"
+    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+
+    query_items = [
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
+        ("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"),
+        ("X-Amz-Credential", f"{access_key}/{credential_scope}"),
+        ("X-Amz-Date", amz_date),
+        ("X-Amz-Expires", str(expires)),
+        ("X-Amz-SignedHeaders", "host"),
+    ]
+    canonical_query = "&".join(
+        f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}" for k, v in sorted(query_items)
+    )
+
+    canonical_request = "\n".join([
+        "GET",
+        quote(path, safe="/-_.~"),
+        canonical_query,
+        "host:localhost\n",
+        "host",
+        "UNSIGNED-PAYLOAD",
+    ])
+    hashed_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    string_to_sign = "\n".join([
+        "AWS4-HMAC-SHA256",
+        amz_date,
+        credential_scope,
+        hashed_request,
+    ])
+
+    def _sign(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+    k_date = _sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
+    k_region = _sign(k_date, region)
+    k_service = _sign(k_region, service)
+    signing_key = _sign(k_service, "aws4_request")
+    signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    return canonical_query + f"&X-Amz-Signature={signature}"
+
+
 def test_bucket_and_object_lifecycle(client, signer):
     headers = signer("PUT", "/photos")
     response = client.put("/photos", headers=headers)
@@ -112,6 +165,45 @@ def test_healthcheck_returns_status(client):
 def test_missing_credentials_denied(client):
     response = client.get("/")
     assert response.status_code == 403
+
+
+def test_presigned_url_denied_for_disabled_user(client, signer):
+    headers = signer("PUT", "/secure")
+    assert client.put("/secure", headers=headers).status_code == 200
+
+    payload = b"hello"
+    headers = signer("PUT", "/secure/file.txt", body=payload)
+    assert client.put("/secure/file.txt", headers=headers, data=payload).status_code == 200
+
+    iam = client.application.extensions["iam"]
+    iam.disable_user("test")
+
+    query = _build_presigned_query("/secure/file.txt")
+    response = client.get(f"/secure/file.txt?{query}", headers={"Host": "localhost"})
+    assert response.status_code == 403
+    assert b"User account is disabled" in response.data
+
+
+def test_presigned_url_denied_for_inactive_key(client, signer):
+    headers = signer("PUT", "/secure2")
+    assert client.put("/secure2", headers=headers).status_code == 200
+
+    payload = b"hello"
+    headers = signer("PUT", "/secure2/file.txt", body=payload)
+    assert client.put("/secure2/file.txt", headers=headers, data=payload).status_code == 200
+
+    iam = client.application.extensions["iam"]
+    for user in iam._raw_config.get("users", []):
+        for key_info in user.get("access_keys", []):
+            if key_info.get("access_key") == "test":
+                key_info["status"] = "inactive"
+    iam._save()
+    iam._load()
+
+    query = _build_presigned_query("/secure2/file.txt")
+    response = client.get(f"/secure2/file.txt?{query}", headers={"Host": "localhost"})
+    assert response.status_code == 403
+    assert b"Access key is inactive" in response.data
 
 
 def test_bucket_policies_deny_reads(client, signer):

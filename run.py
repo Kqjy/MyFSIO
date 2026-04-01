@@ -26,6 +26,7 @@ from typing import Optional
 from app import create_api_app, create_ui_app
 from app.config import AppConfig
 from app.iam import IamService, IamError, ALLOWED_ACTIONS, _derive_fernet_key
+from app.version import get_version
 
 
 def _server_host() -> str:
@@ -229,6 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("--check-config", action="store_true", help="Validate configuration and exit")
     parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
     parser.add_argument("--reset-cred", action="store_true", help="Reset admin credentials and exit")
+    parser.add_argument("--version", action="version", version=f"MyFSIO {get_version()}")
     args = parser.parse_args()
 
     if args.reset_cred or args.mode == "reset-cred":

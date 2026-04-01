@@ -72,6 +72,11 @@ source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
+# (Optional) Build Rust native extension for better performance
+# Requires Rust toolchain: https://rustup.rs
+pip install maturin
+cd myfsio_core && maturin develop --release && cd ..
+
 # Start both servers
 python run.py
 
