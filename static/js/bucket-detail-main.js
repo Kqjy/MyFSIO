@@ -948,7 +948,7 @@
       const row = e.target.closest('[data-object-row]');
       if (!row) return;
 
-      if (e.target.closest('[data-delete-object]') || e.target.closest('[data-object-select]') || e.target.closest('a')) {
+      if (e.target.closest('[data-delete-object]') || e.target.closest('[data-object-select]') || e.target.closest('a') || e.target.closest('.dropdown')) {
         return;
       }
 
