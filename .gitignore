@@ -30,6 +30,9 @@ dist/
 myfsio_core/target/
 myfsio_core/Cargo.lock
 
+# Rust engine build artifacts
+myfsio-engine/target/
+
 # Local runtime artifacts
 logs/
 *.log

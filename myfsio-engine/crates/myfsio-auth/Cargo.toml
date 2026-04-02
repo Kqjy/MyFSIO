@@ -1,0 +1,25 @@
+[package]
+name = "myfsio-auth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+myfsio-common = { path = "../myfsio-common" }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+aes = { workspace = true }
+cbc = { workspace = true }
+base64 = { workspace = true }
+pbkdf2 = "0.12"
+lru = { workspace = true }
+parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

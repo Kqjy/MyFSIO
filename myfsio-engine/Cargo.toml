@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/myfsio-common",
+    "crates/myfsio-auth",
+    "crates/myfsio-crypto",
+    "crates/myfsio-storage",
+    "crates/myfsio-xml",
+    "crates/myfsio-server",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8" }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { version = "1" }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = { version = "0.37", features = ["serialize"] }
+hmac = "0.12"
+sha2 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = { version = "0.1", features = ["alloc"] }
+hkdf = "0.12"
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+lru = "0.14"
+percent-encoding = "2"
+regex = "1"
+unicode-normalization = "0.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+dashmap = "6"

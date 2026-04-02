@@ -1,0 +1,33 @@
+[package]
+name = "myfsio-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+myfsio-common = { path = "../myfsio-common" }
+myfsio-auth = { path = "../myfsio-auth" }
+myfsio-crypto = { path = "../myfsio-crypto" }
+myfsio-storage = { path = "../myfsio-storage" }
+myfsio-xml = { path = "../myfsio-xml" }
+base64 = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio-util = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+http-body-util = "0.1"
+percent-encoding = { workspace = true }
+quick-xml = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { workspace = true, features = ["util"] }

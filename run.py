@@ -5,6 +5,7 @@ import argparse
 import atexit
 import os
 import signal
+import subprocess
 import sys
 import warnings
 import multiprocessing
@@ -72,6 +73,48 @@ def _serve_granian(target: str, port: int, config: Optional[AppConfig] = None) -
 
     server = Granian(**kwargs)
     server.serve()
+
+
+def _find_rust_binary() -> Optional[Path]:
+    candidates = [
+        Path(__file__).parent / "myfsio-engine" / "target" / "release" / "myfsio-server.exe",
+        Path(__file__).parent / "myfsio-engine" / "target" / "release" / "myfsio-server",
+        Path(__file__).parent / "myfsio-engine" / "target" / "debug" / "myfsio-server.exe",
+        Path(__file__).parent / "myfsio-engine" / "target" / "debug" / "myfsio-server",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def serve_rust_api(port: int, config: Optional[AppConfig] = None) -> None:
+    binary = _find_rust_binary()
+    if binary is None:
+        print("ERROR: Rust engine binary not found. Build it first:")
+        print("  cd myfsio-engine && cargo build --release")
+        sys.exit(1)
+
+    env = os.environ.copy()
+    env["PORT"] = str(port)
+    env["HOST"] = _server_host()
+    if config:
+        env["STORAGE_ROOT"] = str(config.storage_root)
+        env["AWS_REGION"] = config.aws_region
+        if config.secret_key:
+            env["SECRET_KEY"] = config.secret_key
+        env.setdefault("ENCRYPTION_ENABLED", str(config.encryption_enabled).lower())
+        env.setdefault("KMS_ENABLED", str(config.kms_enabled).lower())
+        env.setdefault("LIFECYCLE_ENABLED", str(config.lifecycle_enabled).lower())
+    env.setdefault("RUST_LOG", "info")
+
+    print(f"Starting Rust S3 engine: {binary}")
+    proc = subprocess.Popen([str(binary)], env=env)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 def serve_api(port: int, prod: bool = False, config: Optional[AppConfig] = None) -> None:
@@ -227,6 +270,7 @@ if __name__ == "__main__":
     parser.add_argument("--ui-port", type=int, default=5100)
     parser.add_argument("--prod", action="store_true", help="Run in production mode using Granian")
     parser.add_argument("--dev", action="store_true", help="Force development mode (Flask dev server)")
+    parser.add_argument("--engine", choices=["python", "rust"], default="python", help="API engine: python (Flask) or rust (myfsio-engine)")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration and exit")
     parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
     parser.add_argument("--reset-cred", action="store_true", help="Reset admin credentials and exit")
@@ -280,9 +324,17 @@ if __name__ == "__main__":
     else:
         print("Running in development mode (Flask dev server)")
 
+    use_rust = args.engine == "rust"
+
     if args.mode in {"api", "both"}:
-        print(f"Starting API server on port {args.api_port}...")
-        api_proc = Process(target=serve_api, args=(args.api_port, prod_mode, config))
+        if use_rust:
+            print(f"Starting Rust API engine on port {args.api_port}...")
+        else:
+            print(f"Starting API server on port {args.api_port}...")
+        if use_rust:
+            api_proc = Process(target=serve_rust_api, args=(args.api_port, config))
+        else:
+            api_proc = Process(target=serve_api, args=(args.api_port, prod_mode, config))
         api_proc.start()
     else:
         api_proc = None
