@@ -144,6 +144,10 @@ pub struct BucketConfig {
     pub logging: Option<serde_json::Value>,
     #[serde(default)]
     pub object_lock: Option<serde_json::Value>,
+    #[serde(default)]
+    pub policy: Option<serde_json::Value>,
+    #[serde(default)]
+    pub replication: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

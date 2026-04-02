@@ -1,34 +1,17 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
+use myfsio_storage::traits::StorageEngine;
 use tower::ServiceExt;
 
 const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
-fn test_app() -> (axum::Router, tempfile::TempDir) {
+fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::TempDir::new().unwrap();
     let iam_path = tmp.path().join(".myfsio.sys").join("config");
     std::fs::create_dir_all(&iam_path).unwrap();
 
-    let iam_json = serde_json::json!({
-        "version": 2,
-        "users": [{
-            "user_id": "u-test1234",
-            "display_name": "admin",
-            "enabled": true,
-            "access_keys": [{
-                "access_key": TEST_ACCESS_KEY,
-                "secret_key": TEST_SECRET_KEY,
-                "status": "active"
-            }],
-            "policies": [{
-                "bucket": "*",
-                "actions": ["*"],
-                "prefix": "*"
-            }]
-        }]
-    });
     std::fs::write(iam_path.join("iam.json"), iam_json.to_string()).unwrap();
 
     let config = myfsio_server::config::ServerConfig {
@@ -52,6 +35,27 @@ fn test_app() -> (axum::Router, tempfile::TempDir) {
     (app, tmp)
 }
 
+fn test_app() -> (axum::Router, tempfile::TempDir) {
+    test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [{
+            "user_id": "u-test1234",
+            "display_name": "admin",
+            "enabled": true,
+            "access_keys": [{
+                "access_key": TEST_ACCESS_KEY,
+                "secret_key": TEST_SECRET_KEY,
+                "status": "active"
+            }],
+            "policies": [{
+                "bucket": "*",
+                "actions": ["*"],
+                "prefix": "*"
+            }]
+        }]
+    }))
+}
+
 fn signed_request(method: Method, uri: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -62,6 +66,75 @@ fn signed_request(method: Method, uri: &str, body: Body) -> Request<Body> {
         .unwrap()
 }
 
+fn parse_select_events(body: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut idx: usize = 0;
+
+    while idx + 16 <= body.len() {
+        let total_len = u32::from_be_bytes([
+            body[idx],
+            body[idx + 1],
+            body[idx + 2],
+            body[idx + 3],
+        ]) as usize;
+        let headers_len = u32::from_be_bytes([
+            body[idx + 4],
+            body[idx + 5],
+            body[idx + 6],
+            body[idx + 7],
+        ]) as usize;
+        if total_len < 16 || idx + total_len > body.len() {
+            break;
+        }
+
+        let headers_start = idx + 12;
+        let headers_end = headers_start + headers_len;
+        if headers_end > idx + total_len - 4 {
+            break;
+        }
+
+        let mut event_type: Option<String> = None;
+        let mut hidx = headers_start;
+        while hidx < headers_end {
+            let name_len = body[hidx] as usize;
+            hidx += 1;
+            if hidx + name_len + 3 > headers_end {
+                break;
+            }
+            let name = String::from_utf8_lossy(&body[hidx..hidx + name_len]).to_string();
+            hidx += name_len;
+
+            let value_type = body[hidx];
+            hidx += 1;
+            if value_type != 7 || hidx + 2 > headers_end {
+                break;
+            }
+
+            let value_len = u16::from_be_bytes([body[hidx], body[hidx + 1]]) as usize;
+            hidx += 2;
+            if hidx + value_len > headers_end {
+                break;
+            }
+
+            let value = String::from_utf8_lossy(&body[hidx..hidx + value_len]).to_string();
+            hidx += value_len;
+
+            if name == ":event-type" {
+                event_type = Some(value);
+            }
+        }
+
+        let payload_start = headers_end;
+        let payload_end = idx + total_len - 4;
+        let payload = body[payload_start..payload_end].to_vec();
+
+        out.push((event_type.unwrap_or_default(), payload));
+        idx += total_len;
+    }
+
+    out
+}
+
 #[tokio::test]
 async fn test_unauthenticated_request_rejected() {
     let (app, _tmp) = test_app();
@@ -70,6 +143,34 @@ async fn test_unauthenticated_request_rejected() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(
+        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<Code>AccessDenied</Code>"));
+    assert!(body.contains("<Message>Missing credentials</Message>"));
+    assert!(body.contains("<Resource>/</Resource>"));
+    assert!(body.contains("<RequestId>"));
+    assert!(!body.contains("<RequestId></RequestId>"));
+}
+
+#[tokio::test]
+async fn test_unauthenticated_request_includes_requested_resource_path() {
+    let (app, _tmp) = test_app();
+    let resp = app
+        .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(
+        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<Code>AccessDenied</Code>"));
+    assert!(body.contains("<Message>Missing credentials</Message>"));
+    assert!(body.contains("<Resource>/ui/</Resource>"));
+    assert!(body.contains("<RequestId>"));
+    assert!(!body.contains("<RequestId></RequestId>"));
 }
 
 #[tokio::test]
@@ -198,6 +299,54 @@ async fn test_put_and_get_object() {
     assert_eq!(resp.headers().get("content-length").unwrap(), "13");
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"Hello, World!");
+}
+
+#[tokio::test]
+async fn test_content_type_falls_back_to_extension() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/img-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/img-bucket/yum.jpg")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(vec![0_u8, 1, 2, 3, 4]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/img-bucket/yum.jpg",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "image/jpeg");
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/img-bucket/yum.jpg",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "image/jpeg");
 }
 
 #[tokio::test]
@@ -1187,6 +1336,642 @@ async fn test_object_legal_hold() {
     )
     .unwrap();
     assert!(body.contains("<Status>OFF</Status>"));
+}
+
+#[tokio::test]
+async fn test_list_objects_v1_marker_flow() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/v1-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/v1-bucket/{}", name))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from("data"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/v1-bucket?max-keys=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("<Marker></Marker>"));
+    assert!(body.contains("<IsTruncated>true</IsTruncated>") || body.contains("<IsTruncated>false</IsTruncated>"));
+}
+
+#[tokio::test]
+async fn test_bucket_quota_roundtrip() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/quota-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/quota-bucket?quota")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"max_size_bytes": 1024, "max_objects": 10}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/quota-bucket?quota",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["quota"]["max_size_bytes"], 1024);
+    assert_eq!(body["quota"]["max_objects"], 10);
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/quota-bucket?quota",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_bucket_policy_and_status_roundtrip() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/policy-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Allow",
+        "Principal": "*",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::policy-bucket/*"
+      }]
+    }"#;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/policy-bucket?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/policy-bucket?policy",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body.get("Statement").is_some());
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/policy-bucket?policyStatus",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("<IsPublic>TRUE</IsPublic>"));
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/policy-bucket?policy",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_bucket_replication_roundtrip() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/repl-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let repl_xml = "<ReplicationConfiguration><Role>arn:aws:iam::123456789012:role/s3-repl</Role><Rule><ID>rule-1</ID></Rule></ReplicationConfiguration>";
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/repl-bucket?replication")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(repl_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/repl-bucket?replication",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("ReplicationConfiguration"));
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/repl-bucket?replication",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_list_parts_via_get_upload_id() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/parts-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/parts-bucket/large.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/parts-bucket/large.bin?uploadId={}&partNumber=1", upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(vec![1_u8, 2, 3, 4]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/parts-bucket/large.bin?uploadId={}", upload_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("ListPartsResult"));
+    assert!(body.contains("<PartNumber>1</PartNumber>"));
+}
+
+#[tokio::test]
+async fn test_conditional_get_and_head() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/cond-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/cond-bucket/item.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("abc"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag = put_resp.headers().get("etag").unwrap().to_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/cond-bucket/item.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("if-none-match", etag.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/cond-bucket/item.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("if-match", "\"does-not-match\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/cond-bucket/item.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("if-none-match", etag.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
+async fn test_copy_source_preconditions() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/src-pre", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/dst-pre", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/src-pre/original.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("copy source"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag = put_resp.headers().get("etag").unwrap().to_str().unwrap().to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/dst-pre/copied.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-copy-source", "/src-pre/original.txt")
+                .header("x-amz-copy-source-if-match", "\"bad-etag\"")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/dst-pre/copied.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-copy-source", "/src-pre/original.txt")
+                .header("x-amz-copy-source-if-match", etag.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_select_object_content_csv_to_json_events() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-bucket/people.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "text/csv")
+                .body(Body::from("name,age\nalice,30\nbob,40\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT name, age FROM S3Object WHERE CAST(age AS INTEGER) &gt;= 35</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization>
+    <CSV>
+      <FileHeaderInfo>USE</FileHeaderInfo>
+    </CSV>
+  </InputSerialization>
+  <OutputSerialization>
+    <JSON>
+      <RecordDelimiter>\n</RecordDelimiter>
+    </JSON>
+  </OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-bucket/people.csv?select&select-type=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "application/octet-stream");
+    assert_eq!(resp.headers().get("x-amz-request-charged").unwrap(), "requester");
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_select_events(&body);
+    assert!(events.iter().any(|(name, _)| name == "Records"));
+    assert!(events.iter().any(|(name, _)| name == "Stats"));
+    assert!(events.iter().any(|(name, _)| name == "End"));
+
+    let mut records = String::new();
+    for (name, payload) in events {
+        if name == "Records" {
+            records.push_str(&String::from_utf8_lossy(&payload));
+        }
+    }
+    assert!(records.contains("bob"));
+    assert!(!records.contains("alice"));
+}
+
+#[tokio::test]
+async fn test_select_object_content_requires_expression() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-missing-exp", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-missing-exp/file.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("a,b\n1,2\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><CSV /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-missing-exp/file.csv?select")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("<Code>InvalidRequest</Code>"));
+    assert!(body.contains("Expression is required"));
+}
+
+#[tokio::test]
+async fn test_select_object_content_rejects_non_xml_content_type() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-ct", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-ct/file.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("a,b\n1,2\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT * FROM S3Object</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><CSV /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-ct/file.csv?select")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains("<Code>InvalidRequest</Code>"));
+    assert!(body.contains("Content-Type must be application/xml or text/xml"));
+}
+
+#[tokio::test]
+async fn test_non_admin_authorization_enforced() {
+    let iam_json = serde_json::json!({
+        "version": 2,
+        "users": [{
+            "user_id": "u-limited",
+            "display_name": "limited",
+            "enabled": true,
+            "access_keys": [{
+                "access_key": TEST_ACCESS_KEY,
+                "secret_key": TEST_SECRET_KEY,
+                "status": "active"
+            }],
+            "policies": [{
+                "bucket": "authz-bucket",
+                "actions": ["list", "read"],
+                "prefix": "*"
+            }]
+        }]
+    });
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+    std::fs::write(iam_path.join("iam.json"), iam_json.to_string()).unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        region: "us-east-1".to_string(),
+        iam_config_path: iam_path.join("iam.json"),
+        sigv4_timestamp_tolerance_secs: 900,
+        presigned_url_min_expiry: 1,
+        presigned_url_max_expiry: 604800,
+        secret_key: None,
+        encryption_enabled: false,
+        kms_enabled: false,
+        gc_enabled: false,
+        integrity_enabled: false,
+        metrics_enabled: false,
+        lifecycle_enabled: false,
+    };
+    let state = myfsio_server::state::AppState::new(config);
+    state.storage.create_bucket("authz-bucket").await.unwrap();
+    let app = myfsio_server::create_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/denied-bucket", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let resp = app
+        .oneshot(signed_request(Method::GET, "/authz-bucket", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {

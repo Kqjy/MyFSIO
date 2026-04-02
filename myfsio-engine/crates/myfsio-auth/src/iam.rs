@@ -274,6 +274,61 @@ impl IamService {
         self.get_principal(access_key)
     }
 
+    pub fn authorize(
+        &self,
+        principal: &Principal,
+        bucket_name: Option<&str>,
+        action: &str,
+        object_key: Option<&str>,
+    ) -> bool {
+        self.reload_if_needed();
+
+        if principal.is_admin {
+            return true;
+        }
+
+        let normalized_bucket = bucket_name
+            .unwrap_or("*")
+            .trim()
+            .to_ascii_lowercase();
+        let normalized_action = action.trim().to_ascii_lowercase();
+
+        let state = self.state.read();
+        let user = match state.user_records.get(&principal.user_id) {
+            Some(u) => u,
+            None => return false,
+        };
+
+        if !user.enabled {
+            return false;
+        }
+
+        if let Some(ref expires_at) = user.expires_at {
+            if let Ok(exp) = expires_at.parse::<DateTime<Utc>>() {
+                if Utc::now() > exp {
+                    return false;
+                }
+            }
+        }
+
+        for policy in &user.policies {
+            if !bucket_matches(&policy.bucket, &normalized_bucket) {
+                continue;
+            }
+            if !action_matches(&policy.actions, &normalized_action) {
+                continue;
+            }
+            if let Some(key) = object_key {
+                if !prefix_matches(&policy.prefix, key) {
+                    continue;
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
     pub async fn list_users(&self) -> Vec<serde_json::Value> {
         self.reload_if_needed();
         let state = self.state.read();
@@ -351,6 +406,33 @@ impl IamService {
         self.reload();
         Ok(())
     }
+}
+
+fn bucket_matches(policy_bucket: &str, bucket: &str) -> bool {
+    let pb = policy_bucket.trim().to_ascii_lowercase();
+    pb == "*" || pb == bucket
+}
+
+fn action_matches(policy_actions: &[String], action: &str) -> bool {
+    for policy_action in policy_actions {
+        let pa = policy_action.trim().to_ascii_lowercase();
+        if pa == "*" || pa == action {
+            return true;
+        }
+        if pa == "iam:*" && action.starts_with("iam:") {
+            return true;
+        }
+    }
+    false
+}
+
+fn prefix_matches(policy_prefix: &str, object_key: &str) -> bool {
+    let p = policy_prefix.trim();
+    if p.is_empty() || p == "*" {
+        return true;
+    }
+    let base = p.trim_end_matches('*');
+    object_key.starts_with(base)
 }
 
 #[cfg(test)]
@@ -495,5 +577,60 @@ mod tests {
 
         let svc = IamService::new(tmp.path().to_path_buf());
         assert!(svc.get_secret_key("INACTIVE_KEY").is_none());
+    }
+
+    #[test]
+    fn test_authorize_allows_matching_policy() {
+        let json = serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-reader",
+                "display_name": "reader",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": "READER_KEY",
+                    "secret_key": "reader-secret",
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "docs",
+                    "actions": ["read"],
+                    "prefix": "reports/"
+                }]
+            }]
+        })
+        .to_string();
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(json.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let svc = IamService::new(tmp.path().to_path_buf());
+        let principal = svc.get_principal("READER_KEY").unwrap();
+
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("reports/2026.csv"),
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "write",
+            Some("reports/2026.csv"),
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("private/2026.csv"),
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("other"),
+            "read",
+            Some("reports/2026.csv"),
+        ));
     }
 }

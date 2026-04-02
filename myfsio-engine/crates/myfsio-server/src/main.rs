@@ -57,13 +57,32 @@ async fn main() {
 
     let app = myfsio_server::create_router(state);
 
-    let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(bind_addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::AddrInUse {
+                tracing::error!("Port already in use: {}", bind_addr);
+            } else {
+                tracing::error!("Failed to bind {}: {}", bind_addr, err);
+            }
+            for handle in bg_handles {
+                handle.abort();
+            }
+            std::process::exit(1);
+        }
+    };
     tracing::info!("Listening on {}", bind_addr);
 
-    axum::serve(listener, app)
+    if let Err(err) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .unwrap();
+    {
+        tracing::error!("Server exited with error: {}", err);
+        for handle in bg_handles {
+            handle.abort();
+        }
+        std::process::exit(1);
+    }
 
     for handle in bg_handles {
         handle.abort();

@@ -17,6 +17,15 @@ fn storage_err(err: myfsio_storage::error::StorageError) -> Response {
     (status, [("content-type", "application/xml")], s3err.to_xml()).into_response()
 }
 
+fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
+    (
+        status,
+        [("content-type", "application/json")],
+        value.to_string(),
+    )
+        .into_response()
+}
+
 pub async fn get_versioning(state: &AppState, bucket: &str) -> Response {
     match state.storage.is_versioning_enabled(bucket).await {
         Ok(enabled) => {
@@ -268,6 +277,281 @@ pub async fn delete_lifecycle(state: &AppState, bucket: &str) -> Response {
             }
         }
         Err(e) => storage_err(e),
+    }
+}
+
+pub async fn get_quota(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => {
+            if let Some(quota) = &config.quota {
+                let usage = match state.storage.bucket_stats(bucket).await {
+                    Ok(s) => s,
+                    Err(e) => return storage_err(e),
+                };
+                json_response(
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "quota": {
+                            "max_size_bytes": quota.max_bytes,
+                            "max_objects": quota.max_objects,
+                        },
+                        "usage": {
+                            "bytes": usage.bytes,
+                            "objects": usage.objects,
+                        }
+                    }),
+                )
+            } else {
+                xml_response(
+                    StatusCode::NOT_FOUND,
+                    S3Error::new(S3ErrorCode::NoSuchKey, "No quota configuration found").to_xml(),
+                )
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn put_quota(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::InvalidArgument, "Invalid quota payload").to_xml(),
+            );
+        }
+    };
+
+    let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::InvalidArgument, "Request body must be valid JSON").to_xml(),
+            );
+        }
+    };
+
+    let max_size = payload
+        .get("max_size_bytes")
+        .and_then(|v| v.as_u64());
+    let max_objects = payload
+        .get("max_objects")
+        .and_then(|v| v.as_u64());
+
+    if max_size.is_none() && max_objects.is_none() {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "At least one of max_size_bytes or max_objects is required",
+            )
+            .to_xml(),
+        );
+    }
+
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.quota = Some(myfsio_common::types::QuotaConfig {
+                max_bytes: max_size,
+                max_objects,
+            });
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_quota(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.quota = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn get_policy(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => {
+            if let Some(policy) = &config.policy {
+                json_response(StatusCode::OK, policy.clone())
+            } else {
+                xml_response(
+                    StatusCode::NOT_FOUND,
+                    S3Error::new(S3ErrorCode::NoSuchKey, "No bucket policy attached").to_xml(),
+                )
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::MalformedXML, "Failed to read policy body").to_xml(),
+            );
+        }
+    };
+
+    let policy: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::InvalidArgument, "Policy document must be JSON").to_xml(),
+            );
+        }
+    };
+
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.policy = Some(policy);
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_policy(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.policy = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn get_policy_status(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => {
+            let is_public = config
+                .policy
+                .as_ref()
+                .map(policy_is_public)
+                .unwrap_or(false);
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><PolicyStatus><IsPublic>{}</IsPublic></PolicyStatus>",
+                if is_public { "TRUE" } else { "FALSE" }
+            );
+            xml_response(StatusCode::OK, xml)
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn get_replication(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => {
+            if let Some(replication) = &config.replication {
+                match replication {
+                    serde_json::Value::String(s) => xml_response(StatusCode::OK, s.clone()),
+                    other => xml_response(StatusCode::OK, other.to_string()),
+                }
+            } else {
+                xml_response(
+                    StatusCode::NOT_FOUND,
+                    S3Error::new(
+                        S3ErrorCode::NoSuchKey,
+                        "Replication configuration not found",
+                    )
+                    .to_xml(),
+                )
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn put_replication(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::MalformedXML, "Failed to read replication body").to_xml(),
+            );
+        }
+    };
+
+    if body_bytes.is_empty() {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(S3ErrorCode::MalformedXML, "Request body is required").to_xml(),
+        );
+    }
+
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.replication = Some(serde_json::Value::String(body_str));
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_replication(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.replication = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+fn policy_is_public(policy: &serde_json::Value) -> bool {
+    let statements = match policy.get("Statement") {
+        Some(serde_json::Value::Array(items)) => items,
+        Some(item) => {
+            return is_allow_public_statement(item);
+        }
+        None => return false,
+    };
+
+    statements.iter().any(is_allow_public_statement)
+}
+
+fn is_allow_public_statement(statement: &serde_json::Value) -> bool {
+    let effect_allow = statement
+        .get("Effect")
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("allow"))
+        .unwrap_or(false);
+    if !effect_allow {
+        return false;
+    }
+
+    match statement.get("Principal") {
+        Some(serde_json::Value::String(s)) => s == "*",
+        Some(serde_json::Value::Object(obj)) => obj.values().any(|v| v == "*"),
+        _ => false,
     }
 }
 

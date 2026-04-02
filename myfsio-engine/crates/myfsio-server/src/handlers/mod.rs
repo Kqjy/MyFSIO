@@ -1,5 +1,6 @@
 mod config;
 pub mod kms;
+mod select;
 
 use std::collections::HashMap;
 
@@ -7,8 +8,11 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine;
+use chrono::{DateTime, Utc};
 
-use myfsio_common::error::S3Error;
+use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_common::types::PartInfo;
 use myfsio_storage::traits::StorageEngine;
 use tokio::io::AsyncSeekExt;
@@ -18,7 +22,15 @@ use crate::state::AppState;
 
 fn s3_error_response(err: S3Error) -> Response {
     let status = StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = err.to_xml();
+    let resource = if err.resource.is_empty() {
+        "/".to_string()
+    } else {
+        err.resource.clone()
+    };
+    let body = err
+        .with_resource(resource)
+        .with_request_id(uuid::Uuid::new_v4().simple().to_string())
+        .to_xml();
     (
         status,
         [("content-type", "application/xml")],
@@ -52,6 +64,9 @@ pub async fn create_bucket(
     Query(query): Query<BucketQuery>,
     body: Body,
 ) -> Response {
+    if query.quota.is_some() {
+        return config::put_quota(&state, &bucket, body).await;
+    }
     if query.versioning.is_some() {
         return config::put_versioning(&state, &bucket, body).await;
     }
@@ -69,6 +84,12 @@ pub async fn create_bucket(
     }
     if query.acl.is_some() {
         return config::put_acl(&state, &bucket, body).await;
+    }
+    if query.policy.is_some() {
+        return config::put_policy(&state, &bucket, body).await;
+    }
+    if query.replication.is_some() {
+        return config::put_replication(&state, &bucket, body).await;
     }
     if query.website.is_some() {
         return config::put_website(&state, &bucket, body).await;
@@ -91,6 +112,7 @@ pub async fn create_bucket(
 pub struct BucketQuery {
     #[serde(rename = "list-type")]
     pub list_type: Option<String>,
+    pub marker: Option<String>,
     pub prefix: Option<String>,
     pub delimiter: Option<String>,
     #[serde(rename = "max-keys")]
@@ -108,7 +130,11 @@ pub struct BucketQuery {
     pub encryption: Option<String>,
     pub lifecycle: Option<String>,
     pub acl: Option<String>,
+    pub quota: Option<String>,
     pub policy: Option<String>,
+    #[serde(rename = "policyStatus")]
+    pub policy_status: Option<String>,
+    pub replication: Option<String>,
     pub website: Option<String>,
     #[serde(rename = "object-lock")]
     pub object_lock: Option<String>,
@@ -128,6 +154,9 @@ pub async fn get_bucket(
         );
     }
 
+    if query.quota.is_some() {
+        return config::get_quota(&state, &bucket).await;
+    }
     if query.versioning.is_some() {
         return config::get_versioning(&state, &bucket).await;
     }
@@ -148,6 +177,15 @@ pub async fn get_bucket(
     }
     if query.acl.is_some() {
         return config::get_acl(&state, &bucket).await;
+    }
+    if query.policy.is_some() {
+        return config::get_policy(&state, &bucket).await;
+    }
+    if query.policy_status.is_some() {
+        return config::get_policy_status(&state, &bucket).await;
+    }
+    if query.replication.is_some() {
+        return config::get_replication(&state, &bucket).await;
     }
     if query.website.is_some() {
         return config::get_website(&state, &bucket).await;
@@ -171,28 +209,80 @@ pub async fn get_bucket(
     let prefix = query.prefix.clone().unwrap_or_default();
     let delimiter = query.delimiter.clone().unwrap_or_default();
     let max_keys = query.max_keys.unwrap_or(1000);
+    let marker = query.marker.clone().unwrap_or_default();
+    let list_type = query.list_type.clone().unwrap_or_default();
+    let is_v2 = list_type == "2";
+
+    let effective_start = if is_v2 {
+        if let Some(token) = query.continuation_token.as_deref() {
+            match URL_SAFE.decode(token) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(decoded) => Some(decoded),
+                    Err(_) => {
+                        return s3_error_response(S3Error::new(
+                            S3ErrorCode::InvalidArgument,
+                            "Invalid continuation token",
+                        ));
+                    }
+                },
+                Err(_) => {
+                    return s3_error_response(S3Error::new(
+                        S3ErrorCode::InvalidArgument,
+                        "Invalid continuation token",
+                    ));
+                }
+            }
+        } else {
+            query.start_after.clone()
+        }
+    } else if marker.is_empty() {
+        None
+    } else {
+        Some(marker.clone())
+    };
 
     if delimiter.is_empty() {
         let params = myfsio_common::types::ListParams {
             max_keys,
-            continuation_token: query.continuation_token.clone(),
+            continuation_token: effective_start.clone(),
             prefix: if prefix.is_empty() { None } else { Some(prefix.clone()) },
-            start_after: query.start_after.clone(),
+            start_after: if is_v2 { query.start_after.clone() } else { None },
         };
         match state.storage.list_objects(&bucket, &params).await {
             Ok(result) => {
-                let xml = myfsio_xml::response::list_objects_v2_xml(
-                    &bucket,
-                    &prefix,
-                    &delimiter,
-                    max_keys,
-                    &result.objects,
-                    &[],
-                    result.is_truncated,
-                    query.continuation_token.as_deref(),
-                    result.next_continuation_token.as_deref(),
-                    result.objects.len(),
-                );
+                let next_marker = result
+                    .next_continuation_token
+                    .clone()
+                    .or_else(|| result.objects.last().map(|o| o.key.clone()));
+                let xml = if is_v2 {
+                    let next_token = next_marker
+                        .as_deref()
+                        .map(|s| URL_SAFE.encode(s.as_bytes()));
+                    myfsio_xml::response::list_objects_v2_xml(
+                        &bucket,
+                        &prefix,
+                        &delimiter,
+                        max_keys,
+                        &result.objects,
+                        &[],
+                        result.is_truncated,
+                        query.continuation_token.as_deref(),
+                        next_token.as_deref(),
+                        result.objects.len(),
+                    )
+                } else {
+                    myfsio_xml::response::list_objects_v1_xml(
+                        &bucket,
+                        &prefix,
+                        &marker,
+                        &delimiter,
+                        max_keys,
+                        &result.objects,
+                        &[],
+                        result.is_truncated,
+                        next_marker.as_deref(),
+                    )
+                };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
             }
             Err(e) => storage_err_response(e),
@@ -202,22 +292,40 @@ pub async fn get_bucket(
             prefix,
             delimiter: delimiter.clone(),
             max_keys,
-            continuation_token: query.continuation_token.clone(),
+            continuation_token: effective_start,
         };
         match state.storage.list_objects_shallow(&bucket, &params).await {
             Ok(result) => {
-                let xml = myfsio_xml::response::list_objects_v2_xml(
-                    &bucket,
-                    &params.prefix,
-                    &delimiter,
-                    max_keys,
-                    &result.objects,
-                    &result.common_prefixes,
-                    result.is_truncated,
-                    query.continuation_token.as_deref(),
-                    result.next_continuation_token.as_deref(),
-                    result.objects.len() + result.common_prefixes.len(),
-                );
+                let xml = if is_v2 {
+                    let next_token = result
+                        .next_continuation_token
+                        .as_deref()
+                        .map(|s| URL_SAFE.encode(s.as_bytes()));
+                    myfsio_xml::response::list_objects_v2_xml(
+                        &bucket,
+                        &params.prefix,
+                        &delimiter,
+                        max_keys,
+                        &result.objects,
+                        &result.common_prefixes,
+                        result.is_truncated,
+                        query.continuation_token.as_deref(),
+                        next_token.as_deref(),
+                        result.objects.len() + result.common_prefixes.len(),
+                    )
+                } else {
+                    myfsio_xml::response::list_objects_v1_xml(
+                        &bucket,
+                        &params.prefix,
+                        &marker,
+                        &delimiter,
+                        max_keys,
+                        &result.objects,
+                        &result.common_prefixes,
+                        result.is_truncated,
+                        result.next_continuation_token.as_deref(),
+                    )
+                };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
             }
             Err(e) => storage_err_response(e),
@@ -243,6 +351,9 @@ pub async fn delete_bucket(
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
 ) -> Response {
+    if query.quota.is_some() {
+        return config::delete_quota(&state, &bucket).await;
+    }
     if query.tagging.is_some() {
         return config::delete_tagging(&state, &bucket).await;
     }
@@ -257,6 +368,12 @@ pub async fn delete_bucket(
     }
     if query.website.is_some() {
         return config::delete_website(&state, &bucket).await;
+    }
+    if query.policy.is_some() {
+        return config::delete_policy(&state, &bucket).await;
+    }
+    if query.replication.is_some() {
+        return config::delete_replication(&state, &bucket).await;
     }
 
     match state.storage.delete_bucket(&bucket).await {
@@ -285,6 +402,8 @@ pub async fn head_bucket(
 #[derive(serde::Deserialize, Default)]
 pub struct ObjectQuery {
     pub uploads: Option<String>,
+    pub attributes: Option<String>,
+    pub select: Option<String>,
     #[serde(rename = "uploadId")]
     pub upload_id: Option<String>,
     #[serde(rename = "partNumber")]
@@ -329,6 +448,27 @@ fn apply_response_overrides(headers: &mut HeaderMap, query: &ObjectQuery) {
     }
 }
 
+fn guessed_content_type(key: &str, explicit: Option<&str>) -> String {
+    explicit
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| {
+            mime_guess::from_path(key)
+                .first_raw()
+                .unwrap_or("application/octet-stream")
+                .to_string()
+        })
+}
+
+fn insert_content_type(headers: &mut HeaderMap, key: &str, explicit: Option<&str>) {
+    let value = guessed_content_type(key, explicit);
+    if let Ok(header_value) = value.parse() {
+        headers.insert("content-type", header_value);
+    } else {
+        headers.insert("content-type", "application/octet-stream".parse().unwrap());
+    }
+}
+
 pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
@@ -356,16 +496,18 @@ pub async fn put_object(
     }
 
     if let Some(copy_source) = headers.get("x-amz-copy-source").and_then(|v| v.to_str().ok()) {
-        return copy_object_handler(&state, copy_source, &bucket, &key).await;
+        return copy_object_handler(&state, copy_source, &bucket, &key, &headers).await;
     }
 
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream");
+    let content_type = guessed_content_type(
+        &key,
+        headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+    );
 
     let mut metadata = HashMap::new();
-    metadata.insert("__content_type__".to_string(), content_type.to_string());
+    metadata.insert("__content_type__".to_string(), content_type);
 
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
@@ -460,6 +602,20 @@ pub async fn get_object(
     if query.legal_hold.is_some() {
         return config::get_object_legal_hold(&state, &bucket, &key).await;
     }
+    if query.attributes.is_some() {
+        return object_attributes_handler(&state, &bucket, &key, &headers).await;
+    }
+    if let Some(ref upload_id) = query.upload_id {
+        return list_parts_handler(&state, &bucket, &key, upload_id).await;
+    }
+
+    let head_meta = match state.storage.head_object(&bucket, &key).await {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
+    };
+    if let Some(resp) = evaluate_get_preconditions(&headers, &head_meta) {
+        return resp;
+    }
 
     let range_header = headers
         .get("range")
@@ -504,13 +660,7 @@ pub async fn get_object(
         let stream = ReaderStream::new(file);
         let body = Body::from_stream(stream);
 
-        let meta = match state.storage.head_object(&bucket, &key).await {
-            Ok(m) => m,
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&dec_tmp).await;
-                return storage_err_response(e);
-            }
-        };
+        let meta = head_meta.clone();
 
         let tmp_path = dec_tmp.clone();
         tokio::spawn(async move {
@@ -523,11 +673,7 @@ pub async fn get_object(
         if let Some(ref etag) = meta.etag {
             resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
         }
-        if let Some(ref ct) = meta.content_type {
-            resp_headers.insert("content-type", ct.parse().unwrap());
-        } else {
-            resp_headers.insert("content-type", "application/octet-stream".parse().unwrap());
-        }
+        insert_content_type(&mut resp_headers, &key, meta.content_type.as_deref());
         resp_headers.insert(
             "last-modified",
             meta.last_modified.format("%a, %d %b %Y %H:%M:%S GMT").to_string().parse().unwrap(),
@@ -559,11 +705,7 @@ pub async fn get_object(
             if let Some(ref etag) = meta.etag {
                 headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
             }
-            if let Some(ref ct) = meta.content_type {
-                headers.insert("content-type", ct.parse().unwrap());
-            } else {
-                headers.insert("content-type", "application/octet-stream".parse().unwrap());
-            }
+            insert_content_type(&mut headers, &key, meta.content_type.as_deref());
             headers.insert(
                 "last-modified",
                 meta.last_modified
@@ -595,6 +737,7 @@ pub async fn post_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     if query.uploads.is_some() {
@@ -603,6 +746,10 @@ pub async fn post_object(
 
     if let Some(ref upload_id) = query.upload_id {
         return complete_multipart_handler(&state, &bucket, &key, upload_id, body).await;
+    }
+
+    if query.select.is_some() {
+        return select::post_select_object_content(&state, &bucket, &key, &headers, body).await;
     }
 
     (StatusCode::METHOD_NOT_ALLOWED).into_response()
@@ -630,19 +777,19 @@ pub async fn delete_object(
 pub async fn head_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     match state.storage.head_object(&bucket, &key).await {
         Ok(meta) => {
+            if let Some(resp) = evaluate_get_preconditions(&headers, &meta) {
+                return resp;
+            }
             let mut headers = HeaderMap::new();
             headers.insert("content-length", meta.size.to_string().parse().unwrap());
             if let Some(ref etag) = meta.etag {
                 headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
             }
-            if let Some(ref ct) = meta.content_type {
-                headers.insert("content-type", ct.parse().unwrap());
-            } else {
-                headers.insert("content-type", "application/octet-stream".parse().unwrap());
-            }
+            insert_content_type(&mut headers, &key, meta.content_type.as_deref());
             headers.insert(
                 "last-modified",
                 meta.last_modified
@@ -782,11 +929,80 @@ async fn list_multipart_uploads_handler(
     }
 }
 
+async fn list_parts_handler(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+) -> Response {
+    match state.storage.list_parts(bucket, upload_id).await {
+        Ok(parts) => {
+            let xml = myfsio_xml::response::list_parts_xml(bucket, key, upload_id, &parts);
+            (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+        }
+        Err(e) => storage_err_response(e),
+    }
+}
+
+async fn object_attributes_handler(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let meta = match state.storage.head_object(bucket, key).await {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
+    };
+
+    let requested = headers
+        .get("x-amz-object-attributes")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let attrs: std::collections::HashSet<String> = requested
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let all = attrs.is_empty();
+
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    );
+    xml.push_str("<GetObjectAttributesResponse xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
+
+    if all || attrs.contains("etag") {
+        if let Some(etag) = &meta.etag {
+            xml.push_str(&format!("<ETag>{}</ETag>", xml_escape(etag)));
+        }
+    }
+    if all || attrs.contains("storageclass") {
+        let sc = meta
+            .storage_class
+            .as_deref()
+            .unwrap_or("STANDARD");
+        xml.push_str(&format!("<StorageClass>{}</StorageClass>", xml_escape(sc)));
+    }
+    if all || attrs.contains("objectsize") {
+        xml.push_str(&format!("<ObjectSize>{}</ObjectSize>", meta.size));
+    }
+    if attrs.contains("checksum") {
+        xml.push_str("<Checksum></Checksum>");
+    }
+    if attrs.contains("objectparts") {
+        xml.push_str("<ObjectParts></ObjectParts>");
+    }
+
+    xml.push_str("</GetObjectAttributesResponse>");
+    (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+}
+
 async fn copy_object_handler(
     state: &AppState,
     copy_source: &str,
     dst_bucket: &str,
     dst_key: &str,
+    headers: &HeaderMap,
 ) -> Response {
     let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
     let (src_bucket, src_key) = match source.split_once('/') {
@@ -798,6 +1014,14 @@ async fn copy_object_handler(
             ));
         }
     };
+
+    let source_meta = match state.storage.head_object(src_bucket, src_key).await {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
+    };
+    if let Some(resp) = evaluate_copy_preconditions(headers, &source_meta) {
+        return resp;
+    }
 
     match state.storage.copy_object(src_bucket, src_key, dst_bucket, dst_key).await {
         Ok(meta) => {
@@ -908,16 +1132,144 @@ async fn range_get_handler(
     if let Some(ref etag) = meta.etag {
         headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
     }
-    if let Some(ref ct) = meta.content_type {
-        headers.insert("content-type", ct.parse().unwrap());
-    } else {
-        headers.insert("content-type", "application/octet-stream".parse().unwrap());
-    }
+    insert_content_type(&mut headers, key, meta.content_type.as_deref());
     headers.insert("accept-ranges", "bytes".parse().unwrap());
 
     apply_response_overrides(&mut headers, query);
 
     (StatusCode::PARTIAL_CONTENT, headers, body).into_response()
+}
+
+fn evaluate_get_preconditions(
+    headers: &HeaderMap,
+    meta: &myfsio_common::types::ObjectMeta,
+) -> Option<Response> {
+    if let Some(value) = headers.get("if-match").and_then(|v| v.to_str().ok()) {
+        if !etag_condition_matches(value, meta.etag.as_deref()) {
+            return Some(s3_error_response(S3Error::from_code(
+                S3ErrorCode::PreconditionFailed,
+            )));
+        }
+    }
+
+    if let Some(value) = headers
+        .get("if-unmodified-since")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(t) = parse_http_date(value) {
+            if meta.last_modified > t {
+                return Some(s3_error_response(S3Error::from_code(
+                    S3ErrorCode::PreconditionFailed,
+                )));
+            }
+        }
+    }
+
+    if let Some(value) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
+        if etag_condition_matches(value, meta.etag.as_deref()) {
+            return Some(StatusCode::NOT_MODIFIED.into_response());
+        }
+    }
+
+    if let Some(value) = headers
+        .get("if-modified-since")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(t) = parse_http_date(value) {
+            if meta.last_modified <= t {
+                return Some(StatusCode::NOT_MODIFIED.into_response());
+            }
+        }
+    }
+
+    None
+}
+
+fn evaluate_copy_preconditions(
+    headers: &HeaderMap,
+    source_meta: &myfsio_common::types::ObjectMeta,
+) -> Option<Response> {
+    if let Some(value) = headers
+        .get("x-amz-copy-source-if-match")
+        .and_then(|v| v.to_str().ok())
+    {
+        if !etag_condition_matches(value, source_meta.etag.as_deref()) {
+            return Some(s3_error_response(S3Error::from_code(
+                S3ErrorCode::PreconditionFailed,
+            )));
+        }
+    }
+
+    if let Some(value) = headers
+        .get("x-amz-copy-source-if-none-match")
+        .and_then(|v| v.to_str().ok())
+    {
+        if etag_condition_matches(value, source_meta.etag.as_deref()) {
+            return Some(s3_error_response(S3Error::from_code(
+                S3ErrorCode::PreconditionFailed,
+            )));
+        }
+    }
+
+    if let Some(value) = headers
+        .get("x-amz-copy-source-if-modified-since")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(t) = parse_http_date(value) {
+            if source_meta.last_modified <= t {
+                return Some(s3_error_response(S3Error::from_code(
+                    S3ErrorCode::PreconditionFailed,
+                )));
+            }
+        }
+    }
+
+    if let Some(value) = headers
+        .get("x-amz-copy-source-if-unmodified-since")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(t) = parse_http_date(value) {
+            if source_meta.last_modified > t {
+                return Some(s3_error_response(S3Error::from_code(
+                    S3ErrorCode::PreconditionFailed,
+                )));
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_http_date(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn etag_condition_matches(condition: &str, etag: Option<&str>) -> bool {
+    let trimmed = condition.trim();
+    if trimmed == "*" {
+        return true;
+    }
+
+    let current = match etag {
+        Some(e) => e.trim_matches('"'),
+        None => return false,
+    };
+
+    trimmed
+        .split(',')
+        .map(|v| v.trim().trim_matches('"'))
+        .any(|candidate| candidate == current || candidate == "*")
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn parse_range(range_str: &str, total_size: u64) -> Option<(u64, u64)> {

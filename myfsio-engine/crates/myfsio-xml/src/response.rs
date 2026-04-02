@@ -90,6 +90,76 @@ pub fn list_objects_v2_xml(
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
+pub fn list_objects_v1_xml(
+    bucket_name: &str,
+    prefix: &str,
+    marker: &str,
+    delimiter: &str,
+    max_keys: usize,
+    objects: &[ObjectMeta],
+    common_prefixes: &[String],
+    is_truncated: bool,
+    next_marker: Option<&str>,
+) -> String {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
+
+    let start = BytesStart::new("ListBucketResult")
+        .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
+    writer.write_event(Event::Start(start)).unwrap();
+
+    write_text_element(&mut writer, "Name", bucket_name);
+    write_text_element(&mut writer, "Prefix", prefix);
+    write_text_element(&mut writer, "Marker", marker);
+    write_text_element(&mut writer, "MaxKeys", &max_keys.to_string());
+    write_text_element(&mut writer, "IsTruncated", &is_truncated.to_string());
+
+    if !delimiter.is_empty() {
+        write_text_element(&mut writer, "Delimiter", delimiter);
+    }
+    if !delimiter.is_empty() && is_truncated {
+        if let Some(nm) = next_marker {
+            if !nm.is_empty() {
+                write_text_element(&mut writer, "NextMarker", nm);
+            }
+        }
+    }
+
+    for obj in objects {
+        writer
+            .write_event(Event::Start(BytesStart::new("Contents")))
+            .unwrap();
+        write_text_element(&mut writer, "Key", &obj.key);
+        write_text_element(&mut writer, "LastModified", &obj.last_modified.to_rfc3339());
+        if let Some(ref etag) = obj.etag {
+            write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
+        }
+        write_text_element(&mut writer, "Size", &obj.size.to_string());
+        writer
+            .write_event(Event::End(BytesEnd::new("Contents")))
+            .unwrap();
+    }
+
+    for cp in common_prefixes {
+        writer
+            .write_event(Event::Start(BytesStart::new("CommonPrefixes")))
+            .unwrap();
+        write_text_element(&mut writer, "Prefix", cp);
+        writer
+            .write_event(Event::End(BytesEnd::new("CommonPrefixes")))
+            .unwrap();
+    }
+
+    writer
+        .write_event(Event::End(BytesEnd::new("ListBucketResult")))
+        .unwrap();
+
+    String::from_utf8(writer.into_inner().into_inner()).unwrap()
+}
+
 fn write_text_element(writer: &mut Writer<Cursor<Vec<u8>>>, tag: &str, text: &str) {
     writer.write_event(Event::Start(BytesStart::new(tag))).unwrap();
     writer.write_event(Event::Text(BytesText::new(text))).unwrap();
@@ -265,5 +335,24 @@ mod tests {
         assert!(xml.contains("<Key>file.txt</Key>"));
         assert!(xml.contains("<Size>1024</Size>"));
         assert!(xml.contains("<IsTruncated>false</IsTruncated>"));
+    }
+
+    #[test]
+    fn test_list_objects_v1_xml() {
+        let objects = vec![ObjectMeta::new("file.txt".to_string(), 1024, Utc::now())];
+        let xml = list_objects_v1_xml(
+            "my-bucket",
+            "",
+            "",
+            "/",
+            1000,
+            &objects,
+            &[],
+            false,
+            None,
+        );
+        assert!(xml.contains("<Key>file.txt</Key>"));
+        assert!(xml.contains("<Size>1024</Size>"));
+        assert!(xml.contains("<Marker></Marker>"));
     }
 }

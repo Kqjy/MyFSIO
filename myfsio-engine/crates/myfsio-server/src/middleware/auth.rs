@@ -1,5 +1,5 @@
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -16,17 +16,21 @@ pub async fn auth_layer(
     next: Next,
 ) -> Response {
     let uri = req.uri().clone();
-    let path = uri.path();
+    let path = uri.path().to_string();
 
     if path == "/" && req.method() == axum::http::Method::GET {
         match try_auth(&state, &req) {
             AuthResult::Ok(principal) => {
+                if let Err(err) = authorize_request(&state, &principal, &req) {
+                    return error_response(err, &path);
+                }
                 req.extensions_mut().insert(principal);
             }
-            AuthResult::Denied(err) => return error_response(err),
+            AuthResult::Denied(err) => return error_response(err, &path),
             AuthResult::NoAuth => {
                 return error_response(
-                    S3Error::from_code(S3ErrorCode::AccessDenied),
+                    S3Error::new(S3ErrorCode::AccessDenied, "Missing credentials"),
+                    &path,
                 );
             }
         }
@@ -35,12 +39,18 @@ pub async fn auth_layer(
 
     match try_auth(&state, &req) {
         AuthResult::Ok(principal) => {
+            if let Err(err) = authorize_request(&state, &principal, &req) {
+                return error_response(err, &path);
+            }
             req.extensions_mut().insert(principal);
             next.run(req).await
         }
-        AuthResult::Denied(err) => error_response(err),
+        AuthResult::Denied(err) => error_response(err, &path),
         AuthResult::NoAuth => {
-            error_response(S3Error::from_code(S3ErrorCode::AccessDenied))
+            error_response(
+                S3Error::new(S3ErrorCode::AccessDenied, "Missing credentials"),
+                &path,
+            )
         }
     }
 }
@@ -49,6 +59,167 @@ enum AuthResult {
     Ok(Principal),
     Denied(S3Error),
     NoAuth,
+}
+
+fn authorize_request(state: &AppState, principal: &Principal, req: &Request) -> Result<(), S3Error> {
+    let path = req.uri().path();
+    if path == "/" {
+        if state.iam.authorize(principal, None, "list", None) {
+            return Ok(());
+        }
+        return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
+    }
+
+    let mut segments = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty());
+    let bucket = match segments.next() {
+        Some(b) => b,
+        None => {
+            return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
+        }
+    };
+    let remaining: Vec<&str> = segments.collect();
+    let query = req.uri().query().unwrap_or("");
+
+    if remaining.is_empty() {
+        let action = resolve_bucket_action(req.method(), query);
+        if state.iam.authorize(principal, Some(bucket), action, None) {
+            return Ok(());
+        }
+        return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
+    }
+
+    let object_key = remaining.join("/");
+    if req.method() == Method::PUT {
+        if let Some(copy_source) = req
+            .headers()
+            .get("x-amz-copy-source")
+            .and_then(|v| v.to_str().ok())
+        {
+            let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
+            if let Some((src_bucket, src_key)) = source.split_once('/') {
+                let source_allowed =
+                    state.iam.authorize(principal, Some(src_bucket), "read", Some(src_key));
+                let dest_allowed =
+                    state.iam.authorize(principal, Some(bucket), "write", Some(&object_key));
+                if source_allowed && dest_allowed {
+                    return Ok(());
+                }
+                return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
+            }
+        }
+    }
+
+    let action = resolve_object_action(req.method(), query);
+    if state
+        .iam
+        .authorize(principal, Some(bucket), action, Some(&object_key))
+    {
+        return Ok(());
+    }
+
+    Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"))
+}
+
+fn resolve_bucket_action(method: &Method, query: &str) -> &'static str {
+    if has_query_key(query, "versioning") {
+        return "versioning";
+    }
+    if has_query_key(query, "tagging") {
+        return "tagging";
+    }
+    if has_query_key(query, "cors") {
+        return "cors";
+    }
+    if has_query_key(query, "location") {
+        return "list";
+    }
+    if has_query_key(query, "encryption") {
+        return "encryption";
+    }
+    if has_query_key(query, "lifecycle") {
+        return "lifecycle";
+    }
+    if has_query_key(query, "acl") {
+        return "share";
+    }
+    if has_query_key(query, "policy") || has_query_key(query, "policyStatus") {
+        return "policy";
+    }
+    if has_query_key(query, "replication") {
+        return "replication";
+    }
+    if has_query_key(query, "quota") {
+        return "quota";
+    }
+    if has_query_key(query, "website") {
+        return "website";
+    }
+    if has_query_key(query, "object-lock") {
+        return "object_lock";
+    }
+    if has_query_key(query, "notification") {
+        return "notification";
+    }
+    if has_query_key(query, "logging") {
+        return "logging";
+    }
+    if has_query_key(query, "versions") || has_query_key(query, "uploads") {
+        return "list";
+    }
+    if has_query_key(query, "delete") {
+        return "delete";
+    }
+
+    match *method {
+        Method::GET => "list",
+        Method::HEAD => "read",
+        Method::PUT => "create_bucket",
+        Method::DELETE => "delete_bucket",
+        Method::POST => "write",
+        _ => "list",
+    }
+}
+
+fn resolve_object_action(method: &Method, query: &str) -> &'static str {
+    if has_query_key(query, "tagging") {
+        return if *method == Method::GET { "read" } else { "write" };
+    }
+    if has_query_key(query, "acl") {
+        return if *method == Method::GET { "read" } else { "write" };
+    }
+    if has_query_key(query, "retention") || has_query_key(query, "legal-hold") {
+        return "object_lock";
+    }
+    if has_query_key(query, "attributes") {
+        return "read";
+    }
+    if has_query_key(query, "uploads") || has_query_key(query, "uploadId") {
+        return match *method {
+            Method::GET => "read",
+            _ => "write",
+        };
+    }
+    if has_query_key(query, "select") {
+        return "read";
+    }
+
+    match *method {
+        Method::GET | Method::HEAD => "read",
+        Method::PUT => "write",
+        Method::DELETE => "delete",
+        Method::POST => "write",
+        _ => "read",
+    }
+}
+
+fn has_query_key(query: &str, key: &str) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .any(|part| part == key || part.starts_with(&format!("{}=", key)))
 }
 
 fn try_auth(state: &AppState, req: &Request) -> AuthResult {
@@ -382,9 +553,13 @@ fn urlencoding_decode(s: &str) -> String {
         .into_owned()
 }
 
-fn error_response(err: S3Error) -> Response {
+fn error_response(err: S3Error, resource: &str) -> Response {
     let status =
         StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let body = err.to_xml();
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    let body = err
+        .with_resource(resource.to_string())
+        .with_request_id(request_id)
+        .to_xml();
     (status, [("content-type", "application/xml")], body).into_response()
 }

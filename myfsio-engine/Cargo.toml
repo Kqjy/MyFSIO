@@ -41,3 +41,5 @@ base64 = "0.22"
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 dashmap = "6"
+crc32fast = "1"
+duckdb = { version = "1", features = ["bundled"] }
