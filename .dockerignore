@@ -11,3 +11,5 @@ htmlcov
 logs
 data
 tmp
+myfsio_core/target
+myfsio-engine/target

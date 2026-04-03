@@ -13,6 +13,7 @@ RUN apt-get update \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 COPY requirements.txt ./
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
@@ -21,15 +22,18 @@ RUN pip install --no-cache-dir maturin \
     && cd myfsio_core \
     && maturin build --release \
     && pip install target/wheels/*.whl \
+    && cd ../myfsio-engine \
+    && cargo build --release \
+    && cp target/release/myfsio-server /usr/local/bin/myfsio-server \
     && cd .. \
-    && rm -rf myfsio_core/target \
+    && rm -rf myfsio_core/target myfsio-engine/target \
     && pip uninstall -y maturin \
     && rustup self uninstall -y
 
 RUN chmod +x docker-entrypoint.sh
 
 RUN mkdir -p /app/data \
-    && useradd -m -u 1000 myfsio \ 
+    && useradd -m -u 1000 myfsio \
     && chown -R myfsio:myfsio /app
 
 USER myfsio
@@ -37,7 +41,8 @@ USER myfsio
 EXPOSE 5000 5100
 ENV APP_HOST=0.0.0.0 \
     FLASK_ENV=production \
-    FLASK_DEBUG=0
+    FLASK_DEBUG=0 \
+    ENGINE=rust
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:5000/myfsio/health', timeout=2)"

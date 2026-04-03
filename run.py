@@ -77,6 +77,7 @@ def _serve_granian(target: str, port: int, config: Optional[AppConfig] = None) -
 
 def _find_rust_binary() -> Optional[Path]:
     candidates = [
+        Path("/usr/local/bin/myfsio-server"),
         Path(__file__).parent / "myfsio-engine" / "target" / "release" / "myfsio-server.exe",
         Path(__file__).parent / "myfsio-engine" / "target" / "release" / "myfsio-server",
         Path(__file__).parent / "myfsio-engine" / "target" / "debug" / "myfsio-server.exe",
@@ -270,7 +271,7 @@ if __name__ == "__main__":
     parser.add_argument("--ui-port", type=int, default=5100)
     parser.add_argument("--prod", action="store_true", help="Run in production mode using Granian")
     parser.add_argument("--dev", action="store_true", help="Force development mode (Flask dev server)")
-    parser.add_argument("--engine", choices=["python", "rust"], default="python", help="API engine: python (Flask) or rust (myfsio-engine)")
+    parser.add_argument("--engine", choices=["python", "rust"], default=os.getenv("ENGINE", "python"), help="API engine: python (Flask) or rust (myfsio-engine)")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration and exit")
     parser.add_argument("--show-config", action="store_true", help="Show configuration summary and exit")
     parser.add_argument("--reset-cred", action="store_true", help="Reset admin credentials and exit")

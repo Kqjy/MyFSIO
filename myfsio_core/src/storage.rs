@@ -125,7 +125,7 @@ pub fn delete_index_entry(py: Python<'_>, path: &str, entry_name: &str) -> PyRes
         fs::write(&path_owned, serialized)
             .map_err(|e| PyIOError::new_err(format!("Failed to write index: {}", e)))?;
 
-        Ok(false)
+        Ok(true)
     })
 }
 
