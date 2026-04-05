@@ -899,34 +899,22 @@ impl FsStorageBackend {
         })
     }
 
-    fn put_object_sync(
+    fn finalize_put_sync(
         &self,
         bucket_name: &str,
         key: &str,
-        data: &[u8],
+        tmp_path: &Path,
+        etag: String,
+        new_size: u64,
         metadata: Option<HashMap<String, String>>,
     ) -> StorageResult<ObjectMeta> {
         let bucket_path = self.require_bucket(bucket_name)?;
-        self.validate_key(key)?;
-
         let destination = bucket_path.join(key);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
 
         let is_overwrite = destination.exists();
-
-        let tmp_dir = self.tmp_dir();
-        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
-        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
-
-        let mut hasher = Md5::new();
-        hasher.update(data);
-        let etag = format!("{:x}", hasher.finalize());
-
-        std::fs::write(&tmp_path, data).map_err(StorageError::Io)?;
-        let new_size = data.len() as u64;
-
         let lock_dir = self.system_bucket_root(bucket_name).join("locks");
         std::fs::create_dir_all(&lock_dir).map_err(StorageError::Io)?;
 
@@ -936,8 +924,8 @@ impl FsStorageBackend {
                 .map_err(StorageError::Io)?;
         }
 
-        std::fs::rename(&tmp_path, &destination).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
+        std::fs::rename(tmp_path, &destination).map_err(|e| {
+            let _ = std::fs::remove_file(tmp_path);
             StorageError::Io(e)
         })?;
 
@@ -972,6 +960,29 @@ impl FsStorageBackend {
         obj.etag = Some(etag);
         obj.metadata = metadata.unwrap_or_default();
         Ok(obj)
+    }
+
+    fn put_object_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        data: &[u8],
+        metadata: Option<HashMap<String, String>>,
+    ) -> StorageResult<ObjectMeta> {
+        self.validate_key(key)?;
+
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
+        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+
+        let mut hasher = Md5::new();
+        hasher.update(data);
+        let etag = format!("{:x}", hasher.finalize());
+
+        std::fs::write(&tmp_path, data).map_err(StorageError::Io)?;
+        let new_size = data.len() as u64;
+
+        self.finalize_put_sync(bucket_name, key, &tmp_path, etag, new_size, metadata)
     }
 }
 
@@ -1082,12 +1093,38 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         mut stream: AsyncReadStream,
         metadata: Option<HashMap<String, String>>,
     ) -> StorageResult<ObjectMeta> {
-        let mut data = Vec::new();
-        stream
-            .read_to_end(&mut data)
+        self.validate_key(key)?;
+
+        let tmp_dir = self.tmp_dir();
+        tokio::fs::create_dir_all(&tmp_dir)
             .await
             .map_err(StorageError::Io)?;
-        self.put_object_sync(bucket, key, &data, metadata)
+        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+
+        let mut file = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(StorageError::Io)?;
+        let mut hasher = Md5::new();
+        let mut total_size: u64 = 0;
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = stream.read(&mut buf).await.map_err(StorageError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n])
+                .await
+                .map_err(StorageError::Io)?;
+            total_size += n as u64;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(StorageError::Io)?;
+        drop(file);
+
+        let etag = format!("{:x}", hasher.finalize());
+        self.finalize_put_sync(bucket, key, &tmp_path, etag, total_size, metadata)
     }
 
     async fn get_object(
@@ -1295,18 +1332,36 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let mut data = Vec::new();
-        stream
-            .read_to_end(&mut data)
+        let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
+        let tmp_file = upload_dir.join(format!("part-{:05}.part.tmp", part_number));
+
+        let mut file = tokio::fs::File::create(&tmp_file)
             .await
             .map_err(StorageError::Io)?;
-
         let mut hasher = Md5::new();
-        hasher.update(&data);
+        let mut part_size: u64 = 0;
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = stream.read(&mut buf).await.map_err(StorageError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n])
+                .await
+                .map_err(StorageError::Io)?;
+            part_size += n as u64;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(StorageError::Io)?;
+        drop(file);
+
         let etag = format!("{:x}", hasher.finalize());
 
-        let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
-        std::fs::write(&part_file, &data).map_err(StorageError::Io)?;
+        tokio::fs::rename(&tmp_file, &part_file)
+            .await
+            .map_err(StorageError::Io)?;
 
         let lock_path = upload_dir.join(".manifest.lock");
         let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
@@ -1322,7 +1377,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 part_number.to_string(),
                 serde_json::json!({
                     "etag": etag,
-                    "size": data.len(),
+                    "size": part_size,
                     "filename": format!("part-{:05}.part", part_number),
                 }),
             );
@@ -1362,20 +1417,57 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
-        let mut combined_data = Vec::new();
+        let tmp_dir = self.tmp_dir();
+        tokio::fs::create_dir_all(&tmp_dir)
+            .await
+            .map_err(StorageError::Io)?;
+        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+
+        let mut out_file = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(StorageError::Io)?;
+        let mut md5_digest_concat = Vec::new();
+        let mut total_size: u64 = 0;
+        let part_count = parts.len();
+
         for part_info in parts {
             let part_file = upload_dir.join(format!("part-{:05}.part", part_info.part_number));
             if !part_file.exists() {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
                 return Err(StorageError::InvalidObjectKey(format!(
                     "Part {} not found",
                     part_info.part_number
                 )));
             }
-            let part_data = std::fs::read(&part_file).map_err(StorageError::Io)?;
-            combined_data.extend_from_slice(&part_data);
+            let mut part_reader = tokio::fs::File::open(&part_file)
+                .await
+                .map_err(StorageError::Io)?;
+            let mut part_hasher = Md5::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = part_reader.read(&mut buf).await.map_err(StorageError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                part_hasher.update(&buf[..n]);
+                tokio::io::AsyncWriteExt::write_all(&mut out_file, &buf[..n])
+                    .await
+                    .map_err(StorageError::Io)?;
+                total_size += n as u64;
+            }
+            md5_digest_concat.extend_from_slice(&part_hasher.finalize());
         }
 
-        let result = self.put_object_sync(bucket, &object_key, &combined_data, Some(metadata))?;
+        tokio::io::AsyncWriteExt::flush(&mut out_file)
+            .await
+            .map_err(StorageError::Io)?;
+        drop(out_file);
+
+        let mut composite_hasher = Md5::new();
+        composite_hasher.update(&md5_digest_concat);
+        let etag = format!("{:x}-{}", composite_hasher.finalize(), part_count);
+
+        let result = self.finalize_put_sync(bucket, &object_key, &tmp_path, etag, total_size, Some(metadata))?;
 
         let _ = std::fs::remove_dir_all(&upload_dir);
 

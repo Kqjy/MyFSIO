@@ -692,6 +692,102 @@ pub async fn get_logging(state: &AppState, bucket: &str) -> Response {
     }
 }
 
+pub async fn put_object_lock(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.object_lock = Some(value);
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_object_lock(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.object_lock = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn put_notification(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.notification = Some(value);
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_notification(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.notification = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn put_logging(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.logging = Some(value);
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_logging(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.logging = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
 pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
     match state.storage.list_buckets().await {
         Ok(buckets) => {
@@ -727,7 +823,7 @@ pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
         xml.push_str("<IsLatest>true</IsLatest>");
         xml.push_str(&format!(
             "<LastModified>{}</LastModified>",
-            obj.last_modified.to_rfc3339()
+            myfsio_xml::response::format_s3_datetime(&obj.last_modified)
         ));
         if let Some(ref etag) = obj.etag {
             xml.push_str(&format!("<ETag>\"{}\"</ETag>", etag));

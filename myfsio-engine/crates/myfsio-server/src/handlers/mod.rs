@@ -1,3 +1,4 @@
+pub mod admin;
 mod config;
 pub mod kms;
 mod select;
@@ -93,6 +94,15 @@ pub async fn create_bucket(
     }
     if query.website.is_some() {
         return config::put_website(&state, &bucket, body).await;
+    }
+    if query.object_lock.is_some() {
+        return config::put_object_lock(&state, &bucket, body).await;
+    }
+    if query.notification.is_some() {
+        return config::put_notification(&state, &bucket, body).await;
+    }
+    if query.logging.is_some() {
+        return config::put_logging(&state, &bucket, body).await;
     }
 
     match state.storage.create_bucket(&bucket).await {
@@ -374,6 +384,15 @@ pub async fn delete_bucket(
     }
     if query.replication.is_some() {
         return config::delete_replication(&state, &bucket).await;
+    }
+    if query.object_lock.is_some() {
+        return config::delete_object_lock(&state, &bucket).await;
+    }
+    if query.notification.is_some() {
+        return config::delete_notification(&state, &bucket).await;
+    }
+    if query.logging.is_some() {
+        return config::delete_logging(&state, &bucket).await;
     }
 
     match state.storage.delete_bucket(&bucket).await {
@@ -1026,7 +1045,7 @@ async fn copy_object_handler(
     match state.storage.copy_object(src_bucket, src_key, dst_bucket, dst_key).await {
         Ok(meta) => {
             let etag = meta.etag.as_deref().unwrap_or("");
-            let last_modified = meta.last_modified.to_rfc3339();
+            let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
             let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }

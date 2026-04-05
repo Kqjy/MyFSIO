@@ -70,6 +70,10 @@ fn authorize_request(state: &AppState, principal: &Principal, req: &Request) -> 
         return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
     }
 
+    if path.starts_with("/admin/") || path.starts_with("/kms/") {
+        return Ok(());
+    }
+
     let mut segments = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty());
     let bucket = match segments.next() {
         Some(b) => b,

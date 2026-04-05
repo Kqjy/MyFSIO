@@ -39,6 +39,30 @@ pub fn create_router(state: state::AppState) -> Router {
             .route("/kms/generate-data-key", axum::routing::post(handlers::kms::generate_data_key));
     }
 
+    router = router
+        .route("/admin/site/local", axum::routing::get(handlers::admin::get_local_site).put(handlers::admin::update_local_site))
+        .route("/admin/site/all", axum::routing::get(handlers::admin::list_all_sites))
+        .route("/admin/site/peers", axum::routing::post(handlers::admin::register_peer_site))
+        .route("/admin/site/peers/{site_id}", axum::routing::get(handlers::admin::get_peer_site).put(handlers::admin::update_peer_site).delete(handlers::admin::delete_peer_site))
+        .route("/admin/site/peers/{site_id}/health", axum::routing::post(handlers::admin::check_peer_health))
+        .route("/admin/site/topology", axum::routing::get(handlers::admin::get_topology))
+        .route("/admin/site/peers/{site_id}/bidirectional-status", axum::routing::get(handlers::admin::check_bidirectional_status))
+        .route("/admin/iam/users", axum::routing::get(handlers::admin::iam_list_users))
+        .route("/admin/iam/users/{identifier}", axum::routing::get(handlers::admin::iam_get_user))
+        .route("/admin/iam/users/{identifier}/policies", axum::routing::get(handlers::admin::iam_get_user_policies))
+        .route("/admin/iam/users/{identifier}/access-keys", axum::routing::post(handlers::admin::iam_create_access_key))
+        .route("/admin/iam/users/{identifier}/access-keys/{access_key}", axum::routing::delete(handlers::admin::iam_delete_access_key))
+        .route("/admin/iam/users/{identifier}/disable", axum::routing::post(handlers::admin::iam_disable_user))
+        .route("/admin/iam/users/{identifier}/enable", axum::routing::post(handlers::admin::iam_enable_user))
+        .route("/admin/website-domains", axum::routing::get(handlers::admin::list_website_domains).post(handlers::admin::create_website_domain))
+        .route("/admin/website-domains/{domain}", axum::routing::get(handlers::admin::get_website_domain).put(handlers::admin::update_website_domain).delete(handlers::admin::delete_website_domain))
+        .route("/admin/gc/status", axum::routing::get(handlers::admin::gc_status))
+        .route("/admin/gc/run", axum::routing::post(handlers::admin::gc_run))
+        .route("/admin/gc/history", axum::routing::get(handlers::admin::gc_history))
+        .route("/admin/integrity/status", axum::routing::get(handlers::admin::integrity_status))
+        .route("/admin/integrity/run", axum::routing::post(handlers::admin::integrity_run))
+        .route("/admin/integrity/history", axum::routing::get(handlers::admin::integrity_history));
+
     router
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

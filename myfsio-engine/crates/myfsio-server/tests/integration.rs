@@ -29,6 +29,7 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         integrity_enabled: false,
         metrics_enabled: false,
         lifecycle_enabled: false,
+        website_hosting_enabled: false,
     };
     let state = myfsio_server::state::AppState::new(config);
     let app = myfsio_server::create_router(state);
@@ -1955,6 +1956,7 @@ async fn test_non_admin_authorization_enforced() {
         integrity_enabled: false,
         metrics_enabled: false,
         lifecycle_enabled: false,
+        website_hosting_enabled: false,
     };
     let state = myfsio_server::state::AppState::new(config);
     state.storage.create_bucket("authz-bucket").await.unwrap();
@@ -2014,6 +2016,7 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         integrity_enabled: false,
         metrics_enabled: false,
         lifecycle_enabled: false,
+        website_hosting_enabled: false,
     };
     let state = myfsio_server::state::AppState::new_with_encryption(config).await;
     let app = myfsio_server::create_router(state);

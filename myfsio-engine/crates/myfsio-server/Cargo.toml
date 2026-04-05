@@ -31,6 +31,8 @@ mime_guess = "2"
 crc32fast = { workspace = true }
 duckdb = { workspace = true }
 roxmltree = "0.20"
+parking_lot = { workspace = true }
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -4,6 +4,8 @@ use crate::config::ServerConfig;
 use crate::services::gc::GcService;
 use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
+use crate::services::site_registry::SiteRegistry;
+use crate::services::website_domains::WebsiteDomainStore;
 use myfsio_auth::iam::IamService;
 use myfsio_crypto::encryption::EncryptionService;
 use myfsio_crypto::kms::KmsService;
@@ -19,6 +21,8 @@ pub struct AppState {
     pub gc: Option<Arc<GcService>>,
     pub integrity: Option<Arc<IntegrityService>>,
     pub metrics: Option<Arc<MetricsService>>,
+    pub site_registry: Option<Arc<SiteRegistry>>,
+    pub website_domains: Option<Arc<WebsiteDomainStore>>,
 }
 
 impl AppState {
@@ -57,6 +61,14 @@ impl AppState {
             None
         };
 
+        let site_registry = Some(Arc::new(SiteRegistry::new(&config.storage_root)));
+
+        let website_domains = if config.website_hosting_enabled {
+            Some(Arc::new(WebsiteDomainStore::new(&config.storage_root)))
+        } else {
+            None
+        };
+
         Self {
             config,
             storage,
@@ -66,6 +78,8 @@ impl AppState {
             gc,
             integrity,
             metrics,
+            site_registry,
+            website_domains,
         }
     }
 

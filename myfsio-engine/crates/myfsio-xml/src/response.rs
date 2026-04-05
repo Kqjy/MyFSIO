@@ -1,7 +1,12 @@
+use chrono::{DateTime, Utc};
 use myfsio_common::types::{BucketMeta, ObjectMeta};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
 use std::io::Cursor;
+
+pub fn format_s3_datetime(dt: &DateTime<Utc>) -> String {
+    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
 
 pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
@@ -21,7 +26,7 @@ pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]
     for bucket in buckets {
         writer.write_event(Event::Start(BytesStart::new("Bucket"))).unwrap();
         write_text_element(&mut writer, "Name", &bucket.name);
-        write_text_element(&mut writer, "CreationDate", &bucket.creation_date.to_rfc3339());
+        write_text_element(&mut writer, "CreationDate", &format_s3_datetime(&bucket.creation_date));
         writer.write_event(Event::End(BytesEnd::new("Bucket"))).unwrap();
     }
     writer.write_event(Event::End(BytesEnd::new("Buckets"))).unwrap();
@@ -70,7 +75,7 @@ pub fn list_objects_v2_xml(
     for obj in objects {
         writer.write_event(Event::Start(BytesStart::new("Contents"))).unwrap();
         write_text_element(&mut writer, "Key", &obj.key);
-        write_text_element(&mut writer, "LastModified", &obj.last_modified.to_rfc3339());
+        write_text_element(&mut writer, "LastModified", &format_s3_datetime(&obj.last_modified));
         if let Some(ref etag) = obj.etag {
             write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
         }
@@ -133,7 +138,7 @@ pub fn list_objects_v1_xml(
             .write_event(Event::Start(BytesStart::new("Contents")))
             .unwrap();
         write_text_element(&mut writer, "Key", &obj.key);
-        write_text_element(&mut writer, "LastModified", &obj.last_modified.to_rfc3339());
+        write_text_element(&mut writer, "LastModified", &format_s3_datetime(&obj.last_modified));
         if let Some(ref etag) = obj.etag {
             write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
         }
@@ -268,7 +273,7 @@ pub fn list_multipart_uploads_xml(
         writer.write_event(Event::Start(BytesStart::new("Upload"))).unwrap();
         write_text_element(&mut writer, "Key", &upload.key);
         write_text_element(&mut writer, "UploadId", &upload.upload_id);
-        write_text_element(&mut writer, "Initiated", &upload.initiated.to_rfc3339());
+        write_text_element(&mut writer, "Initiated", &format_s3_datetime(&upload.initiated));
         writer.write_event(Event::End(BytesEnd::new("Upload"))).unwrap();
     }
 
@@ -299,7 +304,7 @@ pub fn list_parts_xml(
         write_text_element(&mut writer, "ETag", &format!("\"{}\"", part.etag));
         write_text_element(&mut writer, "Size", &part.size.to_string());
         if let Some(ref lm) = part.last_modified {
-            write_text_element(&mut writer, "LastModified", &lm.to_rfc3339());
+            write_text_element(&mut writer, "LastModified", &format_s3_datetime(lm));
         }
         writer.write_event(Event::End(BytesEnd::new("Part"))).unwrap();
     }

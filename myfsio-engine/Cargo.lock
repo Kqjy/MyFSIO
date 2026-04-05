@@ -1513,6 +1513,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1566,8 +1567,10 @@ dependencies = [
  "myfsio-crypto",
  "myfsio-storage",
  "myfsio-xml",
+ "parking_lot",
  "percent-encoding",
  "quick-xml",
+ "regex",
  "roxmltree",
  "serde",
  "serde_json",

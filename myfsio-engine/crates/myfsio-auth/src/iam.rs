@@ -33,6 +33,58 @@ pub struct IamUser {
     pub policies: Vec<IamPolicy>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct RawIamConfig {
+    #[serde(default)]
+    pub users: Vec<RawIamUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawIamUser {
+    pub user_id: Option<String>,
+    pub display_name: Option<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    #[serde(default)]
+    pub access_keys: Vec<AccessKey>,
+    #[serde(default)]
+    pub policies: Vec<IamPolicy>,
+}
+
+impl RawIamUser {
+    fn normalize(self) -> IamUser {
+        let mut access_keys = self.access_keys;
+        if access_keys.is_empty() {
+            if let (Some(ak), Some(sk)) = (self.access_key, self.secret_key) {
+                access_keys.push(AccessKey {
+                    access_key: ak,
+                    secret_key: sk,
+                    status: "active".to_string(),
+                    created_at: None,
+                });
+            }
+        }
+        let display_name = self.display_name.unwrap_or_else(|| {
+            access_keys.first().map(|k| k.access_key.clone()).unwrap_or_else(|| "unknown".to_string())
+        });
+        let user_id = self.user_id.unwrap_or_else(|| {
+            format!("u-{}", display_name.to_ascii_lowercase().replace(' ', "-"))
+        });
+        IamUser {
+            user_id,
+            display_name,
+            enabled: self.enabled,
+            expires_at: self.expires_at,
+            access_keys,
+            policies: self.policies,
+        }
+    }
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -166,7 +218,7 @@ impl IamService {
             content
         };
 
-        let config: IamConfig = match serde_json::from_str(&raw) {
+        let raw_config: RawIamConfig = match serde_json::from_str(&raw) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to parse IAM config: {}", e);
@@ -174,12 +226,14 @@ impl IamService {
             }
         };
 
+        let users: Vec<IamUser> = raw_config.users.into_iter().map(|u| u.normalize()).collect();
+
         let mut key_secrets = HashMap::new();
         let mut key_index = HashMap::new();
         let mut key_status = HashMap::new();
         let mut user_records = HashMap::new();
 
-        for user in &config.users {
+        for user in &users {
             user_records.insert(user.user_id.clone(), user.clone());
             for ak in &user.access_keys {
                 key_secrets.insert(ak.access_key.clone(), ak.secret_key.clone());
@@ -201,7 +255,7 @@ impl IamService {
         state.last_check = Instant::now();
 
         tracing::info!("IAM config reloaded: {} users, {} keys",
-            config.users.len(),
+            users.len(),
             state.key_secrets.len());
     }
 
@@ -384,8 +438,12 @@ impl IamService {
         let content = std::fs::read_to_string(&self.config_path)
             .map_err(|e| format!("Failed to read IAM config: {}", e))?;
 
-        let mut config: IamConfig = serde_json::from_str(&content)
+        let raw: RawIamConfig = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
+        let mut config = IamConfig {
+            version: 2,
+            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
+        };
 
         let user = config
             .users
@@ -397,6 +455,99 @@ impl IamService {
             .ok_or_else(|| "User not found".to_string())?;
 
         user.enabled = enabled;
+
+        let json = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
+        std::fs::write(&self.config_path, json)
+            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
+
+        self.reload();
+        Ok(())
+    }
+
+    pub fn get_user_policies(&self, identifier: &str) -> Option<Vec<serde_json::Value>> {
+        self.reload_if_needed();
+        let state = self.state.read();
+        let user = state
+            .user_records
+            .get(identifier)
+            .or_else(|| {
+                state.key_index.get(identifier).and_then(|uid| state.user_records.get(uid))
+            })?;
+        Some(
+            user.policies
+                .iter()
+                .map(|p| serde_json::to_value(p).unwrap_or_default())
+                .collect(),
+        )
+    }
+
+    pub fn create_access_key(&self, identifier: &str) -> Result<serde_json::Value, String> {
+        let content = std::fs::read_to_string(&self.config_path)
+            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
+        let raw: RawIamConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
+        let mut config = IamConfig {
+            version: 2,
+            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
+        };
+
+        let user = config
+            .users
+            .iter_mut()
+            .find(|u| {
+                u.user_id == identifier
+                    || u.access_keys.iter().any(|k| k.access_key == identifier)
+            })
+            .ok_or_else(|| format!("User '{}' not found", identifier))?;
+
+        let new_ak = format!("AK{}", uuid::Uuid::new_v4().simple());
+        let new_sk = format!("SK{}", uuid::Uuid::new_v4().simple());
+
+        let key = AccessKey {
+            access_key: new_ak.clone(),
+            secret_key: new_sk.clone(),
+            status: "active".to_string(),
+            created_at: Some(chrono::Utc::now().to_rfc3339()),
+        };
+        user.access_keys.push(key);
+
+        let json = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
+        std::fs::write(&self.config_path, json)
+            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
+
+        self.reload();
+        Ok(serde_json::json!({
+            "access_key": new_ak,
+            "secret_key": new_sk,
+        }))
+    }
+
+    pub fn delete_access_key(&self, access_key: &str) -> Result<(), String> {
+        let content = std::fs::read_to_string(&self.config_path)
+            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
+        let raw: RawIamConfig = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
+        let mut config = IamConfig {
+            version: 2,
+            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
+        };
+
+        let mut found = false;
+        for user in &mut config.users {
+            if user.access_keys.iter().any(|k| k.access_key == access_key) {
+                if user.access_keys.len() <= 1 {
+                    return Err("Cannot delete the last access key".to_string());
+                }
+                user.access_keys.retain(|k| k.access_key != access_key);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(format!("Access key '{}' not found", access_key));
+        }
 
         let json = serde_json::to_string_pretty(&config)
             .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
@@ -577,6 +728,31 @@ mod tests {
 
         let svc = IamService::new(tmp.path().to_path_buf());
         assert!(svc.get_secret_key("INACTIVE_KEY").is_none());
+    }
+
+    #[test]
+    fn test_v1_flat_format() {
+        let json = serde_json::json!({
+            "users": [{
+                "access_key": "test",
+                "secret_key": "secret",
+                "display_name": "Test User",
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            }]
+        })
+        .to_string();
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(json.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+
+        let svc = IamService::new(tmp.path().to_path_buf());
+        let secret = svc.get_secret_key("test");
+        assert_eq!(secret.unwrap(), "secret");
+
+        let principal = svc.get_principal("test").unwrap();
+        assert_eq!(principal.display_name, "Test User");
+        assert!(principal.is_admin);
     }
 
     #[test]

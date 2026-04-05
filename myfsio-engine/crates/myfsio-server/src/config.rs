@@ -17,6 +17,7 @@ pub struct ServerConfig {
     pub integrity_enabled: bool,
     pub metrics_enabled: bool,
     pub lifecycle_enabled: bool,
+    pub website_hosting_enabled: bool,
 }
 
 impl ServerConfig {
@@ -91,6 +92,10 @@ impl ServerConfig {
             .unwrap_or_else(|_| "false".to_string())
             .to_lowercase() == "true";
 
+        let website_hosting_enabled = std::env::var("WEBSITE_HOSTING_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase() == "true";
+
         Self {
             bind_addr: SocketAddr::new(host.parse().unwrap(), port),
             storage_root: storage_path,
@@ -106,6 +111,7 @@ impl ServerConfig {
             integrity_enabled,
             metrics_enabled,
             lifecycle_enabled,
+            website_hosting_enabled,
         }
     }
 }
