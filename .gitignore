@@ -27,11 +27,11 @@ dist/
 .eggs/
 
 # Rust / maturin build artifacts
-myfsio_core/target/
-myfsio_core/Cargo.lock
+python/myfsio_core/target/
+python/myfsio_core/Cargo.lock
 
 # Rust engine build artifacts
-myfsio-engine/target/
+rust/myfsio-engine/target/
 
 # Local runtime artifacts
 logs/

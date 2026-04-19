@@ -1,0 +1,9 @@
+.git
+.gitignore
+logs
+data
+tmp
+myfsio-engine/target
+myfsio-engine/tests
+Dockerfile
+.dockerignore
