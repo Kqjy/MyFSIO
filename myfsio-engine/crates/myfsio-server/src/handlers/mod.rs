@@ -1,7 +1,10 @@
 pub mod admin;
+mod chunked;
 mod config;
 pub mod kms;
 mod select;
+pub mod ui;
+pub mod ui_pages;
 
 use std::collections::HashMap;
 
@@ -347,10 +350,17 @@ pub async fn post_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     if query.delete.is_some() {
         return delete_objects_handler(&state, &bucket, body).await;
+    }
+
+    if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
+        if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
+            return post_object_form_handler(&state, &bucket, ct, body).await;
+        }
     }
 
     (StatusCode::METHOD_NOT_ALLOWED).into_response()
@@ -479,6 +489,21 @@ fn guessed_content_type(key: &str, explicit: Option<&str>) -> String {
         })
 }
 
+fn is_aws_chunked(headers: &HeaderMap) -> bool {
+    if let Some(enc) = headers.get("content-encoding").and_then(|v| v.to_str().ok()) {
+        if enc.to_ascii_lowercase().contains("aws-chunked") {
+            return true;
+        }
+    }
+    if let Some(sha) = headers.get("x-amz-content-sha256").and_then(|v| v.to_str().ok()) {
+        let lower = sha.to_ascii_lowercase();
+        if lower.starts_with("streaming-") {
+            return true;
+        }
+    }
+    false
+}
+
 fn insert_content_type(headers: &mut HeaderMap, key: &str, explicit: Option<&str>) {
     let value = guessed_content_type(key, explicit);
     if let Ok(header_value) = value.parse() {
@@ -510,7 +535,30 @@ pub async fn put_object(
 
     if let Some(ref upload_id) = query.upload_id {
         if let Some(part_number) = query.part_number {
-            return upload_part_handler(&state, &bucket, upload_id, part_number, body).await;
+            if let Some(copy_source) = headers.get("x-amz-copy-source").and_then(|v| v.to_str().ok()) {
+                let range = headers
+                    .get("x-amz-copy-source-range")
+                    .and_then(|v| v.to_str().ok());
+                return upload_part_copy_handler(
+                    &state,
+                    &bucket,
+                    upload_id,
+                    part_number,
+                    copy_source,
+                    range,
+                    &headers,
+                )
+                .await;
+            }
+            return upload_part_handler_with_chunking(
+                &state,
+                &bucket,
+                upload_id,
+                part_number,
+                body,
+                is_aws_chunked(&headers),
+            )
+            .await;
         }
     }
 
@@ -537,12 +585,16 @@ pub async fn put_object(
         }
     }
 
-    let stream = tokio_util::io::StreamReader::new(
-        http_body_util::BodyStream::new(body).map_ok(|frame| {
-            frame.into_data().unwrap_or_default()
-        }).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
-    );
-    let boxed: myfsio_storage::traits::AsyncReadStream = Box::pin(stream);
+    let boxed: myfsio_storage::traits::AsyncReadStream = if is_aws_chunked(&headers) {
+        Box::pin(chunked::decode_body(body))
+    } else {
+        let stream = tokio_util::io::StreamReader::new(
+            http_body_util::BodyStream::new(body).map_ok(|frame| {
+                frame.into_data().unwrap_or_default()
+            }).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+        );
+        Box::pin(stream)
+    };
 
     match state.storage.put_object(&bucket, &key, boxed, Some(metadata)).await {
         Ok(meta) => {
@@ -782,6 +834,9 @@ pub async fn delete_object(
     if query.tagging.is_some() {
         return config::delete_object_tagging(&state, &bucket, &key).await;
     }
+    if query.acl.is_some() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
 
     if let Some(ref upload_id) = query.upload_id {
         return abort_multipart_handler(&state, &bucket, upload_id).await;
@@ -848,19 +903,24 @@ async fn initiate_multipart_handler(
     }
 }
 
-async fn upload_part_handler(
+async fn upload_part_handler_with_chunking(
     state: &AppState,
     bucket: &str,
     upload_id: &str,
     part_number: u32,
     body: Body,
+    aws_chunked: bool,
 ) -> Response {
-    let stream = tokio_util::io::StreamReader::new(
-        http_body_util::BodyStream::new(body).map_ok(|frame| {
-            frame.into_data().unwrap_or_default()
-        }).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
-    );
-    let boxed: myfsio_storage::traits::AsyncReadStream = Box::pin(stream);
+    let boxed: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
+        Box::pin(chunked::decode_body(body))
+    } else {
+        let stream = tokio_util::io::StreamReader::new(
+            http_body_util::BodyStream::new(body).map_ok(|frame| {
+                frame.into_data().unwrap_or_default()
+            }).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+        );
+        Box::pin(stream)
+    };
 
     match state.storage.upload_part(bucket, upload_id, part_number, boxed).await {
         Ok(etag) => {
@@ -870,6 +930,89 @@ async fn upload_part_handler(
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+async fn upload_part_copy_handler(
+    state: &AppState,
+    dst_bucket: &str,
+    upload_id: &str,
+    part_number: u32,
+    copy_source: &str,
+    range_header: Option<&str>,
+    headers: &HeaderMap,
+) -> Response {
+    let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
+    let source = match percent_encoding::percent_decode_str(source).decode_utf8() {
+        Ok(s) => s.into_owned(),
+        Err(_) => {
+            return s3_error_response(S3Error::new(
+                myfsio_common::error::S3ErrorCode::InvalidArgument,
+                "Invalid x-amz-copy-source encoding",
+            ));
+        }
+    };
+    let (src_bucket, src_key) = match source.split_once('/') {
+        Some((b, k)) => (b.to_string(), k.to_string()),
+        None => {
+            return s3_error_response(S3Error::new(
+                myfsio_common::error::S3ErrorCode::InvalidArgument,
+                "Invalid x-amz-copy-source",
+            ));
+        }
+    };
+
+    let source_meta = match state.storage.head_object(&src_bucket, &src_key).await {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
+    };
+    if let Some(resp) = evaluate_copy_preconditions(headers, &source_meta) {
+        return resp;
+    }
+
+    let range = match range_header {
+        Some(r) => match parse_copy_source_range(r) {
+            Some(parsed) => Some(parsed),
+            None => {
+                return s3_error_response(S3Error::new(
+                    myfsio_common::error::S3ErrorCode::InvalidArgument,
+                    "Invalid x-amz-copy-source-range",
+                ));
+            }
+        },
+        None => None,
+    };
+
+    match state
+        .storage
+        .upload_part_copy(
+            dst_bucket,
+            upload_id,
+            part_number,
+            &src_bucket,
+            &src_key,
+            range,
+        )
+        .await
+    {
+        Ok((etag, last_modified)) => {
+            let lm = myfsio_xml::response::format_s3_datetime(&last_modified);
+            let xml = myfsio_xml::response::copy_part_result_xml(&etag, &lm);
+            (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+        }
+        Err(e) => storage_err_response(e),
+    }
+}
+
+fn parse_copy_source_range(value: &str) -> Option<(u64, u64)> {
+    let v = value.trim();
+    let v = v.strip_prefix("bytes=")?;
+    let (start, end) = v.split_once('-')?;
+    let start: u64 = start.trim().parse().ok()?;
+    let end: u64 = end.trim().parse().ok()?;
+    if start > end {
+        return None;
+    }
+    Some((start, end))
 }
 
 async fn complete_multipart_handler(
@@ -1395,4 +1538,322 @@ fn extract_sse_c_key(headers: &HeaderMap) -> Option<Vec<u8>> {
         .get("x-amz-server-side-encryption-customer-key")
         .and_then(|v| v.to_str().ok())?;
     B64.decode(key_b64).ok()
+}
+
+async fn post_object_form_handler(
+    state: &AppState,
+    bucket: &str,
+    content_type: &str,
+    body: Body,
+) -> Response {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use futures::TryStreamExt;
+
+    if !state.storage.bucket_exists(bucket).await.unwrap_or(false) {
+        return s3_error_response(S3Error::from_code(S3ErrorCode::NoSuchBucket));
+    }
+
+    let boundary = match multer::parse_boundary(content_type) {
+        Ok(b) => b,
+        Err(_) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing multipart boundary",
+            ));
+        }
+    };
+
+    let stream = http_body_util::BodyStream::new(body)
+        .map_ok(|frame| frame.into_data().unwrap_or_default())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let mut multipart = multer::Multipart::new(stream, boundary);
+
+    let mut fields: HashMap<String, String> = HashMap::new();
+    let mut file_bytes: Option<bytes::Bytes> = None;
+    let mut file_name: Option<String> = None;
+
+    while let Some(field) = match multipart.next_field().await {
+        Ok(f) => f,
+        Err(e) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::MalformedXML,
+                format!("Malformed multipart: {}", e),
+            ));
+        }
+    } {
+        let name = field.name().map(|s| s.to_string()).unwrap_or_default();
+        if name.eq_ignore_ascii_case("file") {
+            file_name = field.file_name().map(|s| s.to_string());
+            match field.bytes().await {
+                Ok(b) => file_bytes = Some(b),
+                Err(e) => {
+                    return s3_error_response(S3Error::new(
+                        S3ErrorCode::InternalError,
+                        format!("Failed to read file: {}", e),
+                    ));
+                }
+            }
+        } else if !name.is_empty() {
+            match field.text().await {
+                Ok(t) => {
+                    fields.insert(name, t);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    let key_template = match fields.get("key").cloned() {
+        Some(k) => k,
+        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing key field")),
+    };
+    let policy_b64 = match fields.get("policy").cloned() {
+        Some(v) => v,
+        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing policy field")),
+    };
+    let signature = match fields
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-amz-signature"))
+        .map(|(_, v)| v.clone())
+    {
+        Some(v) => v,
+        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing signature")),
+    };
+    let credential = match fields
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-amz-credential"))
+        .map(|(_, v)| v.clone())
+    {
+        Some(v) => v,
+        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing credential")),
+    };
+    let algorithm = match fields
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-amz-algorithm"))
+        .map(|(_, v)| v.clone())
+    {
+        Some(v) => v,
+        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing algorithm")),
+    };
+    if algorithm != "AWS4-HMAC-SHA256" {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Unsupported signing algorithm",
+        ));
+    }
+
+    let policy_bytes = match B64.decode(policy_b64.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidPolicyDocument,
+                format!("Invalid policy base64: {}", e),
+            ));
+        }
+    };
+    let policy_value: serde_json::Value = match serde_json::from_slice(&policy_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidPolicyDocument,
+                format!("Invalid policy JSON: {}", e),
+            ));
+        }
+    };
+
+    if let Some(exp) = policy_value.get("expiration").and_then(|v| v.as_str()) {
+        let normalized = exp.replace('Z', "+00:00");
+        match chrono::DateTime::parse_from_rfc3339(&normalized) {
+            Ok(exp_time) => {
+                if Utc::now() > exp_time.with_timezone(&Utc) {
+                    return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, "Policy expired"));
+                }
+            }
+            Err(_) => {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidPolicyDocument,
+                    "Invalid expiration format",
+                ));
+            }
+        }
+    }
+
+    let content_length = file_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+    let object_key = if key_template.contains("${filename}") {
+        let fname = file_name.clone().unwrap_or_else(|| "upload".to_string());
+        key_template.replace("${filename}", &fname)
+    } else {
+        key_template.clone()
+    };
+
+    if let Some(conditions) = policy_value.get("conditions").and_then(|v| v.as_array()) {
+        if let Err(msg) = validate_post_policy_conditions(bucket, &object_key, conditions, &fields, content_length) {
+            return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, msg));
+        }
+    }
+
+    let credential_parts: Vec<&str> = credential.split('/').collect();
+    if credential_parts.len() != 5 {
+        return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Invalid credential format"));
+    }
+    let access_key = credential_parts[0];
+    let date_stamp = credential_parts[1];
+    let region = credential_parts[2];
+    let service = credential_parts[3];
+
+    let secret_key = match state.iam.get_secret_key(access_key) {
+        Some(s) => s,
+        None => return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, "Invalid access key")),
+    };
+    let signing_key = myfsio_auth::sigv4::derive_signing_key(&secret_key, date_stamp, region, service);
+    let expected = myfsio_auth::sigv4::compute_post_policy_signature(&signing_key, &policy_b64);
+    if !myfsio_auth::sigv4::constant_time_compare(&expected, &signature) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "Signature verification failed",
+        ));
+    }
+
+    let file_data = match file_bytes {
+        Some(b) => b,
+        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing file field")),
+    };
+
+    let mut metadata = HashMap::new();
+    for (k, v) in &fields {
+        let lower = k.to_ascii_lowercase();
+        if let Some(meta_key) = lower.strip_prefix("x-amz-meta-") {
+            if !meta_key.is_empty() && !(meta_key.starts_with("__") && meta_key.ends_with("__")) {
+                metadata.insert(meta_key.to_string(), v.clone());
+            }
+        }
+    }
+    let content_type_value = fields
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.clone());
+    metadata.insert(
+        "__content_type__".to_string(),
+        guessed_content_type(&object_key, content_type_value.as_deref()),
+    );
+
+    let cursor = std::io::Cursor::new(file_data.to_vec());
+    let boxed: myfsio_storage::traits::AsyncReadStream = Box::pin(cursor);
+
+    let meta = match state.storage.put_object(bucket, &object_key, boxed, Some(metadata)).await {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
+    };
+
+    let etag = meta.etag.as_deref().unwrap_or("");
+    let success_status = fields
+        .get("success_action_status")
+        .cloned()
+        .unwrap_or_else(|| "204".to_string());
+    let location = format!("/{}/{}", bucket, object_key);
+    let xml = myfsio_xml::response::post_object_result_xml(&location, bucket, &object_key, etag);
+
+    let status = match success_status.as_str() {
+        "200" => StatusCode::OK,
+        "201" => StatusCode::CREATED,
+        _ => {
+            let mut hdrs = HeaderMap::new();
+            hdrs.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+            return (StatusCode::NO_CONTENT, hdrs).into_response();
+        }
+    };
+
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert("content-type", "application/xml".parse().unwrap());
+    hdrs.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+    (status, hdrs, xml).into_response()
+}
+
+fn validate_post_policy_conditions(
+    bucket: &str,
+    object_key: &str,
+    conditions: &[serde_json::Value],
+    form: &HashMap<String, String>,
+    content_length: u64,
+) -> Result<(), String> {
+    for cond in conditions {
+        if let Some(obj) = cond.as_object() {
+            for (k, v) in obj {
+                let expected = v.as_str().unwrap_or("");
+                match k.as_str() {
+                    "bucket" => {
+                        if bucket != expected {
+                            return Err(format!("Bucket must be {}", expected));
+                        }
+                    }
+                    "key" => {
+                        if object_key != expected {
+                            return Err(format!("Key must be {}", expected));
+                        }
+                    }
+                    other => {
+                        let actual = form
+                            .iter()
+                            .find(|(fk, _)| fk.eq_ignore_ascii_case(other))
+                            .map(|(_, fv)| fv.as_str())
+                            .unwrap_or("");
+                        if actual != expected {
+                            return Err(format!("Field {} must be {}", other, expected));
+                        }
+                    }
+                }
+            }
+        } else if let Some(arr) = cond.as_array() {
+            if arr.len() < 2 {
+                continue;
+            }
+            let op = arr[0].as_str().unwrap_or("").to_ascii_lowercase();
+            if op == "starts-with" && arr.len() == 3 {
+                let field = arr[1].as_str().unwrap_or("").trim_start_matches('$');
+                let prefix = arr[2].as_str().unwrap_or("");
+                if field == "key" {
+                    if !object_key.starts_with(prefix) {
+                        return Err(format!("Key must start with {}", prefix));
+                    }
+                } else {
+                    let actual = form
+                        .iter()
+                        .find(|(fk, _)| fk.eq_ignore_ascii_case(field))
+                        .map(|(_, fv)| fv.as_str())
+                        .unwrap_or("");
+                    if !actual.starts_with(prefix) {
+                        return Err(format!("Field {} must start with {}", field, prefix));
+                    }
+                }
+            } else if op == "eq" && arr.len() == 3 {
+                let field = arr[1].as_str().unwrap_or("").trim_start_matches('$');
+                let expected = arr[2].as_str().unwrap_or("");
+                if field == "key" {
+                    if object_key != expected {
+                        return Err(format!("Key must equal {}", expected));
+                    }
+                } else {
+                    let actual = form
+                        .iter()
+                        .find(|(fk, _)| fk.eq_ignore_ascii_case(field))
+                        .map(|(_, fv)| fv.as_str())
+                        .unwrap_or("");
+                    if actual != expected {
+                        return Err(format!("Field {} must equal {}", field, expected));
+                    }
+                }
+            } else if op == "content-length-range" && arr.len() == 3 {
+                let min = arr[1].as_i64().unwrap_or(0) as u64;
+                let max = arr[2].as_i64().unwrap_or(0) as u64;
+                if content_length < min || content_length > max {
+                    return Err(format!(
+                        "Content length must be between {} and {}",
+                        min, max
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }

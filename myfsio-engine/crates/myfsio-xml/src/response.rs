@@ -207,6 +207,36 @@ pub fn complete_multipart_upload_xml(
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
+pub fn copy_part_result_xml(etag: &str, last_modified: &str) -> String {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+
+    let start = BytesStart::new("CopyPartResult")
+        .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
+    writer.write_event(Event::Start(start)).unwrap();
+    write_text_element(&mut writer, "LastModified", last_modified);
+    write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
+    writer.write_event(Event::End(BytesEnd::new("CopyPartResult"))).unwrap();
+
+    String::from_utf8(writer.into_inner().into_inner()).unwrap()
+}
+
+pub fn post_object_result_xml(location: &str, bucket: &str, key: &str, etag: &str) -> String {
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+
+    let start = BytesStart::new("PostResponse")
+        .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
+    writer.write_event(Event::Start(start)).unwrap();
+    write_text_element(&mut writer, "Location", location);
+    write_text_element(&mut writer, "Bucket", bucket);
+    write_text_element(&mut writer, "Key", key);
+    write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
+    writer.write_event(Event::End(BytesEnd::new("PostResponse"))).unwrap();
+
+    String::from_utf8(writer.into_inner().into_inner()).unwrap()
+}
+
 pub fn copy_object_result_xml(etag: &str, last_modified: &str) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();

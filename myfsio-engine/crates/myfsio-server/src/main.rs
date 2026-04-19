@@ -1,9 +1,32 @@
+use clap::{Parser, Subcommand};
 use myfsio_server::config::ServerConfig;
 use myfsio_server::state::AppState;
+
+#[derive(Parser)]
+#[command(name = "myfsio", version, about = "MyFSIO S3-compatible storage engine")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Serve,
+    Version,
+}
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
+
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Version => {
+            println!("myfsio {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Command::Serve => {}
+    }
 
     let config = ServerConfig::from_env();
     let bind_addr = config.bind_addr;
@@ -12,13 +35,14 @@ async fn main() {
     tracing::info!("Storage root: {}", config.storage_root.display());
     tracing::info!("Region: {}", config.region);
     tracing::info!(
-        "Encryption: {}, KMS: {}, GC: {}, Lifecycle: {}, Integrity: {}, Metrics: {}",
+        "Encryption: {}, KMS: {}, GC: {}, Lifecycle: {}, Integrity: {}, Metrics: {}, UI: {}",
         config.encryption_enabled,
         config.kms_enabled,
         config.gc_enabled,
         config.lifecycle_enabled,
         config.integrity_enabled,
-        config.metrics_enabled
+        config.metrics_enabled,
+        config.ui_enabled
     );
 
     let state = if config.encryption_enabled || config.kms_enabled {
@@ -53,6 +77,14 @@ async fn main() {
         );
         bg_handles.push(lifecycle.start_background());
         tracing::info!("Lifecycle manager background service started");
+    }
+
+    if let Some(ref site_sync) = state.site_sync {
+        let worker = site_sync.clone();
+        bg_handles.push(tokio::spawn(async move {
+            worker.run().await;
+        }));
+        tracing::info!("Site sync worker started");
     }
 
     let app = myfsio_server::create_router(state);

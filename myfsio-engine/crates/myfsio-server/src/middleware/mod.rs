@@ -1,6 +1,8 @@
 mod auth;
+pub mod session;
 
 pub use auth::auth_layer;
+pub use session::{csrf_layer, session_layer, SessionHandle, SessionLayerState};
 
 use axum::extract::Request;
 use axum::middleware::Next;

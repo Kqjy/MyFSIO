@@ -76,6 +76,16 @@ pub trait StorageEngine: Send + Sync {
         stream: AsyncReadStream,
     ) -> StorageResult<String>;
 
+    async fn upload_part_copy(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+        src_bucket: &str,
+        src_key: &str,
+        range: Option<(u64, u64)>,
+    ) -> StorageResult<(String, chrono::DateTime<chrono::Utc>)>;
+
     async fn complete_multipart(
         &self,
         bucket: &str,

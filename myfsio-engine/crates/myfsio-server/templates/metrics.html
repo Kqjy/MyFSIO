@@ -1,0 +1,1159 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h1 class="h3 mb-1 fw-bold">Metrics</h1>
+    <p class="text-muted mb-0">Server performance, API operations, and historical trends</p>
+  </div>
+  <div class="d-flex gap-2 align-items-center flex-shrink-0">
+    <span class="d-flex align-items-center gap-1 text-muted small me-1" id="metricsLiveIndicator">
+      <span class="live-indicator" id="liveIndicatorDot"></span>
+      <span id="refreshCountdown">5</span>s
+    </span>
+    <button class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center justify-content-center" style="width: 32px; height: 32px; padding: 0;" id="pauseBtn" title="Pause auto-refresh">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" id="pauseIcon">
+        <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+      </svg>
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" id="playIcon" class="d-none">
+        <path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/>
+      </svg>
+    </button>
+    <div class="dropdown">
+      <button class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center justify-content-center" style="width: 32px; height: 32px; padding: 0;" type="button" data-bs-toggle="dropdown" title="Export metrics data">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+          <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+          <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+        </svg>
+      </button>
+      <ul class="dropdown-menu dropdown-menu-end">
+        <li><a class="dropdown-item" href="#" id="exportSystem">System Metrics (JSON)</a></li>
+        {% if operation_metrics_enabled %}<li><a class="dropdown-item" href="#" id="exportOps">Operation Metrics (JSON)</a></li>{% endif %}
+        {% if metrics_history_enabled %}<li><a class="dropdown-item" href="#" id="exportHistory">History Data (JSON)</a></li>{% endif %}
+      </ul>
+    </div>
+    <button class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center justify-content-center" style="width: 32px; height: 32px; padding: 0;" id="refreshMetricsBtn" title="Refresh now">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+        <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+        <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<div id="metrics-error-banner" class="alert alert-danger d-none d-flex align-items-center mb-4" role="alert">
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+    <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
+  </svg>
+  <div>Failed to fetch metrics. The API server may be unreachable.</div>
+  <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close" style="font-size: 0.65rem;"></button>
+</div>
+
+<ul class="nav nav-tabs mb-4" id="metricsTabs" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="systemTabBtn" data-bs-toggle="tab" data-bs-target="#systemTab" type="button" role="tab">System</button>
+  </li>
+  {% if operation_metrics_enabled %}
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="opsTabBtn" data-bs-toggle="tab" data-bs-target="#operationsTab" type="button" role="tab">Operations</button>
+  </li>
+  {% endif %}
+  {% if metrics_history_enabled %}
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="historyTabBtn" data-bs-toggle="tab" data-bs-target="#historyTab" type="button" role="tab">History</button>
+  </li>
+  {% endif %}
+</ul>
+
+<div class="tab-content" id="metricsTabContent">
+
+<div class="tab-pane fade show active" id="systemTab" role="tabpanel">
+  <div class="row g-4 mb-4">
+    <div class="col-md-6 col-xl-3">
+      <div class="card shadow-sm h-100 border-0" style="border-top: 3px solid #3b82f6 !important;">
+        <div class="card-body text-center pt-3">
+          <div class="d-flex align-items-center justify-content-center gap-2 mb-3">
+            <div class="d-inline-flex align-items-center justify-content-center rounded-circle bg-primary-subtle" style="width: 28px; height: 28px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                <path d="M5 0a.5.5 0 0 1 .5.5V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2A2.5 2.5 0 0 1 14 4.5h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14a2.5 2.5 0 0 1-2.5 2.5v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14A2.5 2.5 0 0 1 2 11.5H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2A2.5 2.5 0 0 1 4.5 2V.5A.5.5 0 0 1 5 0zM6 4v8h4V4H6z"/>
+              </svg>
+            </div>
+            <h6 class="card-subtitle text-muted text-uppercase small fw-bold mb-0">CPU Usage</h6>
+          </div>
+          <div style="height: 140px; position: relative;" class="mx-auto" id="cpuGaugeWrap">
+            <canvas id="cpuGauge"></canvas>
+          </div>
+          <div class="mt-2">
+            <small data-metric="cpu_status" class="badge bg-success-subtle text-success">Normal</small>
+          </div>
+          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(59,130,246,0.04);"><canvas id="cpuSparkline"></canvas></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6 col-xl-3">
+      <div class="card shadow-sm h-100 border-0" style="border-top: 3px solid #06b6d4 !important;">
+        <div class="card-body text-center pt-3">
+          <div class="d-flex align-items-center justify-content-center gap-2 mb-3">
+            <div class="d-inline-flex align-items-center justify-content-center rounded-circle bg-info-subtle" style="width: 28px; height: 28px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-info" viewBox="0 0 16 16">
+                <path d="M1 3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h4.586a1 1 0 0 0 .707-.293l.353-.353a.5.5 0 0 1 .708 0l.353.353a1 1 0 0 0 .707.293H15a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1H1Zm.5 1h3a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-4a.5.5 0 0 1 .5-.5Zm5 0h3a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-4a.5.5 0 0 1 .5-.5Zm4.5.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-4Z"/>
+              </svg>
+            </div>
+            <h6 class="card-subtitle text-muted text-uppercase small fw-bold mb-0">Memory</h6>
+          </div>
+          <div style="height: 140px; position: relative;" class="mx-auto" id="memGaugeWrap">
+            <canvas id="memGauge"></canvas>
+          </div>
+          <div class="mt-2 d-flex justify-content-center gap-3">
+            <small class="text-muted"><span data-metric="memory_used">{{ memory.used }}</span> used</small>
+            <small class="text-muted"><span data-metric="memory_total">{{ memory.total }}</span> total</small>
+          </div>
+          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(6,182,212,0.04);"><canvas id="memSparkline"></canvas></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6 col-xl-3">
+      <div class="card shadow-sm h-100 border-0" style="border-top: 3px solid #f59e0b !important;">
+        <div class="card-body text-center pt-3">
+          <div class="d-flex align-items-center justify-content-center gap-2 mb-3">
+            <div class="d-inline-flex align-items-center justify-content-center rounded-circle bg-warning-subtle" style="width: 28px; height: 28px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+                <path d="M4.5 11a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1zM3 10.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"/>
+                <path d="M16 11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V9.51c0-.418.105-.83.305-1.197l2.472-4.531A1.5 1.5 0 0 1 4.094 3h7.812a1.5 1.5 0 0 1 1.317.782l2.472 4.53c.2.368.305.78.305 1.198V11zM3.655 4.26 1.592 8.043C1.724 8.014 1.86 8 2 8h12c.14 0 .276.014.408.042L12.345 4.26a.5.5 0 0 0-.439-.26H4.094a.5.5 0 0 0-.439.26zM1 10v1a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1z"/>
+              </svg>
+            </div>
+            <h6 class="card-subtitle text-muted text-uppercase small fw-bold mb-0">Disk Space</h6>
+          </div>
+          <div style="height: 140px; position: relative;" class="mx-auto" id="diskGaugeWrap">
+            <canvas id="diskGauge"></canvas>
+          </div>
+          <div class="mt-2 d-flex justify-content-center gap-3">
+            <small class="text-muted"><span data-metric="disk_free">{{ disk.free }}</span> free</small>
+            <small class="text-muted"><span data-metric="disk_total">{{ disk.total }}</span> total</small>
+          </div>
+          <div class="mt-2 rounded px-2 py-1" style="height: 48px; background: rgba(245,158,11,0.04);"><canvas id="diskSparkline"></canvas></div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6 col-xl-3">
+      <div class="card shadow-sm h-100 border-0" style="border-top: 3px solid #10b981 !important;">
+        <div class="card-body text-center pt-3">
+          <div class="d-flex align-items-center justify-content-center gap-2 mb-3">
+            <div class="d-inline-flex align-items-center justify-content-center rounded-circle bg-success-subtle" style="width: 28px; height: 28px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-success" viewBox="0 0 16 16">
+                <path d="M4.318 2.687C5.234 2.271 6.536 2 8 2s2.766.27 3.682.687C12.644 3.125 13 3.627 13 4c0 .374-.356.875-1.318 1.313C10.766 5.729 9.464 6 8 6s-2.766-.27-3.682-.687C3.356 4.875 3 4.373 3 4c0-.374.356-.875 1.318-1.313ZM13 5.698V7c0 .374-.356.875-1.318 1.313C10.766 8.729 9.464 9 8 9s-2.766-.27-3.682-.687C3.356 7.875 3 7.373 3 7V5.698c.271.202.58.378.904.525C4.978 6.711 6.427 7 8 7s3.022-.289 4.096-.777A4.92 4.92 0 0 0 13 5.698ZM14 4c0-1.007-.875-1.755-1.904-2.223C11.022 1.289 9.573 1 8 1s-3.022.289-4.096.777C2.875 2.245 2 2.993 2 4v9c0 1.007.875 1.755 1.904 2.223C4.978 15.71 6.427 16 8 16s3.022-.289 4.096-.777C13.125 14.755 14 14.007 14 13V4Zm-1 4.698V10c0 .374-.356.875-1.318 1.313C10.766 11.729 9.464 12 8 12s-2.766-.27-3.682-.687C3.356 10.875 3 10.373 3 10V8.698c.271.202.58.378.904.525C4.978 9.71 6.427 10 8 10s3.022-.289 4.096-.777A4.92 4.92 0 0 0 13 8.698Zm0 3V13c0 .374-.356.875-1.318 1.313C10.766 14.729 9.464 15 8 15s-2.766-.27-3.682-.687C3.356 13.875 3 13.373 3 13v-1.302c.271.202.58.378.904.525C4.978 12.71 6.427 13 8 13s3.022-.289 4.096-.777c.324-.147.633-.323.904-.525Z"/>
+              </svg>
+            </div>
+            <h6 class="card-subtitle text-muted text-uppercase small fw-bold mb-0">Storage</h6>
+          </div>
+          <div class="d-flex flex-column align-items-center justify-content-center" style="height: 140px;">
+            <h2 class="display-6 fw-bold mb-1" style="color: #10b981;" data-metric="storage_used">{{ app.storage_used }}</h2>
+            <div class="d-flex gap-4">
+              <div class="text-center">
+                <div class="h5 fw-bold mb-0" data-metric="buckets_count">{{ app.buckets }}</div>
+                <small class="text-muted">Buckets</small>
+              </div>
+              <div class="vr"></div>
+              <div class="text-center">
+                <div class="h5 fw-bold mb-0" data-metric="objects_count">{{ app.objects }}</div>
+                <small class="text-muted">Objects</small>
+              </div>
+            </div>
+          </div>
+          <div class="mt-3 rounded px-2 py-1" style="height: 48px; background: rgba(16,185,129,0.04);">
+            <div class="d-flex align-items-center justify-content-around h-100 small">
+              <div class="d-flex align-items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-success opacity-50" viewBox="0 0 16 16"><path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/></svg>
+                <span class="text-muted" data-metric="buckets_count2">{{ app.buckets }}</span>
+              </div>
+              <div class="d-flex align-items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-success opacity-50" viewBox="0 0 16 16"><path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/></svg>
+                <span class="text-muted" data-metric="objects_count2">{{ app.objects }}</span>
+              </div>
+              <div class="d-flex align-items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-success opacity-50" viewBox="0 0 16 16"><path d="M12.643 15C13.979 15 15 13.845 15 12.5V5H1v7.5C1 13.845 2.021 15 3.357 15h9.286zM5.5 7a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0v-3a.5.5 0 0 1 .5-.5zm3 0a.5.5 0 0 1 .5.5v3a.5.5 0 0 1-1 0v-3a.5.5 0 0 1 .5-.5z"/><path d="M14 3a1 1 0 0 1 1 1v1H1V4a1 1 0 0 1 1-1h12z"/></svg>
+                <span class="text-muted" data-metric="versions_count2">{{ app.versions }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% set has_issues = (cpu_percent > 80) or (memory.percent > 85) or (disk.percent > 90) %}
+  <div id="healthBanner" class="card shadow-sm border-0 mb-4 overflow-hidden">
+    <div class="card-body p-3 d-flex align-items-center gap-3" id="healthBannerBody"
+         style="background: linear-gradient(135deg, {% if has_issues %}#ef4444 0%, #f97316{% else %}#3b82f6 0%, #8b5cf6{% endif %} 100%);">
+      <div class="text-white flex-grow-1 d-flex align-items-center gap-3">
+        <svg id="healthBannerIcon" xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16">
+          {% if has_issues %}
+          <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+          {% else %}
+          <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+          {% endif %}
+        </svg>
+        <div>
+          <span class="fw-semibold" id="healthTitle">{% if has_issues %}Issues Detected{% else %}All Systems Normal{% endif %}</span>
+          <span class="small opacity-75 ms-2" id="healthDetail">
+            {% if has_issues %}
+              {% if cpu_percent > 80 %}CPU {{ cpu_percent }}%{% endif %}
+              {% if memory.percent > 85 %}{% if cpu_percent > 80 %} &middot; {% endif %}Memory {{ memory.percent }}%{% endif %}
+              {% if disk.percent > 90 %}{% if cpu_percent > 80 or memory.percent > 85 %} &middot; {% endif %}Disk {{ disk.percent }}%{% endif %}
+            {% else %}
+              All resources within normal operating parameters
+            {% endif %}
+          </span>
+        </div>
+      </div>
+      <div class="d-flex gap-4 text-white text-nowrap">
+        <div class="text-center">
+          <div class="fw-bold" data-metric="health_uptime">{{ app.uptime_days }}d</div>
+          <small class="opacity-75" style="font-size: 0.7rem;">Uptime</small>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if operation_metrics_enabled %}
+<div class="tab-pane fade" id="operationsTab" role="tabpanel">
+  <div class="row g-3 mb-4">
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1" id="opTotalRequests">0</h4>
+          <small class="text-muted">Requests</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1 text-success" id="opSuccessRate">0%</h4>
+          <small class="text-muted">Success</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1 text-danger" id="opErrorCount">0</h4>
+          <small class="text-muted">Errors</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1 text-info" id="opReqPerSec">0</h4>
+          <small class="text-muted">Req/s</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1" id="opAvgLatency" style="color: #6366f1;">0ms</h4>
+          <small class="text-muted">Avg Latency</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1" id="opP95Latency" style="color: #8b5cf6;">0ms</h4>
+          <small class="text-muted">P95 Latency</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1 text-primary" id="opBytesIn">0 B</h4>
+          <small class="text-muted">Bytes In</small>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-xl">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3 text-center">
+          <h4 class="fw-bold mb-1 text-secondary" id="opBytesOut">0 B</h4>
+          <small class="text-muted">Bytes Out</small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-4 mb-4">
+    <div class="col-lg-4">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Method</h6>
+          <div style="height: 220px; display: flex; align-items: center; justify-content: center;">
+            <canvas id="methodChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Status</h6>
+          <div style="height: 220px;">
+            <canvas id="statusChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Requests by Endpoint</h6>
+          <div style="height: 220px;">
+            <canvas id="endpointChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-4 mb-4">
+    <div class="col-lg-6">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <h6 class="text-muted small fw-bold text-uppercase mb-3">Latency by Endpoint</h6>
+          <div style="height: 200px;">
+            <canvas id="latencyEndpointChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-6">
+      <div class="card shadow-sm border-0 h-100">
+        <div class="card-body p-3">
+          <div class="d-flex justify-content-between align-items-start mb-3">
+            <h6 class="text-muted small fw-bold text-uppercase mb-0">S3 Error Codes</h6>
+            <span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;">API Only</span>
+          </div>
+          <div style="min-height: 170px; max-height: 200px; overflow-y: auto;">
+            <div class="d-flex border-bottom pb-2 mb-2" style="font-size: 0.75rem;">
+              <div class="text-muted fw-semibold" style="flex: 1;">Code</div>
+              <div class="text-muted fw-semibold text-end" style="width: 60px;">Count</div>
+              <div class="text-muted fw-semibold text-end" style="width: 100px;">Distribution</div>
+            </div>
+            <div id="errorCodesBody">
+              <div class="text-muted small text-center py-4">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16">
+                  <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                  <path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/>
+                </svg>
+                <div>No S3 API errors</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-transparent border-0 pt-3 px-3 d-flex justify-content-between align-items-center">
+      <h6 class="text-muted small fw-bold text-uppercase mb-0">Operation Trends</h6>
+      <div class="d-flex align-items-center gap-3">
+        <span class="small text-muted" id="opStatus">Loading...</span>
+        <select class="form-select form-select-sm" id="opHistoryRange" style="width: auto;">
+          <option value="1">1h</option>
+          <option value="6">6h</option>
+          <option value="24" selected>24h</option>
+        </select>
+      </div>
+    </div>
+    <div class="card-body p-3">
+      <div class="row g-4">
+        <div class="col-md-6">
+          <div class="small text-muted fw-semibold mb-2">Request Rate (req/s)</div>
+          <div style="height: 180px;"><canvas id="opTrendReqRate"></canvas></div>
+        </div>
+        <div class="col-md-6">
+          <div class="small text-muted fw-semibold mb-2">Throughput (bytes/s)</div>
+          <div style="height: 180px;"><canvas id="opTrendThroughput"></canvas></div>
+        </div>
+      </div>
+      <div class="row g-4 mt-1">
+        <div class="col-md-6">
+          <div class="small text-muted fw-semibold mb-2">Average Latency (ms)</div>
+          <div style="height: 180px;"><canvas id="opTrendLatency"></canvas></div>
+        </div>
+        <div class="col-md-6">
+          <div class="small text-muted fw-semibold mb-2">Error Rate (%)</div>
+          <div style="height: 180px;"><canvas id="opTrendErrorRate"></canvas></div>
+        </div>
+      </div>
+      <p class="text-muted small mb-0 text-center mt-3" id="opTrendStatus">Loading operation history...</p>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if metrics_history_enabled %}
+<div class="tab-pane fade" id="historyTab" role="tabpanel">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <div class="d-flex gap-2 align-items-center">
+      <select class="form-select form-select-sm" id="historyTimeRange" style="width: auto;">
+        <option value="1">Last 1 hour</option>
+        <option value="6">Last 6 hours</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="168">Last 7 days</option>
+      </select>
+      <select class="form-select form-select-sm" id="maxDataPoints" style="width: auto;" title="Maximum data points">
+        <option value="100">100 pts</option>
+        <option value="250">250 pts</option>
+        <option value="500" selected>500 pts</option>
+        <option value="1000">1000 pts</option>
+        <option value="0">All</option>
+      </select>
+    </div>
+    <span class="small text-muted" id="historyStatus">Loading...</span>
+  </div>
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body p-3">
+      <h6 class="text-muted small fw-bold text-uppercase mb-3">CPU Usage</h6>
+      <div style="height: 200px;"><canvas id="cpuHistoryChart"></canvas></div>
+    </div>
+  </div>
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body p-3">
+      <h6 class="text-muted small fw-bold text-uppercase mb-3">Memory Usage</h6>
+      <div style="height: 200px;"><canvas id="memoryHistoryChart"></canvas></div>
+    </div>
+  </div>
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body p-3">
+      <h6 class="text-muted small fw-bold text-uppercase mb-3">Disk Usage</h6>
+      <div style="height: 200px;"><canvas id="diskHistoryChart"></canvas></div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+  var POLL_INTERVAL = 5000;
+  var paused = false;
+  var countdown = 5;
+  var countdownEl = document.getElementById('refreshCountdown');
+  var pauseBtn = document.getElementById('pauseBtn');
+  var pauseIcon = document.getElementById('pauseIcon');
+  var playIcon = document.getElementById('playIcon');
+  var refreshBtn = document.getElementById('refreshMetricsBtn');
+  var liveDot = document.getElementById('liveIndicatorDot');
+  var countdownTimer = null;
+  var fetchTimer = null;
+
+  var sparklineBuffers = { cpu: [], mem: [], disk: [] };
+  var SPARK_MAX = 60;
+
+  var gaugePlugin = {
+    id: 'gaugeCenter',
+    afterDraw: function(chart) {
+      if (!chart.config.options.plugins.gaugeCenter) return;
+      var opts = chart.config.options.plugins.gaugeCenter;
+      var ctx = chart.ctx;
+      var area = chart.chartArea;
+      var cx = (area.left + area.right) / 2;
+      var cy = (area.top + area.bottom) / 2;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      var isDark = document.documentElement.dataset.bsTheme === 'dark';
+      ctx.fillStyle = isDark ? '#e5e7eb' : '#1f2937';
+      if (opts.warnValue && chart.data.datasets[0].data[0] > opts.warnValue) {
+        ctx.fillStyle = '#ef4444';
+      }
+      ctx.font = 'bold 28px system-ui, -apple-system, sans-serif';
+      ctx.fillText(chart.data.datasets[0].data[0].toFixed(1) + '%', cx, cy);
+      ctx.restore();
+    }
+  };
+  Chart.register(gaugePlugin);
+
+  var gaugeBg = 'rgba(128, 128, 128, 0.08)';
+
+  function createGauge(id, value, color, warnValue) {
+    var ctx = document.getElementById(id);
+    if (!ctx) return null;
+    return new Chart(ctx, {
+      type: 'doughnut',
+      data: {
+        datasets: [{
+          data: [value, Math.max(0, 100 - value)],
+          backgroundColor: [color, gaugeBg],
+          borderWidth: 0,
+          borderRadius: 2
+        }]
+      },
+      options: {
+        cutout: '76%',
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: false },
+          gaugeCenter: { warnValue: warnValue || 999 }
+        }
+      }
+    });
+  }
+
+  function createSparkline(id, color) {
+    var ctx = document.getElementById(id);
+    if (!ctx) return null;
+    return new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          data: [],
+          borderColor: color,
+          backgroundColor: color + '15',
+          fill: true,
+          tension: 0.4,
+          pointRadius: 0,
+          borderWidth: 1.5
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { display: false },
+          y: { display: false, min: 0, max: 100 }
+        }
+      }
+    });
+  }
+
+  var cpuGauge = createGauge('cpuGauge', {{ cpu_percent }}, '#3b82f6', 80);
+  var memGauge = createGauge('memGauge', {{ memory.percent }}, '#06b6d4', 85);
+  var diskGauge = createGauge('diskGauge', {{ disk.percent }}, '#f59e0b', 90);
+
+  var cpuSpark = createSparkline('cpuSparkline', '#3b82f6');
+  var memSpark = createSparkline('memSparkline', '#06b6d4');
+  var diskSpark = createSparkline('diskSparkline', '#f59e0b');
+
+  function updateGauge(chart, value) {
+    if (!chart) return;
+    chart.data.datasets[0].data = [value, Math.max(0, 100 - value)];
+    var color = chart.data.datasets[0].backgroundColor[0];
+    chart.update('none');
+  }
+
+  function updateSparkline(chart, buffer) {
+    if (!chart) return;
+    chart.data.labels = buffer.map(function(_, i) { return i; });
+    chart.data.datasets[0].data = buffer;
+    chart.update('none');
+  }
+
+  function updateMetrics() {
+    fetch('/ui/metrics/api')
+      .then(function(resp) { return resp.json(); })
+      .then(function(data) {
+        updateGauge(cpuGauge, data.cpu_percent);
+        updateGauge(memGauge, data.memory.percent);
+        updateGauge(diskGauge, data.disk.percent);
+
+        sparklineBuffers.cpu.push(data.cpu_percent);
+        sparklineBuffers.mem.push(data.memory.percent);
+        sparklineBuffers.disk.push(data.disk.percent);
+        if (sparklineBuffers.cpu.length > SPARK_MAX) sparklineBuffers.cpu.shift();
+        if (sparklineBuffers.mem.length > SPARK_MAX) sparklineBuffers.mem.shift();
+        if (sparklineBuffers.disk.length > SPARK_MAX) sparklineBuffers.disk.shift();
+        updateSparkline(cpuSpark, sparklineBuffers.cpu);
+        updateSparkline(memSpark, sparklineBuffers.mem);
+        updateSparkline(diskSpark, sparklineBuffers.disk);
+
+        var el;
+        el = document.querySelector('[data-metric="cpu_status"]');
+        if (el) {
+          if (data.cpu_percent > 80) { el.textContent = 'High'; el.className = 'badge bg-danger-subtle text-danger'; }
+          else if (data.cpu_percent > 50) { el.textContent = 'Medium'; el.className = 'badge bg-warning-subtle text-warning'; }
+          else { el.textContent = 'Normal'; el.className = 'badge bg-success-subtle text-success'; }
+        }
+
+        el = document.querySelector('[data-metric="memory_used"]');
+        if (el) el.textContent = data.memory.used;
+        el = document.querySelector('[data-metric="memory_total"]');
+        if (el) el.textContent = data.memory.total;
+        el = document.querySelector('[data-metric="disk_free"]');
+        if (el) el.textContent = data.disk.free;
+        el = document.querySelector('[data-metric="disk_total"]');
+        if (el) el.textContent = data.disk.total;
+        el = document.querySelector('[data-metric="storage_used"]');
+        if (el) el.textContent = data.app.storage_used;
+        el = document.querySelector('[data-metric="buckets_count"]');
+        if (el) el.textContent = data.app.buckets;
+        el = document.querySelector('[data-metric="objects_count"]');
+        if (el) el.textContent = data.app.objects;
+        el = document.querySelector('[data-metric="versions_count"]');
+        if (el) el.textContent = data.app.versions;
+        el = document.querySelector('[data-metric="buckets_count2"]');
+        if (el) el.textContent = data.app.buckets;
+        el = document.querySelector('[data-metric="objects_count2"]');
+        if (el) el.textContent = data.app.objects;
+        el = document.querySelector('[data-metric="versions_count2"]');
+        if (el) el.textContent = data.app.versions;
+        el = document.querySelector('[data-metric="health_uptime"]');
+        if (el) el.textContent = data.app.uptime_days + 'd';
+
+        var cpuHigh = data.cpu_percent > 80;
+        var memHigh = data.memory.percent > 85;
+        var diskHigh = data.disk.percent > 90;
+        var hasIssues = cpuHigh || memHigh || diskHigh;
+
+        var banner = document.getElementById('healthBannerBody');
+        if (banner) {
+          banner.style.background = hasIssues
+            ? 'linear-gradient(135deg, #ef4444 0%, #f97316 100%)'
+            : 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)';
+        }
+        var hIcon = document.getElementById('healthBannerIcon');
+        if (hIcon) {
+          hIcon.innerHTML = hasIssues
+            ? '<path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>'
+            : '<path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>';
+        }
+        var hTitle = document.getElementById('healthTitle');
+        var hDetail = document.getElementById('healthDetail');
+        if (hTitle) hTitle.textContent = hasIssues ? 'Issues Detected' : 'All Systems Normal';
+        if (hDetail) {
+          if (hasIssues) {
+            var parts = [];
+            if (cpuHigh) parts.push('CPU ' + data.cpu_percent.toFixed(1) + '%');
+            if (memHigh) parts.push('Memory ' + data.memory.percent.toFixed(1) + '%');
+            if (diskHigh) parts.push('Disk ' + data.disk.percent.toFixed(1) + '%');
+            hDetail.textContent = parts.join(' \u00b7 ');
+          } else {
+            hDetail.textContent = 'All resources within normal operating parameters';
+          }
+        }
+
+        countdown = 5;
+        var errBanner = document.getElementById('metrics-error-banner');
+        if (errBanner) errBanner.classList.add('d-none');
+      })
+      .catch(function() {
+        var errBanner = document.getElementById('metrics-error-banner');
+        if (errBanner) errBanner.classList.remove('d-none');
+      });
+  }
+
+  function startCountdown() {
+    if (countdownTimer) clearInterval(countdownTimer);
+    countdown = 5;
+    if (countdownEl) countdownEl.textContent = countdown;
+    countdownTimer = setInterval(function() {
+      if (paused) return;
+      countdown--;
+      if (countdownEl) countdownEl.textContent = Math.max(0, countdown);
+      if (countdown <= 0) countdown = 5;
+    }, 1000);
+  }
+
+  function startPolling() {
+    if (fetchTimer) clearInterval(fetchTimer);
+    fetchTimer = setInterval(function() {
+      if (!document.hidden && !paused) updateMetrics();
+    }, POLL_INTERVAL);
+    startCountdown();
+  }
+
+  if (pauseBtn) {
+    pauseBtn.addEventListener('click', function() {
+      paused = !paused;
+      pauseIcon.classList.toggle('d-none', paused);
+      playIcon.classList.toggle('d-none', !paused);
+      if (liveDot) liveDot.style.animationPlayState = paused ? 'paused' : 'running';
+      pauseBtn.title = paused ? 'Resume auto-refresh' : 'Pause auto-refresh';
+      if (!paused) { updateMetrics(); countdown = 5; }
+    });
+  }
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function() {
+      updateMetrics();
+      countdown = 5;
+    });
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden && !paused) {
+      updateMetrics();
+      startPolling();
+    }
+  });
+
+  startPolling();
+
+  function downloadJson(data, filename) {
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  var exportSystem = document.getElementById('exportSystem');
+  if (exportSystem) {
+    exportSystem.addEventListener('click', function(e) {
+      e.preventDefault();
+      fetch('/ui/metrics/api').then(function(r) { return r.json(); }).then(function(d) {
+        downloadJson(d, 'system-metrics-' + new Date().toISOString().slice(0,19) + '.json');
+      });
+    });
+  }
+
+  {% if operation_metrics_enabled %}
+  var exportOps = document.getElementById('exportOps');
+  if (exportOps) {
+    exportOps.addEventListener('click', function(e) {
+      e.preventDefault();
+      fetch('/ui/metrics/operations').then(function(r) { return r.json(); }).then(function(d) {
+        downloadJson(d, 'operation-metrics-' + new Date().toISOString().slice(0,19) + '.json');
+      });
+    });
+  }
+  {% endif %}
+
+  {% if metrics_history_enabled %}
+  var exportHistory = document.getElementById('exportHistory');
+  if (exportHistory) {
+    exportHistory.addEventListener('click', function(e) {
+      e.preventDefault();
+      var hours = document.getElementById('historyTimeRange') ? document.getElementById('historyTimeRange').value : 24;
+      fetch('/ui/metrics/history?hours=' + hours).then(function(r) { return r.json(); }).then(function(d) {
+        downloadJson(d, 'metrics-history-' + new Date().toISOString().slice(0,19) + '.json');
+      });
+    });
+  }
+  {% endif %}
+})();
+
+{% if operation_metrics_enabled %}
+(function() {
+  var methodChart = null;
+  var statusChart = null;
+  var endpointChart = null;
+  var latencyEndpointChart = null;
+  var trendReqRate = null;
+  var trendThroughput = null;
+  var trendLatency = null;
+  var trendErrorRate = null;
+  var opStatus = document.getElementById('opStatus');
+  var opTrendStatus = document.getElementById('opTrendStatus');
+  var opHistoryRange = document.getElementById('opHistoryRange');
+  var opTimer = null;
+  var trendTimer = null;
+
+  var methodColors = {
+    'GET': '#3b82f6', 'PUT': '#10b981', 'POST': '#f59e0b',
+    'DELETE': '#ef4444', 'HEAD': '#6b7280', 'OPTIONS': '#06b6d4'
+  };
+  var statusColors = { '2xx': '#10b981', '3xx': '#06b6d4', '4xx': '#f59e0b', '5xx': '#ef4444' };
+  var endpointColors = {
+    'object': '#3b82f6', 'bucket': '#10b981', 'ui': '#6b7280',
+    'service': '#06b6d4', 'kms': '#f59e0b'
+  };
+
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    var k = 1024;
+    var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  }
+
+  function formatTime(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function trendChartOpts(color, yCallback) {
+    return {
+      type: 'line',
+      data: { labels: [], datasets: [{
+        data: [], borderColor: color, backgroundColor: color + '15',
+        fill: true, tension: 0.3, pointRadius: 2, pointHoverRadius: 5, borderWidth: 1.5
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { display: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
+          y: { display: true, beginAtZero: true, ticks: { callback: yCallback, font: { size: 10 } } }
+        }
+      }
+    };
+  }
+
+  function initOpCharts() {
+    var mCtx = document.getElementById('methodChart');
+    var sCtx = document.getElementById('statusChart');
+    var eCtx = document.getElementById('endpointChart');
+    var leCtx = document.getElementById('latencyEndpointChart');
+
+    if (mCtx) {
+      methodChart = new Chart(mCtx, {
+        type: 'doughnut',
+        data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          cutout: '55%',
+          plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 }, padding: 12 } } }
+        }
+      });
+    }
+
+    if (sCtx) {
+      statusChart = new Chart(sCtx, {
+        type: 'bar',
+        data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderRadius: 4 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
+        }
+      });
+    }
+
+    if (eCtx) {
+      endpointChart = new Chart(eCtx, {
+        type: 'bar',
+        data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderRadius: 4 }] },
+        options: {
+          responsive: true, maintainAspectRatio: false, indexAxis: 'y', animation: false,
+          plugins: { legend: { display: false } },
+          scales: { x: { beginAtZero: true, ticks: { stepSize: 1 } } }
+        }
+      });
+    }
+
+    if (leCtx) {
+      latencyEndpointChart = new Chart(leCtx, {
+        type: 'bar',
+        data: {
+          labels: [],
+          datasets: [
+            { label: 'Avg', data: [], backgroundColor: '#6366f180', borderRadius: 4 },
+            { label: 'P95', data: [], backgroundColor: '#8b5cf680', borderRadius: 4 },
+            { label: 'Max', data: [], backgroundColor: '#ef444480', borderRadius: 4 }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 10 } } } },
+          scales: { y: { beginAtZero: true, ticks: { callback: function(v) { return v + 'ms'; } } } }
+        }
+      });
+    }
+
+    var trCtx = document.getElementById('opTrendReqRate');
+    var ttCtx = document.getElementById('opTrendThroughput');
+    var tlCtx = document.getElementById('opTrendLatency');
+    var teCtx = document.getElementById('opTrendErrorRate');
+
+    if (trCtx) trendReqRate = new Chart(trCtx, trendChartOpts('#3b82f6', function(v) { return v.toFixed(1); }));
+    if (ttCtx) trendThroughput = new Chart(ttCtx, trendChartOpts('#10b981', function(v) { return formatBytes(v) + '/s'; }));
+    if (tlCtx) trendLatency = new Chart(tlCtx, trendChartOpts('#8b5cf6', function(v) { return v.toFixed(0) + 'ms'; }));
+    if (teCtx) trendErrorRate = new Chart(teCtx, trendChartOpts('#ef4444', function(v) { return v.toFixed(1) + '%'; }));
+  }
+
+  function updateOpMetrics() {
+    if (document.hidden) return;
+    fetch('/ui/metrics/operations')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.enabled || !data.stats) {
+          if (opStatus) opStatus.textContent = 'Not available';
+          return;
+        }
+        var stats = data.stats;
+        var totals = stats.totals || {};
+
+        var totalEl = document.getElementById('opTotalRequests');
+        var successEl = document.getElementById('opSuccessRate');
+        var errorEl = document.getElementById('opErrorCount');
+        var rpsEl = document.getElementById('opReqPerSec');
+        var latencyEl = document.getElementById('opAvgLatency');
+        var p95El = document.getElementById('opP95Latency');
+        var bytesInEl = document.getElementById('opBytesIn');
+        var bytesOutEl = document.getElementById('opBytesOut');
+
+        if (totalEl) totalEl.textContent = (totals.count || 0).toLocaleString();
+        if (successEl) {
+          var rate = totals.count > 0 ? ((totals.success_count / totals.count) * 100).toFixed(1) : '0.0';
+          successEl.textContent = rate + '%';
+        }
+        if (errorEl) errorEl.textContent = (totals.error_count || 0).toLocaleString();
+        if (rpsEl) {
+          var rps = stats.window_seconds > 0 ? (totals.count || 0) / stats.window_seconds : 0;
+          rpsEl.textContent = rps.toFixed(2);
+        }
+        if (latencyEl) latencyEl.textContent = (totals.latency_avg_ms || 0).toFixed(1) + 'ms';
+        if (p95El) p95El.textContent = (totals.latency_p95_ms || totals.latency_max_ms || 0).toFixed(1) + 'ms';
+        if (bytesInEl) bytesInEl.textContent = formatBytes(totals.bytes_in || 0);
+        if (bytesOutEl) bytesOutEl.textContent = formatBytes(totals.bytes_out || 0);
+
+        if (methodChart && stats.by_method) {
+          var methods = Object.keys(stats.by_method);
+          methodChart.data.labels = methods;
+          methodChart.data.datasets[0].data = methods.map(function(m) { return stats.by_method[m].count; });
+          methodChart.data.datasets[0].backgroundColor = methods.map(function(m) { return methodColors[m] || '#6b7280'; });
+          methodChart.update('none');
+        }
+
+        if (statusChart && stats.by_status_class) {
+          var statuses = Object.keys(stats.by_status_class).sort();
+          statusChart.data.labels = statuses;
+          statusChart.data.datasets[0].data = statuses.map(function(s) { return stats.by_status_class[s]; });
+          statusChart.data.datasets[0].backgroundColor = statuses.map(function(s) { return statusColors[s] || '#6b7280'; });
+          statusChart.update('none');
+        }
+
+        if (endpointChart && stats.by_endpoint) {
+          var endpoints = Object.keys(stats.by_endpoint);
+          endpointChart.data.labels = endpoints;
+          endpointChart.data.datasets[0].data = endpoints.map(function(e) { return stats.by_endpoint[e].count; });
+          endpointChart.data.datasets[0].backgroundColor = endpoints.map(function(e) { return endpointColors[e] || '#6b7280'; });
+          endpointChart.update('none');
+        }
+
+        if (latencyEndpointChart && stats.by_endpoint) {
+          var eps = Object.keys(stats.by_endpoint);
+          latencyEndpointChart.data.labels = eps;
+          latencyEndpointChart.data.datasets[0].data = eps.map(function(e) { return stats.by_endpoint[e].latency_avg_ms || 0; });
+          latencyEndpointChart.data.datasets[1].data = eps.map(function(e) { return stats.by_endpoint[e].latency_p95_ms || stats.by_endpoint[e].latency_max_ms || 0; });
+          latencyEndpointChart.data.datasets[2].data = eps.map(function(e) { return stats.by_endpoint[e].latency_max_ms || 0; });
+          latencyEndpointChart.update('none');
+        }
+
+        var errorBody = document.getElementById('errorCodesBody');
+        if (errorBody && stats.error_codes) {
+          var errorCodes = Object.entries(stats.error_codes);
+          errorCodes.sort(function(a, b) { return b[1] - a[1]; });
+          var totalErrors = errorCodes.reduce(function(sum, e) { return sum + e[1]; }, 0);
+          errorCodes = errorCodes.slice(0, 10);
+          if (errorCodes.length === 0) {
+            errorBody.innerHTML = '<div class="text-muted small text-center py-4"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle mb-2 text-success" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/></svg><div>No S3 API errors</div></div>';
+          } else {
+            errorBody.innerHTML = errorCodes.map(function(e) {
+              var pct = totalErrors > 0 ? ((e[1] / totalErrors) * 100).toFixed(0) : 0;
+              return '<div class="d-flex align-items-center py-1" style="font-size: 0.8rem;"><div style="flex: 1;"><code class="text-danger">' + e[0] + '</code></div><div class="text-end fw-semibold" style="width: 60px;">' + e[1] + '</div><div style="width: 100px; padding-left: 10px;"><div class="progress" style="height: 6px;"><div class="progress-bar bg-danger" style="width: ' + pct + '%"></div></div></div></div>';
+            }).join('');
+          }
+        }
+
+        var windowMins = Math.floor(stats.window_seconds / 60);
+        var windowSecs = stats.window_seconds % 60;
+        var windowStr = windowMins > 0 ? windowMins + 'm ' + windowSecs + 's' : windowSecs + 's';
+        if (opStatus) opStatus.textContent = 'Window: ' + windowStr;
+      })
+      .catch(function() {
+        if (opStatus) opStatus.textContent = 'Failed to load';
+      });
+  }
+
+  function loadOpTrends() {
+    if (document.hidden) return;
+    var hours = opHistoryRange ? opHistoryRange.value : 24;
+    fetch('/ui/metrics/operations/history?hours=' + hours)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.enabled || !data.history || data.history.length === 0) {
+          if (opTrendStatus) opTrendStatus.textContent = 'No operation history data yet. Snapshots are taken every ' + (data.interval_minutes || 5) + ' minutes.';
+          return;
+        }
+        var history = data.history;
+        var labels = history.map(function(h) { return formatTime(h.timestamp); });
+        var reqRates = history.map(function(h) { return h.window_seconds > 0 ? (h.totals.count || 0) / h.window_seconds : 0; });
+        var throughputs = history.map(function(h) { return h.window_seconds > 0 ? ((h.totals.bytes_in || 0) + (h.totals.bytes_out || 0)) / h.window_seconds : 0; });
+        var latencies = history.map(function(h) { return h.totals.latency_avg_ms || 0; });
+        var errorRates = history.map(function(h) { return h.totals.count > 0 ? ((h.totals.error_count || 0) / h.totals.count * 100) : 0; });
+
+        function updateTrend(chart, lbls, vals) {
+          if (!chart) return;
+          chart.data.labels = lbls;
+          chart.data.datasets[0].data = vals;
+          chart.update('none');
+        }
+        updateTrend(trendReqRate, labels, reqRates);
+        updateTrend(trendThroughput, labels, throughputs);
+        updateTrend(trendLatency, labels, latencies);
+        updateTrend(trendErrorRate, labels, errorRates);
+
+        if (opTrendStatus) opTrendStatus.textContent = history.length + ' snapshots';
+      })
+      .catch(function() {
+        if (opTrendStatus) opTrendStatus.textContent = 'Failed to load operation history';
+      });
+  }
+
+  function startOpPolling() {
+    if (opTimer) clearInterval(opTimer);
+    opTimer = setInterval(function() {
+      if (!document.hidden) updateOpMetrics();
+    }, 5000);
+    if (trendTimer) clearInterval(trendTimer);
+    trendTimer = setInterval(function() {
+      if (!document.hidden) loadOpTrends();
+    }, 60000);
+  }
+
+  if (opHistoryRange) opHistoryRange.addEventListener('change', loadOpTrends);
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      if (opTimer) clearInterval(opTimer);
+      if (trendTimer) clearInterval(trendTimer);
+      opTimer = null;
+      trendTimer = null;
+    } else {
+      updateOpMetrics();
+      loadOpTrends();
+      startOpPolling();
+    }
+  });
+
+  initOpCharts();
+  updateOpMetrics();
+  loadOpTrends();
+  startOpPolling();
+})();
+{% endif %}
+
+{% if metrics_history_enabled %}
+(function() {
+  var cpuChart = null;
+  var memoryChart = null;
+  var diskChart = null;
+  var historyStatus = document.getElementById('historyStatus');
+  var timeRangeSelect = document.getElementById('historyTimeRange');
+  var maxDataPointsSelect = document.getElementById('maxDataPoints');
+  var historyTimer = null;
+
+  function createChart(ctx, label, color) {
+    return new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: label,
+          data: [],
+          borderColor: color,
+          backgroundColor: color + '15',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+          borderWidth: 1.5,
+          hitRadius: 10,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: function(ctx) { return ctx.parsed.y.toFixed(2) + '%'; }
+            }
+          }
+        },
+        scales: {
+          x: { display: true, ticks: { maxRotation: 0, font: { size: 10 }, autoSkip: true, maxTicksLimit: 12 } },
+          y: { display: true, min: 0, max: 100, ticks: { callback: function(v) { return v + '%'; } } }
+        }
+      }
+    });
+  }
+
+  function initCharts() {
+    var cpuCtx = document.getElementById('cpuHistoryChart');
+    var memCtx = document.getElementById('memoryHistoryChart');
+    var diskCtx = document.getElementById('diskHistoryChart');
+    if (cpuCtx) cpuChart = createChart(cpuCtx, 'CPU %', '#3b82f6');
+    if (memCtx) memoryChart = createChart(memCtx, 'Memory %', '#06b6d4');
+    if (diskCtx) diskChart = createChart(diskCtx, 'Disk %', '#f59e0b');
+  }
+
+  function formatTime(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function loadHistory() {
+    if (document.hidden) return;
+    var hours = timeRangeSelect ? timeRangeSelect.value : 24;
+    fetch('/ui/metrics/history?hours=' + hours)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (!data.enabled || !data.history || data.history.length === 0) {
+          if (historyStatus) historyStatus.textContent = 'No history data yet. Recorded every ' + (data.interval_minutes || 5) + ' min.';
+          return;
+        }
+        var maxPoints = maxDataPointsSelect ? parseInt(maxDataPointsSelect.value, 10) : 500;
+        var history = maxPoints > 0 ? data.history.slice(-maxPoints) : data.history;
+        var labels = history.map(function(h) { return formatTime(h.timestamp); });
+
+        function updateChart(chart, data) {
+          if (!chart) return;
+          chart.data.labels = labels;
+          chart.data.datasets[0].data = data;
+          chart.update('none');
+        }
+        updateChart(cpuChart, history.map(function(h) { return h.cpu_percent; }));
+        updateChart(memoryChart, history.map(function(h) { return h.memory_percent; }));
+        updateChart(diskChart, history.map(function(h) { return h.disk_percent; }));
+
+        if (historyStatus) historyStatus.textContent = history.length + ' data points';
+      })
+      .catch(function() {
+        if (historyStatus) historyStatus.textContent = 'Failed to load history';
+      });
+  }
+
+  function startHistoryPolling() {
+    if (historyTimer) clearInterval(historyTimer);
+    historyTimer = setInterval(loadHistory, 60000);
+  }
+
+  if (timeRangeSelect) timeRangeSelect.addEventListener('change', loadHistory);
+  if (maxDataPointsSelect) maxDataPointsSelect.addEventListener('change', loadHistory);
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      if (historyTimer) clearInterval(historyTimer);
+      historyTimer = null;
+    } else {
+      loadHistory();
+      startHistoryPolling();
+    }
+  });
+
+  initCharts();
+  loadHistory();
+  startHistoryPolling();
+})();
+{% endif %}
+</script>
+{% endblock %}

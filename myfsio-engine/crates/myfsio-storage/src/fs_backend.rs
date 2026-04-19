@@ -1389,6 +1389,129 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Ok(etag)
     }
 
+    async fn upload_part_copy(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+        src_bucket: &str,
+        src_key: &str,
+        range: Option<(u64, u64)>,
+    ) -> StorageResult<(String, DateTime<Utc>)> {
+        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        if !manifest_path.exists() {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+
+        let src_path = self.object_path(src_bucket, src_key)?;
+        if !src_path.is_file() {
+            return Err(StorageError::ObjectNotFound {
+                bucket: src_bucket.to_string(),
+                key: src_key.to_string(),
+            });
+        }
+
+        let src_meta = std::fs::metadata(&src_path).map_err(StorageError::Io)?;
+        let src_size = src_meta.len();
+        let src_mtime = src_meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let last_modified = Utc
+            .timestamp_opt(src_mtime as i64, ((src_mtime % 1.0) * 1_000_000_000.0) as u32)
+            .single()
+            .unwrap_or_else(Utc::now);
+
+        let (start, end) = match range {
+            Some((s, e)) => {
+                if s >= src_size || e >= src_size || s > e {
+                    return Err(StorageError::InvalidRange);
+                }
+                (s, e)
+            }
+            None => {
+                if src_size == 0 {
+                    (0u64, 0u64)
+                } else {
+                    (0u64, src_size - 1)
+                }
+            }
+        };
+        let length = if src_size == 0 { 0 } else { end - start + 1 };
+
+        let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
+        let tmp_file = upload_dir.join(format!("part-{:05}.part.tmp", part_number));
+
+        let mut src = tokio::fs::File::open(&src_path)
+            .await
+            .map_err(StorageError::Io)?;
+        if start > 0 {
+            tokio::io::AsyncSeekExt::seek(&mut src, std::io::SeekFrom::Start(start))
+                .await
+                .map_err(StorageError::Io)?;
+        }
+
+        let mut dst = tokio::fs::File::create(&tmp_file)
+            .await
+            .map_err(StorageError::Io)?;
+        let mut hasher = Md5::new();
+        let mut remaining = length;
+        let mut buf = vec![0u8; 65536];
+        while remaining > 0 {
+            let to_read = std::cmp::min(remaining as usize, buf.len());
+            let n = src
+                .read(&mut buf[..to_read])
+                .await
+                .map_err(StorageError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            tokio::io::AsyncWriteExt::write_all(&mut dst, &buf[..n])
+                .await
+                .map_err(StorageError::Io)?;
+            remaining -= n as u64;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut dst)
+            .await
+            .map_err(StorageError::Io)?;
+        drop(dst);
+
+        let etag = format!("{:x}", hasher.finalize());
+
+        tokio::fs::rename(&tmp_file, &part_file)
+            .await
+            .map_err(StorageError::Io)?;
+
+        let lock_path = upload_dir.join(".manifest.lock");
+        let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
+        let _guard = lock.lock();
+
+        let manifest_content =
+            std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let mut manifest: Value =
+            serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
+
+        if let Some(parts) = manifest.get_mut("parts").and_then(|p| p.as_object_mut()) {
+            parts.insert(
+                part_number.to_string(),
+                serde_json::json!({
+                    "etag": etag,
+                    "size": length,
+                    "filename": format!("part-{:05}.part", part_number),
+                }),
+            );
+        }
+
+        Self::atomic_write_json_sync(&manifest_path, &manifest, true)
+            .map_err(StorageError::Io)?;
+
+        Ok((etag, last_modified))
+    }
+
     async fn complete_multipart(
         &self,
         bucket: &str,

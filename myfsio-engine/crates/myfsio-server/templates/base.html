@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    {% if principal %}<meta name="csrf-token" content="{{ csrf_token() }}" />{% endif %}
+    <title>MyFSIO Console</title>
+    <link rel="icon" type="image/png" href="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" />
+    <link rel="icon" type="image/x-icon" href="{{ url_for(endpoint="static", filename="images/MyFSIO.ico") }}" />
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+      integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN"
+      crossorigin="anonymous"
+    />
+    <script>
+      (function () {
+        try {
+          const stored = localStorage.getItem('myfsio-theme');
+          const theme = stored === 'dark' ? 'dark' : 'light';
+          document.documentElement.dataset.bsTheme = theme;
+          document.documentElement.dataset.theme = theme;
+        } catch (err) {
+          document.documentElement.dataset.bsTheme = 'light';
+          document.documentElement.dataset.theme = 'light';
+        }
+        try {
+          if (localStorage.getItem('myfsio-sidebar-collapsed') === 'true') {
+            document.documentElement.classList.add('sidebar-will-collapse');
+          }
+        } catch (err) {}
+      })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for(endpoint="static", filename="css/main.css") }}" />
+  </head>
+  <body>
+    <header class="mobile-header d-lg-none">
+      <button class="sidebar-toggle-btn" type="button" data-bs-toggle="offcanvas" data-bs-target="#mobileSidebar" aria-controls="mobileSidebar" aria-label="Toggle navigation">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
+          <path fill-rule="evenodd" d="M2.5 12a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5z"/>
+        </svg>
+      </button>
+      <a class="mobile-brand" href="{{ url_for(endpoint="ui.buckets_overview") }}">
+        <img src="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" alt="MyFSIO logo" width="28" height="28" />
+        <span>MyFSIO</span>
+      </a>
+      <button class="theme-toggle-mobile" type="button" id="themeToggleMobile" aria-label="Toggle dark mode">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="theme-icon-mobile" id="themeToggleSunMobile" viewBox="0 0 16 16">
+          <path d="M8 11.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm0 1.5a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM8 0a.5.5 0 0 1 .5.5v1.555a.5.5 0 0 1-1 0V.5A.5.5 0 0 1 8 0zm0 12.945a.5.5 0 0 1 .5.5v2.055a.5.5 0 0 1-1 0v-2.055a.5.5 0 0 1 .5-.5zM2.343 2.343a.5.5 0 0 1 .707 0l1.1 1.1a.5.5 0 1 1-.708.707l-1.1-1.1a.5.5 0 0 1 0-.707zm9.507 9.507a.5.5 0 0 1 .707 0l1.1 1.1a.5.5 0 1 1-.707.708l-1.1-1.1a.5.5 0 0 1 0-.708zM0 8a.5.5 0 0 1 .5-.5h1.555a.5.5 0 0 1 0 1H.5A.5.5 0 0 1 0 8zm12.945 0a.5.5 0 0 1 .5-.5H15.5a.5.5 0 0 1 0 1h-2.055a.5.5 0 0 1-.5-.5zM2.343 13.657a.5.5 0 0 1 0-.707l1.1-1.1a.5.5 0 1 1 .708.707l-1.1 1.1a.5.5 0 0 1-.708 0zm9.507-9.507a.5.5 0 0 1 0-.707l1.1-1.1a.5.5 0 0 1 .707.708l-1.1 1.1a.5.5 0 0 1-.707 0z"/>
+        </svg>
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="theme-icon-mobile" id="themeToggleMoonMobile" viewBox="0 0 16 16">
+          <path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/>
+          <path d="M10.794 3.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387a1.734 1.734 0 0 0-1.097 1.097l-.387 1.162a.217.217 0 0 1-.412 0l-.387-1.162A1.734 1.734 0 0 0 9.31 6.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387a1.734 1.734 0 0 0 1.097-1.097l.387-1.162zM13.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.156 1.156 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.156 1.156 0 0 0-.732-.732l-.774-.258a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732L13.863.1z"/>
+        </svg>
+      </button>
+    </header>
+
+    <div class="offcanvas offcanvas-start sidebar-offcanvas" tabindex="-1" id="mobileSidebar" aria-labelledby="mobileSidebarLabel">
+      <div class="offcanvas-header sidebar-header">
+        <a class="sidebar-brand" href="{{ url_for(endpoint="ui.buckets_overview") }}">
+          <img src="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" alt="MyFSIO logo" class="sidebar-logo" width="36" height="36" />
+          <span class="sidebar-title">MyFSIO</span>
+        </a>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+      </div>
+      <div class="offcanvas-body sidebar-body">
+        <nav class="sidebar-nav">
+          {% if principal %}
+          <div class="nav-section">
+            <span class="nav-section-title">Navigation</span>
+            <a href="{{ url_for(endpoint="ui.buckets_overview") }}" class="sidebar-link {% if current_endpoint == "ui.buckets_overview" or current_endpoint == "ui.bucket_detail" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+              </svg>
+              <span>Buckets</span>
+            </a>
+            {% if can_manage_iam %}
+            <a href="{{ url_for(endpoint="ui.iam_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.iam_dashboard" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022zM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-1.01.377-2.042 1.09-2.904.243-.294.526-.569.846-.816zM4.92 10A5.493 5.493 0 0 0 4 13H1c0-.26.164-1.03.76-1.724.545-.636 1.492-1.256 3.16-1.275zM1.5 5.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0zm3-2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/>
+              </svg>
+              <span>IAM</span>
+            </a>
+            <a href="{{ url_for(endpoint="ui.connections_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.connections_dashboard" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M6 3.5A1.5 1.5 0 0 1 7.5 2h1A1.5 1.5 0 0 1 10 3.5v1A1.5 1.5 0 0 1 8.5 6v1H14a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-1 0V8h-5v.5a.5.5 0 0 1-1 0V8h-5v.5a.5.5 0 0 1-1 0v-1A.5.5 0 0 1 2 7h5.5V6A1.5 1.5 0 0 1 6 4.5v-1zM8.5 5a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1zM0 11.5A1.5 1.5 0 0 1 1.5 10h1A1.5 1.5 0 0 1 4 11.5v1A1.5 1.5 0 0 1 2.5 14h-1A1.5 1.5 0 0 1 0 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm4.5.5A1.5 1.5 0 0 1 7.5 10h1a1.5 1.5 0 0 1 1.5 1.5v1A1.5 1.5 0 0 1 8.5 14h-1A1.5 1.5 0 0 1 6 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm4.5.5a1.5 1.5 0 0 1 1.5-1.5h1a1.5 1.5 0 0 1 1.5 1.5v1a1.5 1.5 0 0 1-1.5 1.5h-1a1.5 1.5 0 0 1-1.5-1.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1z"/>
+              </svg>
+              <span>Connections</span>
+            </a>
+            <a href="{{ url_for(endpoint="ui.metrics_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.metrics_dashboard" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M8 4a.5.5 0 0 1 .5.5V6a.5.5 0 0 1-1 0V4.5A.5.5 0 0 1 8 4zM3.732 5.732a.5.5 0 0 1 .707 0l.915.914a.5.5 0 1 1-.708.708l-.914-.915a.5.5 0 0 1 0-.707zM2 10a.5.5 0 0 1 .5-.5h1.586a.5.5 0 0 1 0 1H2.5A.5.5 0 0 1 2 10zm9.5 0a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 0 1H12a.5.5 0 0 1-.5-.5zm.754-4.246a.389.389 0 0 0-.527-.02L7.547 9.31a.91.91 0 1 0 1.302 1.258l3.434-4.297a.389.389 0 0 0-.029-.518z"/>
+                <path fill-rule="evenodd" d="M0 10a8 8 0 1 1 15.547 2.661c-.442 1.253-1.845 1.602-2.932 1.25C11.309 13.488 9.475 13 8 13c-1.474 0-3.31.488-4.615.911-1.087.352-2.49.003-2.932-1.25A7.988 7.988 0 0 1 0 10zm8-7a7 7 0 0 0-6.603 9.329c.203.575.923.876 1.68.63C4.397 12.533 6.358 12 8 12s3.604.532 4.923.96c.757.245 1.477-.056 1.68-.631A7 7 0 0 0 8 3z"/>
+              </svg>
+              <span>Metrics</span>
+            </a>
+            <a href="{{ url_for(endpoint="ui.sites_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.sites_dashboard" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
+              </svg>
+              <span>Sites</span>
+            </a>
+            {% endif %}
+            {% if website_hosting_nav %}
+            <a href="{{ url_for(endpoint="ui.website_domains_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.website_domains_dashboard" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+                <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+              </svg>
+              <span>Domains</span>
+            </a>
+            {% endif %}
+            {% if can_manage_iam %}
+            <a href="{{ url_for(endpoint="ui.system_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.system_dashboard" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
+              </svg>
+              <span>System</span>
+            </a>
+            {% endif %}
+          </div>
+          <div class="nav-section">
+            <span class="nav-section-title">Resources</span>
+            <a href="{{ url_for(endpoint="ui.docs_page") }}" class="sidebar-link {% if current_endpoint == "ui.docs_page" %}active{% endif %}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M1 2.828c.885-.37 2.154-.769 3.388-.893 1.33-.134 2.458.063 3.112.752v9.746c-.935-.53-2.12-.603-3.213-.493-1.18.12-2.37.461-3.287.811V2.828zm7.5-.141c.654-.689 1.782-.886 3.112-.752 1.234.124 2.503.523 3.388.893v9.923c-.918-.35-2.107-.692-3.287-.81-1.094-.111-2.278-.039-3.213.492V2.687zM8 1.783C7.015.936 5.587.81 4.287.94c-1.514.153-3.042.672-3.994 1.105A.5.5 0 0 0 0 2.5v11a.5.5 0 0 0 .707.455c.882-.4 2.303-.881 3.68-1.02 1.409-.142 2.59.087 3.223.877a.5.5 0 0 0 .78 0c.633-.79 1.814-1.019 3.222-.877 1.378.139 2.8.62 3.681 1.02A.5.5 0 0 0 16 13.5v-11a.5.5 0 0 0-.293-.455c-.952-.433-2.48-.952-3.994-1.105C10.413.809 8.985.936 8 1.783z"/>
+              </svg>
+              <span>Documentation</span>
+            </a>
+          </div>
+          {% endif %}
+        </nav>
+        {% if principal %}
+        <div class="sidebar-footer">
+          <div class="sidebar-user">
+            <div class="user-avatar">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/>
+                <path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1z"/>
+              </svg>
+            </div>
+            <div class="user-info">
+              <div class="user-name" title="{{ principal.display_name }}">{{ principal.display_name | truncate(length=16) }}</div>
+              <div class="user-key">{{ principal.access_key | truncate(length=12) }}</div>
+            </div>
+          </div>
+          <form method="post" action="{{ url_for(endpoint="ui.logout") }}" class="w-100">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <button class="sidebar-logout-btn" type="submit">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M10 12.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v2a.5.5 0 0 0 1 0v-2A1.5 1.5 0 0 0 9.5 2h-8A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-2a.5.5 0 0 0-1 0v2z"/>
+                <path fill-rule="evenodd" d="M15.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L14.293 7.5H5.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708l3-3z"/>
+              </svg>
+              <span>Sign out</span>
+            </button>
+          </form>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <aside class="sidebar d-none d-lg-flex" id="desktopSidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-brand" id="sidebarBrand">
+          <img src="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" alt="MyFSIO logo" class="sidebar-logo" width="36" height="36" />
+          <span class="sidebar-title">MyFSIO</span>
+        </div>
+        <button class="sidebar-collapse-btn" type="button" id="sidebarCollapseBtn" aria-label="Collapse sidebar">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M11.354 1.646a.5.5 0 0 1 0 .708L5.707 8l5.647 5.646a.5.5 0 0 1-.708.708l-6-6a.5.5 0 0 1 0-.708l6-6a.5.5 0 0 1 .708 0z"/>
+          </svg>
+        </button>
+      </div>
+      <div class="sidebar-body">
+        <nav class="sidebar-nav">
+          {% if principal %}
+          <div class="nav-section">
+            <span class="nav-section-title">Navigation</span>
+            <a href="{{ url_for(endpoint="ui.buckets_overview") }}" class="sidebar-link {% if current_endpoint == "ui.buckets_overview" or current_endpoint == "ui.bucket_detail" %}active{% endif %}" data-tooltip="Buckets">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+              </svg>
+              <span class="sidebar-link-text">Buckets</span>
+            </a>
+            {% if can_manage_iam %}
+            <a href="{{ url_for(endpoint="ui.iam_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.iam_dashboard" %}active{% endif %}" data-tooltip="IAM">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022zM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-1.01.377-2.042 1.09-2.904.243-.294.526-.569.846-.816zM4.92 10A5.493 5.493 0 0 0 4 13H1c0-.26.164-1.03.76-1.724.545-.636 1.492-1.256 3.16-1.275zM1.5 5.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0zm3-2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/>
+              </svg>
+              <span class="sidebar-link-text">IAM</span>
+            </a>
+            <a href="{{ url_for(endpoint="ui.connections_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.connections_dashboard" %}active{% endif %}" data-tooltip="Connections">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M6 3.5A1.5 1.5 0 0 1 7.5 2h1A1.5 1.5 0 0 1 10 3.5v1A1.5 1.5 0 0 1 8.5 6v1H14a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-1 0V8h-5v.5a.5.5 0 0 1-1 0V8h-5v.5a.5.5 0 0 1-1 0v-1A.5.5 0 0 1 2 7h5.5V6A1.5 1.5 0 0 1 6 4.5v-1zM8.5 5a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1zM0 11.5A1.5 1.5 0 0 1 1.5 10h1A1.5 1.5 0 0 1 4 11.5v1A1.5 1.5 0 0 1 2.5 14h-1A1.5 1.5 0 0 1 0 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm4.5.5A1.5 1.5 0 0 1 7.5 10h1a1.5 1.5 0 0 1 1.5 1.5v1A1.5 1.5 0 0 1 8.5 14h-1A1.5 1.5 0 0 1 6 12.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1zm4.5.5a1.5 1.5 0 0 1 1.5-1.5h1a1.5 1.5 0 0 1 1.5 1.5v1a1.5 1.5 0 0 1-1.5 1.5h-1a1.5 1.5 0 0 1-1.5-1.5v-1zm1.5-.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h1a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5h-1z"/>
+              </svg>
+              <span class="sidebar-link-text">Connections</span>
+            </a>
+            <a href="{{ url_for(endpoint="ui.metrics_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.metrics_dashboard" %}active{% endif %}" data-tooltip="Metrics">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M8 4a.5.5 0 0 1 .5.5V6a.5.5 0 0 1-1 0V4.5A.5.5 0 0 1 8 4zM3.732 5.732a.5.5 0 0 1 .707 0l.915.914a.5.5 0 1 1-.708.708l-.914-.915a.5.5 0 0 1 0-.707zM2 10a.5.5 0 0 1 .5-.5h1.586a.5.5 0 0 1 0 1H2.5A.5.5 0 0 1 2 10zm9.5 0a.5.5 0 0 1 .5-.5h1.5a.5.5 0 0 1 0 1H12a.5.5 0 0 1-.5-.5zm.754-4.246a.389.389 0 0 0-.527-.02L7.547 9.31a.91.91 0 1 0 1.302 1.258l3.434-4.297a.389.389 0 0 0-.029-.518z"/>
+                <path fill-rule="evenodd" d="M0 10a8 8 0 1 1 15.547 2.661c-.442 1.253-1.845 1.602-2.932 1.25C11.309 13.488 9.475 13 8 13c-1.474 0-3.31.488-4.615.911-1.087.352-2.49.003-2.932-1.25A7.988 7.988 0 0 1 0 10zm8-7a7 7 0 0 0-6.603 9.329c.203.575.923.876 1.68.63C4.397 12.533 6.358 12 8 12s3.604.532 4.923.96c.757.245 1.477-.056 1.68-.631A7 7 0 0 0 8 3z"/>
+              </svg>
+              <span class="sidebar-link-text">Metrics</span>
+            </a>
+            <a href="{{ url_for(endpoint="ui.sites_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.sites_dashboard" %}active{% endif %}" data-tooltip="Sites">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
+              </svg>
+              <span class="sidebar-link-text">Sites</span>
+            </a>
+            {% endif %}
+            {% if website_hosting_nav %}
+            <a href="{{ url_for(endpoint="ui.website_domains_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.website_domains_dashboard" %}active{% endif %}" data-tooltip="Domains">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+                <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+              </svg>
+              <span class="sidebar-link-text">Domains</span>
+            </a>
+            {% endif %}
+            {% if can_manage_iam %}
+            <a href="{{ url_for(endpoint="ui.system_dashboard") }}" class="sidebar-link {% if current_endpoint == "ui.system_dashboard" %}active{% endif %}" data-tooltip="System">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
+              </svg>
+              <span class="sidebar-link-text">System</span>
+            </a>
+            {% endif %}
+          </div>
+          <div class="nav-section">
+            <span class="nav-section-title">Resources</span>
+            <a href="{{ url_for(endpoint="ui.docs_page") }}" class="sidebar-link {% if current_endpoint == "ui.docs_page" %}active{% endif %}" data-tooltip="Documentation">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M1 2.828c.885-.37 2.154-.769 3.388-.893 1.33-.134 2.458.063 3.112.752v9.746c-.935-.53-2.12-.603-3.213-.493-1.18.12-2.37.461-3.287.811V2.828zm7.5-.141c.654-.689 1.782-.886 3.112-.752 1.234.124 2.503.523 3.388.893v9.923c-.918-.35-2.107-.692-3.287-.81-1.094-.111-2.278-.039-3.213.492V2.687zM8 1.783C7.015.936 5.587.81 4.287.94c-1.514.153-3.042.672-3.994 1.105A.5.5 0 0 0 0 2.5v11a.5.5 0 0 0 .707.455c.882-.4 2.303-.881 3.68-1.02 1.409-.142 2.59.087 3.223.877a.5.5 0 0 0 .78 0c.633-.79 1.814-1.019 3.222-.877 1.378.139 2.8.62 3.681 1.02A.5.5 0 0 0 16 13.5v-11a.5.5 0 0 0-.293-.455c-.952-.433-2.48-.952-3.994-1.105C10.413.809 8.985.936 8 1.783z"/>
+              </svg>
+              <span class="sidebar-link-text">Documentation</span>
+            </a>
+          </div>
+          {% endif %}
+        </nav>
+      </div>
+      <div class="sidebar-footer">
+        <button class="theme-toggle-sidebar" type="button" id="themeToggle" aria-label="Toggle dark mode">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="theme-icon" id="themeToggleSun" viewBox="0 0 16 16">
+            <path d="M8 11.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm0 1.5a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM8 0a.5.5 0 0 1 .5.5v1.555a.5.5 0 0 1-1 0V.5A.5.5 0 0 1 8 0zm0 12.945a.5.5 0 0 1 .5.5v2.055a.5.5 0 0 1-1 0v-2.055a.5.5 0 0 1 .5-.5zM2.343 2.343a.5.5 0 0 1 .707 0l1.1 1.1a.5.5 0 1 1-.708.707l-1.1-1.1a.5.5 0 0 1 0-.707zm9.507 9.507a.5.5 0 0 1 .707 0l1.1 1.1a.5.5 0 1 1-.707.708l-1.1-1.1a.5.5 0 0 1 0-.708zM0 8a.5.5 0 0 1 .5-.5h1.555a.5.5 0 0 1 0 1H.5A.5.5 0 0 1 0 8zm12.945 0a.5.5 0 0 1 .5-.5H15.5a.5.5 0 0 1 0 1h-2.055a.5.5 0 0 1-.5-.5zM2.343 13.657a.5.5 0 0 1 0-.707l1.1-1.1a.5.5 0 1 1 .708.707l-1.1 1.1a.5.5 0 0 1-.708 0zm9.507-9.507a.5.5 0 0 1 0-.707l1.1-1.1a.5.5 0 0 1 .707.708l-1.1 1.1a.5.5 0 0 1-.707 0z"/>
+          </svg>
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="theme-icon" id="themeToggleMoon" viewBox="0 0 16 16">
+            <path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/>
+            <path d="M10.794 3.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387a1.734 1.734 0 0 0-1.097 1.097l-.387 1.162a.217.217 0 0 1-.412 0l-.387-1.162A1.734 1.734 0 0 0 9.31 6.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387a1.734 1.734 0 0 0 1.097-1.097l.387-1.162zM13.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.156 1.156 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.156 1.156 0 0 0-.732-.732l-.774-.258a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732L13.863.1z"/>
+          </svg>
+          <span class="theme-toggle-text">Toggle theme</span>
+        </button>
+        {% if principal %}
+        <div class="sidebar-user" data-username="{{ principal.display_name }}">
+          <div class="user-avatar">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+              <path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/>
+              <path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1z"/>
+            </svg>
+          </div>
+          <div class="user-info">
+            <div class="user-name" title="{{ principal.display_name }}">{{ principal.display_name | truncate(length=16) }}</div>
+            <div class="user-key">{{ principal.access_key | truncate(length=12) }}</div>
+          </div>
+        </div>
+        <form method="post" action="{{ url_for(endpoint="ui.logout") }}" class="w-100">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <button class="sidebar-logout-btn" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M10 12.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v2a.5.5 0 0 0 1 0v-2A1.5 1.5 0 0 0 9.5 2h-8A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-2a.5.5 0 0 0-1 0v2z"/>
+              <path fill-rule="evenodd" d="M15.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L14.293 7.5H5.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708l3-3z"/>
+            </svg>
+            <span class="logout-text">Sign out</span>
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </aside>
+
+    <div class="main-wrapper">
+      <main class="main-content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+      <div id="liveToast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="toast-header">
+          <strong class="me-auto" id="toastTitle">Notification</strong>
+          <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+        </div>
+        <div class="toast-body" id="toastMessage">
+          Hello, world! This is a toast message.
+        </div>
+      </div>
+    </div>
+    <script
+      src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"
+      integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL"
+      crossorigin="anonymous"
+    ></script>
+    <script>
+      window.myfsioCsrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+      window.getCsrfToken = () => window.myfsioCsrfToken;
+      (function () {
+        const originalFetch = window.fetch;
+        window.fetch = function (input, init) {
+          init = init || {};
+          const method = (init.method || 'GET').toUpperCase();
+          if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+            const headers = new Headers(init.headers || {});
+            if (window.myfsioCsrfToken) {
+              headers.set('X-CSRFToken', window.myfsioCsrfToken);
+            }
+            init.headers = headers;
+          }
+          return originalFetch.call(this, input, init);
+        };
+      })();
+    </script>
+    <script>
+      (function () {
+        const storageKey = 'myfsio-theme';
+        const toggle = document.getElementById('themeToggle');
+        const toggleMobile = document.getElementById('themeToggleMobile');
+        const sunIcon = document.getElementById('themeToggleSun');
+        const moonIcon = document.getElementById('themeToggleMoon');
+        const sunIconMobile = document.getElementById('themeToggleSunMobile');
+        const moonIconMobile = document.getElementById('themeToggleMoonMobile');
+
+        const applyTheme = (theme) => {
+          document.documentElement.dataset.bsTheme = theme;
+          document.documentElement.dataset.theme = theme;
+          try {
+            localStorage.setItem(storageKey, theme);
+          } catch (err) {
+            console.log("Error: local storage not available, cannot save theme preference.");
+          }
+          const isDark = theme === 'dark';
+          if (sunIcon && moonIcon) {
+            sunIcon.classList.toggle('d-none', !isDark);
+            moonIcon.classList.toggle('d-none', isDark);
+          }
+          if (sunIconMobile && moonIconMobile) {
+            sunIconMobile.classList.toggle('d-none', !isDark);
+            moonIconMobile.classList.toggle('d-none', isDark);
+          }
+          [toggle, toggleMobile].forEach(btn => {
+            if (btn) {
+              btn.setAttribute('aria-pressed', isDark ? 'true' : 'false');
+              btn.setAttribute('title', isDark ? 'Switch to light mode' : 'Switch to dark mode');
+              btn.setAttribute('aria-label', isDark ? 'Switch to light mode' : 'Switch to dark mode');
+            }
+          });
+        };
+
+        const current = document.documentElement.dataset.bsTheme || 'light';
+        applyTheme(current);
+
+        const handleToggle = () => {
+          const next = document.documentElement.dataset.bsTheme === 'dark' ? 'light' : 'dark';
+          applyTheme(next);
+        };
+
+        toggle?.addEventListener('click', handleToggle);
+        toggleMobile?.addEventListener('click', handleToggle);
+      })();
+    </script>
+    <script>
+      (function () {
+        const sidebar = document.getElementById('desktopSidebar');
+        const collapseBtn = document.getElementById('sidebarCollapseBtn');
+        const sidebarBrand = document.getElementById('sidebarBrand');
+        const storageKey = 'myfsio-sidebar-collapsed';
+
+        if (!sidebar || !collapseBtn) return;
+
+        const applyCollapsed = (collapsed) => {
+          sidebar.classList.toggle('sidebar-collapsed', collapsed);
+          document.body.classList.toggle('sidebar-is-collapsed', collapsed);
+          document.documentElement.classList.remove('sidebar-will-collapse');
+          try {
+            localStorage.setItem(storageKey, collapsed ? 'true' : 'false');
+          } catch (err) {}
+        };
+
+        try {
+          const stored = localStorage.getItem(storageKey);
+          applyCollapsed(stored === 'true');
+        } catch (err) {
+          document.documentElement.classList.remove('sidebar-will-collapse');
+        }
+
+        collapseBtn.addEventListener('click', () => {
+          const isCollapsed = sidebar.classList.contains('sidebar-collapsed');
+          applyCollapsed(!isCollapsed);
+        });
+
+        sidebarBrand?.addEventListener('click', (e) => {
+          const isCollapsed = sidebar.classList.contains('sidebar-collapsed');
+          if (isCollapsed) {
+            e.preventDefault();
+            applyCollapsed(false);
+          }
+        });
+      })();
+    </script>
+    <script>
+
+      window.showToast = function(message, title = 'Notification', type = 'info') {
+        const toastEl = document.getElementById('liveToast');
+        const toastTitle = document.getElementById('toastTitle');
+        const toastMessage = document.getElementById('toastMessage');
+        
+        toastTitle.textContent = title;
+        toastMessage.textContent = message;
+
+        toastEl.classList.remove('text-bg-primary', 'text-bg-success', 'text-bg-danger', 'text-bg-warning');
+        
+        if (type === 'success') toastEl.classList.add('text-bg-success');
+        if (type === 'error') toastEl.classList.add('text-bg-danger');
+        if (type === 'warning') toastEl.classList.add('text-bg-warning');
+        
+        const toast = new bootstrap.Toast(toastEl);
+        toast.show();
+      };
+    </script>
+    <script>
+      (function () {
+
+        {% if flashed_messages %}
+          {% for flash in flashed_messages %}
+            var type = "{{ flash.category }}";
+            if (type === "danger") type = "error";
+            window.showToast({{ flash.message | json_encode | safe }}, "Notification", type);
+          {% endfor %}
+        {% endif %}
+      })();
+    </script>
+    <script src="{{ url_for(endpoint="static", filename="js/ui-core.js") }}"></script>
+    {% block extra_scripts %}{% endblock %}
+
+  </body>
+</html>

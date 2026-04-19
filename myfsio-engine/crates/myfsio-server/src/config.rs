@@ -18,6 +18,21 @@ pub struct ServerConfig {
     pub metrics_enabled: bool,
     pub lifecycle_enabled: bool,
     pub website_hosting_enabled: bool,
+    pub replication_connect_timeout_secs: u64,
+    pub replication_read_timeout_secs: u64,
+    pub replication_max_retries: u32,
+    pub replication_streaming_threshold_bytes: u64,
+    pub replication_max_failures_per_bucket: usize,
+    pub site_sync_enabled: bool,
+    pub site_sync_interval_secs: u64,
+    pub site_sync_batch_size: usize,
+    pub site_sync_connect_timeout_secs: u64,
+    pub site_sync_read_timeout_secs: u64,
+    pub site_sync_max_retries: u32,
+    pub site_sync_clock_skew_tolerance: f64,
+    pub ui_enabled: bool,
+    pub templates_dir: PathBuf,
+    pub static_dir: PathBuf,
 }
 
 impl ServerConfig {
@@ -96,6 +111,37 @@ impl ServerConfig {
             .unwrap_or_else(|_| "false".to_string())
             .to_lowercase() == "true";
 
+        let replication_connect_timeout_secs = parse_u64_env("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5);
+        let replication_read_timeout_secs = parse_u64_env("REPLICATION_READ_TIMEOUT_SECONDS", 30);
+        let replication_max_retries = parse_u64_env("REPLICATION_MAX_RETRIES", 2) as u32;
+        let replication_streaming_threshold_bytes =
+            parse_u64_env("REPLICATION_STREAMING_THRESHOLD_BYTES", 10_485_760);
+        let replication_max_failures_per_bucket =
+            parse_u64_env("REPLICATION_MAX_FAILURES_PER_BUCKET", 50) as usize;
+
+        let site_sync_enabled = std::env::var("SITE_SYNC_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase() == "true";
+        let site_sync_interval_secs = parse_u64_env("SITE_SYNC_INTERVAL_SECONDS", 60);
+        let site_sync_batch_size = parse_u64_env("SITE_SYNC_BATCH_SIZE", 100) as usize;
+        let site_sync_connect_timeout_secs = parse_u64_env("SITE_SYNC_CONNECT_TIMEOUT_SECONDS", 10);
+        let site_sync_read_timeout_secs = parse_u64_env("SITE_SYNC_READ_TIMEOUT_SECONDS", 120);
+        let site_sync_max_retries = parse_u64_env("SITE_SYNC_MAX_RETRIES", 2) as u32;
+        let site_sync_clock_skew_tolerance: f64 = std::env::var("SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0);
+
+        let ui_enabled = std::env::var("UI_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .to_lowercase() == "true";
+        let templates_dir = std::env::var("TEMPLATES_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_templates_dir());
+        let static_dir = std::env::var("STATIC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_static_dir());
+
         Self {
             bind_addr: SocketAddr::new(host.parse().unwrap(), port),
             storage_root: storage_path,
@@ -112,6 +158,46 @@ impl ServerConfig {
             metrics_enabled,
             lifecycle_enabled,
             website_hosting_enabled,
+            replication_connect_timeout_secs,
+            replication_read_timeout_secs,
+            replication_max_retries,
+            replication_streaming_threshold_bytes,
+            replication_max_failures_per_bucket,
+            site_sync_enabled,
+            site_sync_interval_secs,
+            site_sync_batch_size,
+            site_sync_connect_timeout_secs,
+            site_sync_read_timeout_secs,
+            site_sync_max_retries,
+            site_sync_clock_skew_tolerance,
+            ui_enabled,
+            templates_dir,
+            static_dir,
         }
     }
+}
+
+fn default_templates_dir() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.join("templates")
+}
+
+fn default_static_dir() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for candidate in [
+        manifest_dir.join("static"),
+        manifest_dir.join("..").join("..").join("..").join("static"),
+    ] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    manifest_dir.join("static")
+}
+
+fn parse_u64_env(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }

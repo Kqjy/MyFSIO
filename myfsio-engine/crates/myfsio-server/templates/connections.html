@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% block title %}Connections - S3 Compatible Storage{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <p class="text-uppercase text-muted small mb-1">Replication</p>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+        <path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
+        <path d="M10.232 8.768l.546-.353a.25.25 0 0 0 0-.418l-.546-.354a.25.25 0 0 1-.116-.21V6.25a.25.25 0 0 0-.25-.25h-.5a.25.25 0 0 0-.25.25v1.183a.25.25 0 0 1-.116.21l-.546.354a.25.25 0 0 0 0 .418l.546.353a.25.25 0 0 1 .116.21v1.183a.25.25 0 0 0 .25.25h.5a.25.25 0 0 0 .25-.25V8.978a.25.25 0 0 1 .116-.21z"/>
+      </svg>
+      Remote Connections
+    </h1>
+    <p class="text-muted mb-0 mt-1">Manage connections to other S3-compatible services for replication.</p>
+  </div>
+  <div class="d-none d-md-block">
+    <span class="badge bg-primary bg-opacity-10 text-primary fs-6 px-3 py-2">
+      {{ connections|length }} connection{% if connections|length != 1 %}s{% else %}{% endif %}
+    </span>
+  </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-4 col-md-5">
+        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                        <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                    </svg>
+                    Add New Connection
+                </h5>
+                <p class="text-muted small mb-0">Connect to an S3-compatible endpoint</p>
+            </div>
+            <div class="card-body px-4 pb-4">
+                <form method="POST" action="{{ url_for(endpoint="ui.create_connection") }}" id="createConnectionForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <div class="mb-3">
+                        <label for="name" class="form-label fw-medium">Name</label>
+                        <input type="text" class="form-control" id="name" name="name" required placeholder="Production Backup">
+                    </div>
+                    <div class="mb-3">
+                        <label for="endpoint_url" class="form-label fw-medium">Endpoint URL</label>
+                        <input type="url" class="form-control" id="endpoint_url" name="endpoint_url" required placeholder="https://s3.us-east-1.amazonaws.com">
+                    </div>
+                    <div class="mb-3">
+                        <label for="region" class="form-label fw-medium">Region</label>
+                        <input type="text" class="form-control" id="region" name="region" value="us-east-1">
+                    </div>
+                    <div class="mb-3">
+                        <label for="access_key" class="form-label fw-medium">Access Key</label>
+                        <input type="text" class="form-control font-monospace" id="access_key" name="access_key" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="secret_key" class="form-label fw-medium">Secret Key</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control font-monospace" id="secret_key" name="secret_key" required>
+                            <button class="btn btn-outline-secondary" type="button" onclick="ConnectionsManagement.togglePassword('secret_key')" title="Toggle visibility">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                    <path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/>
+                                    <path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="testResult" class="mb-3"></div>
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-outline-secondary" id="testConnectionBtn">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z"/>
+                            </svg>
+                            Test Connection
+                        </button>
+                        <button type="submit" class="btn btn-primary">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                            </svg>
+                            Add Connection
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-8 col-md-7">
+        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4 d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                            <path d="M0 1.5A1.5 1.5 0 0 1 1.5 0h2A1.5 1.5 0 0 1 5 1.5v2A1.5 1.5 0 0 1 3.5 5h-2A1.5 1.5 0 0 1 0 3.5v-2zM1.5 1a.5.5 0 0 0-.5.5v2a.5.5 0 0 0 .5.5h2a.5.5 0 0 0 .5-.5v-2a.5.5 0 0 0-.5-.5h-2zM0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V8zm1 3v2a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2H1zm14-1V8a1 1 0 0 0-1-1H2a1 1 0 0 0-1 1v2h14zM2 8.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0 4a.5.5 0 0 1 .5-.5h6a.5.5 0 0 1 0 1h-6a.5.5 0 0 1-.5-.5z"/>
+                        </svg>
+                        Existing Connections
+                    </h5>
+                    <p class="text-muted small mb-0">Configured remote endpoints</p>
+                </div>
+            </div>
+            <div class="card-body px-4 pb-4">
+                {% if connections %}
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th scope="col" style="width: 50px;">Status</th>
+                                <th scope="col">Name</th>
+                                <th scope="col">Endpoint</th>
+                                <th scope="col">Region</th>
+                                <th scope="col">Access Key</th>
+                                <th scope="col" class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for conn in connections %}
+                            <tr data-connection-id="{{ conn.id }}">
+                                <td class="text-center">
+                                    <span class="connection-status" data-status="checking" title="Checking...">
+                                        <span class="spinner-border spinner-border-sm text-muted" role="status" style="width: 12px; height: 12px;"></span>
+                                    </span>
+                                </td>
+                                <td>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="connection-icon">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
+                                            </svg>
+                                        </div>
+                                        <span class="fw-medium">{{ conn.name }}</span>
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="text-muted small text-truncate d-inline-block" style="max-width: 200px;" title="{{ conn.endpoint_url }}">{{ conn.endpoint_url }}</span>
+                                </td>
+                                <td><span class="badge bg-primary bg-opacity-10 text-primary">{{ conn.region }}</span></td>
+                                <td><code class="small">{{ conn.access_key | slice(start=0, end=8) }}...{{ conn.access_key | slice(start=-4) }}</code></td>
+                                <td class="text-end">
+                                    <div class="btn-group btn-group-sm" role="group">
+                                        <button type="button" class="btn btn-outline-secondary" 
+                                            data-bs-toggle="modal" 
+                                            data-bs-target="#editConnectionModal"
+                                            data-id="{{ conn.id }}"
+                                            data-name="{{ conn.name }}"
+                                            data-endpoint="{{ conn.endpoint_url }}"
+                                            data-region="{{ conn.region }}"
+                                            data-access="{{ conn.access_key }}"
+                                            title="Edit connection">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
+                                            </svg>
+                                        </button>
+                                        <button type="button" class="btn btn-outline-danger" 
+                                            data-bs-toggle="modal" 
+                                            data-bs-target="#deleteConnectionModal"
+                                            data-id="{{ conn.id }}"
+                                            data-name="{{ conn.name }}"
+                                            title="Delete connection">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                                                <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                                                <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="empty-state text-center py-5">
+                    <div class="empty-state-icon mx-auto mb-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
+                        </svg>
+                    </div>
+                    <h5 class="fw-semibold mb-2">No connections yet</h5>
+                    <p class="text-muted mb-0">Add your first remote connection to enable bucket replication.</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editConnectionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+                        <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
+                    </svg>
+                    Edit Connection
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="POST" id="editConnectionForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="edit_name" class="form-label fw-medium">Name</label>
+                        <input type="text" class="form-control" id="edit_name" name="name" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_endpoint_url" class="form-label fw-medium">Endpoint URL</label>
+                        <input type="url" class="form-control" id="edit_endpoint_url" name="endpoint_url" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_region" class="form-label fw-medium">Region</label>
+                        <input type="text" class="form-control" id="edit_region" name="region" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_access_key" class="form-label fw-medium">Access Key</label>
+                        <input type="text" class="form-control font-monospace" id="edit_access_key" name="access_key" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="edit_secret_key" class="form-label fw-medium">Secret Key</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control font-monospace" id="edit_secret_key" name="secret_key" required>
+                            <button class="btn btn-outline-secondary" type="button" onclick="ConnectionsManagement.togglePassword('edit_secret_key')">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                    <path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/>
+                                    <path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="editTestResult" class="mt-2"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" id="editTestConnectionBtn">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                            <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z"/>
+                        </svg>
+                        Test
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                            <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                        </svg>
+                        Save
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="deleteConnectionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+                        <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                    </svg>
+                    Delete Connection
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to delete <strong id="deleteConnectionName"></strong>?</p>
+                <div class="alert alert-warning d-flex align-items-start small" role="alert">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-0" viewBox="0 0 16 16">
+                        <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                    </svg>
+                    <div>This will stop any replication rules using this connection.</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form method="POST" id="deleteConnectionForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <button type="submit" class="btn btn-danger">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                            <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                            <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                        </svg>
+                        Delete
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for(endpoint="static", filename="js/connections-management.js") }}"></script>
+<script>
+  ConnectionsManagement.init({
+    csrfToken: "{{ csrf_token() }}",
+    endpoints: {
+      test: "{{ url_for(endpoint="ui.test_connection") }}",
+      updateTemplate: "{{ url_for(endpoint="ui.update_connection", connection_id="CONNECTION_ID") }}",
+      deleteTemplate: "{{ url_for(endpoint="ui.delete_connection", connection_id="CONNECTION_ID") }}",
+      healthTemplate: "/ui/connections/CONNECTION_ID/health"
+    }
+  });
+</script>
+{% endblock %}

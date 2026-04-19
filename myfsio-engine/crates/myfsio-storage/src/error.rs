@@ -19,6 +19,8 @@ pub enum StorageError {
     UploadNotFound(String),
     #[error("Quota exceeded: {0}")]
     QuotaExceeded(String),
+    #[error("Invalid range")]
+    InvalidRange,
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -51,6 +53,7 @@ impl From<StorageError> for S3Error {
                 S3Error::new(S3ErrorCode::NoSuchUpload, format!("Upload {} not found", id))
             }
             StorageError::QuotaExceeded(msg) => S3Error::new(S3ErrorCode::QuotaExceeded, msg),
+            StorageError::InvalidRange => S3Error::from_code(S3ErrorCode::InvalidRange),
             StorageError::Io(e) => S3Error::new(S3ErrorCode::InternalError, e.to_string()),
             StorageError::Json(e) => S3Error::new(S3ErrorCode::InternalError, e.to_string()),
             StorageError::Internal(msg) => S3Error::new(S3ErrorCode::InternalError, msg),

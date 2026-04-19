@@ -2,11 +2,53 @@ pub mod config;
 pub mod handlers;
 pub mod middleware;
 pub mod services;
+pub mod session;
 pub mod state;
+pub mod stores;
+pub mod templates;
 
 use axum::Router;
 
 pub const SERVER_HEADER: &str = concat!("MyFSIO-Rust/", env!("CARGO_PKG_VERSION"));
+
+pub fn create_ui_router(state: state::AppState) -> Router {
+    use axum::routing::{get, post};
+    use handlers::ui;
+    use handlers::ui_pages;
+
+    let protected = Router::new()
+        .route("/ui/buckets", get(ui_pages::buckets_overview))
+        .route("/ui/buckets/create", post(ui_pages::create_bucket))
+        .route("/ui/buckets/{bucket_name}", get(ui_pages::bucket_detail))
+        .route("/ui/iam", get(ui_pages::iam_dashboard))
+        .route("/ui/sites", get(ui_pages::sites_dashboard))
+        .route("/ui/connections", get(ui_pages::connections_dashboard))
+        .route("/ui/metrics", get(ui_pages::metrics_dashboard))
+        .route("/ui/system", get(ui_pages::system_dashboard))
+        .route("/ui/website-domains", get(ui_pages::website_domains_dashboard))
+        .route("/ui/replication/new", get(ui_pages::replication_wizard))
+        .route("/ui/docs", get(ui_pages::docs_page))
+        .layer(axum::middleware::from_fn(ui::require_login));
+
+    let public = Router::new()
+        .route("/login", get(ui::login_page).post(ui::login_submit))
+        .route("/logout", post(ui::logout).get(ui::logout))
+        .route("/csrf-error", get(ui::csrf_error_page));
+
+    let session_state = middleware::SessionLayerState {
+        store: state.sessions.clone(),
+        secure: false,
+    };
+
+    protected
+        .merge(public)
+        .layer(axum::middleware::from_fn(middleware::csrf_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            session_state,
+            middleware::session_layer,
+        ))
+        .with_state(state)
+}
 
 pub fn create_router(state: state::AppState) -> Router {
     let mut router = Router::new()
@@ -63,11 +105,20 @@ pub fn create_router(state: state::AppState) -> Router {
         .route("/admin/integrity/run", axum::routing::post(handlers::admin::integrity_run))
         .route("/admin/integrity/history", axum::routing::get(handlers::admin::integrity_history));
 
-    router
+    let mut router = router
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::server_header))
-        .with_state(state)
+        .with_state(state.clone());
+
+    if state.config.ui_enabled {
+        let static_service = tower_http::services::ServeDir::new(&state.config.static_dir);
+        router = router
+            .nest_service("/static", static_service)
+            .merge(create_ui_router(state));
+    }
+
+    router
 }

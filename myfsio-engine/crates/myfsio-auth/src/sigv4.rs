@@ -166,6 +166,11 @@ pub fn compute_signature(signing_key: &[u8], string_to_sign: &str) -> String {
     hex::encode(sig)
 }
 
+pub fn compute_post_policy_signature(signing_key: &[u8], policy_b64: &str) -> String {
+    let sig = hmac_sha256(signing_key, policy_b64.as_bytes());
+    hex::encode(sig)
+}
+
 pub fn build_string_to_sign(
     amz_date: &str,
     credential_scope: &str,

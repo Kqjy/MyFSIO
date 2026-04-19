@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row align-items-center justify-content-center min-vh-75 g-5">
+  <div class="col-lg-5 d-none d-lg-block">
+    <div class="text-center mb-4">
+      <div class="position-relative d-inline-block mb-4">
+        <div class="login-hero-icon">
+          <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-cloud-arrow-up" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M7.646 5.146a.5.5 0 0 1 .708 0l2 2a.5.5 0 0 1-.708.708L8.5 6.707V10.5a.5.5 0 0 1-1 0V6.707L6.354 7.854a.5.5 0 1 1-.708-.708l2-2z"/>
+            <path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
+          </svg>
+        </div>
+      </div>
+      <h1 class="display-5 fw-bold mb-3">Welcome to <span class="text-gradient">MyFSIO</span></h1>
+      <p class="lead text-muted mb-4">A developer-friendly object storage solution for prototyping and local development.</p>
+      <div class="d-flex justify-content-center gap-4 text-muted">
+        <div class="text-center">
+          <div class="h4 fw-bold text-gradient mb-1">S3</div>
+          <small>Compatible</small>
+        </div>
+        <div class="vr"></div>
+        <div class="text-center">
+          <div class="h4 fw-bold text-gradient mb-1">Fast</div>
+          <small>Local Storage</small>
+        </div>
+        <div class="vr"></div>
+        <div class="text-center">
+          <div class="h4 fw-bold text-gradient mb-1">Secure</div>
+          <small>IAM Support</small>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-5 col-md-8 col-sm-10">
+    <div class="card shadow-lg login-card position-relative">
+      <div class="card-body p-4 p-md-5">
+        <div class="text-center mb-4 d-lg-none">
+          <img src="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" alt="MyFSIO" width="48" height="48" class="mb-3 rounded-3">
+          <h2 class="h4 fw-bold">MyFSIO</h2>
+        </div>
+        <h2 class="h4 mb-1 d-none d-lg-block">Sign in</h2>
+        <p class="text-muted mb-4 d-none d-lg-block">Enter your credentials to continue</p>
+        <form method="post" action="{{ url_for(endpoint="ui.login") }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <div class="mb-3">
+            <label class="form-label fw-medium">Access key</label>
+            <div class="input-group">
+              <span class="input-group-text bg-transparent">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-key text-muted" viewBox="0 0 16 16">
+                  <path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/>
+                  <path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+              </span>
+              <input class="form-control" type="text" name="access_key" required autofocus placeholder="Enter your access key" />
+            </div>
+          </div>
+          <div class="mb-4">
+            <label class="form-label fw-medium">Secret key</label>
+            <div class="input-group">
+              <span class="input-group-text bg-transparent">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-shield-lock text-muted" viewBox="0 0 16 16">
+                  <path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.775 11.775 0 0 1-2.517 2.453 7.159 7.159 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 62.456 62.456 0 0 1 5.072.56z"/>
+                  <path d="M9.5 6.5a1.5 1.5 0 0 1-1 1.415l.385 1.99a.5.5 0 0 1-.491.595h-.788a.5.5 0 0 1-.49-.595l.384-1.99a1.5 1.5 0 1 1 2-1.415z"/>
+                </svg>
+              </span>
+              <input class="form-control" type="password" name="secret_key" required placeholder="Enter your secret key" />
+            </div>
+          </div>
+          <button class="btn btn-primary btn-lg w-100 fw-medium" type="submit">
+            Sign in
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-arrow-right ms-2" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/>
+            </svg>
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.min-vh-75 { min-height: 75vh; }
+.login-hero-icon {
+  width: 120px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(139, 92, 246, 0.15) 100%);
+  border-radius: 50%;
+  color: #3b82f6;
+  margin: 0 auto;
+}
+[data-theme='dark'] .login-hero-icon {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.25) 0%, rgba(139, 92, 246, 0.25) 100%);
+  color: #60a5fa;
+}
+</style>
+{% endblock %}

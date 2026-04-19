@@ -13,7 +13,7 @@ members = [
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8" }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 hyper = { version = "1" }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
@@ -43,3 +43,14 @@ futures = "0.3"
 dashmap = "6"
 crc32fast = "1"
 duckdb = { version = "1", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
+aws-sdk-s3 = { version = "1", features = ["behavior-version-latest", "rt-tokio"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
+async-trait = "0.1"
+tera = "1"
+cookie = "0.18"
+subtle = "2"
+clap = { version = "4", features = ["derive"] }

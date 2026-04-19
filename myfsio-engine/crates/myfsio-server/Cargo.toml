@@ -33,6 +33,18 @@ duckdb = { workspace = true }
 roxmltree = "0.20"
 parking_lot = { workspace = true }
 regex = "1"
+multer = "3"
+reqwest = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-smithy-types = { workspace = true }
+async-trait = { workspace = true }
+rand = "0.8"
+tera = { workspace = true }
+cookie = { workspace = true }
+subtle = { workspace = true }
+clap = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
