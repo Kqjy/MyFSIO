@@ -1153,13 +1153,6 @@ pub async fn list_copy_targets(
     Json(json!({ "buckets": buckets })).into_response()
 }
 
-pub async fn json_not_implemented() -> Response {
-    json_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "This feature is not implemented yet",
-    )
-}
-
 #[derive(Deserialize)]
 pub struct ConnectionTestPayload {
     pub endpoint_url: String,
@@ -3163,20 +3156,36 @@ fn apply_history_limit(mut value: Value, limit: Option<usize>) -> Value {
     value
 }
 
-pub async fn bucket_stub_json(Extension(_session): Extension<SessionHandle>) -> Response {
-    Json(json!({"status": "not_implemented", "items": []})).into_response()
-}
-
-pub async fn lifecycle_history_stub(
+pub async fn lifecycle_history(
     State(state): State<AppState>,
     Extension(_session): Extension<SessionHandle>,
-    Path(_bucket_name): Path<String>,
+    Path(bucket_name): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    Json(json!({
-        "enabled": state.config.lifecycle_enabled,
-        "executions": [],
-        "total": 0,
-    }))
+    let limit = params
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50);
+    let offset = params
+        .get("offset")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if !state.config.lifecycle_enabled {
+        return Json(json!({
+            "executions": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "enabled": false,
+        }))
+        .into_response();
+    }
+    Json(crate::services::lifecycle::read_history(
+        &state.config.storage_root,
+        &bucket_name,
+        limit,
+        offset,
+    ))
     .into_response()
 }
 

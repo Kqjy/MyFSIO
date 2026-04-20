@@ -106,7 +106,7 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         )
         .route(
             "/ui/buckets/{bucket_name}/lifecycle/history",
-            get(ui_api::lifecycle_history_stub),
+            get(ui_api::lifecycle_history),
         )
         .route(
             "/ui/buckets/{bucket_name}/replication/status",

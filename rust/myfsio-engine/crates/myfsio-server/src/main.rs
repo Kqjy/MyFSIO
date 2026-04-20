@@ -113,6 +113,7 @@ async fn main() {
         let lifecycle =
             std::sync::Arc::new(myfsio_server::services::lifecycle::LifecycleService::new(
                 state.storage.clone(),
+                config.storage_root.clone(),
                 myfsio_server::services::lifecycle::LifecycleConfig::default(),
             ));
         bg_handles.push(lifecycle.start_background());

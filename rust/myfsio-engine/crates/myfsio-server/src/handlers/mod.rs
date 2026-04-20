@@ -24,6 +24,8 @@ use myfsio_storage::traits::StorageEngine;
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 
+use crate::services::notifications;
+use crate::services::object_lock;
 use crate::state::AppState;
 
 fn s3_error_response(err: S3Error) -> Response {
@@ -43,6 +45,39 @@ fn s3_error_response(err: S3Error) -> Response {
 
 fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
     s3_error_response(S3Error::from(err))
+}
+
+async fn ensure_object_lock_allows_write(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: Option<&HeaderMap>,
+) -> Result<(), Response> {
+    match state.storage.head_object(bucket, key).await {
+        Ok(_) => {
+            let metadata = match state.storage.get_object_metadata(bucket, key).await {
+                Ok(metadata) => metadata,
+                Err(err) => return Err(storage_err_response(err)),
+            };
+            let bypass_governance = headers
+                .and_then(|headers| {
+                    headers
+                        .get("x-amz-bypass-governance-retention")
+                        .and_then(|value| value.to_str().ok())
+                })
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::AccessDenied,
+                    message,
+                )));
+            }
+            Ok(())
+        }
+        Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
+        Err(err) => Err(storage_err_response(err)),
+    }
 }
 
 pub async fn list_buckets(State(state): State<AppState>) -> Response {
@@ -549,10 +584,10 @@ pub async fn put_object(
         return config::put_object_tagging(&state, &bucket, &key, body).await;
     }
     if query.acl.is_some() {
-        return config::put_object_acl(&state, &bucket, &key, body).await;
+        return config::put_object_acl(&state, &bucket, &key, &headers, body).await;
     }
     if query.retention.is_some() {
-        return config::put_object_retention(&state, &bucket, &key, body).await;
+        return config::put_object_retention(&state, &bucket, &key, &headers, body).await;
     }
     if query.legal_hold.is_some() {
         return config::put_object_legal_hold(&state, &bucket, &key, body).await;
@@ -595,6 +630,11 @@ pub async fn put_object(
         .and_then(|v| v.to_str().ok())
     {
         return copy_object_handler(&state, copy_source, &bucket, &key, &headers).await;
+    }
+
+    if let Err(response) = ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
+    {
+        return response;
     }
 
     let content_type = guessed_content_type(
@@ -678,6 +718,17 @@ pub async fn put_object(
                                 "x-amz-server-side-encryption",
                                 enc_ctx.algorithm.as_str().parse().unwrap(),
                             );
+                            notifications::emit_object_created(
+                                &state,
+                                &bucket,
+                                &key,
+                                meta.size,
+                                meta.etag.as_deref(),
+                                "",
+                                "",
+                                "",
+                                "Put",
+                            );
                             return (StatusCode::OK, resp_headers).into_response();
                         }
                         Err(e) => {
@@ -695,6 +746,17 @@ pub async fn put_object(
             if let Some(ref etag) = meta.etag {
                 resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
             }
+            notifications::emit_object_created(
+                &state,
+                &bucket,
+                &key,
+                meta.size,
+                meta.etag.as_deref(),
+                "",
+                "",
+                "",
+                "Put",
+            );
             (StatusCode::OK, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -890,6 +952,7 @@ pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    headers: HeaderMap,
 ) -> Response {
     if query.tagging.is_some() {
         return config::delete_object_tagging(&state, &bucket, &key).await;
@@ -902,8 +965,16 @@ pub async fn delete_object(
         return abort_multipart_handler(&state, &bucket, upload_id).await;
     }
 
+    if let Err(response) = ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
+    {
+        return response;
+    }
+
     match state.storage.delete_object(&bucket, &key).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => storage_err_response(e),
     }
 }
@@ -1218,6 +1289,10 @@ async fn copy_object_handler(
     dst_key: &str,
     headers: &HeaderMap,
 ) -> Response {
+    if let Err(response) = ensure_object_lock_allows_write(state, dst_bucket, dst_key, Some(headers)).await {
+        return response;
+    }
+
     let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
     let (src_bucket, src_key) = match source.split_once('/') {
         Some(parts) => parts,
@@ -1278,8 +1353,26 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
     let mut errors = Vec::new();
 
     for obj in &parsed.objects {
+        if let Err(message) = match state.storage.head_object(bucket, &obj.key).await {
+            Ok(_) => match state.storage.get_object_metadata(bucket, &obj.key).await {
+                Ok(metadata) => object_lock::can_delete_object(&metadata, false),
+                Err(err) => Err(S3Error::from(err).message),
+            },
+            Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
+            Err(err) => Err(S3Error::from(err).message),
+        } {
+            errors.push((
+                obj.key.clone(),
+                S3ErrorCode::AccessDenied.as_str().to_string(),
+                message,
+            ));
+            continue;
+        }
         match state.storage.delete_object(bucket, &obj.key).await {
-            Ok(()) => deleted.push((obj.key.clone(), obj.version_id.clone())),
+            Ok(()) => {
+                notifications::emit_object_removed(state, bucket, &obj.key, "", "", "", "Delete");
+                deleted.push((obj.key.clone(), obj.version_id.clone()))
+            }
             Err(e) => {
                 let s3err = S3Error::from(e);
                 errors.push((
@@ -1965,4 +2058,248 @@ fn validate_post_policy_conditions(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::services::acl::{acl_to_xml, create_canned_acl};
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
+    const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+    fn test_state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join(".myfsio.sys").join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("iam.json"),
+            serde_json::json!({
+                "version": 2,
+                "users": [{
+                    "user_id": "u-test1234",
+                    "display_name": "admin",
+                    "enabled": true,
+                    "access_keys": [{
+                        "access_key": TEST_ACCESS_KEY,
+                        "secret_key": TEST_SECRET_KEY,
+                        "status": "active"
+                    }],
+                    "policies": [{
+                        "bucket": "*",
+                        "actions": ["*"],
+                        "prefix": "*"
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let config = ServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+            storage_root: tmp.path().to_path_buf(),
+            region: "us-east-1".to_string(),
+            iam_config_path: config_dir.join("iam.json"),
+            sigv4_timestamp_tolerance_secs: 900,
+            presigned_url_min_expiry: 1,
+            presigned_url_max_expiry: 604800,
+            secret_key: None,
+            encryption_enabled: false,
+            kms_enabled: false,
+            gc_enabled: false,
+            integrity_enabled: false,
+            metrics_enabled: false,
+            metrics_history_enabled: false,
+            metrics_interval_minutes: 5,
+            metrics_retention_hours: 24,
+            metrics_history_interval_minutes: 5,
+            metrics_history_retention_hours: 24,
+            lifecycle_enabled: false,
+            website_hosting_enabled: false,
+            replication_connect_timeout_secs: 1,
+            replication_read_timeout_secs: 1,
+            replication_max_retries: 1,
+            replication_streaming_threshold_bytes: 10_485_760,
+            replication_max_failures_per_bucket: 50,
+            site_sync_enabled: false,
+            site_sync_interval_secs: 60,
+            site_sync_batch_size: 100,
+            site_sync_connect_timeout_secs: 10,
+            site_sync_read_timeout_secs: 120,
+            site_sync_max_retries: 2,
+            site_sync_clock_skew_tolerance: 1.0,
+            ui_enabled: false,
+            templates_dir: manifest_dir.join("templates"),
+            static_dir: manifest_dir.join("static"),
+        };
+        (AppState::new(config), tmp)
+    }
+
+    fn auth_request(
+        method: axum::http::Method,
+        uri: &str,
+        body: Body,
+    ) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .body(body)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_bucket_acl_allows_anonymous_reads() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("public").await.unwrap();
+        state
+            .storage
+            .put_object(
+                "public",
+                "hello.txt",
+                Box::pin(std::io::Cursor::new(b"hello".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut config = state.storage.get_bucket_config("public").await.unwrap();
+        config.acl = Some(Value::String(acl_to_xml(&create_canned_acl("public-read", "myfsio"))));
+        state.storage.set_bucket_config("public", &config).await.unwrap();
+
+        let app = crate::create_router(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/public/hello.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn object_retention_blocks_delete_without_bypass() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("locked").await.unwrap();
+        state
+            .storage
+            .put_object(
+                "locked",
+                "obj.txt",
+                Box::pin(std::io::Cursor::new(b"data".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        let app = crate::create_router(state);
+
+        let retention_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Mode>GOVERNANCE</Mode>
+              <RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate>
+            </Retention>"#;
+        let response = app
+            .clone()
+            .oneshot(auth_request(
+                axum::http::Method::PUT,
+                "/locked/obj.txt?retention",
+                Body::from(retention_xml),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(auth_request(
+                axum::http::Method::DELETE,
+                "/locked/obj.txt",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::DELETE)
+                    .uri("/locked/obj.txt")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header("x-amz-bypass-governance-retention", "true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn object_acl_round_trip_uses_metadata() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("acl").await.unwrap();
+        state
+            .storage
+            .put_object(
+                "acl",
+                "photo.jpg",
+                Box::pin(std::io::Cursor::new(b"image".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        let app = crate::create_router(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri("/acl/photo.jpg?acl")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header("x-amz-acl", "public-read")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/acl/photo.jpg?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("AllUsers"));
+        assert!(body.contains("READ"));
+    }
 }

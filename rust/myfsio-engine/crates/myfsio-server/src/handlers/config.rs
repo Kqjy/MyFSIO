@@ -1,10 +1,19 @@
 use axum::body::Body;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, Utc};
 
 use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_storage::traits::StorageEngine;
 
+use crate::services::acl::{
+    acl_from_object_metadata, acl_to_xml, create_canned_acl, store_object_acl,
+};
+use crate::services::notifications::parse_notification_configurations;
+use crate::services::object_lock::{
+    ensure_retention_mutable, get_legal_hold, get_object_retention as retention_from_metadata,
+    set_legal_hold, set_object_retention as store_retention, ObjectLockRetention, RetentionMode,
+};
 use crate::state::AppState;
 
 fn xml_response(status: StatusCode, xml: String) -> Response {
@@ -30,6 +39,16 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
         value.to_string(),
     )
         .into_response()
+}
+
+fn custom_xml_error(status: StatusCode, code: &str, message: &str) -> Response {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <Error><Code>{}</Code><Message>{}</Message><Resource></Resource><RequestId></RequestId></Error>",
+        xml_escape(code),
+        xml_escape(message),
+    );
+    xml_response(status, xml)
 }
 
 pub async fn get_versioning(state: &AppState, bucket: &str) -> Response {
@@ -847,13 +866,34 @@ pub async fn delete_object_lock(state: &AppState, bucket: &str) -> Response {
 pub async fn put_notification(state: &AppState, bucket: &str, body: Body) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Unable to parse XML document",
+            )
+        }
     };
-    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+    let raw = String::from_utf8_lossy(&body_bytes).to_string();
+    let notification = if raw.trim().is_empty() {
+        None
+    } else {
+        match parse_notification_configurations(&raw) {
+            Ok(_) => Some(serde_json::Value::String(raw)),
+            Err(message) => {
+                let code = if message.contains("Destination URL is required") {
+                    "InvalidArgument"
+                } else {
+                    "MalformedXML"
+                };
+                return custom_xml_error(StatusCode::BAD_REQUEST, code, &message);
+            }
+        }
+    };
 
     match state.storage.get_bucket_config(bucket).await {
         Ok(mut config) => {
-            config.notification = Some(value);
+            config.notification = notification;
             match state.storage.set_bucket_config(bucket, &config).await {
                 Ok(()) => StatusCode::OK.into_response(),
                 Err(e) => storage_err(e),
@@ -1094,40 +1134,64 @@ pub async fn delete_object_tagging(state: &AppState, bucket: &str, key: &str) ->
     }
 }
 
-pub async fn get_object_acl(state: &AppState, bucket: &str, key: &str) -> Response {
+pub async fn put_object_acl(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: &HeaderMap,
+    _body: Body,
+) -> Response {
     match state.storage.head_object(bucket, key).await {
         Ok(_) => {
-            let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                <AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                <Owner><ID>myfsio</ID><DisplayName>myfsio</DisplayName></Owner>\
-                <AccessControlList>\
-                <Grant><Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\">\
-                <ID>myfsio</ID><DisplayName>myfsio</DisplayName></Grantee>\
-                <Permission>FULL_CONTROL</Permission></Grant>\
-                </AccessControlList></AccessControlPolicy>";
-            xml_response(StatusCode::OK, xml.to_string())
+            let canned_acl = headers
+                .get("x-amz-acl")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("private");
+            let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
+                Ok(metadata) => metadata,
+                Err(err) => return storage_err(err),
+            };
+            let owner = acl_from_object_metadata(&metadata)
+                .map(|acl| acl.owner)
+                .unwrap_or_else(|| "myfsio".to_string());
+            let acl = create_canned_acl(canned_acl, &owner);
+            store_object_acl(&mut metadata, &acl);
+            match state.storage.put_object_metadata(bucket, key, &metadata).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(err) => storage_err(err),
+            }
         }
-        Err(e) => storage_err(e),
-    }
-}
-
-pub async fn put_object_acl(state: &AppState, bucket: &str, key: &str, _body: Body) -> Response {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => StatusCode::OK.into_response(),
         Err(e) => storage_err(e),
     }
 }
 
 pub async fn get_object_retention(state: &AppState, bucket: &str, key: &str) -> Response {
     match state.storage.head_object(bucket, key).await {
-        Ok(_) => xml_response(
-            StatusCode::NOT_FOUND,
-            S3Error::new(
-                S3ErrorCode::InvalidRequest,
-                "No retention policy configured",
-            )
-            .to_xml(),
-        ),
+        Ok(_) => {
+            let metadata = match state.storage.get_object_metadata(bucket, key).await {
+                Ok(metadata) => metadata,
+                Err(err) => return storage_err(err),
+            };
+            if let Some(retention) = retention_from_metadata(&metadata) {
+                let xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                     <Retention xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                     <Mode>{}</Mode><RetainUntilDate>{}</RetainUntilDate></Retention>",
+                    match retention.mode {
+                        RetentionMode::GOVERNANCE => "GOVERNANCE",
+                        RetentionMode::COMPLIANCE => "COMPLIANCE",
+                    },
+                    retention.retain_until_date.format("%Y-%m-%dT%H:%M:%S.000Z"),
+                );
+                xml_response(StatusCode::OK, xml)
+            } else {
+                custom_xml_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchObjectLockConfiguration",
+                    "No retention policy",
+                )
+            }
+        }
         Err(e) => storage_err(e),
     }
 }
@@ -1136,21 +1200,108 @@ pub async fn put_object_retention(
     state: &AppState,
     bucket: &str,
     key: &str,
-    _body: Body,
+    headers: &HeaderMap,
+    body: Body,
 ) -> Response {
     match state.storage.head_object(bucket, key).await {
-        Ok(_) => StatusCode::OK.into_response(),
-        Err(e) => storage_err(e),
+        Ok(_) => {}
+        Err(e) => return storage_err(e),
+    }
+
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Unable to parse XML document",
+            )
+        }
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let doc = match roxmltree::Document::parse(&body_str) {
+        Ok(doc) => doc,
+        Err(_) => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Unable to parse XML document",
+            )
+        }
+    };
+    let mode = find_xml_text(&doc, "Mode").unwrap_or_default();
+    let retain_until = find_xml_text(&doc, "RetainUntilDate").unwrap_or_default();
+    if mode.is_empty() || retain_until.is_empty() {
+        return custom_xml_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "Mode and RetainUntilDate are required",
+        );
+    }
+    let mode = match mode.as_str() {
+        "GOVERNANCE" => RetentionMode::GOVERNANCE,
+        "COMPLIANCE" => RetentionMode::COMPLIANCE,
+        other => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                &format!("Invalid retention mode: {}", other),
+            )
+        }
+    };
+    let retain_until_date = match DateTime::parse_from_rfc3339(&retain_until) {
+        Ok(value) => value.with_timezone(&Utc),
+        Err(_) => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                &format!("Invalid date format: {}", retain_until),
+            )
+        }
+    };
+
+    let bypass_governance = headers
+        .get("x-amz-bypass-governance-retention")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(metadata) => metadata,
+        Err(err) => return storage_err(err),
+    };
+    if let Err(message) = ensure_retention_mutable(&metadata, bypass_governance) {
+        return custom_xml_error(StatusCode::FORBIDDEN, "AccessDenied", &message);
+    }
+    if let Err(message) = store_retention(
+        &mut metadata,
+        &ObjectLockRetention {
+            mode,
+            retain_until_date,
+        },
+    ) {
+        return custom_xml_error(StatusCode::BAD_REQUEST, "InvalidArgument", &message);
+    }
+    match state.storage.put_object_metadata(bucket, key, &metadata).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(err) => storage_err(err),
     }
 }
 
 pub async fn get_object_legal_hold(state: &AppState, bucket: &str, key: &str) -> Response {
     match state.storage.head_object(bucket, key).await {
         Ok(_) => {
-            let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                <LegalHold xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                <Status>OFF</Status></LegalHold>";
-            xml_response(StatusCode::OK, xml.to_string())
+            let metadata = match state.storage.get_object_metadata(bucket, key).await {
+                Ok(metadata) => metadata,
+                Err(err) => return storage_err(err),
+            };
+            let status = if get_legal_hold(&metadata) { "ON" } else { "OFF" };
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <LegalHold xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                 <Status>{}</Status></LegalHold>",
+                status
+            );
+            xml_response(StatusCode::OK, xml)
         }
         Err(e) => storage_err(e),
     }
@@ -1160,12 +1311,78 @@ pub async fn put_object_legal_hold(
     state: &AppState,
     bucket: &str,
     key: &str,
-    _body: Body,
+    body: Body,
 ) -> Response {
     match state.storage.head_object(bucket, key).await {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_) => {}
+        Err(e) => return storage_err(e),
+    }
+
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Unable to parse XML document",
+            )
+        }
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let doc = match roxmltree::Document::parse(&body_str) {
+        Ok(doc) => doc,
+        Err(_) => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedXML",
+                "Unable to parse XML document",
+            )
+        }
+    };
+    let status = find_xml_text(&doc, "Status").unwrap_or_default();
+    let enabled = match status.as_str() {
+        "ON" => true,
+        "OFF" => false,
+        _ => {
+            return custom_xml_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "Status must be ON or OFF",
+            )
+        }
+    };
+    let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(metadata) => metadata,
+        Err(err) => return storage_err(err),
+    };
+    set_legal_hold(&mut metadata, enabled);
+    match state.storage.put_object_metadata(bucket, key, &metadata).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(err) => storage_err(err),
+    }
+}
+
+pub async fn get_object_acl(state: &AppState, bucket: &str, key: &str) -> Response {
+    match state.storage.head_object(bucket, key).await {
+        Ok(_) => {
+            let metadata = match state.storage.get_object_metadata(bucket, key).await {
+                Ok(metadata) => metadata,
+                Err(err) => return storage_err(err),
+            };
+            let acl = acl_from_object_metadata(&metadata)
+                .unwrap_or_else(|| create_canned_acl("private", "myfsio"));
+            xml_response(StatusCode::OK, acl_to_xml(&acl))
+        }
         Err(e) => storage_err(e),
     }
+}
+
+fn find_xml_text(doc: &roxmltree::Document<'_>, name: &str) -> Option<String> {
+    doc.descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == name)
+        .and_then(|node| node.text())
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 #[cfg(test)]

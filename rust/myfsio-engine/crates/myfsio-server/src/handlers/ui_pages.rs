@@ -3015,15 +3015,3 @@ pub async fn update_bucket_website(
             .into_response(),
     }
 }
-
-pub async fn stub_post(Extension(session): Extension<SessionHandle>) -> Response {
-    session.write(|s| s.push_flash("info", "This action is not yet implemented in the Rust UI."));
-    Redirect::to("/ui/buckets").into_response()
-}
-
-#[derive(serde::Deserialize)]
-pub struct QueryArgs(#[serde(default)] pub HashMap<String, String>);
-
-pub async fn json_stub(Query(_q): Query<QueryArgs>) -> Response {
-    axum::Json(json!({"status": "not_implemented", "items": []})).into_response()
-}

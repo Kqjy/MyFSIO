@@ -1,8 +1,11 @@
+pub mod acl;
 pub mod access_logging;
 pub mod gc;
 pub mod integrity;
 pub mod lifecycle;
 pub mod metrics;
+pub mod notifications;
+pub mod object_lock;
 pub mod replication;
 pub mod s3_client;
 pub mod site_registry;

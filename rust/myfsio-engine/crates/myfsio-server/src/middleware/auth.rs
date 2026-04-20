@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 
+use crate::services::acl::acl_from_bucket_config;
 use crate::state::AppState;
 
 fn website_error_response(
@@ -589,6 +590,17 @@ async fn authorize_action(
     if iam_allowed || matches!(policy_decision, PolicyDecision::Allow) {
         return Ok(());
     }
+    if evaluate_bucket_acl(
+        state,
+        bucket,
+        principal.map(|principal| principal.access_key.as_str()),
+        action,
+        principal.is_some(),
+    )
+    .await
+    {
+        return Ok(());
+    }
 
     if principal.is_some() {
         Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"))
@@ -598,6 +610,27 @@ async fn authorize_action(
             "Missing credentials",
         ))
     }
+}
+
+async fn evaluate_bucket_acl(
+    state: &AppState,
+    bucket: &str,
+    principal_id: Option<&str>,
+    action: &str,
+    is_authenticated: bool,
+) -> bool {
+    let config = match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => config,
+        Err(_) => return false,
+    };
+    let Some(value) = config.acl.as_ref() else {
+        return false;
+    };
+    let Some(acl) = acl_from_bucket_config(value) else {
+        return false;
+    };
+    acl.allowed_actions(principal_id, is_authenticated)
+        .contains(action)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
