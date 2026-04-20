@@ -133,24 +133,8 @@
     {% endif %}
     <div class="row g-3">
       {% for user in users %}
-      {% set_global is_admin = false %}
-      {% set_global is_expired = false %}
-      {% set_global is_expiring_soon = false %}
-      {% for policy in user.policies %}
-        {% if "iam:*" in policy.actions or "*" in policy.actions %}
-          {% set_global is_admin = true %}
-        {% endif %}
-      {% endfor %}
-      {% if user.expires_at %}
-        {% set exp_str = user.expires_at %}
-        {% if exp_str <= now_iso %}
-          {% set_global is_expired = true %}
-        {% elif exp_str <= soon_iso %}
-          {% set_global is_expiring_soon = true %}
-        {% endif %}
-      {% endif %}
-      <div class="col-md-6 col-xl-4 iam-user-item" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}">
-        <div class="card h-100 iam-user-card{% if is_admin %} iam-admin-card{% else %}{% endif %}">
+      <div class="col-md-6 col-xl-4 iam-user-item" data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}">
+        <div class="card h-100 iam-user-card{% if user.is_admin %} iam-admin-card{% else %}{% endif %}">
           <div class="card-body">
             <div class="d-flex align-items-start justify-content-between mb-3">
               <div class="d-flex align-items-center gap-3 min-width-0 overflow-hidden">
@@ -162,14 +146,14 @@
                 <div class="min-width-0">
                   <div class="d-flex align-items-center gap-2 mb-0">
                     <h6 class="fw-semibold mb-0 text-truncate" title="{{ user.display_name }}">{{ user.display_name }}</h6>
-                    {% if is_admin %}
+                    {% if user.is_admin %}
                     <span class="iam-role-badge iam-role-admin" data-role-badge>Admin</span>
                     {% else %}
                     <span class="iam-role-badge iam-role-user" data-role-badge>User</span>
                     {% endif %}
-                    {% if is_expired %}
+                    {% if user.is_expired %}
                     <span class="badge text-bg-danger" style="font-size: .65rem">Expired</span>
-                    {% elif is_expiring_soon %}
+                    {% elif user.is_expiring_soon %}
                     <span class="badge text-bg-warning" style="font-size: .65rem">Expiring soon</span>
                     {% endif %}
                   </div>
@@ -192,7 +176,7 @@
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end">
                   <li>
-                    <button class="dropdown-item" type="button" data-edit-user="{{ user.access_key }}" data-display-name="{{ user.display_name }}">
+                    <button class="dropdown-item" type="button" data-edit-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name }}">
                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
                         <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
                       </svg>
@@ -200,7 +184,7 @@
                     </button>
                   </li>
                   <li>
-                    <button class="dropdown-item" type="button" data-expiry-user="{{ user.access_key }}" data-expires-at="{{ user.expires_at or "" }}">
+                    <button class="dropdown-item" type="button" data-expiry-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-expires-at="{{ user.expires_at | default(value="") }}">
                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
                         <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
                         <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
@@ -209,7 +193,7 @@
                     </button>
                   </li>
                   <li>
-                    <button class="dropdown-item" type="button" data-rotate-user="{{ user.access_key }}">
+                    <button class="dropdown-item" type="button" data-rotate-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}">
                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
                         <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
                         <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
@@ -219,7 +203,7 @@
                   </li>
                   <li><hr class="dropdown-divider"></li>
                   <li>
-                    <button class="dropdown-item text-danger" type="button" data-delete-user="{{ user.access_key }}">
+                    <button class="dropdown-item text-danger" type="button" data-delete-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}">
                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
                         <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
                         <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
@@ -260,7 +244,7 @@
                 {% endfor %}
               </div>
             </div>
-            <button class="btn btn-outline-primary btn-sm w-100" type="button" data-policy-editor data-access-key="{{ user.access_key }}">
+            <button class="btn btn-outline-primary btn-sm w-100" type="button" data-policy-editor data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                 <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
                 <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319z"/>
@@ -313,7 +297,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" action="{{ url_for(endpoint="ui.create_iam_user") }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label fw-medium">Display Name</label>
@@ -393,11 +377,11 @@
         <form
           id="policyEditorForm"
           method="post"
-          data-action-template="{{ url_for(endpoint="ui.update_iam_policies", access_key="ACCESS_KEY_PLACEHOLDER") }}"
+          data-action-template="{{ url_for(endpoint="ui.update_iam_policies", user_id="USER_ID_PLACEHOLDER") }}"
           class="d-flex flex-column gap-3"
         >
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
-          <input type="hidden" id="policyEditorUser" name="access_key" />
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+          <input type="hidden" id="policyEditorUserId" name="user_id" />
           
           <div>
             <label class="form-label fw-medium">Inline Policies (JSON array)</label>
@@ -440,7 +424,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" id="editUserForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label fw-medium">Display Name</label>
@@ -490,7 +474,7 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
         <form method="post" id="deleteUserForm">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
             <button class="btn btn-danger" type="submit">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                 <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
@@ -575,7 +559,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" id="expiryForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body">
           <p class="text-muted small mb-3">Set expiration for <code id="expiryUserLabel"></code></p>
           <div class="mb-3">
@@ -618,14 +602,14 @@
     users: JSON.parse(document.getElementById('iamUsersJson').textContent || '[]'),
     currentUserKey: {{ principal.access_key | json_encode | safe }},
     iamLocked: {{ iam_locked | json_encode | safe }},
-    csrfToken: "{{ csrf_token() }}",
+    csrfToken: "{{ csrf_token_value }}",
     endpoints: {
       createUser: "{{ url_for(endpoint="ui.create_iam_user") }}",
-      updateUser: "{{ url_for(endpoint="ui.update_iam_user", access_key="ACCESS_KEY") }}",
-      deleteUser: "{{ url_for(endpoint="ui.delete_iam_user", access_key="ACCESS_KEY") }}",
-      updatePolicies: "{{ url_for(endpoint="ui.update_iam_policies", access_key="ACCESS_KEY") }}",
-      rotateSecret: "{{ url_for(endpoint="ui.rotate_iam_secret", access_key="ACCESS_KEY") }}",
-      updateExpiry: "{{ url_for(endpoint="ui.update_iam_expiry", access_key="ACCESS_KEY") }}"
+      updateUser: "{{ url_for(endpoint="ui.update_iam_user", user_id="USER_ID") }}",
+      deleteUser: "{{ url_for(endpoint="ui.delete_iam_user", user_id="USER_ID") }}",
+      updatePolicies: "{{ url_for(endpoint="ui.update_iam_policies", user_id="USER_ID") }}",
+      rotateSecret: "{{ url_for(endpoint="ui.rotate_iam_secret", user_id="USER_ID") }}",
+      updateExpiry: "{{ url_for(endpoint="ui.update_iam_expiry", user_id="USER_ID") }}"
     }
   });
 </script>

@@ -64,7 +64,10 @@ pub fn derive_signing_key_cached(
         }
     }
 
-    let k_date = hmac_sha256(format!("AWS4{}", secret_key).as_bytes(), date_stamp.as_bytes());
+    let k_date = hmac_sha256(
+        format!("AWS4{}", secret_key).as_bytes(),
+        date_stamp.as_bytes(),
+    );
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
@@ -134,7 +137,11 @@ pub fn verify_sigv4_signature(
 
     let canonical_request = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        method, canonical_uri, canonical_query_string, canonical_headers, signed_headers_str,
+        method,
+        canonical_uri,
+        canonical_query_string,
+        canonical_headers,
+        signed_headers_str,
         payload_hash
     );
 
@@ -197,7 +204,12 @@ mod tests {
 
     #[test]
     fn test_derive_signing_key() {
-        let key = derive_signing_key("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "20130524", "us-east-1", "s3");
+        let key = derive_signing_key(
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "20130524",
+            "us-east-1",
+            "s3",
+        );
         assert_eq!(key.len(), 32);
     }
 
@@ -217,7 +229,11 @@ mod tests {
 
     #[test]
     fn test_build_string_to_sign() {
-        let result = build_string_to_sign("20130524T000000Z", "20130524/us-east-1/s3/aws4_request", "GET\n/\n\nhost:example.com\n\nhost\nUNSIGNED-PAYLOAD");
+        let result = build_string_to_sign(
+            "20130524T000000Z",
+            "20130524/us-east-1/s3/aws4_request",
+            "GET\n/\n\nhost:example.com\n\nhost\nUNSIGNED-PAYLOAD",
+        );
         assert!(result.starts_with("AWS4-HMAC-SHA256\n"));
         assert!(result.contains("20130524T000000Z"));
     }
@@ -239,8 +255,13 @@ mod tests {
 
         let signing_key = derive_signing_key(secret, date_stamp, region, service);
 
-        let canonical_request = "GET\n/\n\nhost:examplebucket.s3.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD";
-        let string_to_sign = build_string_to_sign(amz_date, &format!("{}/{}/{}/aws4_request", date_stamp, region, service), canonical_request);
+        let canonical_request =
+            "GET\n/\n\nhost:examplebucket.s3.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD";
+        let string_to_sign = build_string_to_sign(
+            amz_date,
+            &format!("{}/{}/{}/aws4_request", date_stamp, region, service),
+            canonical_request,
+        );
 
         let signature = compute_signature(&signing_key, &string_to_sign);
 
@@ -249,7 +270,10 @@ mod tests {
             "/",
             &[],
             "host",
-            &[("host".to_string(), "examplebucket.s3.amazonaws.com".to_string())],
+            &[(
+                "host".to_string(),
+                "examplebucket.s3.amazonaws.com".to_string(),
+            )],
             "UNSIGNED-PAYLOAD",
             amz_date,
             date_stamp,

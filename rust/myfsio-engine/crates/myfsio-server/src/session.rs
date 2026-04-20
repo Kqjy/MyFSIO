@@ -27,21 +27,18 @@ pub struct SessionData {
     pub csrf_token: String,
     pub flash: Vec<FlashMessage>,
     pub extra: HashMap<String, String>,
-    created_at: Instant,
     last_accessed: Instant,
 }
 
 impl SessionData {
     pub fn new() -> Self {
-        let now = Instant::now();
         Self {
             user_id: None,
             display_name: None,
             csrf_token: generate_token(CSRF_TOKEN_BYTES),
             flash: Vec::new(),
             extra: HashMap::new(),
-            created_at: now,
-            last_accessed: now,
+            last_accessed: Instant::now(),
         }
     }
 

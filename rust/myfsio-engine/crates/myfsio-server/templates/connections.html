@@ -36,7 +36,7 @@
             </div>
             <div class="card-body px-4 pb-4">
                 <form method="POST" action="{{ url_for(endpoint="ui.create_connection") }}" id="createConnectionForm">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
                     <div class="mb-3">
                         <label for="name" class="form-label fw-medium">Name</label>
                         <input type="text" class="form-control" id="name" name="name" required placeholder="Production Backup">
@@ -197,7 +197,7 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <form method="POST" id="editConnectionForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="edit_name" class="form-label fw-medium">Name</label>
@@ -274,7 +274,7 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
                 <form method="POST" id="deleteConnectionForm">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
                     <button type="submit" class="btn btn-danger">
                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                             <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
@@ -291,7 +291,7 @@
 <script src="{{ url_for(endpoint="static", filename="js/connections-management.js") }}"></script>
 <script>
   ConnectionsManagement.init({
-    csrfToken: "{{ csrf_token() }}",
+    csrfToken: "{{ csrf_token_value }}",
     endpoints: {
       test: "{{ url_for(endpoint="ui.test_connection") }}",
       updateTemplate: "{{ url_for(endpoint="ui.update_connection", connection_id="CONNECTION_ID") }}",

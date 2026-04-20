@@ -132,9 +132,7 @@ impl KmsService {
 
     async fn save(&self) -> Result<(), CryptoError> {
         let keys = self.keys.read().await;
-        let store = KmsStore {
-            keys: keys.clone(),
-        };
+        let store = KmsStore { keys: keys.clone() };
         let json = serde_json::to_string_pretty(&store)
             .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
         std::fs::write(&self.keys_path, json).map_err(CryptoError::Io)?;

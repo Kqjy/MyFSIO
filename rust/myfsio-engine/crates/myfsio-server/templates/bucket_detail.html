@@ -395,14 +395,8 @@
               {% endif %}
 
               {% if can_edit_policy %}
-              {% set preset_choice = "custom" %}
-              {% if not bucket_policy %}
-                {% set preset_choice = "private" %}
-              {% elif bucket_policy_text and bucket_policy_text | trim == default_policy | trim %}
-                {% set preset_choice = "public" %}
-              {% endif %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" id="bucketPolicyForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="mode" value="upsert" id="policyMode" />
                 
                 <div class="mb-4">
@@ -454,7 +448,7 @@
                     </button>
                   </label>
                   <div class="position-relative">
-                    <textarea class="form-control font-monospace" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode | safe }}' spellcheck="false" style="font-size: 0.85rem; line-height: 1.5; tab-size: 2;">{{ bucket_policy_text or default_policy }}</textarea>
+                    <textarea class="form-control font-monospace" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode | safe }}' spellcheck="false" style="font-size: 0.85rem; line-height: 1.5; tab-size: 2;">{% if bucket_policy_text %}{{ bucket_policy_text }}{% else %}{{ default_policy }}{% endif %}</textarea>
                     <div id="policyValidationStatus" class="position-absolute top-0 end-0 m-2 d-none">
                       <span class="badge bg-success-subtle text-success" id="policyValidBadge">
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -655,7 +649,7 @@
                 </button>
                 {% else %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}" id="enableVersioningForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="state" value="enable" />
                 <button class="btn btn-success" type="submit">
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -783,7 +777,7 @@
 
               {% if can_manage_encryption %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_encryption", bucket_name=bucket_name) }}" id="encryptionForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="action" value="enable" id="encryptionAction" />
                 
                 <div class="mb-3">
@@ -817,7 +811,7 @@
                     <option value="">Use default KMS key</option>
                     {% for key in kms_keys %}
                     <option value="{{ key.key_id }}" {% if key.key_id == enc_kms_key %}selected{% else %}{% endif %}>
-                      {{ key.description or key.key_id }} ({{ key.key_id | slice(start=0, end=8) }}...)
+                      {% if key.description %}{{ key.description }}{% else %}{{ key.key_id }}{% endif %} ({{ key.key_id | slice(start=0, end=8) }}...)
                     </option>
                     {% endfor %}
                   </select>
@@ -832,14 +826,14 @@
                     </svg>
                     Save Encryption Settings
                   </button>
-                  {% if enc_algorithm %}
-                  <button type="button" class="btn btn-outline-danger" id="disableEncryptionBtn">
+                  <button type="button" class="btn btn-outline-danger" id="disableEncryptionBtn"
+                          data-bs-toggle="modal" data-bs-target="#disableEncryptionModal"
+                          {% if not enc_algorithm %}style="display: none;"{% endif %}>
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                       <path d="M11 1a2 2 0 0 0-2 2v4a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h5V3a3 3 0 0 1 6 0v4a.5.5 0 0 1-1 0V3a2 2 0 0 0-2-2z"/>
                     </svg>
                     Disable Encryption
                   </button>
-                  {% endif %}
                 </div>
               </form>
               {% else %}
@@ -864,7 +858,6 @@
             <div class="card-body">
               {% set max_bytes = bucket_quota.max_bytes %}
               {% set max_objects = bucket_quota.max_objects %}
-              {% set has_quota = max_bytes != null or max_objects != null %}
               {% set current_objects = bucket_stats.objects | default(value=0) %}
               {% set version_count = bucket_stats.version_count | default(value=0) %}
               {% set total_objects = bucket_stats.total_objects | default(value=current_objects) %}
@@ -879,10 +872,10 @@
                     <div class="border rounded p-3 text-center">
                       <div class="fs-4 fw-bold text-primary">{{ total_objects }}</div>
                       <div class="small text-muted">Total Objects</div>
-                      {% if max_objects != null %}
+                      {% if has_max_objects %}
                       <div class="progress mt-2" style="height: 4px;">
                         {% if max_objects > 0 %}{% set obj_pct = total_objects / max_objects * 100 | int %}{% else %}{% set obj_pct = 0 %}{% endif %}
-                        <div class="progress-bar {% if obj_pct >= 90 %}bg-danger{% elif obj_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {{ [obj_pct, 100] | min }}%"></div>
+                        <div class="progress-bar {% if obj_pct >= 90 %}bg-danger{% elif obj_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {% if obj_pct > 100 %}100{% else %}{{ obj_pct }}{% endif %}%"></div>
                       </div>
                       <div class="small text-muted mt-1">{{ obj_pct }}% of {{ max_objects }} limit</div>
                       {% else %}
@@ -899,10 +892,10 @@
                     <div class="border rounded p-3 text-center">
                       <div class="fs-4 fw-bold text-primary">{{ total_bytes | filesizeformat }}</div>
                       <div class="small text-muted">Total Storage</div>
-                      {% if max_bytes != null %}
+                      {% if has_max_bytes %}
                       <div class="progress mt-2" style="height: 4px;">
                         {% if max_bytes > 0 %}{% set bytes_pct = total_bytes / max_bytes * 100 | int %}{% else %}{% set bytes_pct = 0 %}{% endif %}
-                        <div class="progress-bar {% if bytes_pct >= 90 %}bg-danger{% elif bytes_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {{ [bytes_pct, 100] | min }}%"></div>
+                        <div class="progress-bar {% if bytes_pct >= 90 %}bg-danger{% elif bytes_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {% if bytes_pct > 100 %}100{% else %}{{ bytes_pct }}{% endif %}%"></div>
                       </div>
                       <div class="small text-muted mt-1">{{ bytes_pct }}% of {{ max_bytes | filesizeformat }} limit</div>
                       {% else %}
@@ -924,14 +917,14 @@
                   <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
                 </svg>
                 <div>
-                  <strong>Storage quota enabled</strong>
+                  <strong>Storage quota active</strong>
                   <p class="mb-0 small">
-                    {% if max_bytes != null and max_objects != null %}
-                    Limited to {{ max_bytes | filesizeformat }} and {{ max_objects }} objects.
-                    {% elif max_bytes != null %}
-                    Limited to {{ max_bytes | filesizeformat }} storage.
-                    {% else %}
-                    Limited to {{ max_objects }} objects.
+                    {% if has_max_bytes and has_max_objects %}
+                    This bucket is limited to {{ max_bytes | filesizeformat }} storage and {{ max_objects }} objects.
+                    {% elif has_max_bytes %}
+                    This bucket is limited to {{ max_bytes | filesizeformat }} storage.
+                    {% elif has_max_objects %}
+                    This bucket is limited to {{ max_objects }} objects.
                     {% endif %}
                   </p>
                 </div>
@@ -951,14 +944,14 @@
 
               {% if can_manage_quota %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_quota", bucket_name=bucket_name) }}" id="quotaForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="action" value="set" id="quotaAction" />
 
                 <div class="mb-3">
                   <label for="max_mb" class="form-label fw-medium">Maximum Storage Size</label>
                   <div class="input-group">
                     <input type="number" class="form-control" id="max_mb" name="max_mb" 
-                           value="{% if max_bytes != null %}{{ (max_bytes / 1048576) | int }}{% else %}{{ "" }}{% endif %}" 
+                           value="{% if has_max_bytes %}{{ (max_bytes / 1048576) | int }}{% endif %}"
                            min="1" step="1" placeholder="Unlimited">
                     <span class="input-group-text">MB</span>
                   </div>
@@ -968,7 +961,7 @@
                 <div class="mb-4">
                   <label for="max_objects" class="form-label fw-medium">Maximum Object Count</label>
                   <input type="number" class="form-control" id="max_objects" name="max_objects" 
-                         value="{% if max_objects != null %}{{ max_objects }}{% else %}{{ "" }}{% endif %}" 
+                         value="{% if has_max_objects %}{{ max_objects }}{% endif %}"
                          min="0" step="1" placeholder="Unlimited">
                   <div class="form-text">Maximum number of objects allowed. Leave empty for unlimited.</div>
                 </div>
@@ -1058,7 +1051,7 @@
 
               {% if can_manage_website %}
               <form method="post" action="{{ url_for(endpoint="ui.update_bucket_website", bucket_name=bucket_name) }}" id="websiteForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="action" value="enable" id="websiteAction" />
 
                 <div class="mb-3">
@@ -1423,7 +1416,7 @@
                   Refresh
                 </a>
                 <form id="pause-replication-form" method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}" class="d-inline">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                   <input type="hidden" name="action" value="pause">
                   <button type="submit" class="btn btn-outline-warning">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -1499,7 +1492,7 @@
               
               <div class="d-flex gap-2">
                 <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}" class="d-inline">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                   <input type="hidden" name="action" value="resume">
                   <button type="submit" class="btn btn-primary">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -1538,7 +1531,7 @@
               
               {% if is_replication_admin and connections %}
               <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
                 <input type="hidden" name="action" value="create">
                 
                 <div class="mb-3">
@@ -1713,7 +1706,7 @@
       {% endif %}
       <div class="row g-4">
         <div class="col-lg-8">
-          <div class="card shadow-sm" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}" data-lifecycle-enabled="{{ lifecycle_enabled|lower }}">
+          <div class="card shadow-sm" id="lifecycle-rules-card" data-lifecycle-url="{{ lifecycle_url }}" data-lifecycle-enabled="{% if lifecycle_enabled %}true{% else %}false{% endif %}">
             <div class="card-header d-flex justify-content-between align-items-center">
               <div class="d-flex align-items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-primary me-2" viewBox="0 0 16 16">
@@ -2024,7 +2017,7 @@
       <div class="modal-footer border-0 pt-0">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
         <form method="post" action="{{ url_for(endpoint="ui.update_bucket_policy", bucket_name=bucket_name) }}" class="d-inline" id="deletePolicyForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
           <input type="hidden" name="mode" value="delete" />
           <button type="submit" class="btn btn-danger">Delete Policy</button>
         </form>
@@ -2056,7 +2049,7 @@
         data-multipart-complete-template="{{ url_for(endpoint="ui.complete_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
         data-multipart-abort-template="{{ url_for(endpoint="ui.abort_multipart_upload", bucket_name=bucket_name, upload_id="UPLOAD_ID_PLACEHOLDER") }}"
       >
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body">
           <p class="text-muted small mb-3">Upload files to <code>{{ bucket_name }}</code>. You can select multiple files at once.</p>
           <div class="row g-3">
@@ -2212,7 +2205,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" action="{{ url_for(endpoint="ui.delete_bucket", bucket_name=bucket_name) }}" id="deleteBucketForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body">
           <div class="alert alert-danger d-flex align-items-center mb-3" role="alert">
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
@@ -2322,7 +2315,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" id="deleteObjectForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body">
           <p class="mb-3">
             Are you sure you want to delete this object?
@@ -2440,7 +2433,7 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
         <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name=bucket_name) }}" class="d-inline" id="suspendVersioningForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
           <input type="hidden" name="state" value="suspend" />
           <button type="submit" class="btn btn-warning">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -2449,6 +2442,41 @@
             Suspend Versioning
           </button>
         </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="disableEncryptionModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+          </svg>
+          Disable Default Encryption
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-warning d-flex align-items-start mb-3" role="alert">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+          </svg>
+          <div>
+            <strong>Are you sure?</strong><br>
+            <span class="small">New objects will not be encrypted automatically.</span>
+          </div>
+        </div>
+        <p class="text-muted small mb-0">Existing encrypted objects remain encrypted and readable.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="confirmDisableEncryptionBtn">
+          Disable Encryption
+        </button>
       </div>
     </div>
   </div>
@@ -2483,7 +2511,7 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
         <form method="POST" action="{{ url_for(endpoint="ui.update_bucket_replication", bucket_name=bucket_name) }}" class="d-inline">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+            <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
             <input type="hidden" name="action" value="delete">
             <button type="submit" class="btn btn-warning">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">

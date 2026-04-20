@@ -37,13 +37,8 @@
             <tr><td class="text-muted" style="width:40%">Version</td><td class="fw-medium">{{ app_version }}</td></tr>
             <tr><td class="text-muted">Storage Root</td><td><code>{{ storage_root }}</code></td></tr>
             <tr><td class="text-muted">Platform</td><td>{{ platform }}</td></tr>
-            <tr><td class="text-muted">Python</td><td>{{ python_version }}</td></tr>
-            <tr><td class="text-muted">Rust Extension</td><td>
-              {% if has_rust %}
-              <span class="badge bg-success bg-opacity-10 text-success">Loaded</span>
-              {% else %}
-              <span class="badge bg-secondary bg-opacity-10 text-secondary">Not loaded</span>
-              {% endif %}
+            <tr><td class="text-muted">Engine</td><td>
+              <span class="badge bg-success bg-opacity-10 text-success">Rust (native)</span>
             </td></tr>
           </tbody>
         </table>
@@ -420,7 +415,8 @@
 
   function _gcRefreshHistory() {
     fetch('{{ url_for(endpoint="ui.system_gc_history") }}?limit=10', {
-      headers: {'X-CSRFToken': csrfToken}
+      headers: {'X-CSRFToken': csrfToken},
+      cache: 'no-store'
     })
     .then(function (r) { return r.json(); })
     .then(function (hist) {
@@ -459,7 +455,8 @@
 
   function _integrityRefreshHistory() {
     fetch('{{ url_for(endpoint="ui.system_integrity_history") }}?limit=10', {
-      headers: {'X-CSRFToken': csrfToken}
+      headers: {'X-CSRFToken': csrfToken},
+      cache: 'no-store'
     })
     .then(function (r) { return r.json(); })
     .then(function (hist) {
@@ -555,7 +552,8 @@
 
   function _gcPoll() {
     fetch('{{ url_for(endpoint="ui.system_gc_status") }}', {
-      headers: {'X-CSRFToken': csrfToken}
+      headers: {'X-CSRFToken': csrfToken},
+      cache: 'no-store'
     })
     .then(function (r) { return r.json(); })
     .then(function (status) {
@@ -567,7 +565,8 @@
         _gcSetScanning(false);
         _gcRefreshHistory();
         fetch('{{ url_for(endpoint="ui.system_gc_history") }}?limit=1', {
-          headers: {'X-CSRFToken': csrfToken}
+          headers: {'X-CSRFToken': csrfToken},
+          cache: 'no-store'
         })
         .then(function (r) { return r.json(); })
         .then(function (hist) {
@@ -608,7 +607,13 @@
         body.textContent = data.error;
         return;
       }
-      _gcPollTimer = setTimeout(_gcPoll, 2000);
+      if (data.status === 'started' || data.scanning === true || data.running === true) {
+        _gcPollTimer = setTimeout(_gcPoll, 2000);
+        return;
+      }
+      _gcSetScanning(false);
+      _gcShowResult(data, dryRun);
+      _gcRefreshHistory();
     })
     .catch(function (err) {
       _gcSetScanning(false);
@@ -685,7 +690,8 @@
 
   function _integrityPoll() {
     fetch('{{ url_for(endpoint="ui.system_integrity_status") }}', {
-      headers: {'X-CSRFToken': csrfToken}
+      headers: {'X-CSRFToken': csrfToken},
+      cache: 'no-store'
     })
     .then(function (r) { return r.json(); })
     .then(function (status) {
@@ -697,7 +703,8 @@
         _integritySetScanning(false);
         _integrityRefreshHistory();
         fetch('{{ url_for(endpoint="ui.system_integrity_history") }}?limit=1', {
-          headers: {'X-CSRFToken': csrfToken}
+          headers: {'X-CSRFToken': csrfToken},
+          cache: 'no-store'
         })
         .then(function (r) { return r.json(); })
         .then(function (hist) {
@@ -738,7 +745,13 @@
         body.textContent = data.error;
         return;
       }
-      _integrityPollTimer = setTimeout(_integrityPoll, 2000);
+      if (data.status === 'started' || data.scanning === true || data.running === true) {
+        _integrityPollTimer = setTimeout(_integrityPoll, 2000);
+        return;
+      }
+      _integritySetScanning(false);
+      _integrityShowResult(data, dryRun, autoHeal);
+      _integrityRefreshHistory();
     })
     .catch(function (err) {
       _integritySetScanning(false);

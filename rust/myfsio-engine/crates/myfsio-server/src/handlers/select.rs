@@ -51,14 +51,12 @@ pub async fn post_select_object_content(
     let object_path = match state.storage.get_object_path(bucket, key).await {
         Ok(path) => path,
         Err(_) => {
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::NoSuchKey,
-                "Object not found",
-            ));
+            return s3_error_response(S3Error::new(S3ErrorCode::NoSuchKey, "Object not found"));
         }
     };
 
-    let join_res = tokio::task::spawn_blocking(move || execute_select_query(object_path, request)).await;
+    let join_res =
+        tokio::task::spawn_blocking(move || execute_select_query(object_path, request)).await;
     let chunks = match join_res {
         Ok(Ok(chunks)) => chunks,
         Ok(Err(message)) => {
@@ -79,7 +77,10 @@ pub async fn post_select_object_content(
     }
 
     let stats_payload = build_stats_xml(0, bytes_returned);
-    events.push(Bytes::from(encode_select_event("Stats", stats_payload.as_bytes())));
+    events.push(Bytes::from(encode_select_event(
+        "Stats",
+        stats_payload.as_bytes(),
+    )));
     events.push(Bytes::from(encode_select_event("End", b"")));
 
     let stream = stream::iter(events.into_iter().map(Ok::<Bytes, std::io::Error>));
@@ -166,10 +167,18 @@ fn parse_select_request(payload: &[u8]) -> Result<SelectRequest, S3Error> {
         ));
     }
 
-    let input_node = child(&root, "InputSerialization")
-        .ok_or_else(|| S3Error::new(S3ErrorCode::InvalidRequest, "InputSerialization is required"))?;
-    let output_node = child(&root, "OutputSerialization")
-        .ok_or_else(|| S3Error::new(S3ErrorCode::InvalidRequest, "OutputSerialization is required"))?;
+    let input_node = child(&root, "InputSerialization").ok_or_else(|| {
+        S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "InputSerialization is required",
+        )
+    })?;
+    let output_node = child(&root, "OutputSerialization").ok_or_else(|| {
+        S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "OutputSerialization is required",
+        )
+    })?;
 
     let input_format = parse_input_format(&input_node)?;
     let output_format = parse_output_format(&output_node)?;
@@ -187,8 +196,10 @@ fn parse_input_format(node: &roxmltree::Node<'_, '_>) -> Result<InputFormat, S3E
             file_header_info: child_text(&csv_node, "FileHeaderInfo")
                 .unwrap_or_else(|| "NONE".to_string())
                 .to_ascii_uppercase(),
-            field_delimiter: child_text(&csv_node, "FieldDelimiter").unwrap_or_else(|| ",".to_string()),
-            quote_character: child_text(&csv_node, "QuoteCharacter").unwrap_or_else(|| "\"".to_string()),
+            field_delimiter: child_text(&csv_node, "FieldDelimiter")
+                .unwrap_or_else(|| ",".to_string()),
+            quote_character: child_text(&csv_node, "QuoteCharacter")
+                .unwrap_or_else(|| "\"".to_string()),
         }));
     }
 
@@ -213,15 +224,19 @@ fn parse_input_format(node: &roxmltree::Node<'_, '_>) -> Result<InputFormat, S3E
 fn parse_output_format(node: &roxmltree::Node<'_, '_>) -> Result<OutputFormat, S3Error> {
     if let Some(csv_node) = child(node, "CSV") {
         return Ok(OutputFormat::Csv(CsvOutputConfig {
-            field_delimiter: child_text(&csv_node, "FieldDelimiter").unwrap_or_else(|| ",".to_string()),
-            record_delimiter: child_text(&csv_node, "RecordDelimiter").unwrap_or_else(|| "\n".to_string()),
-            quote_character: child_text(&csv_node, "QuoteCharacter").unwrap_or_else(|| "\"".to_string()),
+            field_delimiter: child_text(&csv_node, "FieldDelimiter")
+                .unwrap_or_else(|| ",".to_string()),
+            record_delimiter: child_text(&csv_node, "RecordDelimiter")
+                .unwrap_or_else(|| "\n".to_string()),
+            quote_character: child_text(&csv_node, "QuoteCharacter")
+                .unwrap_or_else(|| "\"".to_string()),
         }));
     }
 
     if let Some(json_node) = child(node, "JSON") {
         return Ok(OutputFormat::Json(JsonOutputConfig {
-            record_delimiter: child_text(&json_node, "RecordDelimiter").unwrap_or_else(|| "\n".to_string()),
+            record_delimiter: child_text(&json_node, "RecordDelimiter")
+                .unwrap_or_else(|| "\n".to_string()),
         }));
     }
 
@@ -231,7 +246,10 @@ fn parse_output_format(node: &roxmltree::Node<'_, '_>) -> Result<OutputFormat, S
     ))
 }
 
-fn child<'a, 'input>(node: &'a roxmltree::Node<'a, 'input>, name: &str) -> Option<roxmltree::Node<'a, 'input>> {
+fn child<'a, 'input>(
+    node: &'a roxmltree::Node<'a, 'input>,
+    name: &str,
+) -> Option<roxmltree::Node<'a, 'input>> {
     node.children()
         .find(|n| n.is_element() && n.tag_name().name() == name)
 }
@@ -243,7 +261,8 @@ fn child_text(node: &roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
 }
 
 fn execute_select_query(path: PathBuf, request: SelectRequest) -> Result<Vec<Vec<u8>>, String> {
-    let conn = Connection::open_in_memory().map_err(|e| format!("DuckDB connection error: {}", e))?;
+    let conn =
+        Connection::open_in_memory().map_err(|e| format!("DuckDB connection error: {}", e))?;
 
     load_input_table(&conn, &path, &request.input_format)?;
 
@@ -341,7 +360,10 @@ fn collect_csv_chunks(
     let mut chunks: Vec<Vec<u8>> = Vec::new();
     let mut buffer = String::new();
 
-    while let Some(row) = rows.next().map_err(|e| format!("SQL execution error: {}", e))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("SQL execution error: {}", e))?
+    {
         let mut fields: Vec<String> = Vec::with_capacity(col_count);
         for i in 0..col_count {
             let value = row
@@ -353,7 +375,10 @@ fn collect_csv_chunks(
             }
 
             let mut text = value_ref_to_string(value);
-            if text.contains(&delimiter) || text.contains(&quote) || text.contains(&record_delimiter) {
+            if text.contains(&delimiter)
+                || text.contains(&quote)
+                || text.contains(&record_delimiter)
+            {
                 text = text.replace(&quote, &(quote.clone() + &quote));
                 text = format!("{}{}{}", quote, text, quote);
             }
@@ -385,16 +410,16 @@ fn collect_json_chunks(
     let mut chunks: Vec<Vec<u8>> = Vec::new();
     let mut buffer = String::new();
 
-    while let Some(row) = rows.next().map_err(|e| format!("SQL execution error: {}", e))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("SQL execution error: {}", e))?
+    {
         let mut record: HashMap<String, serde_json::Value> = HashMap::with_capacity(col_count);
         for i in 0..col_count {
             let value = row
                 .get_ref(i)
                 .map_err(|e| format!("SQL execution error: {}", e))?;
-            let key = columns
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("_{}", i));
+            let key = columns.get(i).cloned().unwrap_or_else(|| format!("_{}", i));
             record.insert(key, value_ref_to_json(value));
         }
         let line = serde_json::to_string(&record)
@@ -452,7 +477,9 @@ fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
         ValueRef::Double(v) => serde_json::json!(v),
         ValueRef::Decimal(v) => serde_json::Value::String(v.to_string()),
         ValueRef::Text(v) => serde_json::Value::String(String::from_utf8_lossy(v).into_owned()),
-        ValueRef::Blob(v) => serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(v)),
+        ValueRef::Blob(v) => {
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(v))
+        }
         _ => serde_json::Value::String(format!("{:?}", value)),
     }
 }
@@ -477,7 +504,8 @@ fn require_xml_content_type(headers: &HeaderMap) -> Option<Response> {
 }
 
 fn s3_error_response(err: S3Error) -> Response {
-    let status = StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status =
+        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let resource = if err.resource.is_empty() {
         "/".to_string()
     } else {
@@ -487,12 +515,7 @@ fn s3_error_response(err: S3Error) -> Response {
         .with_resource(resource)
         .with_request_id(uuid::Uuid::new_v4().simple().to_string())
         .to_xml();
-    (
-        status,
-        [("content-type", "application/xml")],
-        body,
-    )
-        .into_response()
+    (status, [("content-type", "application/xml")], body).into_response()
 }
 
 fn build_stats_xml(bytes_scanned: usize, bytes_returned: usize) -> String {
@@ -508,7 +531,10 @@ fn encode_select_event(event_type: &str, payload: &[u8]) -> Vec<u8> {
     let mut headers = Vec::new();
     headers.extend(encode_select_header(":event-type", event_type));
     if event_type == "Records" {
-        headers.extend(encode_select_header(":content-type", "application/octet-stream"));
+        headers.extend(encode_select_header(
+            ":content-type",
+            "application/octet-stream",
+        ));
     } else if event_type == "Stats" {
         headers.extend(encode_select_header(":content-type", "text/xml"));
     }

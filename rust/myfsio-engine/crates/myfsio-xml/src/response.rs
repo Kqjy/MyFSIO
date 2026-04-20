@@ -11,27 +11,47 @@ pub fn format_s3_datetime(dt: &DateTime<Utc>) -> String {
 pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("ListAllMyBucketsResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
     writer.write_event(Event::Start(start)).unwrap();
 
-    writer.write_event(Event::Start(BytesStart::new("Owner"))).unwrap();
+    writer
+        .write_event(Event::Start(BytesStart::new("Owner")))
+        .unwrap();
     write_text_element(&mut writer, "ID", owner_id);
     write_text_element(&mut writer, "DisplayName", owner_name);
-    writer.write_event(Event::End(BytesEnd::new("Owner"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("Owner")))
+        .unwrap();
 
-    writer.write_event(Event::Start(BytesStart::new("Buckets"))).unwrap();
+    writer
+        .write_event(Event::Start(BytesStart::new("Buckets")))
+        .unwrap();
     for bucket in buckets {
-        writer.write_event(Event::Start(BytesStart::new("Bucket"))).unwrap();
+        writer
+            .write_event(Event::Start(BytesStart::new("Bucket")))
+            .unwrap();
         write_text_element(&mut writer, "Name", &bucket.name);
-        write_text_element(&mut writer, "CreationDate", &format_s3_datetime(&bucket.creation_date));
-        writer.write_event(Event::End(BytesEnd::new("Bucket"))).unwrap();
+        write_text_element(
+            &mut writer,
+            "CreationDate",
+            &format_s3_datetime(&bucket.creation_date),
+        );
+        writer
+            .write_event(Event::End(BytesEnd::new("Bucket")))
+            .unwrap();
     }
-    writer.write_event(Event::End(BytesEnd::new("Buckets"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("Buckets")))
+        .unwrap();
 
-    writer.write_event(Event::End(BytesEnd::new("ListAllMyBucketsResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("ListAllMyBucketsResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
@@ -50,7 +70,9 @@ pub fn list_objects_v2_xml(
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("ListBucketResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
@@ -73,24 +95,42 @@ pub fn list_objects_v2_xml(
     }
 
     for obj in objects {
-        writer.write_event(Event::Start(BytesStart::new("Contents"))).unwrap();
+        writer
+            .write_event(Event::Start(BytesStart::new("Contents")))
+            .unwrap();
         write_text_element(&mut writer, "Key", &obj.key);
-        write_text_element(&mut writer, "LastModified", &format_s3_datetime(&obj.last_modified));
+        write_text_element(
+            &mut writer,
+            "LastModified",
+            &format_s3_datetime(&obj.last_modified),
+        );
         if let Some(ref etag) = obj.etag {
             write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
         }
         write_text_element(&mut writer, "Size", &obj.size.to_string());
-        write_text_element(&mut writer, "StorageClass", obj.storage_class.as_deref().unwrap_or("STANDARD"));
-        writer.write_event(Event::End(BytesEnd::new("Contents"))).unwrap();
+        write_text_element(
+            &mut writer,
+            "StorageClass",
+            obj.storage_class.as_deref().unwrap_or("STANDARD"),
+        );
+        writer
+            .write_event(Event::End(BytesEnd::new("Contents")))
+            .unwrap();
     }
 
     for prefix in common_prefixes {
-        writer.write_event(Event::Start(BytesStart::new("CommonPrefixes"))).unwrap();
+        writer
+            .write_event(Event::Start(BytesStart::new("CommonPrefixes")))
+            .unwrap();
         write_text_element(&mut writer, "Prefix", prefix);
-        writer.write_event(Event::End(BytesEnd::new("CommonPrefixes"))).unwrap();
+        writer
+            .write_event(Event::End(BytesEnd::new("CommonPrefixes")))
+            .unwrap();
     }
 
-    writer.write_event(Event::End(BytesEnd::new("ListBucketResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("ListBucketResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
@@ -138,7 +178,11 @@ pub fn list_objects_v1_xml(
             .write_event(Event::Start(BytesStart::new("Contents")))
             .unwrap();
         write_text_element(&mut writer, "Key", &obj.key);
-        write_text_element(&mut writer, "LastModified", &format_s3_datetime(&obj.last_modified));
+        write_text_element(
+            &mut writer,
+            "LastModified",
+            &format_s3_datetime(&obj.last_modified),
+        );
         if let Some(ref etag) = obj.etag {
             write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
         }
@@ -166,14 +210,20 @@ pub fn list_objects_v1_xml(
 }
 
 fn write_text_element(writer: &mut Writer<Cursor<Vec<u8>>>, tag: &str, text: &str) {
-    writer.write_event(Event::Start(BytesStart::new(tag))).unwrap();
-    writer.write_event(Event::Text(BytesText::new(text))).unwrap();
+    writer
+        .write_event(Event::Start(BytesStart::new(tag)))
+        .unwrap();
+    writer
+        .write_event(Event::Text(BytesText::new(text)))
+        .unwrap();
     writer.write_event(Event::End(BytesEnd::new(tag))).unwrap();
 }
 
 pub fn initiate_multipart_upload_xml(bucket: &str, key: &str, upload_id: &str) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("InitiateMultipartUploadResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
@@ -181,7 +231,9 @@ pub fn initiate_multipart_upload_xml(bucket: &str, key: &str, upload_id: &str) -
     write_text_element(&mut writer, "Bucket", bucket);
     write_text_element(&mut writer, "Key", key);
     write_text_element(&mut writer, "UploadId", upload_id);
-    writer.write_event(Event::End(BytesEnd::new("InitiateMultipartUploadResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("InitiateMultipartUploadResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
@@ -193,7 +245,9 @@ pub fn complete_multipart_upload_xml(
     location: &str,
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("CompleteMultipartUploadResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
@@ -202,28 +256,36 @@ pub fn complete_multipart_upload_xml(
     write_text_element(&mut writer, "Bucket", bucket);
     write_text_element(&mut writer, "Key", key);
     write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
-    writer.write_event(Event::End(BytesEnd::new("CompleteMultipartUploadResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("CompleteMultipartUploadResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
 pub fn copy_part_result_xml(etag: &str, last_modified: &str) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("CopyPartResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
     writer.write_event(Event::Start(start)).unwrap();
     write_text_element(&mut writer, "LastModified", last_modified);
     write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
-    writer.write_event(Event::End(BytesEnd::new("CopyPartResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("CopyPartResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
 pub fn post_object_result_xml(location: &str, bucket: &str, key: &str, etag: &str) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("PostResponse")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
@@ -232,21 +294,27 @@ pub fn post_object_result_xml(location: &str, bucket: &str, key: &str, etag: &st
     write_text_element(&mut writer, "Bucket", bucket);
     write_text_element(&mut writer, "Key", key);
     write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
-    writer.write_event(Event::End(BytesEnd::new("PostResponse"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("PostResponse")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
 pub fn copy_object_result_xml(etag: &str, last_modified: &str) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("CopyObjectResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
     writer.write_event(Event::Start(start)).unwrap();
     write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
     write_text_element(&mut writer, "LastModified", last_modified);
-    writer.write_event(Event::End(BytesEnd::new("CopyObjectResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("CopyObjectResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
@@ -257,7 +325,9 @@ pub fn delete_result_xml(
     quiet: bool,
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("DeleteResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
@@ -265,24 +335,34 @@ pub fn delete_result_xml(
 
     if !quiet {
         for (key, version_id) in deleted {
-            writer.write_event(Event::Start(BytesStart::new("Deleted"))).unwrap();
+            writer
+                .write_event(Event::Start(BytesStart::new("Deleted")))
+                .unwrap();
             write_text_element(&mut writer, "Key", key);
             if let Some(vid) = version_id {
                 write_text_element(&mut writer, "VersionId", vid);
             }
-            writer.write_event(Event::End(BytesEnd::new("Deleted"))).unwrap();
+            writer
+                .write_event(Event::End(BytesEnd::new("Deleted")))
+                .unwrap();
         }
     }
 
     for (key, code, message) in errors {
-        writer.write_event(Event::Start(BytesStart::new("Error"))).unwrap();
+        writer
+            .write_event(Event::Start(BytesStart::new("Error")))
+            .unwrap();
         write_text_element(&mut writer, "Key", key);
         write_text_element(&mut writer, "Code", code);
         write_text_element(&mut writer, "Message", message);
-        writer.write_event(Event::End(BytesEnd::new("Error"))).unwrap();
+        writer
+            .write_event(Event::End(BytesEnd::new("Error")))
+            .unwrap();
     }
 
-    writer.write_event(Event::End(BytesEnd::new("DeleteResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("DeleteResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
@@ -292,7 +372,9 @@ pub fn list_multipart_uploads_xml(
     uploads: &[myfsio_common::types::MultipartUploadInfo],
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("ListMultipartUploadsResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
@@ -300,14 +382,24 @@ pub fn list_multipart_uploads_xml(
     write_text_element(&mut writer, "Bucket", bucket);
 
     for upload in uploads {
-        writer.write_event(Event::Start(BytesStart::new("Upload"))).unwrap();
+        writer
+            .write_event(Event::Start(BytesStart::new("Upload")))
+            .unwrap();
         write_text_element(&mut writer, "Key", &upload.key);
         write_text_element(&mut writer, "UploadId", &upload.upload_id);
-        write_text_element(&mut writer, "Initiated", &format_s3_datetime(&upload.initiated));
-        writer.write_event(Event::End(BytesEnd::new("Upload"))).unwrap();
+        write_text_element(
+            &mut writer,
+            "Initiated",
+            &format_s3_datetime(&upload.initiated),
+        );
+        writer
+            .write_event(Event::End(BytesEnd::new("Upload")))
+            .unwrap();
     }
 
-    writer.write_event(Event::End(BytesEnd::new("ListMultipartUploadsResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("ListMultipartUploadsResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
@@ -319,7 +411,9 @@ pub fn list_parts_xml(
     parts: &[myfsio_common::types::PartMeta],
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
-    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None))).unwrap();
+    writer
+        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
+        .unwrap();
 
     let start = BytesStart::new("ListPartsResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
@@ -329,17 +423,23 @@ pub fn list_parts_xml(
     write_text_element(&mut writer, "UploadId", upload_id);
 
     for part in parts {
-        writer.write_event(Event::Start(BytesStart::new("Part"))).unwrap();
+        writer
+            .write_event(Event::Start(BytesStart::new("Part")))
+            .unwrap();
         write_text_element(&mut writer, "PartNumber", &part.part_number.to_string());
         write_text_element(&mut writer, "ETag", &format!("\"{}\"", part.etag));
         write_text_element(&mut writer, "Size", &part.size.to_string());
         if let Some(ref lm) = part.last_modified {
             write_text_element(&mut writer, "LastModified", &format_s3_datetime(lm));
         }
-        writer.write_event(Event::End(BytesEnd::new("Part"))).unwrap();
+        writer
+            .write_event(Event::End(BytesEnd::new("Part")))
+            .unwrap();
     }
 
-    writer.write_event(Event::End(BytesEnd::new("ListPartsResult"))).unwrap();
+    writer
+        .write_event(Event::End(BytesEnd::new("ListPartsResult")))
+        .unwrap();
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
@@ -365,7 +465,16 @@ mod tests {
     fn test_list_objects_v2_xml() {
         let objects = vec![ObjectMeta::new("file.txt".to_string(), 1024, Utc::now())];
         let xml = list_objects_v2_xml(
-            "my-bucket", "", "/", 1000, &objects, &[], false, None, None, 1,
+            "my-bucket",
+            "",
+            "/",
+            1000,
+            &objects,
+            &[],
+            false,
+            None,
+            None,
+            1,
         );
         assert!(xml.contains("<Key>file.txt</Key>"));
         assert!(xml.contains("<Size>1024</Size>"));
@@ -375,17 +484,7 @@ mod tests {
     #[test]
     fn test_list_objects_v1_xml() {
         let objects = vec![ObjectMeta::new("file.txt".to_string(), 1024, Utc::now())];
-        let xml = list_objects_v1_xml(
-            "my-bucket",
-            "",
-            "",
-            "/",
-            1000,
-            &objects,
-            &[],
-            false,
-            None,
-        );
+        let xml = list_objects_v1_xml("my-bucket", "", "", "/", 1000, &objects, &[], false, None);
         assert!(xml.contains("<Key>file.txt</Key>"));
         assert!(xml.contains("<Size>1024</Size>"));
         assert!(xml.contains("<Marker></Marker>"));

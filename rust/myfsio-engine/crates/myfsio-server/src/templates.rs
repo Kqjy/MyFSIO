@@ -6,7 +6,8 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use tera::{Context, Error as TeraError, Tera};
 
-pub type EndpointResolver = Arc<dyn Fn(&str, &HashMap<String, Value>) -> Option<String> + Send + Sync>;
+pub type EndpointResolver =
+    Arc<dyn Fn(&str, &HashMap<String, Value>) -> Option<String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct TemplateEngine {
@@ -17,10 +18,10 @@ pub struct TemplateEngine {
 impl TemplateEngine {
     pub fn new(template_glob: &str) -> Result<Self, TeraError> {
         let mut tera = Tera::new(template_glob)?;
+        tera.set_escape_fn(html_escape);
         register_filters(&mut tera);
 
-        let endpoints: Arc<RwLock<HashMap<String, String>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let endpoints: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(HashMap::new()));
 
         register_functions(&mut tera, endpoints.clone());
 
@@ -52,9 +53,25 @@ impl TemplateEngine {
     }
 }
 
+fn html_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn register_filters(tera: &mut Tera) {
     tera.register_filter("format_datetime", format_datetime_filter);
     tera.register_filter("filesizeformat", filesizeformat_filter);
+    tera.register_filter("slice", slice_filter);
 }
 
 fn register_functions(tera: &mut Tera, endpoints: Arc<RwLock<HashMap<String, String>>>) {
@@ -67,10 +84,7 @@ fn register_functions(tera: &mut Tera, endpoints: Arc<RwLock<HashMap<String, Str
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| tera::Error::msg("url_for requires endpoint"))?;
             if endpoint == "static" {
-                let filename = args
-                    .get("filename")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                 return Ok(Value::String(format!("/static/{}", filename)));
             }
             let path = match endpoints_for_url.read().get(endpoint) {
@@ -155,7 +169,11 @@ fn format_datetime_filter(value: &Value, args: &HashMap<String, Value>) -> tera:
         Value::String(s) => DateTime::parse_from_rfc3339(s)
             .ok()
             .map(|d| d.with_timezone(&Utc))
-            .or_else(|| DateTime::parse_from_rfc2822(s).ok().map(|d| d.with_timezone(&Utc))),
+            .or_else(|| {
+                DateTime::parse_from_rfc2822(s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            }),
         Value::Number(n) => n.as_f64().and_then(|f| {
             let secs = f as i64;
             let nanos = ((f - secs as f64) * 1_000_000_000.0) as u32;
@@ -167,6 +185,51 @@ fn format_datetime_filter(value: &Value, args: &HashMap<String, Value>) -> tera:
     match dt {
         Some(d) => Ok(Value::String(d.format(format).to_string())),
         None => Ok(value.clone()),
+    }
+}
+
+fn slice_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let start = args.get("start").and_then(|v| v.as_i64()).unwrap_or(0);
+    let end = args.get("end").and_then(|v| v.as_i64());
+
+    match value {
+        Value::String(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let norm = |i: i64| -> usize {
+                if i < 0 {
+                    (len + i).max(0) as usize
+                } else {
+                    i.min(len) as usize
+                }
+            };
+            let s_idx = norm(start);
+            let e_idx = match end {
+                Some(e) => norm(e),
+                None => len as usize,
+            };
+            let e_idx = e_idx.max(s_idx);
+            Ok(Value::String(chars[s_idx..e_idx].iter().collect()))
+        }
+        Value::Array(arr) => {
+            let len = arr.len() as i64;
+            let norm = |i: i64| -> usize {
+                if i < 0 {
+                    (len + i).max(0) as usize
+                } else {
+                    i.min(len) as usize
+                }
+            };
+            let s_idx = norm(start);
+            let e_idx = match end {
+                Some(e) => norm(e),
+                None => len as usize,
+            };
+            let e_idx = e_idx.max(s_idx);
+            Ok(Value::Array(arr[s_idx..e_idx].to_vec()))
+        }
+        Value::Null => Ok(Value::String(String::new())),
+        _ => Err(tera::Error::msg("slice: unsupported value type")),
     }
 }
 
@@ -205,7 +268,10 @@ mod tests {
         engine.register_endpoints(&[
             ("ui.buckets_overview", "/ui/buckets"),
             ("ui.bucket_detail", "/ui/buckets/{bucket_name}"),
-            ("ui.abort_multipart_upload", "/ui/buckets/{bucket_name}/multipart/{upload_id}/abort"),
+            (
+                "ui.abort_multipart_upload",
+                "/ui/buckets/{bucket_name}/multipart/{upload_id}/abort",
+            ),
         ]);
         engine
     }
@@ -220,7 +286,10 @@ mod tests {
     #[test]
     fn static_url() {
         let e = test_engine();
-        let out = render_inline(&e, "{{ url_for(endpoint='static', filename='css/main.css') }}");
+        let out = render_inline(
+            &e,
+            "{{ url_for(endpoint='static', filename='css/main.css') }}",
+        );
         assert_eq!(out, "/static/css/main.css");
     }
 
@@ -267,7 +336,11 @@ mod tests {
             .get_template_names()
             .map(|s| s.to_string())
             .collect();
-        assert!(names.len() >= 10, "expected 10+ templates, got {}", names.len());
+        assert!(
+            names.len() >= 10,
+            "expected 10+ templates, got {}",
+            names.len()
+        );
     }
 
     #[test]

@@ -66,7 +66,10 @@ impl LifecycleService {
                 None => continue,
             };
 
-            let rules = match lifecycle.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()) {
+            let rules = match lifecycle
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            {
                 Some(v) => v,
                 None => continue,
             };
@@ -93,7 +96,11 @@ impl LifecycleService {
                         let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
                         let params = myfsio_common::types::ListParams {
                             max_keys: 1000,
-                            prefix: if prefix.is_empty() { None } else { Some(prefix.to_string()) },
+                            prefix: if prefix.is_empty() {
+                                None
+                            } else {
+                                Some(prefix.to_string())
+                            },
                             ..Default::default()
                         };
                         if let Ok(result) = self.storage.list_objects(&bucket.name, &params).await {
@@ -101,7 +108,8 @@ impl LifecycleService {
                                 if obj.last_modified < cutoff {
                                     match self.storage.delete_object(&bucket.name, &obj.key).await {
                                         Ok(()) => total_expired += 1,
-                                        Err(e) => errors.push(format!("{}:{}: {}", bucket.name, obj.key, e)),
+                                        Err(e) => errors
+                                            .push(format!("{}:{}: {}", bucket.name, obj.key, e)),
                                     }
                                 }
                             }
@@ -112,12 +120,18 @@ impl LifecycleService {
                 if let Some(abort) = rule.get("AbortIncompleteMultipartUpload") {
                     if let Some(days) = abort.get("DaysAfterInitiation").and_then(|d| d.as_u64()) {
                         let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                        if let Ok(uploads) = self.storage.list_multipart_uploads(&bucket.name).await {
+                        if let Ok(uploads) = self.storage.list_multipart_uploads(&bucket.name).await
+                        {
                             for upload in &uploads {
                                 if upload.initiated < cutoff {
-                                    match self.storage.abort_multipart(&bucket.name, &upload.upload_id).await {
+                                    match self
+                                        .storage
+                                        .abort_multipart(&bucket.name, &upload.upload_id)
+                                        .await
+                                    {
                                         Ok(()) => total_multipart_aborted += 1,
-                                        Err(e) => errors.push(format!("abort {}: {}", upload.upload_id, e)),
+                                        Err(e) => errors
+                                            .push(format!("abort {}: {}", upload.upload_id, e)),
                                     }
                                 }
                             }

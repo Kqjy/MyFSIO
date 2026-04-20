@@ -3,8 +3,7 @@ use unicode_normalization::UnicodeNormalization;
 
 const WINDOWS_RESERVED: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-    "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
-    "LPT9",
+    "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
 const WINDOWS_ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
@@ -110,14 +109,10 @@ pub fn validate_bucket_name(bucket_name: &str) -> Option<String> {
 
     let bytes = bucket_name.as_bytes();
     if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
-        return Some(
-            "Bucket name must start and end with a lowercase letter or digit".to_string(),
-        );
+        return Some("Bucket name must start and end with a lowercase letter or digit".to_string());
     }
     if !bytes[len - 1].is_ascii_lowercase() && !bytes[len - 1].is_ascii_digit() {
-        return Some(
-            "Bucket name must start and end with a lowercase letter or digit".to_string(),
-        );
+        return Some("Bucket name must start and end with a lowercase letter or digit".to_string());
     }
 
     for &b in bytes {

@@ -1,5 +1,5 @@
 use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -7,51 +7,470 @@ use chrono::{NaiveDateTime, Utc};
 use myfsio_auth::sigv4;
 use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_common::types::Principal;
+use myfsio_storage::traits::StorageEngine;
+use serde_json::Value;
+use std::time::Instant;
+use tokio::io::AsyncReadExt;
 
 use crate::state::AppState;
 
-pub async fn auth_layer(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
+fn website_error_response(
+    status: StatusCode,
+    body: Option<Vec<u8>>,
+    content_type: &str,
 ) -> Response {
-    let uri = req.uri().clone();
-    let path = uri.path().to_string();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    if let Some(ref body) = body {
+        headers.insert(
+            header::CONTENT_LENGTH,
+            body.len().to_string().parse().unwrap(),
+        );
+        (status, headers, body.clone()).into_response()
+    } else {
+        (status, headers).into_response()
+    }
+}
 
-    if path == "/" && req.method() == axum::http::Method::GET {
-        match try_auth(&state, &req) {
-            AuthResult::Ok(principal) => {
-                if let Err(err) = authorize_request(&state, &principal, &req) {
-                    return error_response(err, &path);
-                }
-                req.extensions_mut().insert(principal);
-            }
-            AuthResult::Denied(err) => return error_response(err, &path),
-            AuthResult::NoAuth => {
-                return error_response(
-                    S3Error::new(S3ErrorCode::AccessDenied, "Missing credentials"),
-                    &path,
-                );
-            }
+fn parse_range_header(range_header: &str, total_size: u64) -> Option<(u64, u64)> {
+    let range_spec = range_header.strip_prefix("bytes=")?;
+    if let Some(suffix) = range_spec.strip_prefix('-') {
+        let suffix_len: u64 = suffix.parse().ok()?;
+        if suffix_len == 0 || suffix_len > total_size {
+            return None;
         }
-        return next.run(req).await;
+        return Some((total_size - suffix_len, total_size - 1));
     }
 
-    match try_auth(&state, &req) {
-        AuthResult::Ok(principal) => {
-            if let Err(err) = authorize_request(&state, &principal, &req) {
-                return error_response(err, &path);
+    let (start_str, end_str) = range_spec.split_once('-')?;
+    let start: u64 = start_str.parse().ok()?;
+    let end = if end_str.is_empty() {
+        total_size.saturating_sub(1)
+    } else {
+        end_str
+            .parse::<u64>()
+            .ok()?
+            .min(total_size.saturating_sub(1))
+    };
+
+    if start > end || start >= total_size {
+        return None;
+    }
+    Some((start, end))
+}
+
+fn website_content_type(key: &str, metadata: &std::collections::HashMap<String, String>) -> String {
+    metadata
+        .get("__content_type__")
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            mime_guess::from_path(key)
+                .first_raw()
+                .unwrap_or("application/octet-stream")
+                .to_string()
+        })
+}
+
+fn parse_website_config(value: &Value) -> Option<(String, Option<String>)> {
+    match value {
+        Value::Object(map) => {
+            let index_document = map
+                .get("index_document")
+                .or_else(|| map.get("IndexDocument"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("index.html")
+                .to_string();
+            let error_document = map
+                .get("error_document")
+                .or_else(|| map.get("ErrorDocument"))
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string());
+            Some((index_document, error_document))
+        }
+        Value::String(raw) => {
+            if let Ok(json) = serde_json::from_str::<Value>(raw) {
+                return parse_website_config(&json);
             }
-            req.extensions_mut().insert(principal);
-            next.run(req).await
+            let doc = roxmltree::Document::parse(raw).ok()?;
+            let index_document = doc
+                .descendants()
+                .find(|node| node.is_element() && node.tag_name().name() == "Suffix")
+                .and_then(|node| node.text())
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "index.html".to_string());
+            let error_document = doc
+                .descendants()
+                .find(|node| node.is_element() && node.tag_name().name() == "Key")
+                .and_then(|node| node.text())
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty());
+            Some((index_document, error_document))
         }
-        AuthResult::Denied(err) => error_response(err, &path),
-        AuthResult::NoAuth => {
-            error_response(
-                S3Error::new(S3ErrorCode::AccessDenied, "Missing credentials"),
-                &path,
+        _ => None,
+    }
+}
+
+async fn serve_website_document(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    method: &axum::http::Method,
+    range_header: Option<&str>,
+    status: StatusCode,
+) -> Option<Response> {
+    let metadata = state.storage.get_object_metadata(bucket, key).await.ok()?;
+    let (meta, mut reader) = state.storage.get_object(bucket, key).await.ok()?;
+    let content_type = website_content_type(key, &metadata);
+
+    if method == axum::http::Method::HEAD {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+        headers.insert(
+            header::CONTENT_LENGTH,
+            meta.size.to_string().parse().unwrap(),
+        );
+        headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+        return Some((status, headers).into_response());
+    }
+
+    let mut bytes = Vec::new();
+    if reader.read_to_end(&mut bytes).await.is_err() {
+        return None;
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+    headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+
+    if status == StatusCode::OK {
+        if let Some(range_header) = range_header {
+            let Some((start, end)) = parse_range_header(range_header, bytes.len() as u64) else {
+                let mut range_headers = HeaderMap::new();
+                range_headers.insert(
+                    header::CONTENT_RANGE,
+                    format!("bytes */{}", bytes.len()).parse().unwrap(),
+                );
+                return Some((StatusCode::RANGE_NOT_SATISFIABLE, range_headers).into_response());
+            };
+            let body = bytes[start as usize..=end as usize].to_vec();
+            headers.insert(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", start, end, bytes.len())
+                    .parse()
+                    .unwrap(),
+            );
+            headers.insert(
+                header::CONTENT_LENGTH,
+                body.len().to_string().parse().unwrap(),
+            );
+            return Some((StatusCode::PARTIAL_CONTENT, headers, body).into_response());
+        }
+    }
+
+    headers.insert(
+        header::CONTENT_LENGTH,
+        bytes.len().to_string().parse().unwrap(),
+    );
+    Some((status, headers, bytes).into_response())
+}
+
+async fn maybe_serve_website(
+    state: &AppState,
+    method: Method,
+    host: String,
+    uri_path: String,
+    range_header: Option<String>,
+) -> Option<Response> {
+    if !state.config.website_hosting_enabled {
+        return None;
+    }
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return None;
+    }
+    let request_path = uri_path.trim_start_matches('/').to_string();
+    let store = state.website_domains.as_ref()?;
+    let bucket = store.get_bucket(&host)?;
+    if !matches!(state.storage.bucket_exists(&bucket).await, Ok(true)) {
+        return Some(website_error_response(
+            StatusCode::NOT_FOUND,
+            None,
+            "text/plain; charset=utf-8",
+        ));
+    }
+
+    let bucket_config = state.storage.get_bucket_config(&bucket).await.ok()?;
+    let Some(website_config) = bucket_config.website.as_ref() else {
+        return Some(website_error_response(
+            StatusCode::NOT_FOUND,
+            None,
+            "text/plain; charset=utf-8",
+        ));
+    };
+    let Some((index_document, error_document)) = parse_website_config(website_config) else {
+        return Some(website_error_response(
+            StatusCode::NOT_FOUND,
+            None,
+            "text/plain; charset=utf-8",
+        ));
+    };
+
+    let mut object_key = if request_path.is_empty() || uri_path.ends_with('/') {
+        if request_path.is_empty() {
+            index_document.clone()
+        } else {
+            format!("{}{}", request_path, index_document)
+        }
+    } else {
+        request_path.clone()
+    };
+
+    let exists = state
+        .storage
+        .head_object(&bucket, &object_key)
+        .await
+        .is_ok();
+    if !exists && !request_path.is_empty() && !request_path.ends_with('/') {
+        let alternate = format!("{}/{}", request_path, index_document);
+        if state.storage.head_object(&bucket, &alternate).await.is_ok() {
+            object_key = alternate;
+        } else if let Some(error_key) = error_document.as_deref() {
+            return serve_website_document(
+                state,
+                &bucket,
+                error_key,
+                &method,
+                range_header.as_deref(),
+                StatusCode::NOT_FOUND,
             )
+            .await
+            .or_else(|| {
+                Some(website_error_response(
+                    StatusCode::NOT_FOUND,
+                    None,
+                    "text/plain; charset=utf-8",
+                ))
+            });
+        } else {
+            return Some(website_error_response(
+                StatusCode::NOT_FOUND,
+                None,
+                "text/plain; charset=utf-8",
+            ));
         }
+    } else if !exists {
+        if let Some(error_key) = error_document.as_deref() {
+            return serve_website_document(
+                state,
+                &bucket,
+                error_key,
+                &method,
+                range_header.as_deref(),
+                StatusCode::NOT_FOUND,
+            )
+            .await
+            .or_else(|| {
+                Some(website_error_response(
+                    StatusCode::NOT_FOUND,
+                    None,
+                    "text/plain; charset=utf-8",
+                ))
+            });
+        }
+        return Some(website_error_response(
+            StatusCode::NOT_FOUND,
+            None,
+            "text/plain; charset=utf-8",
+        ));
+    }
+
+    serve_website_document(
+        state,
+        &bucket,
+        &object_key,
+        &method,
+        range_header.as_deref(),
+        StatusCode::OK,
+    )
+    .await
+}
+
+pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let start = Instant::now();
+    let uri = req.uri().clone();
+    let path = uri.path().to_string();
+    let method = req.method().clone();
+    let query = uri.query().unwrap_or("").to_string();
+    let copy_source = req
+        .headers()
+        .get("x-amz-copy-source")
+        .and_then(|v| v.to_str().ok())
+        .map(|value| value.to_string());
+    let endpoint_type = classify_endpoint(&path, &query);
+    let bytes_in = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(':').next())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let range_header = req
+        .headers()
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+
+    let response = if path == "/myfsio/health" || path == "/health" {
+        next.run(req).await
+    } else if let Some(response) = maybe_serve_website(
+        &state,
+        method.clone(),
+        host.unwrap_or_default(),
+        path.clone(),
+        range_header,
+    )
+    .await
+    {
+        response
+    } else {
+        match try_auth(&state, &req) {
+            AuthResult::NoAuth => match authorize_request(
+                &state,
+                None,
+                &method,
+                &path,
+                &query,
+                copy_source.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => next.run(req).await,
+                Err(err) => error_response(err, &path),
+            },
+            AuthResult::Ok(principal) => {
+                if let Err(err) = authorize_request(
+                    &state,
+                    Some(&principal),
+                    &method,
+                    &path,
+                    &query,
+                    copy_source.as_deref(),
+                )
+                .await
+                {
+                    error_response(err, &path)
+                } else {
+                    req.extensions_mut().insert(principal);
+                    next.run(req).await
+                }
+            }
+            AuthResult::Denied(err) => error_response(err, &path),
+        }
+    };
+
+    if let Some(metrics) = &state.metrics {
+        let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let status = response.status().as_u16();
+        let bytes_out = response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let error_code = if status >= 400 {
+            Some(s3_code_for_status(status))
+        } else {
+            None
+        };
+        metrics.record_request(
+            method.as_str(),
+            endpoint_type,
+            status,
+            latency_ms,
+            bytes_in,
+            bytes_out,
+            error_code,
+        );
+    }
+
+    response
+}
+
+fn classify_endpoint(path: &str, query: &str) -> &'static str {
+    if path == "/" {
+        return "list_buckets";
+    }
+    let segments: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return "other";
+    }
+    if segments.len() == 1 {
+        if query.contains("uploads") {
+            return "list_multipart_uploads";
+        }
+        if query.contains("versioning") {
+            return "bucket_versioning";
+        }
+        if query.contains("lifecycle") {
+            return "bucket_lifecycle";
+        }
+        if query.contains("policy") {
+            return "bucket_policy";
+        }
+        if query.contains("website") {
+            return "bucket_website";
+        }
+        if query.contains("encryption") {
+            return "bucket_encryption";
+        }
+        if query.contains("replication") {
+            return "bucket_replication";
+        }
+        return "bucket";
+    }
+    if query.contains("uploadId") {
+        return "multipart_part";
+    }
+    if query.contains("uploads") {
+        return "multipart_init";
+    }
+    if query.contains("tagging") {
+        return "object_tagging";
+    }
+    if query.contains("acl") {
+        return "object_acl";
+    }
+    "object"
+}
+
+fn s3_code_for_status(status: u16) -> &'static str {
+    match status {
+        400 => "BadRequest",
+        401 => "Unauthorized",
+        403 => "AccessDenied",
+        404 => "NotFound",
+        405 => "MethodNotAllowed",
+        409 => "Conflict",
+        411 => "MissingContentLength",
+        412 => "PreconditionFailed",
+        413 => "EntityTooLarge",
+        416 => "InvalidRange",
+        500 => "InternalError",
+        501 => "NotImplemented",
+        503 => "ServiceUnavailable",
+        _ => "Other",
     }
 }
 
@@ -61,20 +480,45 @@ enum AuthResult {
     NoAuth,
 }
 
-fn authorize_request(state: &AppState, principal: &Principal, req: &Request) -> Result<(), S3Error> {
-    let path = req.uri().path();
+async fn authorize_request(
+    state: &AppState,
+    principal: Option<&Principal>,
+    method: &Method,
+    path: &str,
+    query: &str,
+    copy_source: Option<&str>,
+) -> Result<(), S3Error> {
+    if path == "/myfsio/health" || path == "/health" {
+        return Ok(());
+    }
     if path == "/" {
-        if state.iam.authorize(principal, None, "list", None) {
-            return Ok(());
+        if let Some(principal) = principal {
+            if state.iam.authorize(principal, None, "list", None) {
+                return Ok(());
+            }
+            return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
         }
-        return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
+        return Err(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Missing credentials",
+        ));
     }
 
     if path.starts_with("/admin/") || path.starts_with("/kms/") {
-        return Ok(());
+        return if principal.is_some() {
+            Ok(())
+        } else {
+            Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Missing credentials",
+            ))
+        };
     }
 
-    let mut segments = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty());
+    let mut segments = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty());
     let bucket = match segments.next() {
         Some(b) => b,
         None => {
@@ -82,29 +526,25 @@ fn authorize_request(state: &AppState, principal: &Principal, req: &Request) -> 
         }
     };
     let remaining: Vec<&str> = segments.collect();
-    let query = req.uri().query().unwrap_or("");
 
     if remaining.is_empty() {
-        let action = resolve_bucket_action(req.method(), query);
-        if state.iam.authorize(principal, Some(bucket), action, None) {
-            return Ok(());
-        }
-        return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
+        let action = resolve_bucket_action(method, query);
+        return authorize_action(state, principal, bucket, action, None).await;
     }
 
     let object_key = remaining.join("/");
-    if req.method() == Method::PUT {
-        if let Some(copy_source) = req
-            .headers()
-            .get("x-amz-copy-source")
-            .and_then(|v| v.to_str().ok())
-        {
+    if *method == Method::PUT {
+        if let Some(copy_source) = copy_source {
             let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
             if let Some((src_bucket, src_key)) = source.split_once('/') {
                 let source_allowed =
-                    state.iam.authorize(principal, Some(src_bucket), "read", Some(src_key));
+                    authorize_action(state, principal, src_bucket, "read", Some(src_key))
+                        .await
+                        .is_ok();
                 let dest_allowed =
-                    state.iam.authorize(principal, Some(bucket), "write", Some(&object_key));
+                    authorize_action(state, principal, bucket, "write", Some(&object_key))
+                        .await
+                        .is_ok();
                 if source_allowed && dest_allowed {
                     return Ok(());
                 }
@@ -113,15 +553,270 @@ fn authorize_request(state: &AppState, principal: &Principal, req: &Request) -> 
         }
     }
 
-    let action = resolve_object_action(req.method(), query);
-    if state
-        .iam
-        .authorize(principal, Some(bucket), action, Some(&object_key))
-    {
+    let action = resolve_object_action(method, query);
+    authorize_action(state, principal, bucket, action, Some(&object_key)).await
+}
+
+async fn authorize_action(
+    state: &AppState,
+    principal: Option<&Principal>,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> Result<(), S3Error> {
+    let iam_allowed = principal
+        .map(|principal| {
+            state
+                .iam
+                .authorize(principal, Some(bucket), action, object_key)
+        })
+        .unwrap_or(false);
+    let policy_decision = evaluate_bucket_policy(
+        state,
+        principal.map(|principal| principal.access_key.as_str()),
+        bucket,
+        action,
+        object_key,
+    )
+    .await;
+
+    if matches!(policy_decision, PolicyDecision::Deny) {
+        return Err(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Access denied by bucket policy",
+        ));
+    }
+    if iam_allowed || matches!(policy_decision, PolicyDecision::Allow) {
         return Ok(());
     }
 
-    Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"))
+    if principal.is_some() {
+        Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"))
+    } else {
+        Err(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Missing credentials",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PolicyDecision {
+    Allow,
+    Deny,
+    Neutral,
+}
+
+async fn evaluate_bucket_policy(
+    state: &AppState,
+    access_key: Option<&str>,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> PolicyDecision {
+    let config = match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => config,
+        Err(_) => return PolicyDecision::Neutral,
+    };
+    let policy: &Value = match config.policy.as_ref() {
+        Some(policy) => policy,
+        None => return PolicyDecision::Neutral,
+    };
+    let mut decision = PolicyDecision::Neutral;
+
+    match policy.get("Statement") {
+        Some(Value::Array(items)) => {
+            for statement in items.iter() {
+                match evaluate_policy_statement(statement, access_key, bucket, action, object_key) {
+                    PolicyDecision::Deny => return PolicyDecision::Deny,
+                    PolicyDecision::Allow => decision = PolicyDecision::Allow,
+                    PolicyDecision::Neutral => {}
+                }
+            }
+        }
+        Some(statement) => {
+            return evaluate_policy_statement(statement, access_key, bucket, action, object_key);
+        }
+        None => return PolicyDecision::Neutral,
+    }
+
+    decision
+}
+
+fn evaluate_policy_statement(
+    statement: &Value,
+    access_key: Option<&str>,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> PolicyDecision {
+    if !statement_matches_principal(statement, access_key)
+        || !statement_matches_action(statement, action)
+        || !statement_matches_resource(statement, bucket, object_key)
+    {
+        return PolicyDecision::Neutral;
+    }
+
+    match statement
+        .get("Effect")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("deny") => PolicyDecision::Deny,
+        Some("allow") => PolicyDecision::Allow,
+        _ => PolicyDecision::Neutral,
+    }
+}
+
+fn statement_matches_principal(statement: &Value, access_key: Option<&str>) -> bool {
+    match statement.get("Principal") {
+        Some(principal) => principal_value_matches(principal, access_key),
+        None => false,
+    }
+}
+
+fn principal_value_matches(value: &Value, access_key: Option<&str>) -> bool {
+    match value {
+        Value::String(token) => token == "*" || access_key == Some(token.as_str()),
+        Value::Array(items) => items
+            .iter()
+            .any(|item| principal_value_matches(item, access_key)),
+        Value::Object(map) => map
+            .values()
+            .any(|item| principal_value_matches(item, access_key)),
+        _ => false,
+    }
+}
+
+fn statement_matches_action(statement: &Value, action: &str) -> bool {
+    match statement.get("Action") {
+        Some(Value::String(value)) => policy_action_matches(value, action),
+        Some(Value::Array(items)) => items.iter().any(|item| {
+            item.as_str()
+                .map(|value| policy_action_matches(value, action))
+                .unwrap_or(false)
+        }),
+        _ => false,
+    }
+}
+
+fn policy_action_matches(policy_action: &str, requested_action: &str) -> bool {
+    let normalized_policy_action = normalize_policy_action(policy_action);
+    normalized_policy_action == "*" || normalized_policy_action == requested_action
+}
+
+fn normalize_policy_action(action: &str) -> String {
+    let normalized = action.trim().to_ascii_lowercase();
+    if normalized == "*" {
+        return normalized;
+    }
+    match normalized.as_str() {
+        "s3:listbucket"
+        | "s3:listallmybuckets"
+        | "s3:listbucketversions"
+        | "s3:listmultipartuploads"
+        | "s3:listparts" => "list".to_string(),
+        "s3:getobject"
+        | "s3:getobjectversion"
+        | "s3:getobjecttagging"
+        | "s3:getobjectversiontagging"
+        | "s3:getobjectacl"
+        | "s3:getbucketversioning"
+        | "s3:headobject"
+        | "s3:headbucket" => "read".to_string(),
+        "s3:putobject"
+        | "s3:createbucket"
+        | "s3:putobjecttagging"
+        | "s3:putbucketversioning"
+        | "s3:createmultipartupload"
+        | "s3:uploadpart"
+        | "s3:completemultipartupload"
+        | "s3:abortmultipartupload"
+        | "s3:copyobject" => "write".to_string(),
+        "s3:deleteobject"
+        | "s3:deleteobjectversion"
+        | "s3:deletebucket"
+        | "s3:deleteobjecttagging" => "delete".to_string(),
+        "s3:putobjectacl" | "s3:putbucketacl" | "s3:getbucketacl" => "share".to_string(),
+        "s3:putbucketpolicy" | "s3:getbucketpolicy" | "s3:deletebucketpolicy" => {
+            "policy".to_string()
+        }
+        "s3:getreplicationconfiguration"
+        | "s3:putreplicationconfiguration"
+        | "s3:deletereplicationconfiguration"
+        | "s3:replicateobject"
+        | "s3:replicatetags"
+        | "s3:replicatedelete" => "replication".to_string(),
+        "s3:getlifecycleconfiguration"
+        | "s3:putlifecycleconfiguration"
+        | "s3:deletelifecycleconfiguration"
+        | "s3:getbucketlifecycle"
+        | "s3:putbucketlifecycle" => "lifecycle".to_string(),
+        "s3:getbucketcors" | "s3:putbucketcors" | "s3:deletebucketcors" => "cors".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn statement_matches_resource(statement: &Value, bucket: &str, object_key: Option<&str>) -> bool {
+    match statement.get("Resource") {
+        Some(Value::String(resource)) => resource_matches(resource, bucket, object_key),
+        Some(Value::Array(items)) => items.iter().any(|item| {
+            item.as_str()
+                .map(|resource| resource_matches(resource, bucket, object_key))
+                .unwrap_or(false)
+        }),
+        _ => false,
+    }
+}
+
+fn resource_matches(resource: &str, bucket: &str, object_key: Option<&str>) -> bool {
+    let remainder = match resource.strip_prefix("arn:aws:s3:::") {
+        Some(value) => value,
+        None => return false,
+    };
+
+    match remainder.split_once('/') {
+        Some((resource_bucket, resource_key)) => object_key
+            .map(|key| wildcard_match(bucket, resource_bucket) && wildcard_match(key, resource_key))
+            .unwrap_or(false),
+        None => object_key.is_none() && wildcard_match(bucket, remainder),
+    }
+}
+
+fn wildcard_match(value: &str, pattern: &str) -> bool {
+    let value = value.as_bytes();
+    let pattern = pattern.as_bytes();
+    let mut value_idx = 0usize;
+    let mut pattern_idx = 0usize;
+    let mut star_idx: Option<usize> = None;
+    let mut match_idx = 0usize;
+
+    while value_idx < value.len() {
+        if pattern_idx < pattern.len()
+            && (pattern[pattern_idx] == b'?'
+                || pattern[pattern_idx].eq_ignore_ascii_case(&value[value_idx]))
+        {
+            value_idx += 1;
+            pattern_idx += 1;
+        } else if pattern_idx < pattern.len() && pattern[pattern_idx] == b'*' {
+            star_idx = Some(pattern_idx);
+            pattern_idx += 1;
+            match_idx = value_idx;
+        } else if let Some(star) = star_idx {
+            pattern_idx = star + 1;
+            match_idx += 1;
+            value_idx = match_idx;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_idx < pattern.len() && pattern[pattern_idx] == b'*' {
+        pattern_idx += 1;
+    }
+
+    pattern_idx == pattern.len()
 }
 
 fn resolve_bucket_action(method: &Method, query: &str) -> &'static str {
@@ -186,10 +881,18 @@ fn resolve_bucket_action(method: &Method, query: &str) -> &'static str {
 
 fn resolve_object_action(method: &Method, query: &str) -> &'static str {
     if has_query_key(query, "tagging") {
-        return if *method == Method::GET { "read" } else { "write" };
+        return if *method == Method::GET {
+            "read"
+        } else {
+            "write"
+        };
     }
     if has_query_key(query, "acl") {
-        return if *method == Method::GET { "read" } else { "write" };
+        return if *method == Method::GET {
+            "read"
+        } else {
+            "write"
+        };
     }
     if has_query_key(query, "retention") || has_query_key(query, "legal-hold") {
         return "object_lock";
@@ -241,14 +944,16 @@ fn try_auth(state: &AppState, req: &Request) -> AuthResult {
     }
 
     if let (Some(ak), Some(sk)) = (
-        req.headers().get("x-access-key").and_then(|v| v.to_str().ok()),
-        req.headers().get("x-secret-key").and_then(|v| v.to_str().ok()),
+        req.headers()
+            .get("x-access-key")
+            .and_then(|v| v.to_str().ok()),
+        req.headers()
+            .get("x-secret-key")
+            .and_then(|v| v.to_str().ok()),
     ) {
         return match state.iam.authenticate(ak, sk) {
             Some(principal) => AuthResult::Ok(principal),
-            None => AuthResult::Denied(
-                S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch),
-            ),
+            None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch)),
         };
     }
 
@@ -263,9 +968,10 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
         .collect();
 
     if parts.len() != 3 {
-        return AuthResult::Denied(
-            S3Error::new(S3ErrorCode::InvalidArgument, "Malformed Authorization header"),
-        );
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Malformed Authorization header",
+        ));
     }
 
     let credential = parts[0].strip_prefix("Credential=").unwrap_or("");
@@ -274,9 +980,10 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
 
     let cred_parts: Vec<&str> = credential.split('/').collect();
     if cred_parts.len() != 5 {
-        return AuthResult::Denied(
-            S3Error::new(S3ErrorCode::InvalidArgument, "Malformed credential"),
-        );
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Malformed credential",
+        ));
     }
 
     let access_key = cred_parts[0];
@@ -292,21 +999,22 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
         .unwrap_or("");
 
     if amz_date.is_empty() {
-        return AuthResult::Denied(
-            S3Error::new(S3ErrorCode::AccessDenied, "Missing Date header"),
-        );
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Missing Date header",
+        ));
     }
 
-    if let Some(err) = check_timestamp_freshness(amz_date, state.config.sigv4_timestamp_tolerance_secs) {
+    if let Some(err) =
+        check_timestamp_freshness(amz_date, state.config.sigv4_timestamp_tolerance_secs)
+    {
         return AuthResult::Denied(err);
     }
 
     let secret_key = match state.iam.get_secret_key(access_key) {
         Some(sk) => sk,
         None => {
-            return AuthResult::Denied(
-                S3Error::from_code(S3ErrorCode::InvalidAccessKeyId),
-            );
+            return AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId));
         }
     };
 
@@ -350,16 +1058,12 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
     );
 
     if !verified {
-        return AuthResult::Denied(
-            S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch),
-        );
+        return AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch));
     }
 
     match state.iam.get_principal(access_key) {
         Some(p) => AuthResult::Ok(p),
-        None => AuthResult::Denied(
-            S3Error::from_code(S3ErrorCode::InvalidAccessKeyId),
-        ),
+        None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }
 }
 
@@ -374,9 +1078,10 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     let credential = match param_map.get("X-Amz-Credential") {
         Some(c) => *c,
         None => {
-            return AuthResult::Denied(
-                S3Error::new(S3ErrorCode::InvalidArgument, "Missing X-Amz-Credential"),
-            );
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing X-Amz-Credential",
+            ));
         }
     };
 
@@ -387,33 +1092,37 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     let provided_signature = match param_map.get("X-Amz-Signature") {
         Some(s) => *s,
         None => {
-            return AuthResult::Denied(
-                S3Error::new(S3ErrorCode::InvalidArgument, "Missing X-Amz-Signature"),
-            );
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing X-Amz-Signature",
+            ));
         }
     };
     let amz_date = match param_map.get("X-Amz-Date") {
         Some(d) => *d,
         None => {
-            return AuthResult::Denied(
-                S3Error::new(S3ErrorCode::InvalidArgument, "Missing X-Amz-Date"),
-            );
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing X-Amz-Date",
+            ));
         }
     };
     let expires_str = match param_map.get("X-Amz-Expires") {
         Some(e) => *e,
         None => {
-            return AuthResult::Denied(
-                S3Error::new(S3ErrorCode::InvalidArgument, "Missing X-Amz-Expires"),
-            );
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing X-Amz-Expires",
+            ));
         }
     };
 
     let cred_parts: Vec<&str> = credential.split('/').collect();
     if cred_parts.len() != 5 {
-        return AuthResult::Denied(
-            S3Error::new(S3ErrorCode::InvalidArgument, "Malformed credential"),
-        );
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Malformed credential",
+        ));
     }
 
     let access_key = cred_parts[0];
@@ -424,44 +1133,44 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     let expires: u64 = match expires_str.parse() {
         Ok(e) => e,
         Err(_) => {
-            return AuthResult::Denied(
-                S3Error::new(S3ErrorCode::InvalidArgument, "Invalid X-Amz-Expires"),
-            );
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Invalid X-Amz-Expires",
+            ));
         }
     };
 
     if expires < state.config.presigned_url_min_expiry
         || expires > state.config.presigned_url_max_expiry
     {
-        return AuthResult::Denied(
-            S3Error::new(S3ErrorCode::InvalidArgument, "X-Amz-Expires out of range"),
-        );
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "X-Amz-Expires out of range",
+        ));
     }
 
-    if let Ok(request_time) =
-        NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ")
-    {
+    if let Ok(request_time) = NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ") {
         let request_utc = request_time.and_utc();
         let now = Utc::now();
         let elapsed = (now - request_utc).num_seconds();
         if elapsed > expires as i64 {
-            return AuthResult::Denied(
-                S3Error::new(S3ErrorCode::AccessDenied, "Request has expired"),
-            );
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Request has expired",
+            ));
         }
         if elapsed < -(state.config.sigv4_timestamp_tolerance_secs as i64) {
-            return AuthResult::Denied(
-                S3Error::new(S3ErrorCode::AccessDenied, "Request is too far in the future"),
-            );
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Request is too far in the future",
+            ));
         }
     }
 
     let secret_key = match state.iam.get_secret_key(access_key) {
         Some(sk) => sk,
         None => {
-            return AuthResult::Denied(
-                S3Error::from_code(S3ErrorCode::InvalidAccessKeyId),
-            );
+            return AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId));
         }
     };
 
@@ -505,16 +1214,12 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     );
 
     if !verified {
-        return AuthResult::Denied(
-            S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch),
-        );
+        return AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch));
     }
 
     match state.iam.get_principal(access_key) {
         Some(p) => AuthResult::Ok(p),
-        None => AuthResult::Denied(
-            S3Error::from_code(S3ErrorCode::InvalidAccessKeyId),
-        ),
+        None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }
 }
 
@@ -543,10 +1248,7 @@ fn parse_query_params(query: &str) -> Vec<(String, String)> {
             let mut parts = pair.splitn(2, '=');
             let key = parts.next()?;
             let value = parts.next().unwrap_or("");
-            Some((
-                urlencoding_decode(key),
-                urlencoding_decode(value),
-            ))
+            Some((urlencoding_decode(key), urlencoding_decode(value)))
         })
         .collect()
 }

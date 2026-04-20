@@ -78,7 +78,7 @@
             <div class="card-body px-4 pb-4">
                 {% if buckets %}
                 <form method="POST" action="{{ url_for(endpoint="ui.create_peer_replication_rules", site_id=peer.site_id) }}">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
 
                     <div class="mb-4">
                         <label for="mode" class="form-label fw-medium">Replication Mode</label>

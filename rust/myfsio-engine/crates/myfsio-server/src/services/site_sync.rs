@@ -102,7 +102,10 @@ impl SiteSyncWorker {
     }
 
     pub async fn run(self: Arc<Self>) {
-        tracing::info!("Site sync worker started (interval={}s)", self.interval.as_secs());
+        tracing::info!(
+            "Site sync worker started (interval={}s)",
+            self.interval.as_secs()
+        );
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(self.interval) => {}
@@ -309,11 +312,10 @@ impl SiteSyncWorker {
             let resp = match req.send().await {
                 Ok(r) => r,
                 Err(err) => {
-                    let msg = format!("{:?}", err);
-                    if msg.contains("NoSuchBucket") {
+                    if is_not_found_error(&err) {
                         return Ok(result);
                     }
-                    return Err(msg);
+                    return Err(format!("{:?}", err));
                 }
             };
             for obj in resp.contents() {
@@ -409,11 +411,9 @@ impl SiteSyncWorker {
             }
         };
 
-        let metadata: Option<HashMap<String, String>> = head.metadata().map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        });
+        let metadata: Option<HashMap<String, String>> = head
+            .metadata()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
 
         let stream = resp.body.into_async_read();
         let boxed: Pin<Box<dyn AsyncRead + Send>> = Box::pin(stream);
@@ -428,7 +428,12 @@ impl SiteSyncWorker {
                 true
             }
             Err(err) => {
-                tracing::error!("Store pulled object failed {}/{}: {}", local_bucket, key, err);
+                tracing::error!(
+                    "Store pulled object failed {}/{}: {}",
+                    local_bucket,
+                    key,
+                    err
+                );
                 false
             }
         }
@@ -482,4 +487,12 @@ fn now_secs() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+fn is_not_found_error<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
+    let msg = format!("{:?}", err);
+    msg.contains("NoSuchBucket")
+        || msg.contains("code: Some(\"NotFound\")")
+        || msg.contains("code: Some(\"NoSuchBucket\")")
+        || msg.contains("status: 404")
 }

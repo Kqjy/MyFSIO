@@ -4,9 +4,7 @@ use rand::RngCore;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::aes_gcm::{
-    encrypt_stream_chunked, decrypt_stream_chunked, CryptoError,
-};
+use crate::aes_gcm::{decrypt_stream_chunked, encrypt_stream_chunked, CryptoError};
 use crate::kms::KmsService;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,15 +170,14 @@ impl EncryptionService {
                 let ciphertext = kms.encrypt_data(kid, &data_key).await?;
                 (Some(B64.encode(&ciphertext)), Some(kid.clone()))
             }
-            SseAlgorithm::CustomerProvided => {
-                (None, None)
-            }
+            SseAlgorithm::CustomerProvided => (None, None),
         };
 
         let actual_key = if ctx.algorithm == SseAlgorithm::CustomerProvided {
-            let ck = ctx.customer_key.as_ref().ok_or_else(|| {
-                CryptoError::EncryptionFailed("No customer key provided".into())
-            })?;
+            let ck = ctx
+                .customer_key
+                .as_ref()
+                .ok_or_else(|| CryptoError::EncryptionFailed("No customer key provided".into()))?;
             if ck.len() != 32 {
                 return Err(CryptoError::InvalidKeySize(ck.len()));
             }
@@ -195,11 +192,9 @@ impl EncryptionService {
         let op = output_path.to_owned();
         let ak = actual_key;
         let n = nonce;
-        tokio::task::spawn_blocking(move || {
-            encrypt_stream_chunked(&ip, &op, &ak, &n, None)
-        })
-        .await
-        .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        tokio::task::spawn_blocking(move || encrypt_stream_chunked(&ip, &op, &ak, &n, None))
+            .await
+            .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
         Ok(EncryptionMetadata {
             algorithm: ctx.algorithm.as_str().to_string(),
@@ -216,9 +211,9 @@ impl EncryptionService {
         enc_meta: &EncryptionMetadata,
         customer_key: Option<&[u8]>,
     ) -> Result<(), CryptoError> {
-        let nonce_bytes = B64.decode(&enc_meta.nonce).map_err(|e| {
-            CryptoError::EncryptionFailed(format!("Bad nonce encoding: {}", e))
-        })?;
+        let nonce_bytes = B64
+            .decode(&enc_meta.nonce)
+            .map_err(|e| CryptoError::EncryptionFailed(format!("Bad nonce encoding: {}", e)))?;
         if nonce_bytes.len() != 12 {
             return Err(CryptoError::InvalidNonceSize(nonce_bytes.len()));
         }
@@ -262,11 +257,9 @@ impl EncryptionService {
         let ip = input_path.to_owned();
         let op = output_path.to_owned();
         let nb: [u8; 12] = nonce_bytes.try_into().unwrap();
-        tokio::task::spawn_blocking(move || {
-            decrypt_stream_chunked(&ip, &op, &data_key, &nb)
-        })
-        .await
-        .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        tokio::task::spawn_blocking(move || decrypt_stream_chunked(&ip, &op, &data_key, &nb))
+            .await
+            .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
         Ok(())
     }
@@ -298,7 +291,10 @@ mod tests {
         let decrypted = dir.path().join("dec.bin");
 
         let data = b"SSE-S3 encrypted content for testing!";
-        std::fs::File::create(&input).unwrap().write_all(data).unwrap();
+        std::fs::File::create(&input)
+            .unwrap()
+            .write_all(data)
+            .unwrap();
 
         let svc = EncryptionService::new(test_master_key(), None);
 
@@ -328,7 +324,10 @@ mod tests {
         let decrypted = dir.path().join("dec.bin");
 
         let data = b"SSE-C encrypted content!";
-        std::fs::File::create(&input).unwrap().write_all(data).unwrap();
+        std::fs::File::create(&input)
+            .unwrap()
+            .write_all(data)
+            .unwrap();
 
         let customer_key = [0xBBu8; 32];
         let svc = EncryptionService::new(test_master_key(), None);
@@ -369,7 +368,10 @@ mod tests {
     fn test_is_encrypted() {
         let mut meta = HashMap::new();
         assert!(!EncryptionMetadata::is_encrypted(&meta));
-        meta.insert("x-amz-server-side-encryption".to_string(), "AES256".to_string());
+        meta.insert(
+            "x-amz-server-side-encryption".to_string(),
+            "AES256".to_string(),
+        );
         assert!(EncryptionMetadata::is_encrypted(&meta));
     }
 }

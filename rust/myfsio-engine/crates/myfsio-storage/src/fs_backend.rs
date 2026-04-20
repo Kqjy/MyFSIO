@@ -76,7 +76,8 @@ impl FsStorageBackend {
     }
 
     fn bucket_versions_root(&self, bucket_name: &str) -> PathBuf {
-        self.system_bucket_root(bucket_name).join(BUCKET_VERSIONS_DIR)
+        self.system_bucket_root(bucket_name)
+            .join(BUCKET_VERSIONS_DIR)
     }
 
     fn multipart_root(&self) -> PathBuf {
@@ -142,7 +143,8 @@ impl FsStorageBackend {
     }
 
     fn bucket_config_path(&self, bucket_name: &str) -> PathBuf {
-        self.system_bucket_root(bucket_name).join(BUCKET_CONFIG_FILE)
+        self.system_bucket_root(bucket_name)
+            .join(BUCKET_CONFIG_FILE)
     }
 
     fn version_dir(&self, bucket_name: &str, key: &str) -> PathBuf {
@@ -210,11 +212,7 @@ impl FsStorageBackend {
                 .and_then(|index| {
                     index.get(&entry_name).and_then(|v| {
                         if let Value::Object(map) = v {
-                            Some(
-                                map.iter()
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect(),
-                            )
+                            Some(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         } else {
                             None
                         }
@@ -319,9 +317,7 @@ impl FsStorageBackend {
                         if let Some(Value::Object(meta)) = payload.get("metadata") {
                             return meta
                                 .iter()
-                                .filter_map(|(k, v)| {
-                                    v.as_str().map(|s| (k.clone(), s.to_string()))
-                                })
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                                 .collect();
                         }
                     }
@@ -424,9 +420,8 @@ impl FsStorageBackend {
         let has_objects = Self::dir_has_files(bucket_path, Some(INTERNAL_FOLDERS));
         let has_versions = Self::dir_has_files(&self.bucket_versions_root(&bucket_name), None)
             || Self::dir_has_files(&self.legacy_versions_root(&bucket_name), None);
-        let has_multipart =
-            Self::dir_has_files(&self.multipart_bucket_root(&bucket_name), None)
-                || Self::dir_has_files(&self.legacy_multipart_root(&bucket_name), None);
+        let has_multipart = Self::dir_has_files(&self.multipart_bucket_root(&bucket_name), None)
+            || Self::dir_has_files(&self.legacy_multipart_root(&bucket_name), None);
 
         (has_objects, has_versions, has_multipart)
     }
@@ -915,10 +910,46 @@ impl FsStorageBackend {
         }
 
         let is_overwrite = destination.exists();
+        let existing_size = if is_overwrite {
+            std::fs::metadata(&destination)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let bucket_config = self.read_bucket_config_sync(bucket_name);
+        if let Some(quota) = bucket_config.quota.as_ref() {
+            self.stats_cache.remove(bucket_name);
+            let stats = self.bucket_stats_sync(bucket_name)?;
+            let added_bytes = new_size.saturating_sub(existing_size);
+            let added_objects: u64 = if is_overwrite { 0 } else { 1 };
+            if let Some(max_bytes) = quota.max_bytes {
+                let projected = stats.total_bytes().saturating_add(added_bytes);
+                if projected > max_bytes {
+                    let _ = std::fs::remove_file(tmp_path);
+                    return Err(StorageError::QuotaExceeded(format!(
+                        "Quota exceeded: adding {} bytes would result in {} bytes, exceeding limit of {} bytes",
+                        added_bytes, projected, max_bytes
+                    )));
+                }
+            }
+            if let Some(max_objects) = quota.max_objects {
+                let projected = stats.total_objects().saturating_add(added_objects);
+                if projected > max_objects {
+                    let _ = std::fs::remove_file(tmp_path);
+                    return Err(StorageError::QuotaExceeded(format!(
+                        "Quota exceeded: adding {} objects would result in {} objects, exceeding limit of {} objects",
+                        added_objects, projected, max_objects
+                    )));
+                }
+            }
+        }
+
         let lock_dir = self.system_bucket_root(bucket_name).join("locks");
         std::fs::create_dir_all(&lock_dir).map_err(StorageError::Io)?;
 
-        let versioning_enabled = self.read_bucket_config_sync(bucket_name).versioning_enabled;
+        let versioning_enabled = bucket_config.versioning_enabled;
         if versioning_enabled && is_overwrite {
             self.archive_current_version_sync(bucket_name, key, "overwrite")
                 .map_err(StorageError::Io)?;
@@ -928,6 +959,8 @@ impl FsStorageBackend {
             let _ = std::fs::remove_file(tmp_path);
             StorageError::Io(e)
         })?;
+
+        self.stats_cache.remove(bucket_name);
 
         let file_meta = std::fs::metadata(&destination).map_err(StorageError::Io)?;
         let mtime = file_meta
@@ -1161,7 +1194,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             .filter(|(k, _)| !k.starts_with("__"))
             .collect();
 
-        let file = tokio::fs::File::open(&path).await.map_err(StorageError::Io)?;
+        let file = tokio::fs::File::open(&path)
+            .await
+            .map_err(StorageError::Io)?;
         let stream: AsyncReadStream = Box::pin(file);
         Ok((obj, stream))
     }
@@ -1313,8 +1348,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         });
 
         let manifest_path = upload_dir.join(MANIFEST_FILE);
-        Self::atomic_write_json_sync(&manifest_path, &manifest, true)
-            .map_err(StorageError::Io)?;
+        Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
 
         Ok(upload_id)
     }
@@ -1367,8 +1401,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
         let _guard = lock.lock();
 
-        let manifest_content =
-            std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
         let mut manifest: Value =
             serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
 
@@ -1383,8 +1416,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             );
         }
 
-        Self::atomic_write_json_sync(&manifest_path, &manifest, true)
-            .map_err(StorageError::Io)?;
+        Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
 
         Ok(etag)
     }
@@ -1421,7 +1453,10 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let last_modified = Utc
-            .timestamp_opt(src_mtime as i64, ((src_mtime % 1.0) * 1_000_000_000.0) as u32)
+            .timestamp_opt(
+                src_mtime as i64,
+                ((src_mtime % 1.0) * 1_000_000_000.0) as u32,
+            )
             .single()
             .unwrap_or_else(Utc::now);
 
@@ -1490,8 +1525,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
         let _guard = lock.lock();
 
-        let manifest_content =
-            std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
         let mut manifest: Value =
             serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
 
@@ -1506,8 +1540,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             );
         }
 
-        Self::atomic_write_json_sync(&manifest_path, &manifest, true)
-            .map_err(StorageError::Io)?;
+        Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
 
         Ok((etag, last_modified))
     }
@@ -1524,8 +1557,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let manifest_content =
-            std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
         let manifest: Value =
             serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
 
@@ -1590,7 +1622,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         composite_hasher.update(&md5_digest_concat);
         let etag = format!("{:x}-{}", composite_hasher.finalize(), part_count);
 
-        let result = self.finalize_put_sync(bucket, &object_key, &tmp_path, etag, total_size, Some(metadata))?;
+        let result = self.finalize_put_sync(
+            bucket,
+            &object_key,
+            &tmp_path,
+            etag,
+            total_size,
+            Some(metadata),
+        )?;
 
         let _ = std::fs::remove_dir_all(&upload_dir);
 
@@ -1763,15 +1802,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Ok(versions)
     }
 
-    async fn get_object_tags(
-        &self,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<Vec<Tag>> {
+    async fn get_object_tags(&self, bucket: &str, key: &str) -> StorageResult<Vec<Tag>> {
         self.require_bucket(bucket)?;
         let obj_path = self.object_path(bucket, key)?;
         if !obj_path.exists() {
-            return Err(StorageError::ObjectNotFound { bucket: bucket.to_string(), key: key.to_string() });
+            return Err(StorageError::ObjectNotFound {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+            });
         }
 
         let entry = self.read_index_entry_sync(bucket, key);
@@ -1785,16 +1823,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Ok(Vec::new())
     }
 
-    async fn set_object_tags(
-        &self,
-        bucket: &str,
-        key: &str,
-        tags: &[Tag],
-    ) -> StorageResult<()> {
+    async fn set_object_tags(&self, bucket: &str, key: &str, tags: &[Tag]) -> StorageResult<()> {
         self.require_bucket(bucket)?;
         let obj_path = self.object_path(bucket, key)?;
         if !obj_path.exists() {
-            return Err(StorageError::ObjectNotFound { bucket: bucket.to_string(), key: key.to_string() });
+            return Err(StorageError::ObjectNotFound {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+            });
         }
 
         let mut entry = self.read_index_entry_sync(bucket, key).unwrap_or_default();
@@ -1812,11 +1848,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Ok(())
     }
 
-    async fn delete_object_tags(
-        &self,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<()> {
+    async fn delete_object_tags(&self, bucket: &str, key: &str) -> StorageResult<()> {
         self.set_object_tags(bucket, key, &[]).await
     }
 }
@@ -1883,7 +1915,10 @@ mod tests {
         assert_eq!(meta.size, 11);
         assert!(meta.etag.is_some());
 
-        let (obj, mut stream) = backend.get_object("test-bucket", "greeting.txt").await.unwrap();
+        let (obj, mut stream) = backend
+            .get_object("test-bucket", "greeting.txt")
+            .await
+            .unwrap();
         assert_eq!(obj.size, 11);
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
@@ -1901,7 +1936,10 @@ mod tests {
             .await
             .unwrap();
 
-        let meta = backend.head_object("test-bucket", "file.txt").await.unwrap();
+        let meta = backend
+            .head_object("test-bucket", "file.txt")
+            .await
+            .unwrap();
         assert_eq!(meta.size, 9);
         assert!(meta.etag.is_some());
     }
@@ -1917,7 +1955,10 @@ mod tests {
             .await
             .unwrap();
 
-        backend.delete_object("test-bucket", "file.txt").await.unwrap();
+        backend
+            .delete_object("test-bucket", "file.txt")
+            .await
+            .unwrap();
         let result = backend.head_object("test-bucket", "file.txt").await;
         assert!(result.is_err());
     }

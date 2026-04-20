@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use myfsio_storage::traits::StorageEngine;
+use serde_json::Value;
 use tower::ServiceExt;
 
 const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -16,6 +17,7 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
 
     let config = myfsio_server::config::ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
         storage_root: tmp.path().to_path_buf(),
         region: "us-east-1".to_string(),
         iam_config_path: iam_path.join("iam.json"),
@@ -28,6 +30,11 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         gc_enabled: false,
         integrity_enabled: false,
         metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
         lifecycle_enabled: false,
         website_hosting_enabled: false,
         replication_connect_timeout_secs: 5,
@@ -72,6 +79,153 @@ fn test_app() -> (axum::Router, tempfile::TempDir) {
     }))
 }
 
+fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        region: "us-east-1".to_string(),
+        iam_config_path: iam_path.join("iam.json"),
+        sigv4_timestamp_tolerance_secs: 900,
+        presigned_url_min_expiry: 1,
+        presigned_url_max_expiry: 604800,
+        secret_key: None,
+        encryption_enabled: false,
+        kms_enabled: false,
+        gc_enabled: false,
+        integrity_enabled: false,
+        metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
+        lifecycle_enabled: false,
+        website_hosting_enabled: false,
+        replication_connect_timeout_secs: 1,
+        replication_read_timeout_secs: 1,
+        replication_max_retries: 1,
+        replication_streaming_threshold_bytes: 10_485_760,
+        replication_max_failures_per_bucket: 50,
+        site_sync_enabled: false,
+        site_sync_interval_secs: 60,
+        site_sync_batch_size: 100,
+        site_sync_connect_timeout_secs: 10,
+        site_sync_read_timeout_secs: 120,
+        site_sync_max_retries: 2,
+        site_sync_clock_skew_tolerance: 1.0,
+        ui_enabled: true,
+        templates_dir: manifest_dir.join("templates"),
+        static_dir: manifest_dir.join("static"),
+    };
+    (myfsio_server::state::AppState::new(config), tmp)
+}
+
+fn authenticated_ui_session(state: &myfsio_server::state::AppState) -> (String, String) {
+    let (session_id, mut session) = state.sessions.create();
+    session.user_id = Some(TEST_ACCESS_KEY.to_string());
+    session.display_name = Some("admin".to_string());
+    let csrf = session.csrf_token.clone();
+    state.sessions.save(&session_id, session);
+    (session_id, csrf)
+}
+
+fn ui_request(method: Method, uri: &str, session_id: &str, csrf: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(uri).header(
+        "cookie",
+        format!(
+            "{}={}",
+            myfsio_server::session::SESSION_COOKIE_NAME,
+            session_id
+        ),
+    );
+    if let Some(token) = csrf {
+        builder = builder.header(myfsio_server::session::CSRF_HEADER_NAME, token);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+fn ui_form_request(
+    method: Method,
+    uri: &str,
+    session_id: &str,
+    csrf: &str,
+    body: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(
+            "cookie",
+            format!(
+                "{}={}",
+                myfsio_server::session::SESSION_COOKIE_NAME,
+                session_id
+            ),
+        )
+        .header("x-csrftoken", csrf)
+        .header("x-requested-with", "XMLHttpRequest")
+        .header("accept", "application/json")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn ui_json_request(
+    method: Method,
+    uri: &str,
+    session_id: &str,
+    csrf: &str,
+    body: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(
+            "cookie",
+            format!(
+                "{}={}",
+                myfsio_server::session::SESSION_COOKIE_NAME,
+                session_id
+            ),
+        )
+        .header("x-csrftoken", csrf)
+        .header("x-requested-with", "XMLHttpRequest")
+        .header("accept", "application/json")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 fn signed_request(method: Method, uri: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -87,18 +241,11 @@ fn parse_select_events(body: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut idx: usize = 0;
 
     while idx + 16 <= body.len() {
-        let total_len = u32::from_be_bytes([
-            body[idx],
-            body[idx + 1],
-            body[idx + 2],
-            body[idx + 3],
-        ]) as usize;
-        let headers_len = u32::from_be_bytes([
-            body[idx + 4],
-            body[idx + 5],
-            body[idx + 6],
-            body[idx + 7],
-        ]) as usize;
+        let total_len =
+            u32::from_be_bytes([body[idx], body[idx + 1], body[idx + 2], body[idx + 3]]) as usize;
+        let headers_len =
+            u32::from_be_bytes([body[idx + 4], body[idx + 5], body[idx + 6], body[idx + 7]])
+                as usize;
         if total_len < 16 || idx + total_len > body.len() {
             break;
         }
@@ -152,6 +299,715 @@ fn parse_select_events(body: &[u8]) -> Vec<(String, Vec<u8>)> {
 }
 
 #[tokio::test]
+async fn test_ui_replication_endpoints_are_wired_and_operational() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "replicated-bucket";
+
+    state
+        .replication
+        .set_rule(myfsio_server::services::replication::ReplicationRule {
+            bucket_name: bucket_name.to_string(),
+            target_connection_id: "missing-connection".to_string(),
+            target_bucket: "remote-bucket".to_string(),
+            enabled: true,
+            mode: myfsio_server::services::replication::MODE_NEW_ONLY.to_string(),
+            created_at: Some(1_700_000_000.0),
+            stats: myfsio_server::services::replication::ReplicationStats {
+                objects_synced: 3,
+                objects_pending: 1,
+                objects_orphaned: 0,
+                bytes_synced: 123,
+                last_sync_at: Some(1_700_000_100.0),
+                last_sync_key: Some("folder/item.txt".to_string()),
+            },
+            sync_deletions: true,
+            last_pull_at: None,
+            filter_prefix: None,
+        });
+
+    state.replication.failures.add(
+        bucket_name,
+        myfsio_server::services::replication::ReplicationFailure {
+            object_key: "folder/item.txt".to_string(),
+            error_message: "temporary failure".to_string(),
+            timestamp: 1_700_000_200.0,
+            failure_count: 2,
+            bucket_name: bucket_name.to_string(),
+            action: "put".to_string(),
+            last_error_code: Some("SlowDown".to_string()),
+        },
+    );
+    state.replication.failures.add(
+        bucket_name,
+        myfsio_server::services::replication::ReplicationFailure {
+            object_key: "other.txt".to_string(),
+            error_message: "another failure".to_string(),
+            timestamp: 1_700_000_300.0,
+            failure_count: 1,
+            bucket_name: bucket_name.to_string(),
+            action: "put".to_string(),
+            last_error_code: None,
+        },
+    );
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let status_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}/replication/status", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status_body: Value =
+        serde_json::from_slice(&status_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(status_body["objects_synced"], 3);
+    assert_eq!(status_body["objects_pending"], 1);
+    assert_eq!(status_body["endpoint_healthy"], false);
+    assert_eq!(status_body["endpoint_error"], "Target connection not found");
+
+    let failures_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}/replication/failures?limit=10", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(failures_resp.status(), StatusCode::OK);
+    let failures_body: Value = serde_json::from_slice(
+        &failures_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(failures_body["total"], 2);
+    assert_eq!(failures_body["failures"].as_array().unwrap().len(), 2);
+
+    let retry_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::POST,
+            &format!(
+                "/ui/buckets/{}/replication/failures/retry?object_key=folder%2Fitem.txt",
+                bucket_name
+            ),
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(retry_resp.status(), StatusCode::BAD_REQUEST);
+
+    let dismiss_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::DELETE,
+            &format!(
+                "/ui/buckets/{}/replication/failures/dismiss?object_key=folder%2Fitem.txt",
+                bucket_name
+            ),
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(dismiss_resp.status(), StatusCode::OK);
+    let dismiss_body: Value =
+        serde_json::from_slice(&dismiss_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(dismiss_body["status"], "dismissed");
+
+    let clear_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::DELETE,
+            &format!("/ui/buckets/{}/replication/failures/clear", bucket_name),
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(clear_resp.status(), StatusCode::OK);
+    let clear_body: Value =
+        serde_json::from_slice(&clear_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(clear_body["status"], "cleared");
+
+    let failures_after_clear = app
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}/replication/failures?limit=10", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(failures_after_clear.status(), StatusCode::OK);
+    let failures_after_clear_body: Value = serde_json::from_slice(
+        &failures_after_clear
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(failures_after_clear_body["total"], 0);
+}
+
+#[tokio::test]
+async fn test_ui_replication_configuration_actions_work() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "config-bucket";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-1".to_string(),
+            name: "Remote".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let create_resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=create&target_connection_id=conn-1&target_bucket=remote-bucket&replication_mode=all&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let create_body: Value =
+        serde_json::from_slice(&create_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(create_body["action"], "create");
+    assert_eq!(create_body["mode"], "all");
+    assert_eq!(create_body["enabled"], true);
+    let rule = state.replication.get_rule(bucket_name).unwrap();
+    assert_eq!(rule.target_connection_id, "conn-1");
+    assert_eq!(rule.target_bucket, "remote-bucket");
+    assert!(rule.enabled);
+    assert_eq!(rule.mode, "all");
+
+    let pause_resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=pause&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(pause_resp.status(), StatusCode::OK);
+    assert!(!state.replication.get_rule(bucket_name).unwrap().enabled);
+
+    let resume_resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=resume&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resume_resp.status(), StatusCode::OK);
+    assert!(state.replication.get_rule(bucket_name).unwrap().enabled);
+
+    let delete_resp = app
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=delete&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), StatusCode::OK);
+    assert!(state.replication.get_rule(bucket_name).is_none());
+}
+
+#[tokio::test]
+async fn test_ui_iam_user_actions_use_real_user_ids() {
+    let (state, _tmp) = test_ui_state();
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let iam_page = app
+        .clone()
+        .oneshot(ui_request(Method::GET, "/ui/iam", &session_id, None))
+        .await
+        .unwrap();
+    assert_eq!(iam_page.status(), StatusCode::OK);
+    let iam_page_body = String::from_utf8(
+        iam_page
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(iam_page_body.contains("/ui/iam/users/u-test1234"));
+    assert!(!iam_page_body.contains("{user_id}"));
+
+    let update_resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            "/ui/iam/users/u-test1234",
+            &session_id,
+            &csrf,
+            "display_name=Updated+Admin&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(update_resp.status(), StatusCode::OK);
+    let update_body: Value =
+        serde_json::from_slice(&update_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(update_body["display_name"], "Updated Admin");
+
+    let policies_json = serde_json::json!([
+        {"bucket": "reports", "actions": ["list", "read"], "prefix": "*"}
+    ]);
+    let policies_encoded = percent_encoding::utf8_percent_encode(
+        &policies_json.to_string(),
+        percent_encoding::NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let policies_resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            "/ui/iam/users/u-test1234/policies",
+            &session_id,
+            &csrf,
+            &format!("policies={}&csrf_token=test", policies_encoded),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(policies_resp.status(), StatusCode::OK);
+    let policies_body: Value = serde_json::from_slice(
+        &policies_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(policies_body["policies"][0]["bucket"], "reports");
+
+    let create_resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            "/ui/iam/users",
+            &session_id,
+            &csrf,
+            "display_name=Alice&access_key=ALICEKEY123&secret_key=alice-secret&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::OK);
+    let create_body: Value =
+        serde_json::from_slice(&create_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    let created_user_id = create_body["user_id"].as_str().unwrap().to_string();
+
+    let delete_resp = app
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/iam/users/{}/delete", created_user_id),
+            &session_id,
+            &csrf,
+            "csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), StatusCode::OK);
+    assert!(state.iam.get_user(&created_user_id).await.is_none());
+}
+
+#[tokio::test]
+async fn test_ui_bucket_panels_and_history_endpoints_round_trip() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "ui-bucket";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let policy_json = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": "*"},
+            "Action": ["s3:GetObject"],
+            "Resource": [format!("arn:aws:s3:::{}/*", bucket_name)]
+        }]
+    });
+    let policy_encoded = percent_encoding::utf8_percent_encode(
+        &policy_json.to_string(),
+        percent_encoding::NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let policy_resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/policy", bucket_name),
+            &session_id,
+            &csrf,
+            &format!(
+                "mode=upsert&policy_document={}&csrf_token=test",
+                policy_encoded
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::OK);
+    let policy_body: Value =
+        serde_json::from_slice(&policy_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(policy_body["ok"], true);
+    let bucket_config = state.storage.get_bucket_config(bucket_name).await.unwrap();
+    assert_eq!(bucket_config.policy.unwrap(), policy_json);
+
+    let cors_resp = app
+        .clone()
+        .oneshot(ui_json_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/cors", bucket_name),
+            &session_id,
+            &csrf,
+            r#"{"rules":[{"AllowedOrigins":["https://example.com"],"AllowedMethods":["GET","PUT"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag"],"MaxAgeSeconds":600}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cors_resp.status(), StatusCode::OK);
+    let cors_get = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}/cors", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cors_get.status(), StatusCode::OK);
+    let cors_body: Value =
+        serde_json::from_slice(&cors_get.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(cors_body["rules"].as_array().unwrap().len(), 1);
+
+    let lifecycle_resp = app
+        .clone()
+        .oneshot(ui_json_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/lifecycle", bucket_name),
+            &session_id,
+            &csrf,
+            r#"{"rules":[{"ID":"expire-logs","Status":"Enabled","Filter":{"Prefix":"logs/"},"Expiration":{"Days":30}}]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(lifecycle_resp.status(), StatusCode::OK);
+    let lifecycle_get = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}/lifecycle", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(lifecycle_get.status(), StatusCode::OK);
+    let lifecycle_body: Value = serde_json::from_slice(
+        &lifecycle_get
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(lifecycle_body["rules"].as_array().unwrap().len(), 1);
+
+    let gc_history = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/system/gc/history",
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(gc_history.status(), StatusCode::OK);
+    let gc_body: Value =
+        serde_json::from_slice(&gc_history.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert!(gc_body["executions"].is_array());
+
+    let integrity_history = app
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/system/integrity/history",
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(integrity_history.status(), StatusCode::OK);
+    let integrity_body: Value = serde_json::from_slice(
+        &integrity_history
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert!(integrity_body["executions"].is_array());
+}
+
+#[tokio::test]
+async fn test_ui_bucket_policy_preset_reflects_private_and_public_states() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "preset-bucket";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+
+    let (session_id, _csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let private_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}?tab=permissions", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(private_resp.status(), StatusCode::OK);
+    let private_html = String::from_utf8(
+        private_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(private_html.contains(
+        "id=\"policyPreset\" name=\"preset\" value=\"private\" data-default=\"private\""
+    ));
+
+    let public_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "AllowList",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["s3:ListBucket"],
+                "Resource": [format!("arn:aws:s3:::{}", bucket_name)],
+            },
+            {
+                "Sid": "AllowRead",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["s3:GetObject"],
+                "Resource": [format!("arn:aws:s3:::{}/*", bucket_name)],
+            }
+        ]
+    });
+    let mut config = state.storage.get_bucket_config(bucket_name).await.unwrap();
+    config.policy = Some(public_policy);
+    state
+        .storage
+        .set_bucket_config(bucket_name, &config)
+        .await
+        .unwrap();
+
+    let public_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}?tab=permissions", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(public_resp.status(), StatusCode::OK);
+    let public_html = String::from_utf8(
+        public_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(public_html
+        .contains("id=\"policyPreset\" name=\"preset\" value=\"public\" data-default=\"public\""));
+    assert!(public_html.contains("Public Read"));
+
+    let overview_resp = app
+        .oneshot(ui_request(Method::GET, "/ui/buckets", &session_id, None))
+        .await
+        .unwrap();
+    assert_eq!(overview_resp.status(), StatusCode::OK);
+    let overview_html = String::from_utf8(
+        overview_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(overview_html.contains("Public Read"));
+}
+
+#[tokio::test]
+async fn test_ui_metrics_history_endpoint_reads_system_history() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_root = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&config_root).unwrap();
+    std::fs::write(
+        config_root.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        config_root.join("metrics_history.json"),
+        serde_json::json!({
+            "history": [{
+                "timestamp": "2026-04-20T00:00:00Z",
+                "cpu_percent": 12.5,
+                "memory_percent": 33.3,
+                "disk_percent": 44.4,
+                "storage_bytes": 1024
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        region: "us-east-1".to_string(),
+        iam_config_path: config_root.join("iam.json"),
+        sigv4_timestamp_tolerance_secs: 900,
+        presigned_url_min_expiry: 1,
+        presigned_url_max_expiry: 604800,
+        secret_key: None,
+        encryption_enabled: false,
+        kms_enabled: false,
+        gc_enabled: false,
+        integrity_enabled: false,
+        metrics_enabled: false,
+        metrics_history_enabled: true,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
+        lifecycle_enabled: false,
+        website_hosting_enabled: false,
+        replication_connect_timeout_secs: 1,
+        replication_read_timeout_secs: 1,
+        replication_max_retries: 1,
+        replication_streaming_threshold_bytes: 10_485_760,
+        replication_max_failures_per_bucket: 50,
+        site_sync_enabled: false,
+        site_sync_interval_secs: 60,
+        site_sync_batch_size: 100,
+        site_sync_connect_timeout_secs: 10,
+        site_sync_read_timeout_secs: 120,
+        site_sync_max_retries: 2,
+        site_sync_clock_skew_tolerance: 1.0,
+        ui_enabled: true,
+        templates_dir: manifest_dir.join("templates"),
+        static_dir: manifest_dir.join("static"),
+    };
+    let state = myfsio_server::state::AppState::new(config);
+    let (session_id, _csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state);
+
+    let resp = app
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/metrics/history?hours=24",
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["history"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn test_unauthenticated_request_rejected() {
     let (app, _tmp) = test_app();
     let resp = app
@@ -160,7 +1016,12 @@ async fn test_unauthenticated_request_rejected() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Code>AccessDenied</Code>"));
@@ -179,7 +1040,12 @@ async fn test_unauthenticated_request_includes_requested_resource_path() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Code>AccessDenied</Code>"));
@@ -198,7 +1064,12 @@ async fn test_list_buckets_empty() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("ListAllMyBucketsResult"));
@@ -220,7 +1091,12 @@ async fn test_create_and_list_bucket() {
         .await
         .unwrap();
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Name>test-bucket</Name>"));
@@ -389,7 +1265,11 @@ async fn test_head_object() {
 
     let resp = app
         .clone()
-        .oneshot(signed_request(Method::HEAD, "/hd-bucket/file.bin", Body::empty()))
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/hd-bucket/file.bin",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -487,7 +1367,12 @@ async fn test_list_objects_v2() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Key>a.txt</Key>"));
@@ -505,7 +1390,12 @@ async fn test_list_objects_v2() {
         .await
         .unwrap();
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Key>a.txt</Key>"));
@@ -521,7 +1411,12 @@ async fn test_list_objects_v2() {
         .await
         .unwrap();
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Key>dir/c.txt</Key>"));
@@ -547,7 +1442,12 @@ async fn test_get_nonexistent_object_returns_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Code>NoSuchKey</Code>"));
@@ -708,7 +1608,13 @@ async fn test_range_request() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(resp.headers().get("content-length").unwrap(), "5");
-    assert!(resp.headers().get("content-range").unwrap().to_str().unwrap().starts_with("bytes 0-4/"));
+    assert!(resp
+        .headers()
+        .get("content-range")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("bytes 0-4/"));
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"Hello");
 
@@ -771,7 +1677,12 @@ async fn test_copy_object() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("CopyObjectResult"));
@@ -809,7 +1720,12 @@ async fn test_multipart_upload_http() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("InitiateMultipartUploadResult"));
@@ -841,7 +1757,14 @@ async fn test_multipart_upload_http() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let etag1 = resp.headers().get("etag").unwrap().to_str().unwrap().trim_matches('"').to_string();
+    let etag1 = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
 
     let part2_data = vec![b'B'; 512];
     let resp = app
@@ -861,7 +1784,14 @@ async fn test_multipart_upload_http() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let etag2 = resp.headers().get("etag").unwrap().to_str().unwrap().trim_matches('"').to_string();
+    let etag2 = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
 
     let complete_xml = format!(
         "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{etag1}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{etag2}\"</ETag></Part></CompleteMultipartUpload>"
@@ -872,10 +1802,7 @@ async fn test_multipart_upload_http() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(format!(
-                    "/mp-bucket/big-file.bin?uploadId={}",
-                    upload_id
-                ))
+                .uri(format!("/mp-bucket/big-file.bin?uploadId={}", upload_id))
                 .header("x-access-key", TEST_ACCESS_KEY)
                 .header("x-secret-key", TEST_SECRET_KEY)
                 .body(Body::from(complete_xml))
@@ -885,7 +1812,12 @@ async fn test_multipart_upload_http() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("CompleteMultipartUploadResult"));
@@ -926,7 +1858,8 @@ async fn test_delete_objects_batch() {
             .unwrap();
     }
 
-    let delete_xml = r#"<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>"#;
+    let delete_xml =
+        r#"<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>"#;
 
     let resp = app
         .clone()
@@ -943,7 +1876,12 @@ async fn test_delete_objects_batch() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("DeleteResult"));
@@ -992,7 +1930,12 @@ async fn test_bucket_versioning() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("VersioningConfiguration"));
@@ -1022,7 +1965,12 @@ async fn test_bucket_versioning() {
         .await
         .unwrap();
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Status>Enabled</Status>"));
@@ -1063,7 +2011,12 @@ async fn test_bucket_tagging() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Key>env</Key>"));
@@ -1099,7 +2052,12 @@ async fn test_bucket_location() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("LocationConstraint"));
@@ -1180,7 +2138,12 @@ async fn test_bucket_acl() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("AccessControlPolicy"));
@@ -1220,13 +2183,19 @@ async fn test_object_tagging() {
     .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<TagSet>"));
     assert!(body.contains("</TagSet>"));
 
-    let tag_xml = r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
+    let tag_xml =
+        r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
         signed_request(
@@ -1247,7 +2216,12 @@ async fn test_object_tagging() {
     .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Key>env</Key>"));
@@ -1255,7 +2229,11 @@ async fn test_object_tagging() {
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(Method::DELETE, "/tag-bucket/myfile.txt?tagging", Body::empty()),
+        signed_request(
+            Method::DELETE,
+            "/tag-bucket/myfile.txt?tagging",
+            Body::empty(),
+        ),
     )
     .await
     .unwrap();
@@ -1269,7 +2247,12 @@ async fn test_object_tagging() {
     .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(!body.contains("<Key>env</Key>"));
@@ -1308,7 +2291,12 @@ async fn test_object_acl() {
     .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("AccessControlPolicy"));
@@ -1330,11 +2318,7 @@ async fn test_object_legal_hold() {
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(
-            Method::PUT,
-            "/lh-bucket/obj.txt",
-            Body::from("data"),
-        ),
+        signed_request(Method::PUT, "/lh-bucket/obj.txt", Body::from("data")),
     )
     .await
     .unwrap();
@@ -1348,7 +2332,12 @@ async fn test_object_legal_hold() {
     .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = String::from_utf8(
-        resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
     )
     .unwrap();
     assert!(body.contains("<Status>OFF</Status>"));
@@ -1388,9 +2377,20 @@ async fn test_list_objects_v1_marker_flow() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("<Marker></Marker>"));
-    assert!(body.contains("<IsTruncated>true</IsTruncated>") || body.contains("<IsTruncated>false</IsTruncated>"));
+    assert!(
+        body.contains("<IsTruncated>true</IsTruncated>")
+            || body.contains("<IsTruncated>false</IsTruncated>")
+    );
 }
 
 #[tokio::test]
@@ -1428,7 +2428,8 @@ async fn test_bucket_quota_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["quota"]["max_size_bytes"], 1024);
     assert_eq!(body["quota"]["max_objects"], 10);
 
@@ -1488,7 +2489,8 @@ async fn test_bucket_policy_and_status_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert!(body.get("Statement").is_some());
 
     let resp = app
@@ -1501,7 +2503,15 @@ async fn test_bucket_policy_and_status_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("<IsPublic>TRUE</IsPublic>"));
 
     let resp = app
@@ -1513,6 +2523,114 @@ async fn test_bucket_policy_and_status_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_public_bucket_policy_allows_anonymous_reads() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/public-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_object = Request::builder()
+        .method(Method::PUT)
+        .uri("/public-bucket/hello.txt")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from("hello world"))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_object).await.unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:ListBucket",
+          "Resource": "arn:aws:s3:::public-bucket"
+        },
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:GetObject",
+          "Resource": "arn:aws:s3:::public-bucket/*"
+        }
+      ]
+    }"#;
+
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/public-bucket?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let object_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/public-bucket/hello.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(object_resp.status(), StatusCode::OK);
+    let object_body = object_resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(object_body.as_ref(), b"hello world");
+
+    let list_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/public-bucket")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = String::from_utf8(
+        list_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(list_body.contains("hello.txt"));
+}
+
+#[tokio::test]
+async fn test_bucket_root_with_trailing_slash_works() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/slash-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(signed_request(Method::GET, "/slash-bucket/", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1552,7 +2670,15 @@ async fn test_bucket_replication_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("ReplicationConfiguration"));
 
     let resp = app
@@ -1585,7 +2711,15 @@ async fn test_list_parts_via_get_upload_id() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     let upload_id = body
         .split("<UploadId>")
         .nth(1)
@@ -1599,7 +2733,10 @@ async fn test_list_parts_via_get_upload_id() {
         .oneshot(
             Request::builder()
                 .method(Method::PUT)
-                .uri(format!("/parts-bucket/large.bin?uploadId={}&partNumber=1", upload_id))
+                .uri(format!(
+                    "/parts-bucket/large.bin?uploadId={}&partNumber=1",
+                    upload_id
+                ))
                 .header("x-access-key", TEST_ACCESS_KEY)
                 .header("x-secret-key", TEST_SECRET_KEY)
                 .body(Body::from(vec![1_u8, 2, 3, 4]))
@@ -1618,7 +2755,15 @@ async fn test_list_parts_via_get_upload_id() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("ListPartsResult"));
     assert!(body.contains("<PartNumber>1</PartNumber>"));
 }
@@ -1645,7 +2790,13 @@ async fn test_conditional_get_and_head() {
         )
         .await
         .unwrap();
-    let etag = put_resp.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let etag = put_resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
 
     let resp = app
         .clone()
@@ -1721,7 +2872,13 @@ async fn test_copy_source_preconditions() {
         )
         .await
         .unwrap();
-    let etag = put_resp.headers().get("etag").unwrap().to_str().unwrap().to_string();
+    let etag = put_resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
 
     let resp = app
         .clone()
@@ -1812,8 +2969,14 @@ async fn test_select_object_content_csv_to_json_events() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(resp.headers().get("content-type").unwrap(), "application/octet-stream");
-    assert_eq!(resp.headers().get("x-amz-request-charged").unwrap(), "requester");
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        resp.headers().get("x-amz-request-charged").unwrap(),
+        "requester"
+    );
 
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let events = parse_select_events(&body);
@@ -1836,7 +2999,11 @@ async fn test_select_object_content_requires_expression() {
     let (app, _tmp) = test_app();
 
     app.clone()
-        .oneshot(signed_request(Method::PUT, "/sel-missing-exp", Body::empty()))
+        .oneshot(signed_request(
+            Method::PUT,
+            "/sel-missing-exp",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     app.clone()
@@ -1875,7 +3042,15 @@ async fn test_select_object_content_requires_expression() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("<Code>InvalidRequest</Code>"));
     assert!(body.contains("Expression is required"));
 }
@@ -1925,7 +3100,15 @@ async fn test_select_object_content_rejects_non_xml_content_type() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = String::from_utf8(resp.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("<Code>InvalidRequest</Code>"));
     assert!(body.contains("Content-Type must be application/xml or text/xml"));
 }
@@ -1958,6 +3141,7 @@ async fn test_non_admin_authorization_enforced() {
 
     let config = myfsio_server::config::ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
         storage_root: tmp.path().to_path_buf(),
         region: "us-east-1".to_string(),
         iam_config_path: iam_path.join("iam.json"),
@@ -1970,6 +3154,11 @@ async fn test_non_admin_authorization_enforced() {
         gc_enabled: false,
         integrity_enabled: false,
         metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
         lifecycle_enabled: false,
         website_hosting_enabled: false,
         replication_connect_timeout_secs: 5,
@@ -2033,6 +3222,7 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
 
     let config = myfsio_server::config::ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
         storage_root: tmp.path().to_path_buf(),
         region: "us-east-1".to_string(),
         iam_config_path: iam_path.join("iam.json"),
@@ -2045,6 +3235,11 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         gc_enabled: false,
         integrity_enabled: false,
         metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
         lifecycle_enabled: false,
         website_hosting_enabled: false,
         replication_connect_timeout_secs: 5,
@@ -2135,10 +3330,8 @@ async fn test_kms_key_crud() {
         .unwrap();
     let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_slice(
-        &resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let key_id = body["KeyId"].as_str().unwrap().to_string();
     assert!(!key_id.is_empty());
 
@@ -2149,19 +3342,13 @@ async fn test_kms_key_crud() {
     .await
     .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_slice(
-        &resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["keys"].as_array().unwrap().len(), 1);
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(
-            Method::GET,
-            &format!("/kms/keys/{}", key_id),
-            Body::empty(),
-        ),
+        signed_request(Method::GET, &format!("/kms/keys/{}", key_id), Body::empty()),
     )
     .await
     .unwrap();
@@ -2193,10 +3380,8 @@ async fn test_kms_encrypt_decrypt() {
         .body(Body::from(r#"{"Description": "enc key"}"#))
         .unwrap();
     let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(
-        &resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let key_id = body["KeyId"].as_str().unwrap().to_string();
 
     use base64::engine::general_purpose::STANDARD as B64;
@@ -2216,10 +3401,8 @@ async fn test_kms_encrypt_decrypt() {
         .unwrap();
     let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_slice(
-        &resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let ct_b64 = body["CiphertextBlob"].as_str().unwrap().to_string();
 
     let dec_req = serde_json::json!({
@@ -2235,12 +3418,9 @@ async fn test_kms_encrypt_decrypt() {
         .unwrap();
     let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = serde_json::from_slice(
-        &resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let pt_b64 = body["Plaintext"].as_str().unwrap();
     let result = B64.decode(pt_b64).unwrap();
     assert_eq!(result, plaintext);
 }
-

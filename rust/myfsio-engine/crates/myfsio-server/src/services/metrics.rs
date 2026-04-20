@@ -165,8 +165,9 @@ impl MetricsService {
                 .ok()
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
                 .and_then(|v| {
-                    v.get("snapshots")
-                        .and_then(|s| serde_json::from_value::<Vec<MetricsSnapshot>>(s.clone()).ok())
+                    v.get("snapshots").and_then(|s| {
+                        serde_json::from_value::<Vec<MetricsSnapshot>>(s.clone()).ok()
+                    })
                 })
                 .unwrap_or_default()
         } else {
@@ -218,7 +219,9 @@ impl MetricsService {
         if let Some(code) = error_code {
             *inner.error_codes.entry(code.to_string()).or_insert(0) += 1;
         }
-        inner.totals.record(latency_ms, success, bytes_in, bytes_out);
+        inner
+            .totals
+            .record(latency_ms, success, bytes_in, bytes_out);
     }
 
     pub fn get_current_stats(&self) -> Value {

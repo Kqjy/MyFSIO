@@ -1,5 +1,5 @@
-pub mod response;
 pub mod request;
+pub mod response;
 
 use quick_xml::Writer;
 use std::io::Cursor;

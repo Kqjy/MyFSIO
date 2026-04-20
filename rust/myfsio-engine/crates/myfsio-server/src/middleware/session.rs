@@ -62,18 +62,14 @@ pub async fn session_layer(
 ) -> Response {
     let cookie_id = extract_session_cookie(&req);
 
-    let (session_id, session_data, is_new) = match cookie_id.and_then(|id| {
-        state
-            .store
-            .get(&id)
-            .map(|data| (id.clone(), data))
-    }) {
-        Some((id, data)) => (id, data, false),
-        None => {
-            let (id, data) = state.store.create();
-            (id, data, true)
-        }
-    };
+    let (session_id, session_data, is_new) =
+        match cookie_id.and_then(|id| state.store.get(&id).map(|data| (id.clone(), data))) {
+            Some((id, data)) => (id, data, false),
+            None => {
+                let (id, data) = state.store.create();
+                (id, data, true)
+            }
+        };
 
     let handle = SessionHandle::new(session_id.clone(), session_data);
     req.extensions_mut().insert(handle.clone());
@@ -95,6 +91,8 @@ pub async fn session_layer(
 }
 
 pub async fn csrf_layer(req: Request, next: Next) -> Response {
+    const CSRF_HEADER_ALIAS: &str = "x-csrftoken";
+
     let method = req.method().clone();
     let needs_check = matches!(
         method,
@@ -126,14 +124,22 @@ pub async fn csrf_layer(req: Request, next: Next) -> Response {
     let header_token = req
         .headers()
         .get(CSRF_HEADER_NAME)
+        .or_else(|| req.headers().get(CSRF_HEADER_ALIAS))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    if let Some(token) = header_token {
-        if csrf_tokens_match(&expected, &token) {
+    if let Some(token) = header_token.as_deref() {
+        if csrf_tokens_match(&expected, token) {
             return next.run(req).await;
         }
     }
+
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
     let (parts, body) = req.into_parts();
     let bytes = match axum::body::to_bytes(body, usize::MAX).await {
@@ -141,14 +147,10 @@ pub async fn csrf_layer(req: Request, next: Next) -> Response {
         Err(_) => return (StatusCode::BAD_REQUEST, "Body read failed").into_response(),
     };
 
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
     let form_token = if content_type.starts_with("application/x-www-form-urlencoded") {
         extract_form_token(&bytes)
+    } else if content_type.starts_with("multipart/form-data") {
+        extract_multipart_token(&content_type, &bytes)
     } else {
         None
     };
@@ -160,7 +162,30 @@ pub async fn csrf_layer(req: Request, next: Next) -> Response {
         }
     }
 
+    tracing::warn!(
+        path = %parts.uri.path(),
+        content_type = %content_type,
+        expected_len = expected.len(),
+        header_present = header_token.is_some(),
+        "CSRF token mismatch"
+    );
     (StatusCode::FORBIDDEN, "Invalid CSRF token").into_response()
+}
+
+fn extract_multipart_token(content_type: &str, body: &[u8]) -> Option<String> {
+    let boundary = multer::parse_boundary(content_type).ok()?;
+    let prefix = format!("--{}", boundary);
+    let text = std::str::from_utf8(body).ok()?;
+    let needle = "name=\"csrf_token\"";
+    let idx = text.find(needle)?;
+    let after = &text[idx + needle.len()..];
+    let body_start = after.find("\r\n\r\n")? + 4;
+    let tail = &after[body_start..];
+    let end = tail
+        .find(&format!("\r\n--{}", prefix.trim_start_matches("--")))
+        .or_else(|| tail.find("\r\n--"))
+        .unwrap_or(tail.len());
+    Some(tail[..end].trim().to_string())
 }
 
 fn extract_session_cookie(req: &Request) -> Option<String> {

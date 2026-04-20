@@ -24,7 +24,11 @@ pub trait StorageEngine: Send + Sync {
         metadata: Option<HashMap<String, String>>,
     ) -> StorageResult<ObjectMeta>;
 
-    async fn get_object(&self, bucket: &str, key: &str) -> StorageResult<(ObjectMeta, AsyncReadStream)>;
+    async fn get_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<(ObjectMeta, AsyncReadStream)>;
 
     async fn get_object_path(&self, bucket: &str, key: &str) -> StorageResult<PathBuf>;
 
@@ -53,7 +57,11 @@ pub trait StorageEngine: Send + Sync {
         metadata: &HashMap<String, String>,
     ) -> StorageResult<()>;
 
-    async fn list_objects(&self, bucket: &str, params: &ListParams) -> StorageResult<ListObjectsResult>;
+    async fn list_objects(
+        &self,
+        bucket: &str,
+        params: &ListParams,
+    ) -> StorageResult<ListObjectsResult>;
 
     async fn list_objects_shallow(
         &self,
@@ -97,10 +105,8 @@ pub trait StorageEngine: Send + Sync {
 
     async fn list_parts(&self, bucket: &str, upload_id: &str) -> StorageResult<Vec<PartMeta>>;
 
-    async fn list_multipart_uploads(
-        &self,
-        bucket: &str,
-    ) -> StorageResult<Vec<MultipartUploadInfo>>;
+    async fn list_multipart_uploads(&self, bucket: &str)
+        -> StorageResult<Vec<MultipartUploadInfo>>;
 
     async fn get_bucket_config(&self, bucket: &str) -> StorageResult<BucketConfig>;
     async fn set_bucket_config(&self, bucket: &str, config: &BucketConfig) -> StorageResult<()>;
@@ -114,22 +120,9 @@ pub trait StorageEngine: Send + Sync {
         key: &str,
     ) -> StorageResult<Vec<VersionInfo>>;
 
-    async fn get_object_tags(
-        &self,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<Vec<Tag>>;
+    async fn get_object_tags(&self, bucket: &str, key: &str) -> StorageResult<Vec<Tag>>;
 
-    async fn set_object_tags(
-        &self,
-        bucket: &str,
-        key: &str,
-        tags: &[Tag],
-    ) -> StorageResult<()>;
+    async fn set_object_tags(&self, bucket: &str, key: &str, tags: &[Tag]) -> StorageResult<()>;
 
-    async fn delete_object_tags(
-        &self,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<()>;
+    async fn delete_object_tags(&self, bucket: &str, key: &str) -> StorageResult<()>;
 }

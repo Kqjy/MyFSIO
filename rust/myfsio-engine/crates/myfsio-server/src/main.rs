@@ -3,8 +3,18 @@ use myfsio_server::config::ServerConfig;
 use myfsio_server::state::AppState;
 
 #[derive(Parser)]
-#[command(name = "myfsio", version, about = "MyFSIO S3-compatible storage engine")]
+#[command(
+    name = "myfsio",
+    version,
+    about = "MyFSIO S3-compatible storage engine"
+)]
 struct Cli {
+    #[arg(long, help = "Validate configuration and exit")]
+    check_config: bool,
+    #[arg(long, help = "Show configuration summary and exit")]
+    show_config: bool,
+    #[arg(long, help = "Reset admin credentials and exit")]
+    reset_cred: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -17,9 +27,30 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    load_env_files();
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+    let config = ServerConfig::from_env();
+
+    if cli.reset_cred {
+        reset_admin_credentials(&config);
+        return;
+    }
+    if cli.check_config || cli.show_config {
+        print_config_summary(&config);
+        if cli.check_config {
+            let issues = validate_config(&config);
+            for issue in &issues {
+                println!("{issue}");
+            }
+            if issues.iter().any(|issue| issue.starts_with("CRITICAL:")) {
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     match cli.command.unwrap_or(Command::Serve) {
         Command::Version => {
             println!("myfsio {}", env!("CARGO_PKG_VERSION"));
@@ -28,19 +59,24 @@ async fn main() {
         Command::Serve => {}
     }
 
-    let config = ServerConfig::from_env();
+    ensure_iam_bootstrap(&config);
     let bind_addr = config.bind_addr;
+    let ui_bind_addr = config.ui_bind_addr;
 
-    tracing::info!("MyFSIO Rust Engine starting on {}", bind_addr);
+    tracing::info!("MyFSIO Rust Engine starting — API on {}", bind_addr);
+    if config.ui_enabled {
+        tracing::info!("UI will bind on {}", ui_bind_addr);
+    }
     tracing::info!("Storage root: {}", config.storage_root.display());
     tracing::info!("Region: {}", config.region);
     tracing::info!(
-        "Encryption: {}, KMS: {}, GC: {}, Lifecycle: {}, Integrity: {}, Metrics: {}, UI: {}",
+        "Encryption: {}, KMS: {}, GC: {}, Lifecycle: {}, Integrity: {}, Metrics History: {}, Operation Metrics: {}, UI: {}",
         config.encryption_enabled,
         config.kms_enabled,
         config.gc_enabled,
         config.lifecycle_enabled,
         config.integrity_enabled,
+        config.metrics_history_enabled,
         config.metrics_enabled,
         config.ui_enabled
     );
@@ -68,13 +104,17 @@ async fn main() {
         tracing::info!("Metrics collector background service started");
     }
 
+    if let Some(ref system_metrics) = state.system_metrics {
+        bg_handles.push(system_metrics.clone().start_background());
+        tracing::info!("System metrics history collector started");
+    }
+
     if config.lifecycle_enabled {
-        let lifecycle = std::sync::Arc::new(
-            myfsio_server::services::lifecycle::LifecycleService::new(
+        let lifecycle =
+            std::sync::Arc::new(myfsio_server::services::lifecycle::LifecycleService::new(
                 state.storage.clone(),
                 myfsio_server::services::lifecycle::LifecycleConfig::default(),
-            ),
-        );
+            ));
         bg_handles.push(lifecycle.start_background());
         tracing::info!("Lifecycle manager background service started");
     }
@@ -87,15 +127,21 @@ async fn main() {
         tracing::info!("Site sync worker started");
     }
 
-    let app = myfsio_server::create_router(state);
+    let ui_enabled = config.ui_enabled;
+    let api_app = myfsio_server::create_router(state.clone());
+    let ui_app = if ui_enabled {
+        Some(myfsio_server::create_ui_router(state.clone()))
+    } else {
+        None
+    };
 
-    let listener = match tokio::net::TcpListener::bind(bind_addr).await {
+    let api_listener = match tokio::net::TcpListener::bind(bind_addr).await {
         Ok(listener) => listener,
         Err(err) => {
             if err.kind() == std::io::ErrorKind::AddrInUse {
-                tracing::error!("Port already in use: {}", bind_addr);
+                tracing::error!("API port already in use: {}", bind_addr);
             } else {
-                tracing::error!("Failed to bind {}: {}", bind_addr, err);
+                tracing::error!("Failed to bind API {}: {}", bind_addr, err);
             }
             for handle in bg_handles {
                 handle.abort();
@@ -103,17 +149,67 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    tracing::info!("Listening on {}", bind_addr);
+    tracing::info!("API listening on {}", bind_addr);
 
-    if let Err(err) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
-        tracing::error!("Server exited with error: {}", err);
-        for handle in bg_handles {
-            handle.abort();
+    let ui_listener = if let Some(ref app) = ui_app {
+        let _ = app;
+        match tokio::net::TcpListener::bind(ui_bind_addr).await {
+            Ok(listener) => {
+                tracing::info!("UI listening on {}", ui_bind_addr);
+                Some(listener)
+            }
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::AddrInUse {
+                    tracing::error!("UI port already in use: {}", ui_bind_addr);
+                } else {
+                    tracing::error!("Failed to bind UI {}: {}", ui_bind_addr, err);
+                }
+                for handle in bg_handles {
+                    handle.abort();
+                }
+                std::process::exit(1);
+            }
         }
-        std::process::exit(1);
+    } else {
+        None
+    };
+
+    let shutdown = shutdown_signal_shared();
+    let api_shutdown = shutdown.clone();
+    let api_task = tokio::spawn(async move {
+        axum::serve(api_listener, api_app)
+            .with_graceful_shutdown(async move {
+                api_shutdown.notified().await;
+            })
+            .await
+    });
+
+    let ui_task = if let (Some(listener), Some(app)) = (ui_listener, ui_app) {
+        let ui_shutdown = shutdown.clone();
+        Some(tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    ui_shutdown.notified().await;
+                })
+                .await
+        }))
+    } else {
+        None
+    };
+
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for Ctrl+C");
+    tracing::info!("Shutdown signal received");
+    shutdown.notify_waiters();
+
+    if let Err(err) = api_task.await.unwrap_or(Ok(())) {
+        tracing::error!("API server exited with error: {}", err);
+    }
+    if let Some(task) = ui_task {
+        if let Err(err) = task.await.unwrap_or(Ok(())) {
+            tracing::error!("UI server exited with error: {}", err);
+        }
     }
 
     for handle in bg_handles {
@@ -121,9 +217,209 @@ async fn main() {
     }
 }
 
-async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to listen for Ctrl+C");
-    tracing::info!("Shutdown signal received");
+fn print_config_summary(config: &ServerConfig) {
+    println!("MyFSIO Rust Configuration");
+    println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("API bind: {}", config.bind_addr);
+    println!("UI bind: {}", config.ui_bind_addr);
+    println!("UI enabled: {}", config.ui_enabled);
+    println!("Storage root: {}", config.storage_root.display());
+    println!("IAM config: {}", config.iam_config_path.display());
+    println!("Region: {}", config.region);
+    println!("Encryption enabled: {}", config.encryption_enabled);
+    println!("KMS enabled: {}", config.kms_enabled);
+    println!("GC enabled: {}", config.gc_enabled);
+    println!("Integrity enabled: {}", config.integrity_enabled);
+    println!("Lifecycle enabled: {}", config.lifecycle_enabled);
+    println!(
+        "Website hosting enabled: {}",
+        config.website_hosting_enabled
+    );
+    println!("Site sync enabled: {}", config.site_sync_enabled);
+    println!(
+        "Metrics history enabled: {}",
+        config.metrics_history_enabled
+    );
+    println!("Operation metrics enabled: {}", config.metrics_enabled);
+}
+
+fn validate_config(config: &ServerConfig) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    if config.ui_enabled && config.bind_addr == config.ui_bind_addr {
+        issues.push(
+            "CRITICAL: API and UI bind addresses cannot be identical when UI is enabled."
+                .to_string(),
+        );
+    }
+    if config.presigned_url_min_expiry > config.presigned_url_max_expiry {
+        issues.push("CRITICAL: PRESIGNED_URL_MIN_EXPIRY_SECONDS cannot exceed PRESIGNED_URL_MAX_EXPIRY_SECONDS.".to_string());
+    }
+    if let Err(err) = std::fs::create_dir_all(&config.storage_root) {
+        issues.push(format!(
+            "CRITICAL: Cannot create storage root {}: {}",
+            config.storage_root.display(),
+            err
+        ));
+    }
+    if let Some(parent) = config.iam_config_path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            issues.push(format!(
+                "CRITICAL: Cannot create IAM config directory {}: {}",
+                parent.display(),
+                err
+            ));
+        }
+    }
+    if config.encryption_enabled && config.secret_key.is_none() {
+        issues.push(
+            "WARNING: ENCRYPTION_ENABLED=true but SECRET_KEY is not configured; secure-at-rest config encryption is unavailable.".to_string(),
+        );
+    }
+    if config.site_sync_enabled && !config.website_hosting_enabled {
+        issues.push(
+            "INFO: SITE_SYNC_ENABLED=true without WEBSITE_HOSTING_ENABLED; this is valid but unrelated.".to_string(),
+        );
+    }
+
+    issues
+}
+
+fn shutdown_signal_shared() -> std::sync::Arc<tokio::sync::Notify> {
+    std::sync::Arc::new(tokio::sync::Notify::new())
+}
+
+fn load_env_files() {
+    let cwd = std::env::current_dir().ok();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    candidates.push(std::path::PathBuf::from("/opt/myfsio/myfsio.env"));
+    if let Some(ref dir) = cwd {
+        candidates.push(dir.join(".env"));
+        candidates.push(dir.join("myfsio.env"));
+        for ancestor in dir.ancestors().skip(1).take(4) {
+            candidates.push(ancestor.join(".env"));
+            candidates.push(ancestor.join("myfsio.env"));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for path in candidates {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if path.is_file() {
+            match dotenvy::from_path_override(&path) {
+                Ok(()) => eprintln!("Loaded env file: {}", path.display()),
+                Err(e) => eprintln!("Failed to load env file {}: {}", path.display(), e),
+            }
+        }
+    }
+}
+
+fn ensure_iam_bootstrap(config: &ServerConfig) {
+    let iam_path = &config.iam_config_path;
+    if iam_path.exists() {
+        return;
+    }
+
+    let access_key = std::env::var("ADMIN_ACCESS_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
+    let secret_key = std::env::var("ADMIN_SECRET_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
+
+    let user_id = format!("u-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    let body = serde_json::json!({
+        "version": 2,
+        "users": [{
+            "user_id": user_id,
+            "display_name": "Local Admin",
+            "enabled": true,
+            "access_keys": [{
+                "access_key": access_key,
+                "secret_key": secret_key,
+                "status": "active",
+                "created_at": created_at,
+            }],
+            "policies": [{
+                "bucket": "*",
+                "actions": ["*"],
+                "prefix": "*",
+            }]
+        }]
+    });
+
+    let json = match serde_json::to_string_pretty(&body) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to serialize IAM bootstrap config: {}", e);
+            return;
+        }
+    };
+
+    if let Some(parent) = iam_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!(
+                "Failed to create IAM config dir {}: {}",
+                parent.display(),
+                e
+            );
+            return;
+        }
+    }
+
+    if let Err(e) = std::fs::write(iam_path, json) {
+        tracing::error!(
+            "Failed to write IAM bootstrap config {}: {}",
+            iam_path.display(),
+            e
+        );
+        return;
+    }
+
+    tracing::info!("============================================================");
+    tracing::info!("MYFSIO - ADMIN CREDENTIALS INITIALIZED");
+    tracing::info!("============================================================");
+    tracing::info!("Access Key: {}", access_key);
+    tracing::info!("Secret Key: {}", secret_key);
+    tracing::info!("Saved to: {}", iam_path.display());
+    tracing::info!("============================================================");
+}
+
+fn reset_admin_credentials(config: &ServerConfig) {
+    if let Some(parent) = config.iam_config_path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "Failed to create IAM config directory {}: {}",
+                parent.display(),
+                err
+            );
+            std::process::exit(1);
+        }
+    }
+
+    if config.iam_config_path.exists() {
+        let backup = config
+            .iam_config_path
+            .with_extension(format!("bak-{}", chrono::Utc::now().timestamp()));
+        if let Err(err) = std::fs::rename(&config.iam_config_path, &backup) {
+            eprintln!(
+                "Failed to back up existing IAM config {}: {}",
+                config.iam_config_path.display(),
+                err
+            );
+            std::process::exit(1);
+        }
+        println!("Backed up existing IAM config to {}", backup.display());
+    }
+
+    ensure_iam_bootstrap(config);
+    println!("Admin credentials reset.");
 }

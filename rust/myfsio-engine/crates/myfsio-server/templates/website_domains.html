@@ -35,7 +35,7 @@
       </div>
       <div class="card-body px-4 pb-4">
         <form method="POST" action="{{ url_for(endpoint="ui.create_website_domain") }}" id="createDomainForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
           <div class="mb-3">
             <label for="domain" class="form-label fw-medium">Domain</label>
             <input type="text" class="form-control" id="domain" name="domain" required
@@ -204,7 +204,7 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="POST" id="editDomainForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label fw-medium">Domain</label>
@@ -241,7 +241,7 @@
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
       <form method="POST" id="deleteDomainForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
         <div class="modal-header border-0 pb-0">
           <h5 class="modal-title fw-semibold">
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">

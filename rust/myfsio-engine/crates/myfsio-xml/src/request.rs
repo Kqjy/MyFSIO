@@ -49,7 +49,11 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
                     let text = e.unescape().map_err(|e| e.to_string())?.to_string();
                     match current_tag.as_str() {
                         "PartNumber" => {
-                            part_number = Some(text.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?);
+                            part_number = Some(
+                                text.trim()
+                                    .parse()
+                                    .map_err(|e: std::num::ParseIntError| e.to_string())?,
+                            );
                         }
                         "ETag" => {
                             etag = Some(text.trim().trim_matches('"').to_string());

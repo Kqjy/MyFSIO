@@ -28,6 +28,7 @@ pub struct GcService {
     storage_root: PathBuf,
     config: GcConfig,
     running: Arc<RwLock<bool>>,
+    started_at: Arc<RwLock<Option<Instant>>>,
     history: Arc<RwLock<Vec<Value>>>,
     history_path: PathBuf,
 }
@@ -53,6 +54,7 @@ impl GcService {
             storage_root,
             config,
             running: Arc::new(RwLock::new(false)),
+            started_at: Arc::new(RwLock::new(None)),
             history: Arc::new(RwLock::new(history)),
             history_path,
         }
@@ -60,9 +62,17 @@ impl GcService {
 
     pub async fn status(&self) -> Value {
         let running = *self.running.read().await;
+        let scan_elapsed_seconds = self
+            .started_at
+            .read()
+            .await
+            .as_ref()
+            .map(|started| started.elapsed().as_secs_f64());
         json!({
             "enabled": true,
             "running": running,
+            "scanning": running,
+            "scan_elapsed_seconds": scan_elapsed_seconds,
             "interval_hours": self.config.interval_hours,
             "temp_file_max_age_hours": self.config.temp_file_max_age_hours,
             "multipart_max_age_days": self.config.multipart_max_age_days,
@@ -73,7 +83,9 @@ impl GcService {
 
     pub async fn history(&self) -> Value {
         let history = self.history.read().await;
-        json!({ "executions": *history })
+        let mut executions: Vec<Value> = history.iter().cloned().collect();
+        executions.reverse();
+        json!({ "executions": executions })
     }
 
     pub async fn run_now(&self, dry_run: bool) -> Result<Value, String> {
@@ -84,12 +96,14 @@ impl GcService {
             }
             *running = true;
         }
+        *self.started_at.write().await = Some(Instant::now());
 
         let start = Instant::now();
         let result = self.execute_gc(dry_run || self.config.dry_run).await;
         let elapsed = start.elapsed().as_secs_f64();
 
         *self.running.write().await = false;
+        *self.started_at.write().await = None;
 
         let mut result_json = result.clone();
         if let Some(obj) = result_json.as_object_mut() {
@@ -124,9 +138,12 @@ impl GcService {
         let mut errors: Vec<String> = Vec::new();
 
         let now = std::time::SystemTime::now();
-        let temp_max_age = std::time::Duration::from_secs_f64(self.config.temp_file_max_age_hours * 3600.0);
-        let multipart_max_age = std::time::Duration::from_secs(self.config.multipart_max_age_days * 86400);
-        let lock_max_age = std::time::Duration::from_secs_f64(self.config.lock_file_max_age_hours * 3600.0);
+        let temp_max_age =
+            std::time::Duration::from_secs_f64(self.config.temp_file_max_age_hours * 3600.0);
+        let multipart_max_age =
+            std::time::Duration::from_secs(self.config.multipart_max_age_days * 86400);
+        let lock_max_age =
+            std::time::Duration::from_secs_f64(self.config.lock_file_max_age_hours * 3600.0);
 
         let tmp_dir = self.storage_root.join(".myfsio.sys").join("tmp");
         if tmp_dir.exists() {
@@ -140,7 +157,10 @@ impl GcService {
                                         let size = metadata.len();
                                         if !dry_run {
                                             if let Err(e) = std::fs::remove_file(entry.path()) {
-                                                errors.push(format!("Failed to remove temp file: {}", e));
+                                                errors.push(format!(
+                                                    "Failed to remove temp file: {}",
+                                                    e
+                                                ));
                                                 continue;
                                             }
                                         }
@@ -242,7 +262,10 @@ impl GcService {
         if let Some(parent) = self.history_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&self.history_path, serde_json::to_string_pretty(&data).unwrap_or_default());
+        let _ = std::fs::write(
+            &self.history_path,
+            serde_json::to_string_pretty(&data).unwrap_or_default(),
+        );
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {

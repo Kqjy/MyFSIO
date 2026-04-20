@@ -41,7 +41,10 @@ impl<S> AwsChunkedStream<S> {
 
     fn parse_chunk_size(line: &[u8]) -> std::io::Result<u64> {
         let text = std::str::from_utf8(line).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid chunk size encoding")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid chunk size encoding",
+            )
         })?;
         let head = text.split(';').next().unwrap_or("").trim();
         u64::from_str_radix(head, 16).map_err(|_| {
@@ -179,4 +182,3 @@ pub fn decode_body(body: axum::body::Body) -> impl AsyncRead + Send + Unpin {
     );
     AwsChunkedStream::new(stream)
 }
-

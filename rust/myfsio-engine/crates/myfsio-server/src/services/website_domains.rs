@@ -64,7 +64,10 @@ impl WebsiteDomainStore {
     }
 
     pub fn set_mapping(&self, domain: &str, bucket: &str) {
-        self.data.write().mappings.insert(domain.to_string(), bucket.to_string());
+        self.data
+            .write()
+            .mappings
+            .insert(domain.to_string(), bucket.to_string());
         self.save();
     }
 

@@ -225,10 +225,10 @@ def _policy_allows_public_read(policy: dict[str, Any]) -> bool:
 
 def _bucket_access_descriptor(policy: dict[str, Any] | None) -> tuple[str, str]:
     if not policy:
-        return ("IAM only", "text-bg-secondary")
+        return ("IAM only", "bg-secondary-subtle text-secondary-emphasis")
     if _policy_allows_public_read(policy):
-        return ("Public read", "text-bg-warning")
-    return ("Custom policy", "text-bg-info")
+        return ("Public read", "bg-warning-subtle text-warning-emphasis")
+    return ("Custom policy", "bg-info-subtle text-info-emphasis")
 
 
 def _current_principal():

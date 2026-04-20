@@ -113,10 +113,10 @@
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" action="{{ url_for(endpoint="ui.create_bucket") }}" id="createBucketForm">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body pt-0">
           <label class="form-label fw-medium">Bucket name</label>
-          <input class="form-control" type="text" name="bucket_name" pattern="[a-z0-9.-]{3,63}" placeholder="my-bucket-name" required autofocus />
+          <input class="form-control" type="text" name="bucket_name" pattern="[a-z0-9.\-]{3,63}" placeholder="my-bucket-name" required autofocus />
           <div class="form-text">Use 3-63 characters: lowercase letters, numbers, dots, or hyphens.</div>
         </div>
         <div class="modal-footer">

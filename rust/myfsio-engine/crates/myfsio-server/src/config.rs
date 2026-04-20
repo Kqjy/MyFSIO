@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub bind_addr: SocketAddr,
+    pub ui_bind_addr: SocketAddr,
     pub storage_root: PathBuf,
     pub region: String,
     pub iam_config_path: PathBuf,
@@ -16,6 +17,11 @@ pub struct ServerConfig {
     pub gc_enabled: bool,
     pub integrity_enabled: bool,
     pub metrics_enabled: bool,
+    pub metrics_history_enabled: bool,
+    pub metrics_interval_minutes: u64,
+    pub metrics_retention_hours: u64,
+    pub metrics_history_interval_minutes: u64,
+    pub metrics_history_retention_hours: u64,
     pub lifecycle_enabled: bool,
     pub website_hosting_enabled: bool,
     pub replication_connect_timeout_secs: u64,
@@ -42,22 +48,28 @@ impl ServerConfig {
             .unwrap_or_else(|_| "5000".to_string())
             .parse()
             .unwrap_or(5000);
-        let storage_root = std::env::var("STORAGE_ROOT")
-            .unwrap_or_else(|_| "./data".to_string());
-        let region = std::env::var("AWS_REGION")
-            .unwrap_or_else(|_| "us-east-1".to_string());
+        let ui_port: u16 = std::env::var("UI_PORT")
+            .unwrap_or_else(|_| "5100".to_string())
+            .parse()
+            .unwrap_or(5100);
+        let storage_root = std::env::var("STORAGE_ROOT").unwrap_or_else(|_| "./data".to_string());
+        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
         let storage_path = PathBuf::from(&storage_root);
         let iam_config_path = std::env::var("IAM_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                storage_path.join(".myfsio.sys").join("config").join("iam.json")
+                storage_path
+                    .join(".myfsio.sys")
+                    .join("config")
+                    .join("iam.json")
             });
 
-        let sigv4_timestamp_tolerance_secs: u64 = std::env::var("SIGV4_TIMESTAMP_TOLERANCE_SECONDS")
-            .unwrap_or_else(|_| "900".to_string())
-            .parse()
-            .unwrap_or(900);
+        let sigv4_timestamp_tolerance_secs: u64 =
+            std::env::var("SIGV4_TIMESTAMP_TOLERANCE_SECONDS")
+                .unwrap_or_else(|_| "900".to_string())
+                .parse()
+                .unwrap_or(900);
 
         let presigned_url_min_expiry: u64 = std::env::var("PRESIGNED_URL_MIN_EXPIRY_SECONDS")
             .unwrap_or_else(|_| "1".to_string())
@@ -78,40 +90,60 @@ impl ServerConfig {
                         .join(".myfsio.sys")
                         .join("config")
                         .join(".secret");
-                    std::fs::read_to_string(&secret_file).ok().map(|s| s.trim().to_string())
+                    std::fs::read_to_string(&secret_file)
+                        .ok()
+                        .map(|s| s.trim().to_string())
                 }
             }
         };
 
         let encryption_enabled = std::env::var("ENCRYPTION_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
         let kms_enabled = std::env::var("KMS_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
         let gc_enabled = std::env::var("GC_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
         let integrity_enabled = std::env::var("INTEGRITY_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
         let metrics_enabled = std::env::var("OPERATION_METRICS_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
+
+        let metrics_history_enabled = std::env::var("METRICS_HISTORY_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase()
+            == "true";
+
+        let metrics_interval_minutes = parse_u64_env("OPERATION_METRICS_INTERVAL_MINUTES", 5);
+        let metrics_retention_hours = parse_u64_env("OPERATION_METRICS_RETENTION_HOURS", 24);
+        let metrics_history_interval_minutes = parse_u64_env("METRICS_HISTORY_INTERVAL_MINUTES", 5);
+        let metrics_history_retention_hours = parse_u64_env("METRICS_HISTORY_RETENTION_HOURS", 24);
 
         let lifecycle_enabled = std::env::var("LIFECYCLE_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
         let website_hosting_enabled = std::env::var("WEBSITE_HOSTING_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
-        let replication_connect_timeout_secs = parse_u64_env("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5);
+        let replication_connect_timeout_secs =
+            parse_u64_env("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5);
         let replication_read_timeout_secs = parse_u64_env("REPLICATION_READ_TIMEOUT_SECONDS", 30);
         let replication_max_retries = parse_u64_env("REPLICATION_MAX_RETRIES", 2) as u32;
         let replication_streaming_threshold_bytes =
@@ -121,20 +153,23 @@ impl ServerConfig {
 
         let site_sync_enabled = std::env::var("SITE_SYNC_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
         let site_sync_interval_secs = parse_u64_env("SITE_SYNC_INTERVAL_SECONDS", 60);
         let site_sync_batch_size = parse_u64_env("SITE_SYNC_BATCH_SIZE", 100) as usize;
         let site_sync_connect_timeout_secs = parse_u64_env("SITE_SYNC_CONNECT_TIMEOUT_SECONDS", 10);
         let site_sync_read_timeout_secs = parse_u64_env("SITE_SYNC_READ_TIMEOUT_SECONDS", 120);
         let site_sync_max_retries = parse_u64_env("SITE_SYNC_MAX_RETRIES", 2) as u32;
-        let site_sync_clock_skew_tolerance: f64 = std::env::var("SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1.0);
+        let site_sync_clock_skew_tolerance: f64 =
+            std::env::var("SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1.0);
 
         let ui_enabled = std::env::var("UI_ENABLED")
             .unwrap_or_else(|_| "true".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
         let templates_dir = std::env::var("TEMPLATES_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_templates_dir());
@@ -142,8 +177,10 @@ impl ServerConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_static_dir());
 
+        let host_ip: std::net::IpAddr = host.parse().unwrap();
         Self {
-            bind_addr: SocketAddr::new(host.parse().unwrap(), port),
+            bind_addr: SocketAddr::new(host_ip, port),
+            ui_bind_addr: SocketAddr::new(host_ip, ui_port),
             storage_root: storage_path,
             region,
             iam_config_path,
@@ -156,6 +193,11 @@ impl ServerConfig {
             gc_enabled,
             integrity_enabled,
             metrics_enabled,
+            metrics_history_enabled,
+            metrics_interval_minutes,
+            metrics_retention_hours,
+            metrics_history_interval_minutes,
+            metrics_history_retention_hours,
             lifecycle_enabled,
             website_hosting_enabled,
             replication_connect_timeout_secs,

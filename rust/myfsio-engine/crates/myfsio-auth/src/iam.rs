@@ -69,7 +69,10 @@ impl RawIamUser {
             }
         }
         let display_name = self.display_name.unwrap_or_else(|| {
-            access_keys.first().map(|k| k.access_key.clone()).unwrap_or_else(|| "unknown".to_string())
+            access_keys
+                .first()
+                .map(|k| k.access_key.clone())
+                .unwrap_or_else(|| "unknown".to_string())
         });
         let user_id = self.user_id.unwrap_or_else(|| {
             format!("u-{}", display_name.to_ascii_lowercase().replace(' ', "-"))
@@ -173,7 +176,7 @@ impl IamService {
                 (None, Some(_)) => true,
                 (Some(old), Some(new)) => old != new,
                 (Some(_), None) => true,
-                (None, None) => state.key_secrets.is_empty(),
+                (None, None) => false,
             }
         };
 
@@ -188,7 +191,11 @@ impl IamService {
         let content = match std::fs::read_to_string(&self.config_path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("Failed to read IAM config {}: {}", self.config_path.display(), e);
+                tracing::warn!(
+                    "Failed to read IAM config {}: {}",
+                    self.config_path.display(),
+                    e
+                );
                 return;
             }
         };
@@ -205,7 +212,10 @@ impl IamService {
                         }
                     },
                     Err(e) => {
-                        tracing::error!("Failed to decrypt IAM config: {}. SECRET_KEY may have changed.", e);
+                        tracing::error!(
+                            "Failed to decrypt IAM config: {}. SECRET_KEY may have changed.",
+                            e
+                        );
                         return;
                     }
                 },
@@ -226,7 +236,11 @@ impl IamService {
             }
         };
 
-        let users: Vec<IamUser> = raw_config.users.into_iter().map(|u| u.normalize()).collect();
+        let users: Vec<IamUser> = raw_config
+            .users
+            .into_iter()
+            .map(|u| u.normalize())
+            .collect();
 
         let mut key_secrets = HashMap::new();
         let mut key_index = HashMap::new();
@@ -254,9 +268,11 @@ impl IamService {
         state.file_mtime = file_mtime;
         state.last_check = Instant::now();
 
-        tracing::info!("IAM config reloaded: {} users, {} keys",
+        tracing::info!(
+            "IAM config reloaded: {} users, {} keys",
             users.len(),
-            state.key_secrets.len());
+            state.key_secrets.len()
+        );
     }
 
     pub fn get_secret_key(&self, access_key: &str) -> Option<String> {
@@ -308,9 +324,10 @@ impl IamService {
             }
         }
 
-        let is_admin = user.policies.iter().any(|p| {
-            p.bucket == "*" && p.actions.iter().any(|a| a == "*")
-        });
+        let is_admin = user
+            .policies
+            .iter()
+            .any(|p| p.bucket == "*" && p.actions.iter().any(|a| a == "*"));
 
         Some(Principal::new(
             access_key.to_string(),
@@ -341,10 +358,7 @@ impl IamService {
             return true;
         }
 
-        let normalized_bucket = bucket_name
-            .unwrap_or("*")
-            .trim()
-            .to_ascii_lowercase();
+        let normalized_bucket = bucket_name.unwrap_or("*").trim().to_ascii_lowercase();
         let normalized_action = action.trim().to_ascii_lowercase();
 
         let state = self.state.read();
@@ -383,6 +397,46 @@ impl IamService {
         false
     }
 
+    pub fn export_config(&self, mask_secrets: bool) -> serde_json::Value {
+        self.reload_if_needed();
+        let state = self.state.read();
+        let users: Vec<serde_json::Value> = state
+            .user_records
+            .values()
+            .map(|u| {
+                let access_keys: Vec<serde_json::Value> = u
+                    .access_keys
+                    .iter()
+                    .map(|k| {
+                        let secret = if mask_secrets {
+                            "***".to_string()
+                        } else {
+                            k.secret_key.clone()
+                        };
+                        serde_json::json!({
+                            "access_key": k.access_key,
+                            "secret_key": secret,
+                            "status": k.status,
+                            "created_at": k.created_at,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "user_id": u.user_id,
+                    "display_name": u.display_name,
+                    "enabled": u.enabled,
+                    "expires_at": u.expires_at,
+                    "access_keys": access_keys,
+                    "policies": u.policies,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "version": 2,
+            "users": users,
+        })
+    }
+
     pub async fn list_users(&self) -> Vec<serde_json::Value> {
         self.reload_if_needed();
         let state = self.state.read();
@@ -411,12 +465,12 @@ impl IamService {
         self.reload_if_needed();
         let state = self.state.read();
 
-        let user = state
-            .user_records
-            .get(identifier)
-            .or_else(|| {
-                state.key_index.get(identifier).and_then(|uid| state.user_records.get(uid))
-            })?;
+        let user = state.user_records.get(identifier).or_else(|| {
+            state
+                .key_index
+                .get(identifier)
+                .and_then(|uid| state.user_records.get(uid))
+        })?;
 
         Some(serde_json::json!({
             "user_id": user.user_id,
@@ -449,8 +503,7 @@ impl IamService {
             .users
             .iter_mut()
             .find(|u| {
-                u.user_id == identifier
-                    || u.access_keys.iter().any(|k| k.access_key == identifier)
+                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
             })
             .ok_or_else(|| "User not found".to_string())?;
 
@@ -468,12 +521,12 @@ impl IamService {
     pub fn get_user_policies(&self, identifier: &str) -> Option<Vec<serde_json::Value>> {
         self.reload_if_needed();
         let state = self.state.read();
-        let user = state
-            .user_records
-            .get(identifier)
-            .or_else(|| {
-                state.key_index.get(identifier).and_then(|uid| state.user_records.get(uid))
-            })?;
+        let user = state.user_records.get(identifier).or_else(|| {
+            state
+                .key_index
+                .get(identifier)
+                .and_then(|uid| state.user_records.get(uid))
+        })?;
         Some(
             user.policies
                 .iter()
@@ -496,8 +549,7 @@ impl IamService {
             .users
             .iter_mut()
             .find(|u| {
-                u.user_id == identifier
-                    || u.access_keys.iter().any(|k| k.access_key == identifier)
+                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
             })
             .ok_or_else(|| format!("User '{}' not found", identifier))?;
 
@@ -556,6 +608,178 @@ impl IamService {
 
         self.reload();
         Ok(())
+    }
+
+    fn load_config(&self) -> Result<IamConfig, String> {
+        let content = std::fs::read_to_string(&self.config_path)
+            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
+        let raw_text = if content.starts_with("MYFSIO_IAM_ENC:") {
+            let encrypted_token = &content["MYFSIO_IAM_ENC:".len()..];
+            let key = self.fernet_key.as_ref().ok_or_else(|| {
+                "IAM config is encrypted but no SECRET_KEY configured".to_string()
+            })?;
+            let plaintext = crate::fernet::decrypt(key, encrypted_token.trim())
+                .map_err(|e| format!("Failed to decrypt IAM config: {}", e))?;
+            String::from_utf8(plaintext)
+                .map_err(|e| format!("Decrypted IAM config not UTF-8: {}", e))?
+        } else {
+            content
+        };
+        let raw: RawIamConfig = serde_json::from_str(&raw_text)
+            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
+        Ok(IamConfig {
+            version: 2,
+            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
+        })
+    }
+
+    fn save_config(&self, config: &IamConfig) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(config)
+            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
+        let payload = if let Some(key) = &self.fernet_key {
+            let token = crate::fernet::encrypt(key, json.as_bytes())
+                .map_err(|e| format!("Failed to encrypt IAM config: {}", e))?;
+            format!("MYFSIO_IAM_ENC:{}", token)
+        } else {
+            json
+        };
+        std::fs::write(&self.config_path, payload)
+            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
+        self.reload();
+        Ok(())
+    }
+
+    pub fn create_user(
+        &self,
+        display_name: &str,
+        policies: Option<Vec<IamPolicy>>,
+        access_key: Option<String>,
+        secret_key: Option<String>,
+        expires_at: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        let mut config = self.load_config()?;
+
+        let new_ak = access_key
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
+        let new_sk = secret_key
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
+
+        if config
+            .users
+            .iter()
+            .any(|u| u.access_keys.iter().any(|k| k.access_key == new_ak))
+        {
+            return Err(format!("Access key '{}' already exists", new_ak));
+        }
+
+        let user_id = format!("u-{}", uuid::Uuid::new_v4().simple());
+        let resolved_policies = policies.unwrap_or_else(|| {
+            vec![IamPolicy {
+                bucket: "*".to_string(),
+                actions: vec!["*".to_string()],
+                prefix: "*".to_string(),
+            }]
+        });
+
+        let user = IamUser {
+            user_id: user_id.clone(),
+            display_name: display_name.to_string(),
+            enabled: true,
+            expires_at,
+            access_keys: vec![AccessKey {
+                access_key: new_ak.clone(),
+                secret_key: new_sk.clone(),
+                status: "active".to_string(),
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
+            }],
+            policies: resolved_policies,
+        };
+        config.users.push(user);
+
+        self.save_config(&config)?;
+        Ok(serde_json::json!({
+            "user_id": user_id,
+            "access_key": new_ak,
+            "secret_key": new_sk,
+            "display_name": display_name,
+        }))
+    }
+
+    pub fn delete_user(&self, identifier: &str) -> Result<(), String> {
+        let mut config = self.load_config()?;
+        let before = config.users.len();
+        config.users.retain(|u| {
+            u.user_id != identifier && !u.access_keys.iter().any(|k| k.access_key == identifier)
+        });
+        if config.users.len() == before {
+            return Err(format!("User '{}' not found", identifier));
+        }
+        self.save_config(&config)
+    }
+
+    pub fn update_user(
+        &self,
+        identifier: &str,
+        display_name: Option<String>,
+        expires_at: Option<Option<String>>,
+    ) -> Result<(), String> {
+        let mut config = self.load_config()?;
+        let user = config
+            .users
+            .iter_mut()
+            .find(|u| {
+                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
+            })
+            .ok_or_else(|| format!("User '{}' not found", identifier))?;
+        if let Some(name) = display_name {
+            user.display_name = name;
+        }
+        if let Some(exp) = expires_at {
+            user.expires_at = exp;
+        }
+        self.save_config(&config)
+    }
+
+    pub fn update_user_policies(
+        &self,
+        identifier: &str,
+        policies: Vec<IamPolicy>,
+    ) -> Result<(), String> {
+        let mut config = self.load_config()?;
+        let user = config
+            .users
+            .iter_mut()
+            .find(|u| {
+                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
+            })
+            .ok_or_else(|| format!("User '{}' not found", identifier))?;
+        user.policies = policies;
+        self.save_config(&config)
+    }
+
+    pub fn rotate_secret(&self, identifier: &str) -> Result<serde_json::Value, String> {
+        let mut config = self.load_config()?;
+        let user = config
+            .users
+            .iter_mut()
+            .find(|u| {
+                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
+            })
+            .ok_or_else(|| format!("User '{}' not found", identifier))?;
+        let key = user
+            .access_keys
+            .first_mut()
+            .ok_or_else(|| "User has no access keys".to_string())?;
+        let new_sk = format!("SK{}", uuid::Uuid::new_v4().simple());
+        key.secret_key = new_sk.clone();
+        let ak = key.access_key.clone();
+        self.save_config(&config)?;
+        Ok(serde_json::json!({
+            "access_key": ak,
+            "secret_key": new_sk,
+        }))
     }
 }
 
@@ -622,10 +846,7 @@ mod tests {
 
         let svc = IamService::new(tmp.path().to_path_buf());
         let secret = svc.get_secret_key("AKIAIOSFODNN7EXAMPLE");
-        assert_eq!(
-            secret.unwrap(),
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-        );
+        assert_eq!(secret.unwrap(), "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
     }
 
     #[test]
@@ -664,7 +885,9 @@ mod tests {
         tmp.flush().unwrap();
 
         let svc = IamService::new(tmp.path().to_path_buf());
-        assert!(svc.authenticate("AKIAIOSFODNN7EXAMPLE", "wrongsecret").is_none());
+        assert!(svc
+            .authenticate("AKIAIOSFODNN7EXAMPLE", "wrongsecret")
+            .is_none());
     }
 
     #[test]
@@ -784,29 +1007,9 @@ mod tests {
         let svc = IamService::new(tmp.path().to_path_buf());
         let principal = svc.get_principal("READER_KEY").unwrap();
 
-        assert!(svc.authorize(
-            &principal,
-            Some("docs"),
-            "read",
-            Some("reports/2026.csv"),
-        ));
-        assert!(!svc.authorize(
-            &principal,
-            Some("docs"),
-            "write",
-            Some("reports/2026.csv"),
-        ));
-        assert!(!svc.authorize(
-            &principal,
-            Some("docs"),
-            "read",
-            Some("private/2026.csv"),
-        ));
-        assert!(!svc.authorize(
-            &principal,
-            Some("other"),
-            "read",
-            Some("reports/2026.csv"),
-        ));
+        assert!(svc.authorize(&principal, Some("docs"), "read", Some("reports/2026.csv"),));
+        assert!(!svc.authorize(&principal, Some("docs"), "write", Some("reports/2026.csv"),));
+        assert!(!svc.authorize(&principal, Some("docs"), "read", Some("private/2026.csv"),));
+        assert!(!svc.authorize(&principal, Some("other"), "read", Some("reports/2026.csv"),));
     }
 }

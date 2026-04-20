@@ -1,9 +1,11 @@
+pub mod access_logging;
 pub mod gc;
-pub mod lifecycle;
 pub mod integrity;
+pub mod lifecycle;
 pub mod metrics;
 pub mod replication;
 pub mod s3_client;
 pub mod site_registry;
 pub mod site_sync;
+pub mod system_metrics;
 pub mod website_domains;

@@ -102,7 +102,12 @@ impl SiteRegistry {
     }
 
     pub fn get_peer(&self, site_id: &str) -> Option<PeerSite> {
-        self.data.read().peers.iter().find(|p| p.site_id == site_id).cloned()
+        self.data
+            .read()
+            .peers
+            .iter()
+            .find(|p| p.site_id == site_id)
+            .cloned()
     }
 
     pub fn add_peer(&self, peer: PeerSite) {

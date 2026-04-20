@@ -4,6 +4,7 @@ mod config;
 pub mod kms;
 mod select;
 pub mod ui;
+pub mod ui_api;
 pub mod ui_pages;
 
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use serde_json::json;
 
 use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_common::types::PartInfo;
@@ -25,7 +27,8 @@ use tokio_util::io::ReaderStream;
 use crate::state::AppState;
 
 fn s3_error_response(err: S3Error) -> Response {
-    let status = StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status =
+        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let resource = if err.resource.is_empty() {
         "/".to_string()
     } else {
@@ -35,12 +38,7 @@ fn s3_error_response(err: S3Error) -> Response {
         .with_resource(resource)
         .with_request_id(uuid::Uuid::new_v4().simple().to_string())
         .to_xml();
-    (
-        status,
-        [("content-type", "application/xml")],
-        body,
-    )
-        .into_response()
+    (status, [("content-type", "application/xml")], body).into_response()
 }
 
 fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
@@ -51,15 +49,23 @@ pub async fn list_buckets(State(state): State<AppState>) -> Response {
     match state.storage.list_buckets().await {
         Ok(buckets) => {
             let xml = myfsio_xml::response::list_buckets_xml("myfsio", "myfsio", &buckets);
-            (
-                StatusCode::OK,
-                [("content-type", "application/xml")],
-                xml,
-            )
-                .into_response()
+            (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+pub async fn health_check() -> Response {
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string(),
+    )
+        .into_response()
 }
 
 pub async fn create_bucket(
@@ -109,14 +115,12 @@ pub async fn create_bucket(
     }
 
     match state.storage.create_bucket(&bucket).await {
-        Ok(()) => {
-            (
-                StatusCode::OK,
-                [("location", format!("/{}", bucket).as_str())],
-                "",
-            )
-                .into_response()
-        }
+        Ok(()) => (
+            StatusCode::OK,
+            [("location", format!("/{}", bucket).as_str())],
+            "",
+        )
+            .into_response(),
         Err(e) => storage_err_response(e),
     }
 }
@@ -162,9 +166,7 @@ pub async fn get_bucket(
     Query(query): Query<BucketQuery>,
 ) -> Response {
     if !matches!(state.storage.bucket_exists(&bucket).await, Ok(true)) {
-        return storage_err_response(
-            myfsio_storage::error::StorageError::BucketNotFound(bucket),
-        );
+        return storage_err_response(myfsio_storage::error::StorageError::BucketNotFound(bucket));
     }
 
     if query.quota.is_some() {
@@ -258,8 +260,16 @@ pub async fn get_bucket(
         let params = myfsio_common::types::ListParams {
             max_keys,
             continuation_token: effective_start.clone(),
-            prefix: if prefix.is_empty() { None } else { Some(prefix.clone()) },
-            start_after: if is_v2 { query.start_after.clone() } else { None },
+            prefix: if prefix.is_empty() {
+                None
+            } else {
+                Some(prefix.clone())
+            },
+            start_after: if is_v2 {
+                query.start_after.clone()
+            } else {
+                None
+            },
         };
         match state.storage.list_objects(&bucket, &params).await {
             Ok(result) => {
@@ -411,19 +421,16 @@ pub async fn delete_bucket(
     }
 }
 
-pub async fn head_bucket(
-    State(state): State<AppState>,
-    Path(bucket): Path<String>,
-) -> Response {
+pub async fn head_bucket(State(state): State<AppState>, Path(bucket): Path<String>) -> Response {
     match state.storage.bucket_exists(&bucket).await {
         Ok(true) => {
             let mut headers = HeaderMap::new();
             headers.insert("x-amz-bucket-region", state.config.region.parse().unwrap());
             (StatusCode::OK, headers).into_response()
         }
-        Ok(false) => storage_err_response(
-            myfsio_storage::error::StorageError::BucketNotFound(bucket),
-        ),
+        Ok(false) => {
+            storage_err_response(myfsio_storage::error::StorageError::BucketNotFound(bucket))
+        }
         Err(e) => storage_err_response(e),
     }
 }
@@ -458,22 +465,34 @@ pub struct ObjectQuery {
 
 fn apply_response_overrides(headers: &mut HeaderMap, query: &ObjectQuery) {
     if let Some(ref v) = query.response_content_type {
-        if let Ok(val) = v.parse() { headers.insert("content-type", val); }
+        if let Ok(val) = v.parse() {
+            headers.insert("content-type", val);
+        }
     }
     if let Some(ref v) = query.response_content_disposition {
-        if let Ok(val) = v.parse() { headers.insert("content-disposition", val); }
+        if let Ok(val) = v.parse() {
+            headers.insert("content-disposition", val);
+        }
     }
     if let Some(ref v) = query.response_content_language {
-        if let Ok(val) = v.parse() { headers.insert("content-language", val); }
+        if let Ok(val) = v.parse() {
+            headers.insert("content-language", val);
+        }
     }
     if let Some(ref v) = query.response_content_encoding {
-        if let Ok(val) = v.parse() { headers.insert("content-encoding", val); }
+        if let Ok(val) = v.parse() {
+            headers.insert("content-encoding", val);
+        }
     }
     if let Some(ref v) = query.response_cache_control {
-        if let Ok(val) = v.parse() { headers.insert("cache-control", val); }
+        if let Ok(val) = v.parse() {
+            headers.insert("cache-control", val);
+        }
     }
     if let Some(ref v) = query.response_expires {
-        if let Ok(val) = v.parse() { headers.insert("expires", val); }
+        if let Ok(val) = v.parse() {
+            headers.insert("expires", val);
+        }
     }
 }
 
@@ -490,12 +509,18 @@ fn guessed_content_type(key: &str, explicit: Option<&str>) -> String {
 }
 
 fn is_aws_chunked(headers: &HeaderMap) -> bool {
-    if let Some(enc) = headers.get("content-encoding").and_then(|v| v.to_str().ok()) {
+    if let Some(enc) = headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+    {
         if enc.to_ascii_lowercase().contains("aws-chunked") {
             return true;
         }
     }
-    if let Some(sha) = headers.get("x-amz-content-sha256").and_then(|v| v.to_str().ok()) {
+    if let Some(sha) = headers
+        .get("x-amz-content-sha256")
+        .and_then(|v| v.to_str().ok())
+    {
         let lower = sha.to_ascii_lowercase();
         if lower.starts_with("streaming-") {
             return true;
@@ -535,7 +560,10 @@ pub async fn put_object(
 
     if let Some(ref upload_id) = query.upload_id {
         if let Some(part_number) = query.part_number {
-            if let Some(copy_source) = headers.get("x-amz-copy-source").and_then(|v| v.to_str().ok()) {
+            if let Some(copy_source) = headers
+                .get("x-amz-copy-source")
+                .and_then(|v| v.to_str().ok())
+            {
                 let range = headers
                     .get("x-amz-copy-source-range")
                     .and_then(|v| v.to_str().ok());
@@ -562,15 +590,16 @@ pub async fn put_object(
         }
     }
 
-    if let Some(copy_source) = headers.get("x-amz-copy-source").and_then(|v| v.to_str().ok()) {
+    if let Some(copy_source) = headers
+        .get("x-amz-copy-source")
+        .and_then(|v| v.to_str().ok())
+    {
         return copy_object_handler(&state, copy_source, &bucket, &key, &headers).await;
     }
 
     let content_type = guessed_content_type(
         &key,
-        headers
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
     );
 
     let mut metadata = HashMap::new();
@@ -589,14 +618,18 @@ pub async fn put_object(
         Box::pin(chunked::decode_body(body))
     } else {
         let stream = tokio_util::io::StreamReader::new(
-            http_body_util::BodyStream::new(body).map_ok(|frame| {
-                frame.into_data().unwrap_or_default()
-            }).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+            http_body_util::BodyStream::new(body)
+                .map_ok(|frame| frame.into_data().unwrap_or_default())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
         );
         Box::pin(stream)
     };
 
-    match state.storage.put_object(&bucket, &key, boxed, Some(metadata)).await {
+    match state
+        .storage
+        .put_object(&bucket, &key, boxed, Some(metadata))
+        .await
+    {
         Ok(meta) => {
             if let Some(enc_ctx) = resolve_encryption_context(&state, &bucket, &headers).await {
                 if let Some(ref enc_svc) = state.encryption {
@@ -612,26 +645,39 @@ pub async fn put_object(
                         Ok(enc_meta) => {
                             if let Err(e) = tokio::fs::rename(&enc_tmp, &obj_path).await {
                                 let _ = tokio::fs::remove_file(&enc_tmp).await;
-                                return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                                return storage_err_response(
+                                    myfsio_storage::error::StorageError::Io(e),
+                                );
                             }
-                            let enc_size = tokio::fs::metadata(&obj_path).await.map(|m| m.len()).unwrap_or(0);
+                            let enc_size = tokio::fs::metadata(&obj_path)
+                                .await
+                                .map(|m| m.len())
+                                .unwrap_or(0);
 
                             let mut enc_metadata = enc_meta.to_metadata_map();
-                            let all_meta = match state.storage.get_object_metadata(&bucket, &key).await {
-                                Ok(m) => m,
-                                Err(_) => HashMap::new(),
-                            };
+                            let all_meta =
+                                match state.storage.get_object_metadata(&bucket, &key).await {
+                                    Ok(m) => m,
+                                    Err(_) => HashMap::new(),
+                                };
                             for (k, v) in &all_meta {
                                 enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                             enc_metadata.insert("__size__".to_string(), enc_size.to_string());
-                            let _ = state.storage.put_object_metadata(&bucket, &key, &enc_metadata).await;
+                            let _ = state
+                                .storage
+                                .put_object_metadata(&bucket, &key, &enc_metadata)
+                                .await;
 
                             let mut resp_headers = HeaderMap::new();
                             if let Some(ref etag) = meta.etag {
-                                resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+                                resp_headers
+                                    .insert("etag", format!("\"{}\"", etag).parse().unwrap());
                             }
-                            resp_headers.insert("x-amz-server-side-encryption", enc_ctx.algorithm.as_str().parse().unwrap());
+                            resp_headers.insert(
+                                "x-amz-server-side-encryption",
+                                enc_ctx.algorithm.as_str().parse().unwrap(),
+                            );
                             return (StatusCode::OK, resp_headers).into_response();
                         }
                         Err(e) => {
@@ -697,7 +743,11 @@ pub async fn get_object(
         return range_get_handler(&state, &bucket, &key, range_str, &query).await;
     }
 
-    let all_meta = state.storage.get_object_metadata(&bucket, &key).await.unwrap_or_default();
+    let all_meta = state
+        .storage
+        .get_object_metadata(&bucket, &key)
+        .await
+        .unwrap_or_default();
     let enc_meta = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&all_meta);
 
     if let (Some(ref enc_info), Some(ref enc_svc)) = (&enc_meta, &state.encryption) {
@@ -712,7 +762,10 @@ pub async fn get_object(
         let customer_key = extract_sse_c_key(&headers);
         let ck_ref = customer_key.as_deref();
 
-        if let Err(e) = enc_svc.decrypt_object(&obj_path, &dec_tmp, enc_info, ck_ref).await {
+        if let Err(e) = enc_svc
+            .decrypt_object(&obj_path, &dec_tmp, enc_info, ck_ref)
+            .await
+        {
             let _ = tokio::fs::remove_file(&dec_tmp).await;
             return s3_error_response(S3Error::new(
                 myfsio_common::error::S3ErrorCode::InternalError,
@@ -747,10 +800,17 @@ pub async fn get_object(
         insert_content_type(&mut resp_headers, &key, meta.content_type.as_deref());
         resp_headers.insert(
             "last-modified",
-            meta.last_modified.format("%a, %d %b %Y %H:%M:%S GMT").to_string().parse().unwrap(),
+            meta.last_modified
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string()
+                .parse()
+                .unwrap(),
         );
         resp_headers.insert("accept-ranges", "bytes".parse().unwrap());
-        resp_headers.insert("x-amz-server-side-encryption", enc_info.algorithm.parse().unwrap());
+        resp_headers.insert(
+            "x-amz-server-side-encryption",
+            enc_info.algorithm.parse().unwrap(),
+        );
 
         for (k, v) in &meta.metadata {
             if let Ok(header_val) = v.parse() {
@@ -889,11 +949,7 @@ pub async fn head_object(
     }
 }
 
-async fn initiate_multipart_handler(
-    state: &AppState,
-    bucket: &str,
-    key: &str,
-) -> Response {
+async fn initiate_multipart_handler(state: &AppState, bucket: &str, key: &str) -> Response {
     match state.storage.initiate_multipart(bucket, key, None).await {
         Ok(upload_id) => {
             let xml = myfsio_xml::response::initiate_multipart_upload_xml(bucket, key, &upload_id);
@@ -915,14 +971,18 @@ async fn upload_part_handler_with_chunking(
         Box::pin(chunked::decode_body(body))
     } else {
         let stream = tokio_util::io::StreamReader::new(
-            http_body_util::BodyStream::new(body).map_ok(|frame| {
-                frame.into_data().unwrap_or_default()
-            }).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+            http_body_util::BodyStream::new(body)
+                .map_ok(|frame| frame.into_data().unwrap_or_default())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
         );
         Box::pin(stream)
     };
 
-    match state.storage.upload_part(bucket, upload_id, part_number, boxed).await {
+    match state
+        .storage
+        .upload_part(bucket, upload_id, part_number, boxed)
+        .await
+    {
         Ok(etag) => {
             let mut headers = HeaderMap::new();
             headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
@@ -1052,7 +1112,11 @@ async fn complete_multipart_handler(
         })
         .collect();
 
-    match state.storage.complete_multipart(bucket, upload_id, &parts).await {
+    match state
+        .storage
+        .complete_multipart(bucket, upload_id, &parts)
+        .await
+    {
         Ok(meta) => {
             let etag = meta.etag.as_deref().unwrap_or("");
             let xml = myfsio_xml::response::complete_multipart_upload_xml(
@@ -1067,21 +1131,14 @@ async fn complete_multipart_handler(
     }
 }
 
-async fn abort_multipart_handler(
-    state: &AppState,
-    bucket: &str,
-    upload_id: &str,
-) -> Response {
+async fn abort_multipart_handler(state: &AppState, bucket: &str, upload_id: &str) -> Response {
     match state.storage.abort_multipart(bucket, upload_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => storage_err_response(e),
     }
 }
 
-async fn list_multipart_uploads_handler(
-    state: &AppState,
-    bucket: &str,
-) -> Response {
+async fn list_multipart_uploads_handler(state: &AppState, bucket: &str) -> Response {
     match state.storage.list_multipart_uploads(bucket).await {
         Ok(uploads) => {
             let xml = myfsio_xml::response::list_multipart_uploads_xml(bucket, &uploads);
@@ -1128,9 +1185,7 @@ async fn object_attributes_handler(
         .collect();
     let all = attrs.is_empty();
 
-    let mut xml = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-    );
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     xml.push_str("<GetObjectAttributesResponse xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
 
     if all || attrs.contains("etag") {
@@ -1139,10 +1194,7 @@ async fn object_attributes_handler(
         }
     }
     if all || attrs.contains("storageclass") {
-        let sc = meta
-            .storage_class
-            .as_deref()
-            .unwrap_or("STANDARD");
+        let sc = meta.storage_class.as_deref().unwrap_or("STANDARD");
         xml.push_str(&format!("<StorageClass>{}</StorageClass>", xml_escape(sc)));
     }
     if all || attrs.contains("objectsize") {
@@ -1185,7 +1237,11 @@ async fn copy_object_handler(
         return resp;
     }
 
-    match state.storage.copy_object(src_bucket, src_key, dst_bucket, dst_key).await {
+    match state
+        .storage
+        .copy_object(src_bucket, src_key, dst_bucket, dst_key)
+        .await
+    {
         Ok(meta) => {
             let etag = meta.etag.as_deref().unwrap_or("");
             let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
@@ -1196,11 +1252,7 @@ async fn copy_object_handler(
     }
 }
 
-async fn delete_objects_handler(
-    state: &AppState,
-    bucket: &str,
-    body: Body,
-) -> Response {
+async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
@@ -1289,7 +1341,9 @@ async fn range_get_handler(
     headers.insert("content-length", length.to_string().parse().unwrap());
     headers.insert(
         "content-range",
-        format!("bytes {}-{}/{}", start, end, total_size).parse().unwrap(),
+        format!("bytes {}-{}/{}", start, end, total_size)
+            .parse()
+            .unwrap(),
     );
     if let Some(ref etag) = meta.etag {
         headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
@@ -1471,7 +1525,10 @@ async fn resolve_encryption_context(
     bucket: &str,
     headers: &HeaderMap,
 ) -> Option<myfsio_crypto::encryption::EncryptionContext> {
-    if let Some(alg) = headers.get("x-amz-server-side-encryption").and_then(|v| v.to_str().ok()) {
+    if let Some(alg) = headers
+        .get("x-amz-server-side-encryption")
+        .and_then(|v| v.to_str().ok())
+    {
         let algorithm = match alg {
             "AES256" => myfsio_crypto::encryption::SseAlgorithm::Aes256,
             "aws:kms" => myfsio_crypto::encryption::SseAlgorithm::AwsKms,
@@ -1606,11 +1663,21 @@ async fn post_object_form_handler(
 
     let key_template = match fields.get("key").cloned() {
         Some(k) => k,
-        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing key field")),
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing key field",
+            ))
+        }
     };
     let policy_b64 = match fields.get("policy").cloned() {
         Some(v) => v,
-        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing policy field")),
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing policy field",
+            ))
+        }
     };
     let signature = match fields
         .iter()
@@ -1618,7 +1685,12 @@ async fn post_object_form_handler(
         .map(|(_, v)| v.clone())
     {
         Some(v) => v,
-        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing signature")),
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing signature",
+            ))
+        }
     };
     let credential = match fields
         .iter()
@@ -1626,7 +1698,12 @@ async fn post_object_form_handler(
         .map(|(_, v)| v.clone())
     {
         Some(v) => v,
-        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing credential")),
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing credential",
+            ))
+        }
     };
     let algorithm = match fields
         .iter()
@@ -1634,7 +1711,12 @@ async fn post_object_form_handler(
         .map(|(_, v)| v.clone())
     {
         Some(v) => v,
-        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing algorithm")),
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing algorithm",
+            ))
+        }
     };
     if algorithm != "AWS4-HMAC-SHA256" {
         return s3_error_response(S3Error::new(
@@ -1667,7 +1749,10 @@ async fn post_object_form_handler(
         match chrono::DateTime::parse_from_rfc3339(&normalized) {
             Ok(exp_time) => {
                 if Utc::now() > exp_time.with_timezone(&Utc) {
-                    return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, "Policy expired"));
+                    return s3_error_response(S3Error::new(
+                        S3ErrorCode::AccessDenied,
+                        "Policy expired",
+                    ));
                 }
             }
             Err(_) => {
@@ -1688,14 +1773,23 @@ async fn post_object_form_handler(
     };
 
     if let Some(conditions) = policy_value.get("conditions").and_then(|v| v.as_array()) {
-        if let Err(msg) = validate_post_policy_conditions(bucket, &object_key, conditions, &fields, content_length) {
+        if let Err(msg) = validate_post_policy_conditions(
+            bucket,
+            &object_key,
+            conditions,
+            &fields,
+            content_length,
+        ) {
             return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, msg));
         }
     }
 
     let credential_parts: Vec<&str> = credential.split('/').collect();
     if credential_parts.len() != 5 {
-        return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Invalid credential format"));
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Invalid credential format",
+        ));
     }
     let access_key = credential_parts[0];
     let date_stamp = credential_parts[1];
@@ -1704,9 +1798,15 @@ async fn post_object_form_handler(
 
     let secret_key = match state.iam.get_secret_key(access_key) {
         Some(s) => s,
-        None => return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, "Invalid access key")),
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Invalid access key",
+            ))
+        }
     };
-    let signing_key = myfsio_auth::sigv4::derive_signing_key(&secret_key, date_stamp, region, service);
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(&secret_key, date_stamp, region, service);
     let expected = myfsio_auth::sigv4::compute_post_policy_signature(&signing_key, &policy_b64);
     if !myfsio_auth::sigv4::constant_time_compare(&expected, &signature) {
         return s3_error_response(S3Error::new(
@@ -1717,7 +1817,12 @@ async fn post_object_form_handler(
 
     let file_data = match file_bytes {
         Some(b) => b,
-        None => return s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, "Missing file field")),
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Missing file field",
+            ))
+        }
     };
 
     let mut metadata = HashMap::new();
@@ -1741,7 +1846,11 @@ async fn post_object_form_handler(
     let cursor = std::io::Cursor::new(file_data.to_vec());
     let boxed: myfsio_storage::traits::AsyncReadStream = Box::pin(cursor);
 
-    let meta = match state.storage.put_object(bucket, &object_key, boxed, Some(metadata)).await {
+    let meta = match state
+        .storage
+        .put_object(bucket, &object_key, boxed, Some(metadata))
+        .await
+    {
         Ok(m) => m,
         Err(e) => return storage_err_response(e),
     };

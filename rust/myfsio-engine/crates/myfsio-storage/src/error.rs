@@ -40,18 +40,20 @@ impl From<StorageError> for S3Error {
                     .with_resource(format!("/{}", name))
             }
             StorageError::BucketNotEmpty(name) => {
-                S3Error::from_code(S3ErrorCode::BucketNotEmpty)
-                    .with_resource(format!("/{}", name))
+                S3Error::from_code(S3ErrorCode::BucketNotEmpty).with_resource(format!("/{}", name))
             }
             StorageError::ObjectNotFound { bucket, key } => {
                 S3Error::from_code(S3ErrorCode::NoSuchKey)
                     .with_resource(format!("/{}/{}", bucket, key))
             }
-            StorageError::InvalidBucketName(msg) => S3Error::new(S3ErrorCode::InvalidBucketName, msg),
-            StorageError::InvalidObjectKey(msg) => S3Error::new(S3ErrorCode::InvalidKey, msg),
-            StorageError::UploadNotFound(id) => {
-                S3Error::new(S3ErrorCode::NoSuchUpload, format!("Upload {} not found", id))
+            StorageError::InvalidBucketName(msg) => {
+                S3Error::new(S3ErrorCode::InvalidBucketName, msg)
             }
+            StorageError::InvalidObjectKey(msg) => S3Error::new(S3ErrorCode::InvalidKey, msg),
+            StorageError::UploadNotFound(id) => S3Error::new(
+                S3ErrorCode::NoSuchUpload,
+                format!("Upload {} not found", id),
+            ),
             StorageError::QuotaExceeded(msg) => S3Error::new(S3ErrorCode::QuotaExceeded, msg),
             StorageError::InvalidRange => S3Error::from_code(S3ErrorCode::InvalidRange),
             StorageError::Io(e) => S3Error::new(S3ErrorCode::InternalError, e.to_string()),

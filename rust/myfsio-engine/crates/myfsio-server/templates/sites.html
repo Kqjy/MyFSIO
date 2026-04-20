@@ -43,18 +43,18 @@
             </div>
             <div class="card-body px-4 pb-4">
                 <form method="POST" action="{{ url_for(endpoint="ui.update_local_site") }}" id="localSiteForm">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
                     <div class="mb-3">
                         <label for="site_id" class="form-label fw-medium">Site ID</label>
                         <input type="text" class="form-control" id="site_id" name="site_id" required
-                            value="{% if local_site %}{{ local_site.site_id }}{% else %}{{ config_site_id or "" }}{% endif %}"
+                            value="{% if local_site %}{{ local_site.site_id }}{% else %}{{ config_site_id | default(value="") }}{% endif %}"
                             placeholder="us-west-1">
                         <div class="form-text">Unique identifier for this site</div>
                     </div>
                     <div class="mb-3">
                         <label for="endpoint" class="form-label fw-medium">Endpoint URL</label>
                         <input type="url" class="form-control" id="endpoint" name="endpoint"
-                            value="{% if local_site %}{{ local_site.endpoint }}{% else %}{{ config_site_endpoint or "" }}{% endif %}"
+                            value="{% if local_site %}{{ local_site.endpoint }}{% else %}{{ config_site_endpoint | default(value="") }}{% endif %}"
                             placeholder="https://s3.us-west-1.example.com">
                         <div class="form-text">Public URL for this site</div>
                     </div>
@@ -109,7 +109,7 @@
             <div class="collapse" id="addPeerCollapse">
                 <div class="card-body px-4 pb-4">
                     <form method="POST" action="{{ url_for(endpoint="ui.add_peer_site") }}" id="addPeerForm">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
                         <div class="mb-3">
                             <label for="peer_site_id" class="form-label fw-medium">Site ID</label>
                             <input type="text" class="form-control" id="peer_site_id" name="site_id" required placeholder="us-east-1">
@@ -198,7 +198,7 @@
                             <tr data-site-id="{{ peer.site_id }}">
                                 <td class="text-center">
                                     <span class="peer-health-status" data-site-id="{{ peer.site_id }}"
-                                        data-last-checked="{{ peer.last_health_check or "" }}"
+                                        data-last-checked="{{ peer.last_health_check | default(value="") }}"
                                         title="{% if peer.is_healthy == true %}Healthy{% elif peer.is_healthy == false %}Unhealthy{% else %}Not checked{% endif %}{% if peer.last_health_check %} (checked {{ peer.last_health_check }}){% endif %}"
                                         style="cursor: help;">
                                         {% if peer.is_healthy == true %}
@@ -277,7 +277,7 @@
                                             data-region="{{ peer.region }}"
                                             data-priority="{{ peer.priority }}"
                                             data-display-name="{{ peer.display_name }}"
-                                            data-connection-id="{{ peer.connection_id or "" }}"
+                                            data-connection-id="{{ peer.connection_id | default(value="") }}"
                                             title="Edit peer">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
                                                 <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
@@ -381,7 +381,7 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <form method="POST" id="editPeerForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
                 <div class="modal-body">
                     <div class="mb-3">
                         <label class="form-label fw-medium">Site ID</label>
@@ -454,7 +454,7 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
                 <form method="POST" id="deletePeerForm">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
                     <button type="submit" class="btn btn-danger">
                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                             <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
@@ -775,7 +775,7 @@
                         var blockingErrors = ['NO_CONNECTION', 'CONNECTION_NOT_FOUND', 'REMOTE_UNREACHABLE', 'ENDPOINT_NOT_ALLOWED'];
                         var hasBlockingError = data.issues && data.issues.some(function(i) { return blockingErrors.indexOf(i.code) !== -1; });
                         if (!hasBlockingError) {
-                            wizardLink.href = '/ui/sites/peers/' + encodeURIComponent(siteId) + '/replication-wizard';
+                            wizardLink.href = '/ui/replication/new?site_id=' + encodeURIComponent(siteId);
                             wizardLink.classList.remove('d-none');
                         }
                     }

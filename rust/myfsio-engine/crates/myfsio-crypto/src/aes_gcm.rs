@@ -193,7 +193,10 @@ mod tests {
         let decrypted = dir.path().join("decrypted.bin");
 
         let data = b"Hello, this is a test of AES-256-GCM chunked encryption!";
-        std::fs::File::create(&input).unwrap().write_all(data).unwrap();
+        std::fs::File::create(&input)
+            .unwrap()
+            .write_all(data)
+            .unwrap();
 
         let key = [0x42u8; 32];
         let nonce = [0x01u8; 12];
@@ -212,9 +215,18 @@ mod tests {
     fn test_invalid_key_size() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("input.bin");
-        std::fs::File::create(&input).unwrap().write_all(b"test").unwrap();
+        std::fs::File::create(&input)
+            .unwrap()
+            .write_all(b"test")
+            .unwrap();
 
-        let result = encrypt_stream_chunked(&input, &dir.path().join("out"), &[0u8; 16], &[0u8; 12], None);
+        let result = encrypt_stream_chunked(
+            &input,
+            &dir.path().join("out"),
+            &[0u8; 16],
+            &[0u8; 12],
+            None,
+        );
         assert!(matches!(result, Err(CryptoError::InvalidKeySize(16))));
     }
 
@@ -225,7 +237,10 @@ mod tests {
         let encrypted = dir.path().join("encrypted.bin");
         let decrypted = dir.path().join("decrypted.bin");
 
-        std::fs::File::create(&input).unwrap().write_all(b"secret data").unwrap();
+        std::fs::File::create(&input)
+            .unwrap()
+            .write_all(b"secret data")
+            .unwrap();
 
         let key = [0x42u8; 32];
         let nonce = [0x01u8; 12];

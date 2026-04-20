@@ -2,16 +2,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::ServerConfig;
-use crate::session::SessionStore;
-use crate::templates::TemplateEngine;
+use crate::services::access_logging::AccessLoggingService;
 use crate::services::gc::GcService;
 use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
 use crate::services::replication::ReplicationManager;
 use crate::services::site_registry::SiteRegistry;
 use crate::services::site_sync::SiteSyncWorker;
+use crate::services::system_metrics::SystemMetricsService;
 use crate::services::website_domains::WebsiteDomainStore;
+use crate::session::SessionStore;
 use crate::stores::connections::ConnectionStore;
+use crate::templates::TemplateEngine;
 use myfsio_auth::iam::IamService;
 use myfsio_crypto::encryption::EncryptionService;
 use myfsio_crypto::kms::KmsService;
@@ -27,6 +29,7 @@ pub struct AppState {
     pub gc: Option<Arc<GcService>>,
     pub integrity: Option<Arc<IntegrityService>>,
     pub metrics: Option<Arc<MetricsService>>,
+    pub system_metrics: Option<Arc<SystemMetricsService>>,
     pub site_registry: Option<Arc<SiteRegistry>>,
     pub website_domains: Option<Arc<WebsiteDomainStore>>,
     pub connections: Arc<ConnectionStore>,
@@ -34,6 +37,7 @@ pub struct AppState {
     pub site_sync: Option<Arc<SiteSyncWorker>>,
     pub templates: Option<Arc<TemplateEngine>>,
     pub sessions: Arc<SessionStore>,
+    pub access_logging: Arc<AccessLoggingService>,
 }
 
 impl AppState {
@@ -66,7 +70,23 @@ impl AppState {
         let metrics = if config.metrics_enabled {
             Some(Arc::new(MetricsService::new(
                 &config.storage_root,
-                crate::services::metrics::MetricsConfig::default(),
+                crate::services::metrics::MetricsConfig {
+                    interval_minutes: config.metrics_interval_minutes,
+                    retention_hours: config.metrics_retention_hours,
+                },
+            )))
+        } else {
+            None
+        };
+
+        let system_metrics = if config.metrics_history_enabled {
+            Some(Arc::new(SystemMetricsService::new(
+                &config.storage_root,
+                storage.clone(),
+                crate::services::system_metrics::SystemMetricsConfig {
+                    interval_minutes: config.metrics_history_interval_minutes,
+                    retention_hours: config.metrics_history_retention_hours,
+                },
             )))
         } else {
             None
@@ -111,6 +131,7 @@ impl AppState {
         };
 
         let templates = init_templates(&config.templates_dir);
+        let access_logging = Arc::new(AccessLoggingService::new(&config.storage_root));
         Self {
             config,
             storage,
@@ -120,6 +141,7 @@ impl AppState {
             gc,
             integrity,
             metrics,
+            system_metrics,
             site_registry,
             website_domains,
             connections,
@@ -127,6 +149,7 @@ impl AppState {
             site_sync,
             templates,
             sessions: Arc::new(SessionStore::new(Duration::from_secs(60 * 60 * 12))),
+            access_logging,
         }
     }
 
@@ -149,9 +172,7 @@ impl AppState {
 
         let encryption = if config.encryption_enabled {
             match myfsio_crypto::kms::load_or_create_master_key(&keys_dir).await {
-                Ok(master_key) => {
-                    Some(Arc::new(EncryptionService::new(master_key, kms.clone())))
-                }
+                Ok(master_key) => Some(Arc::new(EncryptionService::new(master_key, kms.clone()))),
                 Err(e) => {
                     tracing::error!("Failed to initialize encryption: {}", e);
                     None

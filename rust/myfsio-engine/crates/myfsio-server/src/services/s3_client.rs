@@ -37,8 +37,8 @@ pub fn build_client(connection: &RemoteConnection, options: &ClientOptions) -> C
         .read_timeout(options.read_timeout)
         .build();
 
-    let retry_config = aws_smithy_types::retry::RetryConfig::standard()
-        .with_max_attempts(options.max_attempts);
+    let retry_config =
+        aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(options.max_attempts);
 
     let config = aws_sdk_s3::config::Builder::new()
         .behavior_version(BehaviorVersion::latest())

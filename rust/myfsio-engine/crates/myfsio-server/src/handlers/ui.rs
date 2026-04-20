@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error as StdError;
 
 use axum::extract::{Extension, Form, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -100,6 +101,10 @@ pub async fn csrf_error_page(
     resp
 }
 
+pub async fn root_redirect() -> Response {
+    Redirect::to("/ui/buckets").into_response()
+}
+
 pub async fn not_found_page(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
@@ -119,9 +124,15 @@ pub async fn require_login(
         return next.run(req).await;
     }
     let path = req.uri().path().to_string();
-    let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
     let next_url = format!("{}{}", path, query);
-    let encoded = percent_encoding::utf8_percent_encode(&next_url, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let encoded =
+        percent_encoding::utf8_percent_encode(&next_url, percent_encoding::NON_ALPHANUMERIC)
+            .to_string();
     let target = format!("/login?next={}", encoded);
     Redirect::to(&target).into_response()
 }
@@ -130,22 +141,45 @@ pub fn render(state: &AppState, template: &str, ctx: &Context) -> Response {
     let engine = match &state.templates {
         Some(e) => e,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Templates not configured").into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Templates not configured",
+            )
+                .into_response();
         }
     };
     match engine.render(template, ctx) {
         Ok(html) => {
             let mut headers = HeaderMap::new();
-            headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
+            headers.insert(
+                header::CONTENT_TYPE,
+                "text/html; charset=utf-8".parse().unwrap(),
+            );
             (StatusCode::OK, headers, html).into_response()
         }
         Err(e) => {
-            tracing::error!("Template render failed ({}): {}", template, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Template error: {}", e),
-            )
-                .into_response()
+            let mut detail = format!("{}", e);
+            let mut src = StdError::source(&e);
+            while let Some(s) = src {
+                detail.push_str(" | ");
+                detail.push_str(&s.to_string());
+                src = s.source();
+            }
+            tracing::error!("Template render failed ({}): {}", template, detail);
+            let fallback_ctx = Context::new();
+            let body = if template != "500.html" {
+                engine
+                    .render("500.html", &fallback_ctx)
+                    .unwrap_or_else(|_| "Internal Server Error".to_string())
+            } else {
+                "Internal Server Error".to_string()
+            };
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                "text/html; charset=utf-8".parse().unwrap(),
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, headers, body).into_response()
         }
     }
 }
@@ -159,6 +193,8 @@ pub fn base_context(session: &SessionHandle, endpoint: Option<&str>) -> Context 
     ctx.insert("current_user_display_name", &snapshot.display_name);
     ctx.insert("current_endpoint", &endpoint.unwrap_or(""));
     ctx.insert("request_args", &HashMap::<String, String>::new());
+    ctx.insert("null", &serde_json::Value::Null);
+    ctx.insert("none", &serde_json::Value::Null);
     ctx
 }
 

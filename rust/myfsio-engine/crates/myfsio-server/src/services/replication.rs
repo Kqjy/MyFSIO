@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
+use myfsio_common::types::ListParams;
 use myfsio_storage::fs_backend::FsStorageBackend;
 use myfsio_storage::traits::StorageEngine;
 
@@ -124,7 +125,10 @@ impl ReplicationFailureStore {
         }
         let trimmed = &failures[..failures.len().min(self.max_failures_per_bucket)];
         let data = serde_json::json!({ "failures": trimmed });
-        let _ = std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default());
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&data).unwrap_or_default(),
+        );
     }
 
     pub fn load(&self, bucket: &str) -> Vec<ReplicationFailure> {
@@ -148,7 +152,10 @@ impl ReplicationFailureStore {
 
     pub fn add(&self, bucket: &str, failure: ReplicationFailure) {
         let mut failures = self.load(bucket);
-        if let Some(existing) = failures.iter_mut().find(|f| f.object_key == failure.object_key) {
+        if let Some(existing) = failures
+            .iter_mut()
+            .find(|f| f.object_key == failure.object_key)
+        {
             existing.failure_count += 1;
             existing.timestamp = failure.timestamp;
             existing.error_message = failure.error_message.clone();
@@ -318,7 +325,101 @@ impl ReplicationManager {
         let manager = self.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            manager.replicate_task(&bucket, &key, &rule, &connection, &action).await;
+            manager
+                .replicate_task(&bucket, &key, &rule, &connection, &action)
+                .await;
+        });
+    }
+
+    pub async fn replicate_existing_objects(self: Arc<Self>, bucket: String) -> usize {
+        let rule = match self.get_rule(&bucket) {
+            Some(r) if r.enabled => r,
+            _ => return 0,
+        };
+        let connection = match self.connections.get(&rule.target_connection_id) {
+            Some(c) => c,
+            None => {
+                tracing::warn!(
+                    "Cannot replicate existing objects for {}: connection {} not found",
+                    bucket,
+                    rule.target_connection_id
+                );
+                return 0;
+            }
+        };
+        if !self.check_endpoint(&connection).await {
+            tracing::warn!(
+                "Cannot replicate existing objects for {}: endpoint {} is unreachable",
+                bucket,
+                connection.endpoint_url
+            );
+            return 0;
+        }
+
+        let mut continuation_token: Option<String> = None;
+        let mut submitted = 0usize;
+
+        loop {
+            let page = match self
+                .storage
+                .list_objects(
+                    &bucket,
+                    &ListParams {
+                        max_keys: 1000,
+                        continuation_token: continuation_token.clone(),
+                        prefix: rule.filter_prefix.clone(),
+                        start_after: None,
+                    },
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to list existing objects for replication in {}: {}",
+                        bucket,
+                        err
+                    );
+                    break;
+                }
+            };
+
+            let next_token = page.next_continuation_token.clone();
+            let is_truncated = page.is_truncated;
+
+            for object in page.objects {
+                submitted += 1;
+                self.clone()
+                    .trigger(bucket.clone(), object.key, "write".to_string())
+                    .await;
+            }
+
+            if !is_truncated {
+                break;
+            }
+
+            continuation_token = next_token;
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        submitted
+    }
+
+    pub fn schedule_existing_objects_sync(self: Arc<Self>, bucket: String) {
+        tokio::spawn(async move {
+            let submitted = self
+                .clone()
+                .replicate_existing_objects(bucket.clone())
+                .await;
+            if submitted > 0 {
+                tracing::info!(
+                    "Scheduled {} existing object(s) for replication in {}",
+                    submitted,
+                    bucket
+                );
+            }
         });
     }
 
@@ -330,7 +431,8 @@ impl ReplicationManager {
         conn: &RemoteConnection,
         action: &str,
     ) {
-        if object_key.contains("..") || object_key.starts_with('/') || object_key.starts_with('\\') {
+        if object_key.contains("..") || object_key.starts_with('/') || object_key.starts_with('\\')
+        {
             tracing::error!("Invalid object key (path traversal): {}", object_key);
             return;
         }
@@ -358,7 +460,12 @@ impl ReplicationManager {
                 }
                 Err(err) => {
                     let msg = format!("{:?}", err);
-                    tracing::error!("Replication DELETE failed {}/{}: {}", bucket, object_key, msg);
+                    tracing::error!(
+                        "Replication DELETE failed {}/{}: {}",
+                        bucket,
+                        object_key,
+                        msg
+                    );
                     self.failures.add(
                         bucket,
                         ReplicationFailure {
@@ -414,16 +521,18 @@ impl ReplicationManager {
                     .send()
                     .await
                 {
-                    Ok(_) | Err(_) => upload_object(
-                        &client,
-                        &rule.target_bucket,
-                        object_key,
-                        &src_path,
-                        file_size,
-                        self.streaming_threshold_bytes,
-                        content_type.as_deref(),
-                    )
-                    .await,
+                    Ok(_) | Err(_) => {
+                        upload_object(
+                            &client,
+                            &rule.target_bucket,
+                            object_key,
+                            &src_path,
+                            file_size,
+                            self.streaming_threshold_bytes,
+                            content_type.as_deref(),
+                        )
+                        .await
+                    }
                 }
             }
             other => other,
@@ -577,9 +686,9 @@ async fn upload_object(
             )))
         })?
     } else {
-        let bytes = tokio::fs::read(path).await.map_err(|e| {
-            aws_sdk_s3::error::SdkError::construction_failure(Box::new(e))
-        })?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| aws_sdk_s3::error::SdkError::construction_failure(Box::new(e)))?;
         ByteStream::from(bytes)
     };
 

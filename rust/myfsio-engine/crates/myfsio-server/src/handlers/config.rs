@@ -13,8 +13,14 @@ fn xml_response(status: StatusCode, xml: String) -> Response {
 
 fn storage_err(err: myfsio_storage::error::StorageError) -> Response {
     let s3err = S3Error::from(err);
-    let status = StatusCode::from_u16(s3err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, [("content-type", "application/xml")], s3err.to_xml()).into_response()
+    let status =
+        StatusCode::from_u16(s3err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (
+        status,
+        [("content-type", "application/xml")],
+        s3err.to_xml(),
+    )
+        .into_response()
 }
 
 fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
@@ -68,7 +74,7 @@ pub async fn get_tagging(state: &AppState, bucket: &str) -> Response {
         Ok(config) => {
             let mut xml = String::from(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                <Tagging xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><TagSet>"
+                <Tagging xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><TagSet>",
             );
             for tag in &config.tags {
                 xml.push_str(&format!(
@@ -130,7 +136,11 @@ pub async fn get_cors(state: &AppState, bucket: &str) -> Response {
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
-                    S3Error::new(S3ErrorCode::NoSuchKey, "The CORS configuration does not exist").to_xml(),
+                    S3Error::new(
+                        S3ErrorCode::NoSuchKey,
+                        "The CORS configuration does not exist",
+                    )
+                    .to_xml(),
                 )
             }
         }
@@ -192,7 +202,8 @@ pub async fn get_encryption(state: &AppState, bucket: &str) -> Response {
                     S3Error::new(
                         S3ErrorCode::InvalidRequest,
                         "The server side encryption configuration was not found",
-                    ).to_xml(),
+                    )
+                    .to_xml(),
                 )
             }
         }
@@ -240,7 +251,11 @@ pub async fn get_lifecycle(state: &AppState, bucket: &str) -> Response {
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
-                    S3Error::new(S3ErrorCode::NoSuchKey, "The lifecycle configuration does not exist").to_xml(),
+                    S3Error::new(
+                        S3ErrorCode::NoSuchKey,
+                        "The lifecycle configuration does not exist",
+                    )
+                    .to_xml(),
                 )
             }
         }
@@ -328,17 +343,17 @@ pub async fn put_quota(state: &AppState, bucket: &str, body: Body) -> Response {
         Err(_) => {
             return xml_response(
                 StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::InvalidArgument, "Request body must be valid JSON").to_xml(),
+                S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Request body must be valid JSON",
+                )
+                .to_xml(),
             );
         }
     };
 
-    let max_size = payload
-        .get("max_size_bytes")
-        .and_then(|v| v.as_u64());
-    let max_objects = payload
-        .get("max_objects")
-        .and_then(|v| v.as_u64());
+    let max_size = payload.get("max_size_bytes").and_then(|v| v.as_u64());
+    let max_objects = payload.get("max_objects").and_then(|v| v.as_u64());
 
     if max_size.is_none() && max_objects.is_none() {
         return xml_response(
@@ -603,7 +618,11 @@ pub async fn get_website(state: &AppState, bucket: &str) -> Response {
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
-                    S3Error::new(S3ErrorCode::NoSuchKey, "The website configuration does not exist").to_xml(),
+                    S3Error::new(
+                        S3ErrorCode::NoSuchKey,
+                        "The website configuration does not exist",
+                    )
+                    .to_xml(),
                 )
             }
         }
@@ -677,19 +696,120 @@ pub async fn get_notification(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn get_logging(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(config) => {
-            if let Some(l) = &config.logging {
-                xml_response(StatusCode::OK, l.to_string())
-            } else {
-                let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                    <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                    </BucketLoggingStatus>";
-                xml_response(StatusCode::OK, xml.to_string())
-            }
+    match state.storage.bucket_exists(bucket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return storage_err(myfsio_storage::error::StorageError::BucketNotFound(
+                bucket.to_string(),
+            ))
         }
-        Err(e) => storage_err(e),
+        Err(e) => return storage_err(e),
     }
+
+    let logging_config = if let Some(cfg) = state.access_logging.get(bucket) {
+        Some(cfg)
+    } else {
+        match state.storage.get_bucket_config(bucket).await {
+            Ok(config) => {
+                let legacy = legacy_logging_config(&config);
+                if let Some(cfg) = legacy.as_ref() {
+                    if let Err(err) = state.access_logging.set(bucket, cfg.clone()) {
+                        tracing::warn!(
+                            "Failed to migrate legacy bucket logging config for {}: {}",
+                            bucket,
+                            err
+                        );
+                    }
+                }
+                legacy
+            }
+            Err(e) => return storage_err(e),
+        }
+    };
+
+    let body = match logging_config {
+        Some(cfg) if cfg.enabled => format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <LoggingEnabled><TargetBucket>{}</TargetBucket><TargetPrefix>{}</TargetPrefix></LoggingEnabled>\
+             </BucketLoggingStatus>",
+            xml_escape(&cfg.target_bucket),
+            xml_escape(&cfg.target_prefix),
+        ),
+        _ => "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+              <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></BucketLoggingStatus>"
+            .to_string(),
+    };
+    xml_response(StatusCode::OK, body)
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn legacy_logging_config(
+    config: &myfsio_common::types::BucketConfig,
+) -> Option<crate::services::access_logging::LoggingConfiguration> {
+    let value = config.logging.as_ref()?;
+    match value {
+        serde_json::Value::String(xml) => parse_logging_config_xml(xml),
+        serde_json::Value::Object(_) => parse_logging_config_value(value.clone()),
+        _ => None,
+    }
+}
+
+fn parse_logging_config_value(
+    value: serde_json::Value,
+) -> Option<crate::services::access_logging::LoggingConfiguration> {
+    let logging_enabled = value.get("LoggingEnabled")?;
+    let target_bucket = logging_enabled
+        .get("TargetBucket")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let target_prefix = logging_enabled
+        .get("TargetPrefix")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(crate::services::access_logging::LoggingConfiguration {
+        target_bucket,
+        target_prefix,
+        enabled: true,
+    })
+}
+
+fn parse_logging_config_xml(
+    xml: &str,
+) -> Option<crate::services::access_logging::LoggingConfiguration> {
+    let doc = roxmltree::Document::parse(xml).ok()?;
+    let root = doc.root_element();
+    let logging_enabled = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "LoggingEnabled")?;
+    let target_bucket = logging_enabled
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "TargetBucket")
+        .and_then(|n| n.text())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let target_prefix = logging_enabled
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "TargetPrefix")
+        .and_then(|n| n.text())
+        .unwrap_or_default()
+        .to_string();
+    Some(crate::services::access_logging::LoggingConfiguration {
+        target_bucket,
+        target_prefix,
+        enabled: true,
+    })
 }
 
 pub async fn put_object_lock(state: &AppState, bucket: &str, body: Body) -> Response {
@@ -757,35 +877,125 @@ pub async fn delete_notification(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_logging(state: &AppState, bucket: &str, body: Body) -> Response {
+    match state.storage.bucket_exists(bucket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return storage_err(myfsio_storage::error::StorageError::BucketNotFound(
+                bucket.to_string(),
+            ))
+        }
+        Err(e) => return storage_err(e),
+    }
+
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.logging = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
+    if body_bytes.iter().all(u8::is_ascii_whitespace) {
+        state.access_logging.delete(bucket);
+        return StatusCode::OK.into_response();
     }
+
+    let xml = match std::str::from_utf8(&body_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return s3_error_response(
+                S3ErrorCode::MalformedXML,
+                "Unable to parse XML document",
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+
+    let doc = match roxmltree::Document::parse(xml) {
+        Ok(d) => d,
+        Err(_) => {
+            return s3_error_response(
+                S3ErrorCode::MalformedXML,
+                "Unable to parse XML document",
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+
+    let root = doc.root_element();
+    let logging_enabled = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "LoggingEnabled");
+
+    let Some(le) = logging_enabled else {
+        state.access_logging.delete(bucket);
+        return StatusCode::OK.into_response();
+    };
+
+    let target_bucket = le
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "TargetBucket")
+        .and_then(|n| n.text())
+        .map(str::trim)
+        .unwrap_or_default();
+
+    if target_bucket.is_empty() {
+        return s3_error_response(
+            S3ErrorCode::InvalidArgument,
+            "TargetBucket is required",
+            StatusCode::BAD_REQUEST,
+        );
+    }
+
+    let cfg = crate::services::access_logging::LoggingConfiguration {
+        target_bucket: target_bucket.to_string(),
+        target_prefix: le
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == "TargetPrefix")
+            .and_then(|n| n.text())
+            .unwrap_or_default()
+            .to_string(),
+        enabled: true,
+    };
+
+    match state.storage.bucket_exists(&cfg.target_bucket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return s3_error_response(
+                S3ErrorCode::InvalidArgument,
+                "Target bucket does not exist",
+                StatusCode::BAD_REQUEST,
+            )
+        }
+        Err(e) => return storage_err(e),
+    }
+
+    if let Err(e) = state.access_logging.set(bucket, cfg) {
+        tracing::error!(
+            "Failed to persist bucket logging config for {}: {}",
+            bucket,
+            e
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    StatusCode::OK.into_response()
 }
 
 pub async fn delete_logging(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.logging = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
+    match state.storage.bucket_exists(bucket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return storage_err(myfsio_storage::error::StorageError::BucketNotFound(
+                bucket.to_string(),
+            ))
         }
-        Err(e) => storage_err(e),
+        Err(e) => return storage_err(e),
     }
+    state.access_logging.delete(bucket);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn s3_error_response(code: S3ErrorCode, message: &str, status: StatusCode) -> Response {
+    let err = S3Error::new(code, message.to_string());
+    (status, [("content-type", "application/xml")], err.to_xml()).into_response()
 }
 
 pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
@@ -812,7 +1022,7 @@ pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
 
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-        <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+        <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
     );
     xml.push_str(&format!("<Name>{}</Name>", bucket));
 
@@ -842,7 +1052,7 @@ pub async fn get_object_tagging(state: &AppState, bucket: &str, key: &str) -> Re
         Ok(tags) => {
             let mut xml = String::from(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                <Tagging xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><TagSet>"
+                <Tagging xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><TagSet>",
             );
             for tag in &tags {
                 xml.push_str(&format!(
@@ -910,20 +1120,24 @@ pub async fn put_object_acl(state: &AppState, bucket: &str, key: &str, _body: Bo
 
 pub async fn get_object_retention(state: &AppState, bucket: &str, key: &str) -> Response {
     match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            xml_response(
-                StatusCode::NOT_FOUND,
-                S3Error::new(
-                    S3ErrorCode::InvalidRequest,
-                    "No retention policy configured",
-                ).to_xml(),
+        Ok(_) => xml_response(
+            StatusCode::NOT_FOUND,
+            S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "No retention policy configured",
             )
-        }
+            .to_xml(),
+        ),
         Err(e) => storage_err(e),
     }
 }
 
-pub async fn put_object_retention(state: &AppState, bucket: &str, key: &str, _body: Body) -> Response {
+pub async fn put_object_retention(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    _body: Body,
+) -> Response {
     match state.storage.head_object(bucket, key).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => storage_err(e),
@@ -942,10 +1156,65 @@ pub async fn get_object_legal_hold(state: &AppState, bucket: &str, key: &str) ->
     }
 }
 
-pub async fn put_object_legal_hold(state: &AppState, bucket: &str, key: &str, _body: Body) -> Response {
+pub async fn put_object_legal_hold(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    _body: Body,
+) -> Response {
     match state.storage.head_object(bucket, key).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => storage_err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{legacy_logging_config, parse_logging_config_xml};
+    use myfsio_common::types::BucketConfig;
+
+    #[test]
+    fn parses_legacy_logging_xml_string() {
+        let mut config = BucketConfig::default();
+        config.logging = Some(serde_json::Value::String(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+            <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+            <LoggingEnabled><TargetBucket>logs</TargetBucket><TargetPrefix>audit/</TargetPrefix></LoggingEnabled>\
+            </BucketLoggingStatus>"
+                .to_string(),
+        ));
+
+        let parsed = legacy_logging_config(&config).expect("expected legacy logging config");
+        assert_eq!(parsed.target_bucket, "logs");
+        assert_eq!(parsed.target_prefix, "audit/");
+        assert!(parsed.enabled);
+    }
+
+    #[test]
+    fn parses_legacy_logging_json_object() {
+        let mut config = BucketConfig::default();
+        config.logging = Some(serde_json::json!({
+            "LoggingEnabled": {
+                "TargetBucket": "logs",
+                "TargetPrefix": "archive/"
+            }
+        }));
+
+        let parsed = legacy_logging_config(&config).expect("expected legacy logging config");
+        assert_eq!(parsed.target_bucket, "logs");
+        assert_eq!(parsed.target_prefix, "archive/");
+        assert!(parsed.enabled);
+    }
+
+    #[test]
+    fn ignores_logging_xml_without_enabled_block() {
+        let parsed = parse_logging_config_xml(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+            <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+            </BucketLoggingStatus>",
+        );
+
+        assert!(parsed.is_none());
     }
 }
 

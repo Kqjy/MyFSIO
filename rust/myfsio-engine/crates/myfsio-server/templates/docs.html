@@ -71,28 +71,35 @@
           <span class="docs-section-kicker">01</span>
           <h2 class="h4 mb-0">Set up &amp; run locally</h2>
         </div>
-        <p class="text-muted">Prepare a virtual environment, install dependencies, and launch both servers for a complete console + API experience.</p>
+        <p class="text-muted">Build or run the Rust server and launch the API plus web UI from a single process.</p>
+        <div class="alert alert-light border small mb-3">
+          Runtime note: MyFSIO now runs from the Rust server in <code>rust/myfsio-engine</code>. For the verified runtime configuration list, use the repository <code>docs.md</code>.
+        </div>
         <ol class="docs-steps">
-          <li>Install Python 3.11+ plus system build tools.</li>
-          <li>Create a virtual environment and install <code>requirements.txt</code>.</li>
-          <li>Start the services with <code>python run.py</code>.</li>
+          <li>Install a current Rust toolchain.</li>
+          <li>Change into <code>rust/myfsio-engine</code>.</li>
+          <li>Start the server with <code>cargo run -p myfsio-server --</code>.</li>
         </ol>
-<pre class="mb-3"><code class="language-bash">python -m venv .venv
-. .venv/Scripts/activate      # PowerShell: .\\.venv\\Scripts\\Activate.ps1
-pip install -r requirements.txt
+<pre class="mb-3"><code class="language-bash">cd rust/myfsio-engine
 
-# Run both API and UI (Development)
-python run.py
+# Run API + UI
+cargo run -p myfsio-server --
 
-# Run in Production (Granian server)
-python run.py --prod
+# Show resolved configuration
+cargo run -p myfsio-server -- --show-config
 
-# Or run individually
-python run.py --mode api
-python run.py --mode ui
+# Validate configuration
+cargo run -p myfsio-server -- --check-config
+
+# API only
+UI_ENABLED=false cargo run -p myfsio-server --
+
+# Release build
+cargo build --release -p myfsio-server
+./target/release/myfsio-server
 </code></pre>
         <h3 class="h6 mt-4 mb-2">Configuration</h3>
-        <p class="text-muted small">Configuration defaults live in <code>app/config.py</code>. You can override them using environment variables. This is critical for production deployments behind proxies.</p>
+        <p class="text-muted small">Configuration is driven by the Rust server environment. See <code>docs.md</code> for the authoritative runtime variables.</p>
         <div class="table-responsive">
           <table class="table table-sm table-bordered small mb-0">
             <thead class="table-light">
@@ -121,15 +128,15 @@ python run.py --mode ui
               <tr>
                 <td><code>SECRET_KEY</code></td>
                 <td>(Auto-generated)</td>
-                <td>Flask session key. Auto-generates if not set. <strong>Set explicitly in production.</strong></td>
+                <td>Session signing and IAM-at-rest encryption key. <strong>Set explicitly in production.</strong></td>
               </tr>
               <tr>
-                <td><code>APP_HOST</code></td>
-                <td><code>0.0.0.0</code></td>
+                <td><code>HOST</code></td>
+                <td><code>127.0.0.1</code></td>
                 <td>Bind interface.</td>
               </tr>
               <tr>
-                <td><code>APP_PORT</code></td>
+                <td><code>PORT</code></td>
                 <td><code>5000</code></td>
                 <td>Listen port (UI uses 5100).</td>
               </tr>
@@ -454,19 +461,19 @@ python run.py --mode ui
         
         <h3 class="h6 text-uppercase text-muted mt-4">Quick Start (nohup)</h3>
         <p class="text-muted small">Simplest way to run in background—survives terminal close:</p>
-<pre class="mb-3"><code class="language-bash"># Using Python
-nohup python run.py --prod > /dev/null 2>&1 &
+<pre class="mb-3"><code class="language-bash"># From the repository
+nohup cargo run -p myfsio-server -- > /dev/null 2>&1 &
 
-# Using compiled binary
-nohup ./myfsio > /dev/null 2>&1 &
+# Using a compiled binary
+nohup ./myfsio-server > /dev/null 2>&1 &
 
 # Check if running
-ps aux | grep myfsio</code></pre>
+ps aux | grep myfsio-server</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Screen / Tmux</h3>
         <p class="text-muted small">Attach/detach from a persistent session:</p>
 <pre class="mb-3"><code class="language-bash"># Start in a detached screen session
-screen -dmS myfsio ./myfsio
+screen -dmS myfsio ./myfsio-server
 
 # Attach to view logs
 screen -r myfsio
@@ -507,7 +514,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
           <span class="docs-section-kicker">03</span>
           <h2 class="h4 mb-0">Authenticate &amp; manage IAM</h2>
         </div>
-        <p class="text-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Set <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> env vars for custom credentials. When <code>SECRET_KEY</code> is configured, the IAM config is encrypted at rest. To reset credentials, run <code>python run.py --reset-cred</code>.</p>
+        <p class="text-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Set <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> for custom credentials. When <code>SECRET_KEY</code> is configured, the IAM config is encrypted at rest. To reset credentials, run <code>cargo run -p myfsio-server -- --reset-cred</code> or the installed binary with <code>--reset-cred</code>.</p>
         <div class="docs-highlight mb-3">
           <ol class="mb-0">
             <li>Check the console output for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/ui/login</code>.</li>
@@ -517,7 +524,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
           </ol>
         </div>
-        <p class="mb-0 text-muted">All API calls require <code>X-Access-Key</code> and <code>X-Secret-Key</code> headers. The UI stores them in the Flask session after you log in.</p>
+        <p class="mb-0 text-muted">All API calls require <code>X-Access-Key</code> and <code>X-Secret-Key</code> headers. The UI stores them in the server-managed session after you log in.</p>
       </div>
     </article>
     <article id="console" class="card shadow-sm docs-section">
@@ -737,7 +744,7 @@ curl -X PUT {{ api_base }}/demo/notes.txt \
             </tbody>
           </table>
         </div>
-        <p class="small text-muted mt-3 mb-0">All responses include <code>X-Request-Id</code> for tracing. See the <a href="#api-matrix">Full API Reference</a> for the complete endpoint list. Logs land in <code>logs/api.log</code> and <code>logs/ui.log</code>.</p>
+        <p class="small text-muted mt-3 mb-0">All responses include <code>X-Request-Id</code> for tracing. See the <a href="#api-matrix">Full API Reference</a> for the complete endpoint list. When running the Rust server, logs go to stdout and whatever service manager or container runtime is supervising the process.</p>
       </div>
     </article>
     <article id="examples" class="card shadow-sm docs-section">
@@ -1174,7 +1181,7 @@ export SITE_ID=us-west-1
 export SITE_ENDPOINT=https://s3.us-west-1.example.com
 export SITE_REGION=us-west-1
 export SITE_PRIORITY=100
-python run.py</code></pre>
+cargo run -p myfsio-server --</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Using the Sites UI</h3>
         <p class="small text-muted">Navigate to <a href="{{ url_for(endpoint="ui.sites_dashboard") }}">Sites</a> in the sidebar to manage site configuration:</p>
@@ -1442,12 +1449,12 @@ curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
 <pre class="mb-2"><code class="language-bash"># PowerShell
 $env:ENCRYPTION_ENABLED = "true"
 $env:KMS_ENABLED = "true"  # Optional
-python run.py
+cargo run -p myfsio-server --
 
 # Bash
 export ENCRYPTION_ENABLED=true
 export KMS_ENABLED=true
-python run.py</code></pre>
+cargo run -p myfsio-server --</code></pre>
           </li>
           <li>
             <strong>Configure bucket encryption:</strong> Navigate to your bucket → <strong>Properties</strong> tab → <strong>Default Encryption</strong> card → Click <strong>Enable Encryption</strong>.
@@ -1557,7 +1564,7 @@ curl "{{ api_base }}/my-bucket/secret.txt" \
 
         <h3 class="h6 text-uppercase text-muted mt-4">How It Works</h3>
         <p class="small text-muted mb-3">
-          Lifecycle rules run on a background timer (Python <code>threading.Timer</code>), not a system cronjob. The enforcement cycle triggers every <strong>3600 seconds (1 hour)</strong> by default. Each cycle scans all buckets with lifecycle configurations and applies matching rules.
+          Lifecycle rules run in a Tokio background task, not a system cronjob. The enforcement cycle triggers every <strong>3600 seconds (1 hour)</strong> by default. Each cycle scans all buckets with lifecycle configurations and applies matching rules.
         </p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Expiration Types</h3>
@@ -1639,7 +1646,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
 
         <h3 class="h6 text-uppercase text-muted mt-4">Enabling GC</h3>
         <p class="small text-muted">Disabled by default. Enable via environment variable:</p>
-<pre class="mb-3"><code class="language-bash">GC_ENABLED=true python run.py</code></pre>
+<pre class="mb-3"><code class="language-bash">GC_ENABLED=true cargo run -p myfsio-server --</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
         <div class="table-responsive mb-3">
@@ -1742,7 +1749,7 @@ curl "{{ api_base }}/admin/gc/history?limit=10" \
 
         <h3 class="h6 text-uppercase text-muted mt-4">Enabling Integrity Scanner</h3>
         <p class="small text-muted">Disabled by default. Enable via environment variable:</p>
-<pre class="mb-3"><code class="language-bash">INTEGRITY_ENABLED=true python run.py</code></pre>
+<pre class="mb-3"><code class="language-bash">INTEGRITY_ENABLED=true cargo run -p myfsio-server --</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Configuration</h3>
         <div class="table-responsive mb-3">
@@ -1848,11 +1855,11 @@ curl "{{ api_base }}/admin/integrity/history?limit=10" \
         <p class="small text-muted">Set the environment variable to opt-in:</p>
 <pre class="mb-3"><code class="language-bash"># PowerShell
 $env:METRICS_HISTORY_ENABLED = "true"
-python run.py
+cargo run -p myfsio-server --
 
 # Bash
 export METRICS_HISTORY_ENABLED=true
-python run.py</code></pre>
+cargo run -p myfsio-server --</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Configuration Options</h3>
         <div class="table-responsive mb-3">
@@ -1932,11 +1939,11 @@ curl -X PUT "{{ api_base | replace(from="/api", to="/ui") }}/metrics/settings" \
         <p class="small text-muted">Set the environment variable to opt-in:</p>
 <pre class="mb-3"><code class="language-bash"># PowerShell
 $env:OPERATION_METRICS_ENABLED = "true"
-python run.py
+cargo run -p myfsio-server --
 
 # Bash
 export OPERATION_METRICS_ENABLED=true
-python run.py</code></pre>
+cargo run -p myfsio-server --</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Configuration Options</h3>
         <div class="table-responsive mb-3">
@@ -2751,8 +2758,8 @@ cp -r logs/ logs-backup/</code></pre>
         <ol class="docs-steps mb-3">
           <li><strong>Stop the service:</strong> <code>sudo systemctl stop myfsio</code> (or kill the process)</li>
           <li><strong>Pull new version:</strong> <code>git pull origin main</code> or download the new binary</li>
-          <li><strong>Install dependencies:</strong> <code>pip install -r requirements.txt</code></li>
-          <li><strong>Validate config:</strong> <code>python run.py --check-config</code></li>
+          <li><strong>Build or install the new Rust binary:</strong> <code>cargo build --release -p myfsio-server</code></li>
+          <li><strong>Validate config:</strong> <code>./myfsio-server --check-config</code></li>
           <li><strong>Start the service:</strong> <code>sudo systemctl start myfsio</code></li>
           <li><strong>Verify:</strong> <code>curl http://localhost:5000/myfsio/health</code></li>
         </ol>
@@ -2892,11 +2899,11 @@ POST   /kms/generate-random             # Generate random bytes</code></pre>
           </div>
           <div>
             <div class="small text-uppercase text-muted">Logs</div>
-            <span class="text-muted small">logs/api.log · logs/ui.log</span>
+            <span class="text-muted small">stdout, journald, or container logs</span>
           </div>
         </div>
         <div class="mt-4">
-          <p class="small text-muted mb-1">Need more automation? Extend <code>app/s3_api.py</code> or wrap <code>run_api.py</code> with gunicorn for production-style deployments.</p>
+          <p class="small text-muted mb-1">Need more automation? Integrate against the S3, admin, or KMS routes directly, or package the Rust binary behind systemd or containers for production deployments.</p>
         </div>
       </div>
     </aside>
