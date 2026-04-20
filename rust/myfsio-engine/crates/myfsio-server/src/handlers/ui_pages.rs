@@ -257,11 +257,23 @@ fn config_encryption_to_ui(value: Option<&Value>) -> Value {
 }
 
 fn config_website_to_ui(value: Option<&Value>) -> Value {
-    match value {
+    let parsed = match value {
         Some(Value::Object(map)) => Value::Object(map.clone()),
         Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
         _ => Value::Null,
-    }
+    };
+
+    let Some(map) = parsed.as_object() else {
+        return Value::Null;
+    };
+
+    json!({
+        "index_document": map
+            .get("index_document")
+            .and_then(Value::as_str)
+            .unwrap_or("index.html"),
+        "error_document": map.get("error_document").and_then(Value::as_str),
+    })
 }
 
 fn bucket_access_descriptor(

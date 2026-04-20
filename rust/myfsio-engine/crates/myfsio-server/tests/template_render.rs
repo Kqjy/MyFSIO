@@ -341,3 +341,84 @@ fn render_bucket_detail() {
     ctx.insert("objects_stream_url", &"");
     render_or_panic("bucket_detail.html", &ctx);
 }
+
+#[test]
+fn render_bucket_detail_without_error_document() {
+    let mut ctx = base_ctx();
+    ctx.insert("bucket_name", &"site-bucket");
+    ctx.insert(
+        "bucket",
+        &json!({
+            "name": "site-bucket",
+            "creation_date": "2025-01-01T00:00:00Z",
+        }),
+    );
+    ctx.insert("objects", &Vec::<Value>::new());
+    ctx.insert("prefixes", &Vec::<Value>::new());
+    ctx.insert("total_objects", &0u64);
+    ctx.insert("total_bytes", &0u64);
+    ctx.insert("current_objects", &0u64);
+    ctx.insert("current_bytes", &0u64);
+    ctx.insert("version_count", &0u64);
+    ctx.insert("version_bytes", &0u64);
+    ctx.insert("max_objects", &Value::Null);
+    ctx.insert("max_bytes", &Value::Null);
+    ctx.insert("has_max_objects", &false);
+    ctx.insert("has_max_bytes", &false);
+    ctx.insert("obj_pct", &0);
+    ctx.insert("bytes_pct", &0);
+    ctx.insert("has_quota", &false);
+    ctx.insert("versioning_enabled", &false);
+    ctx.insert("versioning_status", &"Disabled");
+    ctx.insert("encryption_config", &json!({"Rules": []}));
+    ctx.insert("enc_rules", &Vec::<Value>::new());
+    ctx.insert("enc_algorithm", &"");
+    ctx.insert("enc_kms_key", &"");
+    ctx.insert("replication_rules", &Vec::<Value>::new());
+    ctx.insert("replication_rule", &Value::Null);
+    ctx.insert("website_config", &json!({"index_document": "index.html"}));
+    ctx.insert("bucket_policy", &"");
+    ctx.insert("bucket_policy_text", &"");
+    ctx.insert("connections", &Vec::<Value>::new());
+    ctx.insert("current_prefix", &"");
+    ctx.insert("parent_prefix", &"");
+    ctx.insert("has_more", &false);
+    ctx.insert("next_token", &"");
+    ctx.insert("active_tab", &"objects");
+    ctx.insert("multipart_uploads", &Vec::<Value>::new());
+    ctx.insert("target_conn", &Value::Null);
+    ctx.insert("target_conn_name", &"");
+    ctx.insert("preset_choice", &"");
+    ctx.insert("default_policy", &"");
+    ctx.insert("can_manage_cors", &true);
+    ctx.insert("can_manage_lifecycle", &true);
+    ctx.insert("can_manage_quota", &true);
+    ctx.insert("can_manage_versioning", &true);
+    ctx.insert("can_manage_website", &true);
+    ctx.insert("can_edit_policy", &true);
+    ctx.insert("is_replication_admin", &true);
+    ctx.insert("lifecycle_enabled", &false);
+    ctx.insert("site_sync_enabled", &false);
+    ctx.insert("website_hosting_enabled", &true);
+    ctx.insert("website_domains", &Vec::<Value>::new());
+    ctx.insert("kms_keys", &Vec::<Value>::new());
+    ctx.insert(
+        "bucket_stats",
+        &json!({
+            "bytes": 0, "objects": 0, "total_bytes": 0, "total_objects": 0,
+            "version_bytes": 0, "version_count": 0
+        }),
+    );
+    ctx.insert(
+        "bucket_quota",
+        &json!({ "max_bytes": null, "max_objects": null }),
+    );
+    ctx.insert("buckets_for_copy_url", &"");
+    ctx.insert("acl_url", &"");
+    ctx.insert("cors_url", &"");
+    ctx.insert("folders_url", &"");
+    ctx.insert("lifecycle_url", &"");
+    ctx.insert("objects_api_url", &"");
+    ctx.insert("objects_stream_url", &"");
+    render_or_panic("bucket_detail.html", &ctx);
+}
