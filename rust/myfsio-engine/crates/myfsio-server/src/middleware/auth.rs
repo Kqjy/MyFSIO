@@ -328,7 +328,7 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
 
-    let response = if path == "/myfsio/health" || path == "/health" {
+    let response = if path == "/myfsio/health" {
         next.run(req).await
     } else if let Some(response) = maybe_serve_website(
         &state,
@@ -488,7 +488,7 @@ async fn authorize_request(
     query: &str,
     copy_source: Option<&str>,
 ) -> Result<(), S3Error> {
-    if path == "/myfsio/health" || path == "/health" {
+    if path == "/myfsio/health" {
         return Ok(());
     }
     if path == "/" {
