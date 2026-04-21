@@ -268,11 +268,9 @@ mod tests {
         let parsed = acl_from_bucket_config(&Value::String(acl_to_xml(&acl))).unwrap();
         assert_eq!(parsed.owner, "owner");
         assert_eq!(parsed.grants.len(), 2);
-        assert!(
-            parsed
-                .grants
-                .iter()
-                .any(|grant| grant.grantee == GRANTEE_AUTHENTICATED_USERS)
-        );
+        assert!(parsed
+            .grants
+            .iter()
+            .any(|grant| grant.grantee == GRANTEE_AUTHENTICATED_USERS));
     }
 }

@@ -19,19 +19,57 @@ fn website_error_response(
     status: StatusCode,
     body: Option<Vec<u8>>,
     content_type: &str,
+    include_body: bool,
 ) -> Response {
+    let (body, content_type) = match body {
+        Some(body) => (body, content_type),
+        None => (
+            default_website_error_body(status).into_bytes(),
+            "text/html; charset=utf-8",
+        ),
+    };
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    if let Some(ref body) = body {
-        headers.insert(
-            header::CONTENT_LENGTH,
-            body.len().to_string().parse().unwrap(),
-        );
+    headers.insert(
+        header::CONTENT_LENGTH,
+        body.len().to_string().parse().unwrap(),
+    );
+    if include_body {
         (status, headers, body.clone()).into_response()
     } else {
         (status, headers).into_response()
     }
+}
+
+fn default_website_error_body(status: StatusCode) -> String {
+    let code = status.as_u16();
+    let reason = status.canonical_reason().unwrap_or("Error");
+    format!(
+        "<!doctype html>\
+<html lang=\"en\">\
+<head>\
+<meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>{code} {reason}</title>\
+<style>\
+html{{font-family:Arial,Helvetica,sans-serif;background:#f8fafc;color:#172033}}\
+body{{margin:0;min-height:100vh;display:grid;place-items:center}}\
+main{{max-width:42rem;padding:3rem 2rem}}\
+p.code{{font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;color:#64748b;margin:0 0 .75rem}}\
+h1{{font-size:2rem;line-height:1.15;margin:0 0 1rem}}\
+p{{font-size:1rem;line-height:1.6;margin:0;color:#334155}}\
+</style>\
+</head>\
+<body>\
+<main>\
+<p class=\"code\">HTTP {code}</p>\
+<h1>{code} {reason}</h1>\
+<p>The requested page could not be found. Check the URL, or return to the site root.</p>\
+</main>\
+</body>\
+</html>"
+    )
 }
 
 fn parse_range_header(range_header: &str, total_size: u64) -> Option<(u64, u64)> {
@@ -192,6 +230,7 @@ async fn maybe_serve_website(
         return None;
     }
     let request_path = uri_path.trim_start_matches('/').to_string();
+    let include_error_body = method != axum::http::Method::HEAD;
     let store = state.website_domains.as_ref()?;
     let bucket = store.get_bucket(&host)?;
     if !matches!(state.storage.bucket_exists(&bucket).await, Ok(true)) {
@@ -199,6 +238,7 @@ async fn maybe_serve_website(
             StatusCode::NOT_FOUND,
             None,
             "text/plain; charset=utf-8",
+            include_error_body,
         ));
     }
 
@@ -208,6 +248,7 @@ async fn maybe_serve_website(
             StatusCode::NOT_FOUND,
             None,
             "text/plain; charset=utf-8",
+            include_error_body,
         ));
     };
     let Some((index_document, error_document)) = parse_website_config(website_config) else {
@@ -215,6 +256,7 @@ async fn maybe_serve_website(
             StatusCode::NOT_FOUND,
             None,
             "text/plain; charset=utf-8",
+            include_error_body,
         ));
     };
 
@@ -252,6 +294,7 @@ async fn maybe_serve_website(
                     StatusCode::NOT_FOUND,
                     None,
                     "text/plain; charset=utf-8",
+                    include_error_body,
                 ))
             });
         } else {
@@ -259,6 +302,7 @@ async fn maybe_serve_website(
                 StatusCode::NOT_FOUND,
                 None,
                 "text/plain; charset=utf-8",
+                include_error_body,
             ));
         }
     } else if !exists {
@@ -277,6 +321,7 @@ async fn maybe_serve_website(
                     StatusCode::NOT_FOUND,
                     None,
                     "text/plain; charset=utf-8",
+                    include_error_body,
                 ))
             });
         }
@@ -284,6 +329,7 @@ async fn maybe_serve_website(
             StatusCode::NOT_FOUND,
             None,
             "text/plain; charset=utf-8",
+            include_error_body,
         ));
     }
 

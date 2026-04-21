@@ -21,7 +21,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         .route("/", get(ui::root_redirect))
         .route("/ui", get(ui::root_redirect))
         .route("/ui/", get(ui::root_redirect))
-        .route("/ui/buckets", get(ui_pages::buckets_overview))
+        .route(
+            "/ui/buckets",
+            get(ui_pages::buckets_overview).post(ui_pages::create_bucket),
+        )
         .route("/ui/buckets/create", post(ui_pages::create_bucket))
         .route("/ui/buckets/{bucket_name}", get(ui_pages::bucket_detail))
         .route(
@@ -65,11 +68,19 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             put(ui_api::upload_multipart_part),
         )
         .route(
+            "/ui/buckets/{bucket_name}/multipart/{upload_id}/parts",
+            put(ui_api::upload_multipart_part),
+        )
+        .route(
             "/ui/buckets/{bucket_name}/multipart/{upload_id}/complete",
             post(ui_api::complete_multipart_upload),
         )
         .route(
             "/ui/buckets/{bucket_name}/multipart/{upload_id}/abort",
+            delete(ui_api::abort_multipart_upload),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/multipart/{upload_id}",
             delete(ui_api::abort_multipart_upload),
         )
         .route(
@@ -87,6 +98,18 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         .route(
             "/ui/buckets/{bucket_name}/copy-targets",
             get(ui_api::list_copy_targets),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/list-for-copy",
+            get(ui_api::list_copy_targets),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/objects/bulk-delete",
+            post(ui_api::bulk_delete_objects),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/objects/bulk-download",
+            post(ui_api::bulk_download_objects),
         )
         .route(
             "/ui/buckets/{bucket_name}/objects/{*rest}",
@@ -133,6 +156,11 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             delete(ui_api::clear_replication_failures),
         )
         .route(
+            "/ui/buckets/{bucket_name}/replication/failures/{*rest}",
+            post(ui_api::retry_replication_failure_path)
+                .delete(ui_api::dismiss_replication_failure_path),
+        )
+        .route(
             "/ui/buckets/{bucket_name}/bulk-delete",
             post(ui_api::bulk_delete_objects),
         )
@@ -156,6 +184,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             post(ui_pages::delete_iam_user),
         )
         .route(
+            "/ui/iam/users/{user_id}/update",
+            post(ui_pages::update_iam_user),
+        )
+        .route(
             "/ui/iam/users/{user_id}/policies",
             post(ui_pages::update_iam_policies),
         )
@@ -167,10 +199,18 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/iam/users/{user_id}/rotate-secret",
             post(ui_pages::rotate_iam_secret),
         )
+        .route(
+            "/ui/iam/users/{user_id}/rotate",
+            post(ui_pages::rotate_iam_secret),
+        )
         .route("/ui/connections/create", post(ui_pages::create_connection))
         .route("/ui/connections/test", post(ui_api::test_connection))
         .route(
             "/ui/connections/{connection_id}",
+            post(ui_pages::update_connection),
+        )
+        .route(
+            "/ui/connections/{connection_id}/update",
             post(ui_pages::update_connection),
         )
         .route(
@@ -201,7 +241,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/sites/peers/{site_id}/bidirectional-status",
             get(ui_api::peer_bidirectional_status),
         )
-        .route("/ui/connections", get(ui_pages::connections_dashboard))
+        .route(
+            "/ui/connections",
+            get(ui_pages::connections_dashboard).post(ui_pages::create_connection),
+        )
         .route("/ui/metrics", get(ui_pages::metrics_dashboard))
         .route(
             "/ui/metrics/settings",
@@ -237,6 +280,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         )
         .route(
             "/ui/website-domains/{domain}",
+            post(ui_pages::update_website_domain),
+        )
+        .route(
+            "/ui/website-domains/{domain}/update",
             post(ui_pages::update_website_domain),
         )
         .route(
@@ -446,7 +493,15 @@ pub fn create_router(state: state::AppState) -> Router {
             axum::routing::post(handlers::admin::iam_create_access_key),
         )
         .route(
+            "/admin/iam/users/{identifier}/keys",
+            axum::routing::post(handlers::admin::iam_create_access_key),
+        )
+        .route(
             "/admin/iam/users/{identifier}/access-keys/{access_key}",
+            axum::routing::delete(handlers::admin::iam_delete_access_key),
+        )
+        .route(
+            "/admin/iam/users/{identifier}/keys/{access_key}",
             axum::routing::delete(handlers::admin::iam_delete_access_key),
         )
         .route(

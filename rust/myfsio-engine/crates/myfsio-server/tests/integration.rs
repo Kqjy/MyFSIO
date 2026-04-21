@@ -1,8 +1,9 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use myfsio_storage::traits::StorageEngine;
+use myfsio_storage::traits::{AsyncReadStream, StorageEngine};
 use serde_json::Value;
+use std::collections::HashMap;
 use tower::ServiceExt;
 
 const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -233,6 +234,150 @@ fn signed_request(method: Method, uri: &str, body: Body) -> Request<Body> {
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(body)
+        .unwrap()
+}
+
+fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        region: "us-east-1".to_string(),
+        iam_config_path: iam_path.join("iam.json"),
+        sigv4_timestamp_tolerance_secs: 900,
+        presigned_url_min_expiry: 1,
+        presigned_url_max_expiry: 604800,
+        secret_key: None,
+        encryption_enabled: false,
+        kms_enabled: false,
+        gc_enabled: false,
+        integrity_enabled: false,
+        metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
+        lifecycle_enabled: false,
+        website_hosting_enabled: true,
+        replication_connect_timeout_secs: 5,
+        replication_read_timeout_secs: 30,
+        replication_max_retries: 2,
+        replication_streaming_threshold_bytes: 10_485_760,
+        replication_max_failures_per_bucket: 50,
+        site_sync_enabled: false,
+        site_sync_interval_secs: 60,
+        site_sync_batch_size: 100,
+        site_sync_connect_timeout_secs: 10,
+        site_sync_read_timeout_secs: 120,
+        site_sync_max_retries: 2,
+        site_sync_clock_skew_tolerance: 1.0,
+        ui_enabled: false,
+        templates_dir: std::path::PathBuf::from("templates"),
+        static_dir: std::path::PathBuf::from("static"),
+    };
+    (myfsio_server::state::AppState::new(config), tmp)
+}
+
+async fn put_website_object(
+    state: &myfsio_server::state::AppState,
+    bucket: &str,
+    key: &str,
+    body: &str,
+    content_type: &str,
+) {
+    let mut metadata = HashMap::new();
+    metadata.insert("__content_type__".to_string(), content_type.to_string());
+    let reader: AsyncReadStream = Box::pin(std::io::Cursor::new(body.as_bytes().to_vec()));
+    state
+        .storage
+        .put_object(bucket, key, reader, Some(metadata))
+        .await
+        .unwrap();
+}
+
+async fn test_website_app(error_document: Option<&str>) -> (axum::Router, tempfile::TempDir) {
+    let (state, tmp) = test_website_state();
+    let bucket = "site-bucket";
+
+    state.storage.create_bucket(bucket).await.unwrap();
+    put_website_object(
+        &state,
+        bucket,
+        "index.html",
+        "<!doctype html><h1>Home</h1>",
+        "text/html",
+    )
+    .await;
+    if let Some(error_key) = error_document {
+        put_website_object(
+            &state,
+            bucket,
+            error_key,
+            "<!doctype html><h1>Bucket Not Found Page</h1>",
+            "text/html",
+        )
+        .await;
+    }
+
+    let mut config = state.storage.get_bucket_config(bucket).await.unwrap();
+    config.website = Some(match error_document {
+        Some(error_key) => serde_json::json!({
+            "index_document": "index.html",
+            "error_document": error_key,
+        }),
+        None => serde_json::json!({
+            "index_document": "index.html",
+        }),
+    });
+    state
+        .storage
+        .set_bucket_config(bucket, &config)
+        .await
+        .unwrap();
+    state
+        .website_domains
+        .as_ref()
+        .unwrap()
+        .set_mapping("site.example.com", bucket);
+
+    (myfsio_server::create_router(state), tmp)
+}
+
+fn website_request(method: Method, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Host", "site.example.com")
+        .body(Body::empty())
         .unwrap()
 }
 
@@ -3111,6 +3256,98 @@ async fn test_select_object_content_rejects_non_xml_content_type() {
     .unwrap();
     assert!(body.contains("<Code>InvalidRequest</Code>"));
     assert!(body.contains("Content-Type must be application/xml or text/xml"));
+}
+
+#[tokio::test]
+async fn test_static_website_serves_configured_error_document() {
+    let (app, _tmp) = test_website_app(Some("404.html")).await;
+
+    let resp = app
+        .oneshot(website_request(Method::GET, "/missing.html"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("Bucket Not Found Page"));
+}
+
+#[tokio::test]
+async fn test_static_website_default_404_returns_html_body() {
+    let (app, _tmp) = test_website_app(None).await;
+
+    let resp = app
+        .clone()
+        .oneshot(website_request(Method::GET, "/missing.html"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let content_length = resp
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body.len(), content_length);
+    assert!(body.contains("<h1>404 Not Found</h1>"));
+    assert!(body.len() > 512);
+
+    let head_resp = app
+        .oneshot(website_request(Method::HEAD, "/missing.html"))
+        .await
+        .unwrap();
+    assert_eq!(head_resp.status(), StatusCode::NOT_FOUND);
+    let head_content_length = head_resp
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let head_body = head_resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    assert_eq!(head_content_length, content_length);
+    assert!(head_body.is_empty());
 }
 
 #[tokio::test]

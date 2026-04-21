@@ -1994,12 +1994,15 @@ pub async fn complete_multipart_upload(
         .complete_multipart(&bucket_name, &upload_id, &parts)
         .await
     {
-        Ok(meta) => json_ok(json!({
-            "key": meta.key,
-            "size": meta.size,
-            "etag": meta.etag.unwrap_or_default(),
-            "last_modified": meta.last_modified.to_rfc3339(),
-        })),
+        Ok(meta) => {
+            super::trigger_replication(&state, &bucket_name, &meta.key, "write");
+            json_ok(json!({
+                "key": meta.key,
+                "size": meta.size,
+                "etag": meta.etag.unwrap_or_default(),
+                "last_modified": meta.last_modified.to_rfc3339(),
+            }))
+        }
         Err(err) => storage_json_error(err),
     }
 }
@@ -2462,13 +2465,16 @@ async fn copy_object_json(state: &AppState, bucket: &str, key: &str, body: Body)
         .copy_object(bucket, key, dest_bucket, dest_key)
         .await
     {
-        Ok(_) => Json(json!({
-            "status": "ok",
-            "message": format!("Copied to {}/{}", dest_bucket, dest_key),
-            "dest_bucket": dest_bucket,
-            "dest_key": dest_key,
-        }))
-        .into_response(),
+        Ok(_) => {
+            super::trigger_replication(state, dest_bucket, dest_key, "write");
+            Json(json!({
+                "status": "ok",
+                "message": format!("Copied to {}/{}", dest_bucket, dest_key),
+                "dest_bucket": dest_bucket,
+                "dest_key": dest_key,
+            }))
+            .into_response()
+        }
         Err(err) => storage_json_error(err),
     }
 }
@@ -2495,13 +2501,17 @@ async fn move_object_json(state: &AppState, bucket: &str, key: &str, body: Body)
 
     match state.storage.copy_object(bucket, key, dest_bucket, dest_key).await {
         Ok(_) => match state.storage.delete_object(bucket, key).await {
-            Ok(()) => Json(json!({
-                "status": "ok",
-                "message": format!("Moved to {}/{}", dest_bucket, dest_key),
-                "dest_bucket": dest_bucket,
-                "dest_key": dest_key,
-            }))
-            .into_response(),
+            Ok(()) => {
+                super::trigger_replication(state, dest_bucket, dest_key, "write");
+                super::trigger_replication(state, bucket, key, "delete");
+                Json(json!({
+                    "status": "ok",
+                    "message": format!("Moved to {}/{}", dest_bucket, dest_key),
+                    "dest_bucket": dest_bucket,
+                    "dest_key": dest_key,
+                }))
+                .into_response()
+            }
             Err(_) => Json(json!({
                 "status": "partial",
                 "message": format!("Copied to {}/{} but failed to delete source", dest_bucket, dest_key),
@@ -2554,6 +2564,7 @@ async fn delete_object_json(
         if let Err(err) = state.storage.delete_object(bucket, key).await {
             return storage_json_error(err);
         }
+        super::trigger_replication(state, bucket, key, "delete");
         if let Err(err) = purge_object_versions_for_key(state, bucket, key).await {
             return json_error(StatusCode::BAD_REQUEST, err);
         }
@@ -2565,11 +2576,14 @@ async fn delete_object_json(
     }
 
     match state.storage.delete_object(bucket, key).await {
-        Ok(()) => Json(json!({
-            "status": "ok",
-            "message": format!("Deleted '{}'", key),
-        }))
-        .into_response(),
+        Ok(()) => {
+            super::trigger_replication(state, bucket, key, "delete");
+            Json(json!({
+                "status": "ok",
+                "message": format!("Deleted '{}'", key),
+            }))
+            .into_response()
+        }
         Err(err) => storage_json_error(err),
     }
 }
@@ -2630,6 +2644,7 @@ async fn restore_object_version_json(
     {
         return storage_json_error(err);
     }
+    super::trigger_replication(state, bucket, key, "write");
 
     let mut message = format!("Restored '{}'", key);
     if live_exists && versioning_enabled {
@@ -2678,6 +2693,14 @@ fn parse_object_post_action(rest: &str) -> Option<(String, ObjectPostAction)> {
             key.to_string(),
             ObjectPostAction::Restore(version_id.to_string()),
         ));
+    }
+    if let Some(key_with_version) = rest.strip_suffix("/restore") {
+        if let Some((key, version_id)) = key_with_version.rsplit_once("/versions/") {
+            return Some((
+                key.to_string(),
+                ObjectPostAction::Restore(version_id.to_string()),
+            ));
+        }
     }
     for (suffix, action) in [
         ("/delete", ObjectPostAction::Delete),
@@ -2824,6 +2847,7 @@ pub async fn bulk_delete_objects(
     for key in keys {
         match state.storage.delete_object(&bucket_name, &key).await {
             Ok(()) => {
+                super::trigger_replication(&state, &bucket_name, &key, "delete");
                 if payload.purge_versions {
                     if let Err(err) =
                         purge_object_versions_for_key(&state, &bucket_name, &key).await
@@ -3038,6 +3062,7 @@ pub async fn archived_post_dispatch(
         match purge_object_versions_for_key(&state, &bucket_name, key).await {
             Ok(()) => {
                 let _ = state.storage.delete_object(&bucket_name, key).await;
+                super::trigger_replication(&state, &bucket_name, key, "delete");
                 Json(json!({
                     "status": "ok",
                     "message": format!("Removed archived versions for '{}'", key),
@@ -3267,14 +3292,32 @@ pub async fn retry_replication_failure(
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
-    let object_key = q.object_key.trim();
+    retry_replication_failure_key(&state, &bucket_name, q.object_key.trim()).await
+}
+
+pub async fn retry_replication_failure_path(
+    State(state): State<AppState>,
+    Extension(_session): Extension<SessionHandle>,
+    Path((bucket_name, rest)): Path<(String, String)>,
+) -> Response {
+    let Some(object_key) = rest.strip_suffix("/retry") else {
+        return json_error(StatusCode::NOT_FOUND, "Unknown replication failure action");
+    };
+    retry_replication_failure_key(&state, &bucket_name, object_key.trim()).await
+}
+
+async fn retry_replication_failure_key(
+    state: &AppState,
+    bucket_name: &str,
+    object_key: &str,
+) -> Response {
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
     }
 
     if state
         .replication
-        .retry_failed(&bucket_name, object_key)
+        .retry_failed(bucket_name, object_key)
         .await
     {
         json_ok(json!({
@@ -3305,12 +3348,27 @@ pub async fn dismiss_replication_failure(
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
-    let object_key = q.object_key.trim();
+    dismiss_replication_failure_key(&state, &bucket_name, q.object_key.trim())
+}
+
+pub async fn dismiss_replication_failure_path(
+    State(state): State<AppState>,
+    Extension(_session): Extension<SessionHandle>,
+    Path((bucket_name, object_key)): Path<(String, String)>,
+) -> Response {
+    dismiss_replication_failure_key(&state, &bucket_name, object_key.trim())
+}
+
+fn dismiss_replication_failure_key(
+    state: &AppState,
+    bucket_name: &str,
+    object_key: &str,
+) -> Response {
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
     }
 
-    if state.replication.dismiss_failure(&bucket_name, object_key) {
+    if state.replication.dismiss_failure(bucket_name, object_key) {
         json_ok(json!({
             "status": "dismissed",
             "object_key": object_key,

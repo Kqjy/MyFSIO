@@ -147,6 +147,12 @@ impl FsStorageBackend {
             .join(BUCKET_CONFIG_FILE)
     }
 
+    fn legacy_bucket_policies_path(&self) -> PathBuf {
+        self.system_root_path()
+            .join("config")
+            .join("bucket_policies.json")
+    }
+
     fn version_dir(&self, bucket_name: &str, key: &str) -> PathBuf {
         self.bucket_versions_root(bucket_name).join(key)
     }
@@ -383,7 +389,7 @@ impl FsStorageBackend {
         }
 
         let config_path = self.bucket_config_path(bucket_name);
-        let config = if config_path.exists() {
+        let mut config = if config_path.exists() {
             std::fs::read_to_string(&config_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<BucketConfig>(&s).ok())
@@ -391,10 +397,53 @@ impl FsStorageBackend {
         } else {
             BucketConfig::default()
         };
+        if config.policy.is_none() {
+            config.policy = self.read_legacy_bucket_policy_sync(bucket_name);
+        }
 
         self.bucket_config_cache
             .insert(bucket_name.to_string(), (config.clone(), Instant::now()));
         config
+    }
+
+    fn read_legacy_bucket_policy_sync(&self, bucket_name: &str) -> Option<Value> {
+        let path = self.legacy_bucket_policies_path();
+        let text = std::fs::read_to_string(path).ok()?;
+        let value = serde_json::from_str::<Value>(&text).ok()?;
+        value
+            .get("policies")
+            .and_then(|policies| policies.get(bucket_name))
+            .cloned()
+            .or_else(|| value.get(bucket_name).cloned())
+    }
+
+    fn remove_legacy_bucket_policy_sync(&self, bucket_name: &str) -> std::io::Result<()> {
+        let path = self.legacy_bucket_policies_path();
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let text = std::fs::read_to_string(&path)?;
+        let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+            return Ok(());
+        };
+        let changed = {
+            let Some(object) = value.as_object_mut() else {
+                return Ok(());
+            };
+
+            let mut changed = false;
+            if let Some(policies) = object.get_mut("policies").and_then(Value::as_object_mut) {
+                changed |= policies.remove(bucket_name).is_some();
+            }
+            changed |= object.remove(bucket_name).is_some();
+            changed
+        };
+        if !changed {
+            return Ok(());
+        }
+
+        Self::atomic_write_json_sync(&path, &value, true)
     }
 
     fn write_bucket_config_sync(
@@ -406,6 +455,9 @@ impl FsStorageBackend {
         let json_val = serde_json::to_value(config)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         Self::atomic_write_json_sync(&config_path, &json_val, true)?;
+        if config.policy.is_none() {
+            self.remove_legacy_bucket_policy_sync(bucket_name)?;
+        }
         self.bucket_config_cache
             .insert(bucket_name.to_string(), (config.clone(), Instant::now()));
         Ok(())
@@ -1879,6 +1931,63 @@ mod tests {
         assert!(!backend.bucket_exists("test-bucket").await.unwrap());
         backend.create_bucket("test-bucket").await.unwrap();
         assert!(backend.bucket_exists("test-bucket").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_bucket_config_reads_legacy_global_policy() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("legacy-policy").await.unwrap();
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        let policy_path = config_dir.join("bucket_policies.json");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            &policy_path,
+            serde_json::json!({
+                "policies": {
+                    "legacy-policy": {
+                        "Version": "2012-10-17",
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Principal": "*",
+                            "Action": "s3:GetObject",
+                            "Resource": "arn:aws:s3:::legacy-policy/*"
+                        }]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = backend.get_bucket_config("legacy-policy").await.unwrap();
+        assert!(config.policy.is_some());
+        assert_eq!(
+            config
+                .policy
+                .as_ref()
+                .and_then(|p| p.get("Version"))
+                .and_then(Value::as_str),
+            Some("2012-10-17")
+        );
+
+        let mut config = config;
+        config.policy = None;
+        backend
+            .set_bucket_config("legacy-policy", &config)
+            .await
+            .unwrap();
+        let legacy_file =
+            serde_json::from_str::<Value>(&std::fs::read_to_string(policy_path).unwrap()).unwrap();
+        assert!(legacy_file
+            .get("policies")
+            .and_then(|policies| policies.get("legacy-policy"))
+            .is_none());
+        assert!(backend
+            .get_bucket_config("legacy-policy")
+            .await
+            .unwrap()
+            .policy
+            .is_none());
     }
 
     #[tokio::test]

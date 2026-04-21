@@ -1,5 +1,5 @@
-pub mod acl;
 pub mod access_logging;
+pub mod acl;
 pub mod gc;
 pub mod integrity;
 pub mod lifecycle;

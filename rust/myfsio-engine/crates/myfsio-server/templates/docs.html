@@ -569,7 +569,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <h3 class="h6 text-uppercase text-muted">Policies &amp; versioning</h3>
             <ul>
               <li>Toggle versioning (requires write access). Archived-only keys are flagged so you can restore them quickly.</li>
-              <li>The policy editor saves drafts, ships with presets, and hot-reloads <code>data/.myfsio.sys/config/bucket_policies.json</code>.</li>
+              <li>The policy editor saves each bucket policy in that bucket's <code>.bucket.json</code>; legacy <code>data/.myfsio.sys/config/bucket_policies.json</code> entries are still read as a fallback.</li>
             </ul>
           </div>
         </div>
@@ -2058,7 +2058,7 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
               <tr>
                 <td>UI shows stale policy/object data</td>
                 <td>Browser cached prior state</td>
-                <td>Refresh; the server hot-reloads <code>data/.myfsio.sys/config/bucket_policies.json</code> and storage metadata.</td>
+                <td>Refresh; the server hot-reloads bucket <code>.bucket.json</code> policy data and legacy <code>data/.myfsio.sys/config/bucket_policies.json</code> fallback entries.</td>
               </tr>
               <tr>
                 <td>Presign dialog returns 403</td>

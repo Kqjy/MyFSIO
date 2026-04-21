@@ -97,50 +97,26 @@ impl ServerConfig {
             }
         };
 
-        let encryption_enabled = std::env::var("ENCRYPTION_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let encryption_enabled = parse_bool_env("ENCRYPTION_ENABLED", false);
 
-        let kms_enabled = std::env::var("KMS_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let kms_enabled = parse_bool_env("KMS_ENABLED", false);
 
-        let gc_enabled = std::env::var("GC_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let gc_enabled = parse_bool_env("GC_ENABLED", false);
 
-        let integrity_enabled = std::env::var("INTEGRITY_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let integrity_enabled = parse_bool_env("INTEGRITY_ENABLED", false);
 
-        let metrics_enabled = std::env::var("OPERATION_METRICS_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let metrics_enabled = parse_bool_env("OPERATION_METRICS_ENABLED", false);
 
-        let metrics_history_enabled = std::env::var("METRICS_HISTORY_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let metrics_history_enabled = parse_bool_env("METRICS_HISTORY_ENABLED", false);
 
         let metrics_interval_minutes = parse_u64_env("OPERATION_METRICS_INTERVAL_MINUTES", 5);
         let metrics_retention_hours = parse_u64_env("OPERATION_METRICS_RETENTION_HOURS", 24);
         let metrics_history_interval_minutes = parse_u64_env("METRICS_HISTORY_INTERVAL_MINUTES", 5);
         let metrics_history_retention_hours = parse_u64_env("METRICS_HISTORY_RETENTION_HOURS", 24);
 
-        let lifecycle_enabled = std::env::var("LIFECYCLE_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let lifecycle_enabled = parse_bool_env("LIFECYCLE_ENABLED", false);
 
-        let website_hosting_enabled = std::env::var("WEBSITE_HOSTING_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let website_hosting_enabled = parse_bool_env("WEBSITE_HOSTING_ENABLED", false);
 
         let replication_connect_timeout_secs =
             parse_u64_env("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5);
@@ -151,10 +127,7 @@ impl ServerConfig {
         let replication_max_failures_per_bucket =
             parse_u64_env("REPLICATION_MAX_FAILURES_PER_BUCKET", 50) as usize;
 
-        let site_sync_enabled = std::env::var("SITE_SYNC_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase()
-            == "true";
+        let site_sync_enabled = parse_bool_env("SITE_SYNC_ENABLED", false);
         let site_sync_interval_secs = parse_u64_env("SITE_SYNC_INTERVAL_SECONDS", 60);
         let site_sync_batch_size = parse_u64_env("SITE_SYNC_BATCH_SIZE", 100) as usize;
         let site_sync_connect_timeout_secs = parse_u64_env("SITE_SYNC_CONNECT_TIMEOUT_SECONDS", 10);
@@ -166,10 +139,7 @@ impl ServerConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(1.0);
 
-        let ui_enabled = std::env::var("UI_ENABLED")
-            .unwrap_or_else(|_| "true".to_string())
-            .to_lowercase()
-            == "true";
+        let ui_enabled = parse_bool_env("UI_ENABLED", true);
         let templates_dir = std::env::var("TEMPLATES_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_templates_dir());
@@ -241,5 +211,17 @@ fn parse_u64_env(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+fn parse_bool_env(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(default)
 }

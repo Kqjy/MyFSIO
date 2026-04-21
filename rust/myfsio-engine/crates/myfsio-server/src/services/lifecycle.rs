@@ -302,7 +302,10 @@ impl LifecycleService {
             Ok(uploads) => {
                 for upload in &uploads {
                     if upload.initiated < cutoff {
-                        if let Err(err) = self.storage.abort_multipart(bucket, &upload.upload_id).await
+                        if let Err(err) = self
+                            .storage
+                            .abort_multipart(bucket, &upload.upload_id)
+                            .await
                         {
                             result
                                 .errors
@@ -314,7 +317,10 @@ impl LifecycleService {
                 }
                 None
             }
-            Err(err) => Some(format!("Failed to list multipart uploads for {}: {}", bucket, err)),
+            Err(err) => Some(format!(
+                "Failed to list multipart uploads for {}: {}",
+                bucket, err
+            )),
         }
     }
 
@@ -438,12 +444,9 @@ fn parse_lifecycle_rules_from_string(raw: &str) -> Vec<ParsedLifecycleRule> {
                         .find(|node| {
                             node.is_element()
                                 && node.tag_name().name() == "Filter"
-                                && node
-                                    .children()
-                                    .any(|child| {
-                                        child.is_element()
-                                            && child.tag_name().name() == "Prefix"
-                                    })
+                                && node.children().any(|child| {
+                                    child.is_element() && child.tag_name().name() == "Prefix"
+                                })
                         })
                         .and_then(|filter| child_text(&filter, "Prefix"))
                 })
@@ -469,8 +472,7 @@ fn parse_lifecycle_rules_from_string(raw: &str) -> Vec<ParsedLifecycleRule> {
             abort_incomplete_multipart_days: rule
                 .descendants()
                 .find(|node| {
-                    node.is_element()
-                        && node.tag_name().name() == "AbortIncompleteMultipartUpload"
+                    node.is_element() && node.tag_name().name() == "AbortIncompleteMultipartUpload"
                 })
                 .and_then(|node| child_text(&node, "DaysAfterInitiation"))
                 .and_then(|value| value.parse::<u64>().ok()),
@@ -592,7 +594,9 @@ mod tests {
             .await
             .unwrap();
 
-        let versions_root = version_root_for_bucket(tmp.path(), "docs").join("logs").join("file.txt");
+        let versions_root = version_root_for_bucket(tmp.path(), "docs")
+            .join("logs")
+            .join("file.txt");
         let manifest = std::fs::read_dir(&versions_root)
             .unwrap()
             .flatten()
@@ -621,7 +625,8 @@ mod tests {
         config.lifecycle = Some(Value::String(lifecycle_xml.to_string()));
         storage.set_bucket_config("docs", &config).await.unwrap();
 
-        let service = LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
+        let service =
+            LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
         let result = service.run_cycle().await.unwrap();
         assert_eq!(result["versions_deleted"], 1);
 

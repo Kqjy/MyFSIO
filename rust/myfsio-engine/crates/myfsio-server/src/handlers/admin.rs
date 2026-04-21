@@ -46,6 +46,17 @@ fn require_admin(principal: &Principal) -> Option<Response> {
     None
 }
 
+fn require_iam_action(state: &AppState, principal: &Principal, action: &str) -> Option<Response> {
+    if !state.iam.authorize(principal, None, action, None) {
+        return Some(json_error(
+            "AccessDenied",
+            &format!("Requires {} permission", action),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    None
+}
+
 async fn read_json_body(body: Body) -> Option<serde_json::Value> {
     let bytes = http_body_util::BodyExt::collect(body)
         .await
@@ -926,7 +937,7 @@ pub async fn iam_list_users(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "iam:list_users") {
         return err;
     }
     let users = state.iam.list_users().await;
@@ -938,7 +949,7 @@ pub async fn iam_get_user(
     Extension(principal): Extension<Principal>,
     Path(identifier): Path<String>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "iam:get_user") {
         return err;
     }
     match state.iam.get_user(&identifier).await {
@@ -956,7 +967,7 @@ pub async fn iam_get_user_policies(
     Extension(principal): Extension<Principal>,
     Path(identifier): Path<String>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "iam:get_policy") {
         return err;
     }
     match state.iam.get_user_policies(&identifier) {
@@ -974,7 +985,7 @@ pub async fn iam_create_access_key(
     Extension(principal): Extension<Principal>,
     Path(identifier): Path<String>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "iam:create_key") {
         return err;
     }
     match state.iam.create_access_key(&identifier) {
@@ -988,7 +999,7 @@ pub async fn iam_delete_access_key(
     Extension(principal): Extension<Principal>,
     Path((_identifier, access_key)): Path<(String, String)>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "iam:delete_key") {
         return err;
     }
     match state.iam.delete_access_key(&access_key) {
@@ -1002,7 +1013,7 @@ pub async fn iam_disable_user(
     Extension(principal): Extension<Principal>,
     Path(identifier): Path<String>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "iam:disable_user") {
         return err;
     }
     match state.iam.set_user_enabled(&identifier, false).await {
@@ -1016,7 +1027,7 @@ pub async fn iam_enable_user(
     Extension(principal): Extension<Principal>,
     Path(identifier): Path<String>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "iam:disable_user") {
         return err;
     }
     match state.iam.set_user_enabled(&identifier, true).await {

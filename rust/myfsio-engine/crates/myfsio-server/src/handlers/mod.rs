@@ -47,6 +47,16 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
     s3_error_response(S3Error::from(err))
 }
 
+fn trigger_replication(state: &AppState, bucket: &str, key: &str, action: &str) {
+    let manager = state.replication.clone();
+    let bucket = bucket.to_string();
+    let key = key.to_string();
+    let action = action.to_string();
+    tokio::spawn(async move {
+        manager.trigger(bucket, key, action).await;
+    });
+}
+
 async fn ensure_object_lock_allows_write(
     state: &AppState,
     bucket: &str,
@@ -632,7 +642,8 @@ pub async fn put_object(
         return copy_object_handler(&state, copy_source, &bucket, &key, &headers).await;
     }
 
-    if let Err(response) = ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
+    if let Err(response) =
+        ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
     {
         return response;
     }
@@ -729,6 +740,7 @@ pub async fn put_object(
                                 "",
                                 "Put",
                             );
+                            trigger_replication(&state, &bucket, &key, "write");
                             return (StatusCode::OK, resp_headers).into_response();
                         }
                         Err(e) => {
@@ -757,6 +769,7 @@ pub async fn put_object(
                 "",
                 "Put",
             );
+            trigger_replication(&state, &bucket, &key, "write");
             (StatusCode::OK, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -965,7 +978,8 @@ pub async fn delete_object(
         return abort_multipart_handler(&state, &bucket, upload_id).await;
     }
 
-    if let Err(response) = ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
+    if let Err(response) =
+        ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
     {
         return response;
     }
@@ -973,6 +987,7 @@ pub async fn delete_object(
     match state.storage.delete_object(&bucket, &key).await {
         Ok(()) => {
             notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
+            trigger_replication(&state, &bucket, &key, "delete");
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => storage_err_response(e),
@@ -1196,6 +1211,7 @@ async fn complete_multipart_handler(
                 etag,
                 &format!("/{}/{}", bucket, key),
             );
+            trigger_replication(state, bucket, key, "write");
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -1289,7 +1305,9 @@ async fn copy_object_handler(
     dst_key: &str,
     headers: &HeaderMap,
 ) -> Response {
-    if let Err(response) = ensure_object_lock_allows_write(state, dst_bucket, dst_key, Some(headers)).await {
+    if let Err(response) =
+        ensure_object_lock_allows_write(state, dst_bucket, dst_key, Some(headers)).await
+    {
         return response;
     }
 
@@ -1321,6 +1339,7 @@ async fn copy_object_handler(
             let etag = meta.etag.as_deref().unwrap_or("");
             let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
             let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
+            trigger_replication(state, dst_bucket, dst_key, "write");
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -1371,6 +1390,7 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
         match state.storage.delete_object(bucket, &obj.key).await {
             Ok(()) => {
                 notifications::emit_object_removed(state, bucket, &obj.key, "", "", "", "Delete");
+                trigger_replication(state, bucket, &obj.key, "delete");
                 deleted.push((obj.key.clone(), obj.version_id.clone()))
             }
             Err(e) => {
@@ -2172,8 +2192,15 @@ mod tests {
             .unwrap();
 
         let mut config = state.storage.get_bucket_config("public").await.unwrap();
-        config.acl = Some(Value::String(acl_to_xml(&create_canned_acl("public-read", "myfsio"))));
-        state.storage.set_bucket_config("public", &config).await.unwrap();
+        config.acl = Some(Value::String(acl_to_xml(&create_canned_acl(
+            "public-read",
+            "myfsio",
+        ))));
+        state
+            .storage
+            .set_bucket_config("public", &config)
+            .await
+            .unwrap();
 
         let app = crate::create_router(state);
         let response = app

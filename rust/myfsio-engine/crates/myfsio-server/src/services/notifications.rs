@@ -61,7 +61,9 @@ impl NotificationConfiguration {
     }
 }
 
-pub fn parse_notification_configurations(xml: &str) -> Result<Vec<NotificationConfiguration>, String> {
+pub fn parse_notification_configurations(
+    xml: &str,
+) -> Result<Vec<NotificationConfiguration>, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|err| err.to_string())?;
     let mut configs = Vec::new();
 

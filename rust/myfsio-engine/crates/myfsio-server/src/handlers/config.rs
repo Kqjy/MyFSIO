@@ -1156,7 +1156,11 @@ pub async fn put_object_acl(
                 .unwrap_or_else(|| "myfsio".to_string());
             let acl = create_canned_acl(canned_acl, &owner);
             store_object_acl(&mut metadata, &acl);
-            match state.storage.put_object_metadata(bucket, key, &metadata).await {
+            match state
+                .storage
+                .put_object_metadata(bucket, key, &metadata)
+                .await
+            {
                 Ok(()) => StatusCode::OK.into_response(),
                 Err(err) => storage_err(err),
             }
@@ -1281,7 +1285,11 @@ pub async fn put_object_retention(
     ) {
         return custom_xml_error(StatusCode::BAD_REQUEST, "InvalidArgument", &message);
     }
-    match state.storage.put_object_metadata(bucket, key, &metadata).await {
+    match state
+        .storage
+        .put_object_metadata(bucket, key, &metadata)
+        .await
+    {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => storage_err(err),
     }
@@ -1294,7 +1302,11 @@ pub async fn get_object_legal_hold(state: &AppState, bucket: &str, key: &str) ->
                 Ok(metadata) => metadata,
                 Err(err) => return storage_err(err),
             };
-            let status = if get_legal_hold(&metadata) { "ON" } else { "OFF" };
+            let status = if get_legal_hold(&metadata) {
+                "ON"
+            } else {
+                "OFF"
+            };
             let xml = format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                  <LegalHold xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
@@ -1356,7 +1368,11 @@ pub async fn put_object_legal_hold(
         Err(err) => return storage_err(err),
     };
     set_legal_hold(&mut metadata, enabled);
-    match state.storage.put_object_metadata(bucket, key, &metadata).await {
+    match state
+        .storage
+        .put_object_metadata(bucket, key, &metadata)
+        .await
+    {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => storage_err(err),
     }
