@@ -10,6 +10,7 @@ myfsio-crypto = { path = "../myfsio-crypto" }
 myfsio-storage = { path = "../myfsio-storage" }
 myfsio-xml = { path = "../myfsio-xml" }
 base64 = { workspace = true }
+md-5 = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
@@ -29,6 +30,7 @@ percent-encoding = { workspace = true }
 quick-xml = { workspace = true }
 mime_guess = "2"
 crc32fast = { workspace = true }
+sha2 = { workspace = true }
 duckdb = { workspace = true }
 roxmltree = "0.20"
 parking_lot = { workspace = true }

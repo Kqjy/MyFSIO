@@ -1038,7 +1038,12 @@ fn s3_error_response(code: S3ErrorCode, message: &str, status: StatusCode) -> Re
     (status, [("content-type", "application/xml")], err.to_xml()).into_response()
 }
 
-pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
+pub async fn list_object_versions(
+    state: &AppState,
+    bucket: &str,
+    prefix: Option<&str>,
+    max_keys: usize,
+) -> Response {
     match state.storage.list_buckets().await {
         Ok(buckets) => {
             if !buckets.iter().any(|b| b.name == bucket) {
@@ -1050,13 +1055,24 @@ pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
         Err(e) => return storage_err(e),
     }
 
+    let fetch_limit = max_keys.saturating_add(1).max(1);
     let params = myfsio_common::types::ListParams {
-        max_keys: 1000,
+        max_keys: fetch_limit,
+        prefix: prefix.map(ToOwned::to_owned),
         ..Default::default()
     };
 
-    let objects = match state.storage.list_objects(bucket, &params).await {
-        Ok(result) => result.objects,
+    let object_result = match state.storage.list_objects(bucket, &params).await {
+        Ok(result) => result,
+        Err(e) => return storage_err(e),
+    };
+    let objects = object_result.objects;
+    let archived_versions = match state
+        .storage
+        .list_bucket_object_versions(bucket, prefix)
+        .await
+    {
+        Ok(versions) => versions,
         Err(e) => return storage_err(e),
     };
 
@@ -1064,11 +1080,24 @@ pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
         <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
     );
-    xml.push_str(&format!("<Name>{}</Name>", bucket));
+    xml.push_str(&format!("<Name>{}</Name>", xml_escape(bucket)));
+    xml.push_str(&format!(
+        "<Prefix>{}</Prefix>",
+        xml_escape(prefix.unwrap_or(""))
+    ));
+    xml.push_str(&format!("<MaxKeys>{}</MaxKeys>", max_keys));
 
-    for obj in &objects {
+    let current_count = objects.len().min(max_keys);
+    let remaining = max_keys.saturating_sub(current_count);
+    let archived_count = archived_versions.len().min(remaining);
+    let is_truncated = object_result.is_truncated
+        || objects.len() > current_count
+        || archived_versions.len() > archived_count;
+    xml.push_str(&format!("<IsTruncated>{}</IsTruncated>", is_truncated));
+
+    for obj in objects.iter().take(current_count) {
         xml.push_str("<Version>");
-        xml.push_str(&format!("<Key>{}</Key>", obj.key));
+        xml.push_str(&format!("<Key>{}</Key>", xml_escape(&obj.key)));
         xml.push_str("<VersionId>null</VersionId>");
         xml.push_str("<IsLatest>true</IsLatest>");
         xml.push_str(&format!(
@@ -1076,9 +1105,32 @@ pub async fn list_object_versions(state: &AppState, bucket: &str) -> Response {
             myfsio_xml::response::format_s3_datetime(&obj.last_modified)
         ));
         if let Some(ref etag) = obj.etag {
-            xml.push_str(&format!("<ETag>\"{}\"</ETag>", etag));
+            xml.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(etag)));
         }
         xml.push_str(&format!("<Size>{}</Size>", obj.size));
+        xml.push_str(&format!(
+            "<StorageClass>{}</StorageClass>",
+            xml_escape(obj.storage_class.as_deref().unwrap_or("STANDARD"))
+        ));
+        xml.push_str("</Version>");
+    }
+
+    for version in archived_versions.iter().take(archived_count) {
+        xml.push_str("<Version>");
+        xml.push_str(&format!("<Key>{}</Key>", xml_escape(&version.key)));
+        xml.push_str(&format!(
+            "<VersionId>{}</VersionId>",
+            xml_escape(&version.version_id)
+        ));
+        xml.push_str("<IsLatest>false</IsLatest>");
+        xml.push_str(&format!(
+            "<LastModified>{}</LastModified>",
+            myfsio_xml::response::format_s3_datetime(&version.last_modified)
+        ));
+        if let Some(ref etag) = version.etag {
+            xml.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(etag)));
+        }
+        xml.push_str(&format!("<Size>{}</Size>", version.size));
         xml.push_str("<StorageClass>STANDARD</StorageClass>");
         xml.push_str("</Version>");
     }

@@ -13,10 +13,13 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::engine::general_purpose::URL_SAFE;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use md5::Md5;
+use percent_encoding::percent_decode_str;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_common::types::PartInfo;
@@ -90,7 +93,44 @@ async fn ensure_object_lock_allows_write(
     }
 }
 
-pub async fn list_buckets(State(state): State<AppState>) -> Response {
+async fn ensure_object_version_lock_allows_delete(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    version_id: &str,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    let metadata = match state
+        .storage
+        .get_object_version_metadata(bucket, key, version_id)
+        .await
+    {
+        Ok(metadata) => metadata,
+        Err(err) => return Err(storage_err_response(err)),
+    };
+    let bypass_governance = headers
+        .get("x-amz-bypass-governance-retention")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            message,
+        )));
+    }
+    Ok(())
+}
+
+pub async fn list_buckets(
+    State(state): State<AppState>,
+    Query(query): Query<BucketQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
+        return get_bucket(State(state), Path(host_bucket), Query(query), headers).await;
+    }
+
     match state.storage.list_buckets().await {
         Ok(buckets) => {
             let xml = myfsio_xml::response::list_buckets_xml("myfsio", "myfsio", &buckets);
@@ -117,8 +157,22 @@ pub async fn create_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
+        if host_bucket != bucket {
+            return put_object(
+                State(state),
+                Path((host_bucket, bucket)),
+                Query(ObjectQuery::default()),
+                headers,
+                body,
+            )
+            .await;
+        }
+    }
+
     if query.quota.is_some() {
         return config::put_quota(&state, &bucket, body).await;
     }
@@ -205,11 +259,41 @@ pub struct BucketQuery {
     pub versions: Option<String>,
 }
 
+async fn virtual_host_bucket_from_headers(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let host = headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(':').next())?
+        .trim()
+        .to_ascii_lowercase();
+    let (candidate, _) = host.split_once('.')?;
+    if myfsio_storage::validation::validate_bucket_name(candidate).is_some() {
+        return None;
+    }
+    match state.storage.bucket_exists(candidate).await {
+        Ok(true) => Some(candidate.to_string()),
+        _ => None,
+    }
+}
+
 pub async fn get_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    headers: HeaderMap,
 ) -> Response {
+    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
+        if host_bucket != bucket {
+            return get_object(
+                State(state),
+                Path((host_bucket, bucket)),
+                Query(ObjectQuery::default()),
+                headers,
+            )
+            .await;
+        }
+    }
+
     if !matches!(state.storage.bucket_exists(&bucket).await, Ok(true)) {
         return storage_err_response(myfsio_storage::error::StorageError::BucketNotFound(bucket));
     }
@@ -260,7 +344,13 @@ pub async fn get_bucket(
         return config::get_logging(&state, &bucket).await;
     }
     if query.versions.is_some() {
-        return config::list_object_versions(&state, &bucket).await;
+        return config::list_object_versions(
+            &state,
+            &bucket,
+            query.prefix.as_deref(),
+            query.max_keys.unwrap_or(1000),
+        )
+        .await;
     }
     if query.uploads.is_some() {
         return list_multipart_uploads_handler(&state, &bucket).await;
@@ -408,6 +498,19 @@ pub async fn post_bucket(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
+        if host_bucket != bucket {
+            return post_object(
+                State(state),
+                Path((host_bucket, bucket)),
+                Query(ObjectQuery::default()),
+                headers,
+                body,
+            )
+            .await;
+        }
+    }
+
     if query.delete.is_some() {
         return delete_objects_handler(&state, &bucket, body).await;
     }
@@ -425,7 +528,20 @@ pub async fn delete_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    headers: HeaderMap,
 ) -> Response {
+    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
+        if host_bucket != bucket {
+            return delete_object(
+                State(state),
+                Path((host_bucket, bucket)),
+                Query(ObjectQuery::default()),
+                headers,
+            )
+            .await;
+        }
+    }
+
     if query.quota.is_some() {
         return config::delete_quota(&state, &bucket).await;
     }
@@ -466,7 +582,23 @@ pub async fn delete_bucket(
     }
 }
 
-pub async fn head_bucket(State(state): State<AppState>, Path(bucket): Path<String>) -> Response {
+pub async fn head_bucket(
+    State(state): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
+        if host_bucket != bucket {
+            return head_object(
+                State(state),
+                Path((host_bucket, bucket)),
+                Query(ObjectQuery::default()),
+                headers,
+            )
+            .await;
+        }
+    }
+
     match state.storage.bucket_exists(&bucket).await {
         Ok(true) => {
             let mut headers = HeaderMap::new();
@@ -489,6 +621,8 @@ pub struct ObjectQuery {
     pub upload_id: Option<String>,
     #[serde(rename = "partNumber")]
     pub part_number: Option<u32>,
+    #[serde(rename = "versionId")]
+    pub version_id: Option<String>,
     pub tagging: Option<String>,
     pub acl: Option<String>,
     pub retention: Option<String>,
@@ -583,6 +717,314 @@ fn insert_content_type(headers: &mut HeaderMap, key: &str, explicit: Option<&str
     }
 }
 
+fn internal_header_pairs() -> &'static [(&'static str, &'static str, &'static str)] {
+    &[
+        ("cache-control", "__cache_control__", "cache-control"),
+        (
+            "content-disposition",
+            "__content_disposition__",
+            "content-disposition",
+        ),
+        (
+            "content-language",
+            "__content_language__",
+            "content-language",
+        ),
+        (
+            "content-encoding",
+            "__content_encoding__",
+            "content-encoding",
+        ),
+        ("expires", "__expires__", "expires"),
+        (
+            "x-amz-website-redirect-location",
+            "__website_redirect_location__",
+            "x-amz-website-redirect-location",
+        ),
+    ]
+}
+
+fn decoded_content_encoding(value: &str) -> Option<String> {
+    let filtered: Vec<&str> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && !part.eq_ignore_ascii_case("aws-chunked"))
+        .collect();
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered.join(", "))
+    }
+}
+
+fn insert_standard_object_metadata(
+    headers: &HeaderMap,
+    metadata: &mut HashMap<String, String>,
+) -> Result<(), Response> {
+    for (request_header, metadata_key, _) in internal_header_pairs() {
+        if let Some(value) = headers.get(*request_header).and_then(|v| v.to_str().ok()) {
+            if *request_header == "content-encoding" {
+                if let Some(decoded_encoding) = decoded_content_encoding(value) {
+                    metadata.insert((*metadata_key).to_string(), decoded_encoding);
+                }
+            } else {
+                metadata.insert((*metadata_key).to_string(), value.to_string());
+            }
+        }
+    }
+    if let Some(value) = headers
+        .get("x-amz-storage-class")
+        .and_then(|v| v.to_str().ok())
+    {
+        metadata.insert("__storage_class__".to_string(), value.to_ascii_uppercase());
+    }
+
+    if let Some(value) = headers
+        .get("x-amz-object-lock-legal-hold")
+        .and_then(|v| v.to_str().ok())
+    {
+        object_lock::set_legal_hold(metadata, value.eq_ignore_ascii_case("ON"));
+    }
+
+    let retention_mode = headers
+        .get("x-amz-object-lock-mode")
+        .and_then(|v| v.to_str().ok());
+    let retain_until = headers
+        .get("x-amz-object-lock-retain-until-date")
+        .and_then(|v| v.to_str().ok());
+    if let (Some(mode), Some(retain_until)) = (retention_mode, retain_until) {
+        let mode = match mode.to_ascii_uppercase().as_str() {
+            "GOVERNANCE" => object_lock::RetentionMode::GOVERNANCE,
+            "COMPLIANCE" => object_lock::RetentionMode::COMPLIANCE,
+            _ => {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Invalid x-amz-object-lock-mode",
+                )))
+            }
+        };
+        let retain_until_date = DateTime::parse_from_rfc3339(retain_until)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|_| {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Invalid x-amz-object-lock-retain-until-date",
+                ))
+            })?;
+        object_lock::set_object_retention(
+            metadata,
+            &object_lock::ObjectLockRetention {
+                mode,
+                retain_until_date,
+            },
+        )
+        .map_err(|message| {
+            s3_error_response(S3Error::new(S3ErrorCode::InvalidArgument, message))
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_stored_response_headers(headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
+    for (_, metadata_key, response_header) in internal_header_pairs() {
+        if let Some(value) = metadata
+            .get(*metadata_key)
+            .and_then(|value| value.parse().ok())
+        {
+            headers.insert(*response_header, value);
+        }
+    }
+    if let Some(value) = metadata
+        .get("__storage_class__")
+        .and_then(|value| value.parse().ok())
+    {
+        headers.insert("x-amz-storage-class", value);
+    }
+}
+
+fn apply_user_metadata(headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
+    for (k, v) in metadata {
+        if let Ok(header_val) = v.parse() {
+            let header_name = format!("x-amz-meta-{}", k);
+            if let Ok(name) = header_name.parse::<axum::http::HeaderName>() {
+                headers.insert(name, header_val);
+            }
+        }
+    }
+}
+
+fn is_null_version(version_id: Option<&str>) -> bool {
+    version_id.is_none_or(|value| value == "null")
+}
+
+fn bad_digest_response(message: impl Into<String>) -> Response {
+    s3_error_response(S3Error::new(S3ErrorCode::BadDigest, message))
+}
+
+fn base64_header_bytes(headers: &HeaderMap, name: &str) -> Result<Option<Vec<u8>>, Response> {
+    let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) else {
+        return Ok(None);
+    };
+    STANDARD
+        .decode(value.trim())
+        .map(Some)
+        .map_err(|_| bad_digest_response(format!("Invalid base64 value for {}", name)))
+}
+
+fn has_upload_checksum(headers: &HeaderMap) -> bool {
+    headers.contains_key("content-md5")
+        || headers.contains_key("x-amz-checksum-sha256")
+        || headers.contains_key("x-amz-checksum-crc32")
+}
+
+fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Response> {
+    if let Some(expected) = base64_header_bytes(headers, "content-md5")? {
+        if expected.len() != 16 || Md5::digest(data).as_slice() != expected.as_slice() {
+            return Err(bad_digest_response(
+                "The Content-MD5 you specified did not match what we received",
+            ));
+        }
+    }
+
+    if let Some(expected) = base64_header_bytes(headers, "x-amz-checksum-sha256")? {
+        if Sha256::digest(data).as_slice() != expected.as_slice() {
+            return Err(bad_digest_response(
+                "The x-amz-checksum-sha256 you specified did not match what we received",
+            ));
+        }
+    }
+
+    if let Some(expected) = base64_header_bytes(headers, "x-amz-checksum-crc32")? {
+        let actual = crc32fast::hash(data).to_be_bytes();
+        if expected.as_slice() != actual {
+            return Err(bad_digest_response(
+                "The x-amz-checksum-crc32 you specified did not match what we received",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<Vec<u8>, Response> {
+    if aws_chunked {
+        let mut reader = chunked::decode_body(body);
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).await.map_err(|_| {
+            s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Failed to read aws-chunked request body",
+            ))
+        })?;
+        return Ok(data);
+    }
+
+    http_body_util::BodyExt::collect(body)
+        .await
+        .map(|collected| collected.to_bytes().to_vec())
+        .map_err(|_| {
+            s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Failed to read request body",
+            ))
+        })
+}
+
+fn parse_tagging_header(value: &str) -> Result<Vec<myfsio_common::types::Tag>, Response> {
+    let mut tags = Vec::new();
+    if value.trim().is_empty() {
+        return Ok(tags);
+    }
+
+    for pair in value.split('&') {
+        let (raw_key, raw_value) = pair.split_once('=').ok_or_else(|| {
+            s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidTag,
+                "The x-amz-tagging header must use query-string key=value pairs",
+            ))
+        })?;
+        let key = percent_decode_str(raw_key)
+            .decode_utf8()
+            .map_err(|_| {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidTag,
+                    "Tag keys must be valid UTF-8",
+                ))
+            })?
+            .to_string();
+        let value = percent_decode_str(raw_value)
+            .decode_utf8()
+            .map_err(|_| {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidTag,
+                    "Tag values must be valid UTF-8",
+                ))
+            })?
+            .to_string();
+        tags.push(myfsio_common::types::Tag { key, value });
+    }
+
+    Ok(tags)
+}
+
+fn parse_copy_source(copy_source: &str) -> Result<(String, String, Option<String>), Response> {
+    let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
+    let (bucket_raw, key_and_query) = source.split_once('/').ok_or_else(|| {
+        s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Invalid x-amz-copy-source",
+        ))
+    })?;
+    let (key_raw, query) = key_and_query
+        .split_once('?')
+        .map(|(key, query)| (key, Some(query)))
+        .unwrap_or((key_and_query, None));
+
+    let bucket = percent_decode_str(bucket_raw)
+        .decode_utf8()
+        .map_err(|_| {
+            s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Invalid x-amz-copy-source bucket encoding",
+            ))
+        })?
+        .to_string();
+    let key = percent_decode_str(key_raw)
+        .decode_utf8()
+        .map_err(|_| {
+            s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Invalid x-amz-copy-source key encoding",
+            ))
+        })?
+        .to_string();
+
+    let mut version_id = None;
+    if let Some(query) = query {
+        for pair in query.split('&') {
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
+            if name == "versionId" {
+                version_id = Some(
+                    percent_decode_str(value)
+                        .decode_utf8()
+                        .map_err(|_| {
+                            s3_error_response(S3Error::new(
+                                S3ErrorCode::InvalidArgument,
+                                "Invalid x-amz-copy-source versionId encoding",
+                            ))
+                        })?
+                        .to_string(),
+                );
+                break;
+            }
+        }
+    }
+
+    Ok((bucket, key, version_id))
+}
+
 pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
@@ -647,6 +1089,9 @@ pub async fn put_object(
     {
         return response;
     }
+    if let Some(response) = evaluate_put_preconditions(&state, &bucket, &key, &headers).await {
+        return response;
+    }
 
     let content_type = guessed_content_type(
         &key,
@@ -655,6 +1100,9 @@ pub async fn put_object(
 
     let mut metadata = HashMap::new();
     metadata.insert("__content_type__".to_string(), content_type);
+    if let Err(response) = insert_standard_object_metadata(&headers, &mut metadata) {
+        return response;
+    }
 
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
@@ -665,7 +1113,27 @@ pub async fn put_object(
         }
     }
 
-    let boxed: myfsio_storage::traits::AsyncReadStream = if is_aws_chunked(&headers) {
+    let tags = match headers
+        .get("x-amz-tagging")
+        .and_then(|value| value.to_str().ok())
+        .map(parse_tagging_header)
+        .transpose()
+    {
+        Ok(tags) => tags,
+        Err(response) => return response,
+    };
+
+    let aws_chunked = is_aws_chunked(&headers);
+    let boxed: myfsio_storage::traits::AsyncReadStream = if has_upload_checksum(&headers) {
+        let data = match collect_upload_body(body, aws_chunked).await {
+            Ok(data) => data,
+            Err(response) => return response,
+        };
+        if let Err(response) = validate_upload_checksums(&headers, &data) {
+            return response;
+        }
+        Box::pin(std::io::Cursor::new(data))
+    } else if aws_chunked {
         Box::pin(chunked::decode_body(body))
     } else {
         let stream = tokio_util::io::StreamReader::new(
@@ -682,6 +1150,11 @@ pub async fn put_object(
         .await
     {
         Ok(meta) => {
+            if let Some(ref tags) = tags {
+                if let Err(e) = state.storage.set_object_tags(&bucket, &key, tags).await {
+                    return storage_err_response(e);
+                }
+            }
             if let Some(enc_ctx) = resolve_encryption_context(&state, &bucket, &headers).await {
                 if let Some(ref enc_svc) = state.encryption {
                     let obj_path = match state.storage.get_object_path(&bucket, &key).await {
@@ -801,9 +1274,23 @@ pub async fn get_object(
         return list_parts_handler(&state, &bucket, &key, upload_id).await;
     }
 
-    let head_meta = match state.storage.head_object(&bucket, &key).await {
-        Ok(m) => m,
-        Err(e) => return storage_err_response(e),
+    let version_id = query
+        .version_id
+        .as_deref()
+        .filter(|value| !is_null_version(Some(*value)));
+    let head_meta = match version_id {
+        Some(version_id) => match state
+            .storage
+            .head_object_version(&bucket, &key, version_id)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
+        None => match state.storage.head_object(&bucket, &key).await {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
     };
     if let Some(resp) = evaluate_get_preconditions(&headers, &head_meta) {
         return resp;
@@ -818,17 +1305,34 @@ pub async fn get_object(
         return range_get_handler(&state, &bucket, &key, range_str, &query).await;
     }
 
-    let all_meta = state
-        .storage
-        .get_object_metadata(&bucket, &key)
-        .await
-        .unwrap_or_default();
+    let all_meta = match version_id {
+        Some(version_id) => state
+            .storage
+            .get_object_version_metadata(&bucket, &key, version_id)
+            .await
+            .unwrap_or_default(),
+        None => state
+            .storage
+            .get_object_metadata(&bucket, &key)
+            .await
+            .unwrap_or_default(),
+    };
     let enc_meta = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&all_meta);
 
     if let (Some(ref enc_info), Some(ref enc_svc)) = (&enc_meta, &state.encryption) {
-        let obj_path = match state.storage.get_object_path(&bucket, &key).await {
-            Ok(p) => p,
-            Err(e) => return storage_err_response(e),
+        let obj_path = match version_id {
+            Some(version_id) => match state
+                .storage
+                .get_object_version_path(&bucket, &key, version_id)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => return storage_err_response(e),
+            },
+            None => match state.storage.get_object_path(&bucket, &key).await {
+                Ok(p) => p,
+                Err(e) => return storage_err_response(e),
+            },
         };
         let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
         let _ = tokio::fs::create_dir_all(&tmp_dir).await;
@@ -886,22 +1390,31 @@ pub async fn get_object(
             "x-amz-server-side-encryption",
             enc_info.algorithm.parse().unwrap(),
         );
-
-        for (k, v) in &meta.metadata {
-            if let Ok(header_val) = v.parse() {
-                let header_name = format!("x-amz-meta-{}", k);
-                if let Ok(name) = header_name.parse::<axum::http::HeaderName>() {
-                    resp_headers.insert(name, header_val);
-                }
+        apply_stored_response_headers(&mut resp_headers, &all_meta);
+        if let Some(ref requested_version) = query.version_id {
+            if let Ok(value) = requested_version.parse() {
+                resp_headers.insert("x-amz-version-id", value);
             }
         }
+
+        apply_user_metadata(&mut resp_headers, &meta.metadata);
 
         apply_response_overrides(&mut resp_headers, &query);
 
         return (StatusCode::OK, resp_headers, body).into_response();
     }
 
-    match state.storage.get_object(&bucket, &key).await {
+    let object_result = match version_id {
+        Some(version_id) => {
+            state
+                .storage
+                .get_object_version(&bucket, &key, version_id)
+                .await
+        }
+        None => state.storage.get_object(&bucket, &key).await,
+    };
+
+    match object_result {
         Ok((meta, reader)) => {
             let stream = ReaderStream::new(reader);
             let body = Body::from_stream(stream);
@@ -921,15 +1434,14 @@ pub async fn get_object(
                     .unwrap(),
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
-
-            for (k, v) in &meta.metadata {
-                if let Ok(header_val) = v.parse() {
-                    let header_name = format!("x-amz-meta-{}", k);
-                    if let Ok(name) = header_name.parse::<axum::http::HeaderName>() {
-                        headers.insert(name, header_val);
-                    }
+            apply_stored_response_headers(&mut headers, &all_meta);
+            if let Some(ref requested_version) = query.version_id {
+                if let Ok(value) = requested_version.parse() {
+                    headers.insert("x-amz-version-id", value);
                 }
             }
+
+            apply_user_metadata(&mut headers, &meta.metadata);
 
             apply_response_overrides(&mut headers, &query);
 
@@ -978,6 +1490,35 @@ pub async fn delete_object(
         return abort_multipart_handler(&state, &bucket, upload_id).await;
     }
 
+    if let Some(version_id) = query
+        .version_id
+        .as_deref()
+        .filter(|value| !is_null_version(Some(*value)))
+    {
+        if let Err(response) =
+            ensure_object_version_lock_allows_delete(&state, &bucket, &key, version_id, &headers)
+                .await
+        {
+            return response;
+        }
+        return match state
+            .storage
+            .delete_object_version(&bucket, &key, version_id)
+            .await
+        {
+            Ok(()) => {
+                let mut resp_headers = HeaderMap::new();
+                if let Ok(value) = version_id.parse() {
+                    resp_headers.insert("x-amz-version-id", value);
+                }
+                notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
+                trigger_replication(&state, &bucket, &key, "delete");
+                (StatusCode::NO_CONTENT, resp_headers).into_response()
+            }
+            Err(e) => storage_err_response(e),
+        };
+    }
+
     if let Err(response) =
         ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
     {
@@ -997,13 +1538,40 @@ pub async fn delete_object(
 pub async fn head_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    Query(query): Query<ObjectQuery>,
     headers: HeaderMap,
 ) -> Response {
-    match state.storage.head_object(&bucket, &key).await {
+    let version_id = query
+        .version_id
+        .as_deref()
+        .filter(|value| !is_null_version(Some(*value)));
+    let result = match version_id {
+        Some(version_id) => {
+            state
+                .storage
+                .head_object_version(&bucket, &key, version_id)
+                .await
+        }
+        None => state.storage.head_object(&bucket, &key).await,
+    };
+
+    match result {
         Ok(meta) => {
             if let Some(resp) = evaluate_get_preconditions(&headers, &meta) {
                 return resp;
             }
+            let all_meta = match version_id {
+                Some(version_id) => state
+                    .storage
+                    .get_object_version_metadata(&bucket, &key, version_id)
+                    .await
+                    .unwrap_or_default(),
+                None => state
+                    .storage
+                    .get_object_metadata(&bucket, &key)
+                    .await
+                    .unwrap_or_default(),
+            };
             let mut headers = HeaderMap::new();
             headers.insert("content-length", meta.size.to_string().parse().unwrap());
             if let Some(ref etag) = meta.etag {
@@ -1019,15 +1587,14 @@ pub async fn head_object(
                     .unwrap(),
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
-
-            for (k, v) in &meta.metadata {
-                if let Ok(header_val) = v.parse() {
-                    let header_name = format!("x-amz-meta-{}", k);
-                    if let Ok(name) = header_name.parse::<axum::http::HeaderName>() {
-                        headers.insert(name, header_val);
-                    }
+            apply_stored_response_headers(&mut headers, &all_meta);
+            if let Some(ref requested_version) = query.version_id {
+                if let Ok(value) = requested_version.parse() {
+                    headers.insert("x-amz-version-id", value);
                 }
             }
+
+            apply_user_metadata(&mut headers, &meta.metadata);
 
             (StatusCode::OK, headers).into_response()
         }
@@ -1311,30 +1878,70 @@ async fn copy_object_handler(
         return response;
     }
 
-    let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
-    let (src_bucket, src_key) = match source.split_once('/') {
-        Some(parts) => parts,
-        None => {
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InvalidArgument,
-                "Invalid x-amz-copy-source",
-            ));
-        }
+    let (src_bucket, src_key, src_version_id) = match parse_copy_source(copy_source) {
+        Ok(parts) => parts,
+        Err(response) => return response,
     };
 
-    let source_meta = match state.storage.head_object(src_bucket, src_key).await {
-        Ok(m) => m,
-        Err(e) => return storage_err_response(e),
+    let source_meta = match src_version_id.as_deref() {
+        Some(version_id) if version_id != "null" => match state
+            .storage
+            .head_object_version(&src_bucket, &src_key, version_id)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
+        _ => match state.storage.head_object(&src_bucket, &src_key).await {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
     };
     if let Some(resp) = evaluate_copy_preconditions(headers, &source_meta) {
         return resp;
     }
 
-    match state
-        .storage
-        .copy_object(src_bucket, src_key, dst_bucket, dst_key)
-        .await
+    let copy_result = if let Some(version_id) = src_version_id
+        .as_deref()
+        .filter(|value| !is_null_version(Some(*value)))
     {
+        let (_meta, mut reader) = match state
+            .storage
+            .get_object_version(&src_bucket, &src_key, version_id)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => return storage_err_response(e),
+        };
+        let mut data = Vec::new();
+        if let Err(e) = reader.read_to_end(&mut data).await {
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+        let metadata = match state
+            .storage
+            .get_object_version_metadata(&src_bucket, &src_key, version_id)
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(e) => return storage_err_response(e),
+        };
+        state
+            .storage
+            .put_object(
+                dst_bucket,
+                dst_key,
+                Box::pin(std::io::Cursor::new(data)),
+                Some(metadata),
+            )
+            .await
+    } else {
+        state
+            .storage
+            .copy_object(&src_bucket, &src_key, dst_bucket, dst_key)
+            .await
+    };
+
+    match copy_result {
         Ok(meta) => {
             let etag = meta.etag.as_deref().unwrap_or("");
             let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
@@ -1372,13 +1979,23 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
     let mut errors = Vec::new();
 
     for obj in &parsed.objects {
-        if let Err(message) = match state.storage.head_object(bucket, &obj.key).await {
-            Ok(_) => match state.storage.get_object_metadata(bucket, &obj.key).await {
+        if let Err(message) = match obj.version_id.as_deref() {
+            Some(version_id) if version_id != "null" => match state
+                .storage
+                .get_object_version_metadata(bucket, &obj.key, version_id)
+                .await
+            {
                 Ok(metadata) => object_lock::can_delete_object(&metadata, false),
                 Err(err) => Err(S3Error::from(err).message),
             },
-            Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
-            Err(err) => Err(S3Error::from(err).message),
+            _ => match state.storage.head_object(bucket, &obj.key).await {
+                Ok(_) => match state.storage.get_object_metadata(bucket, &obj.key).await {
+                    Ok(metadata) => object_lock::can_delete_object(&metadata, false),
+                    Err(err) => Err(S3Error::from(err).message),
+                },
+                Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
+                Err(err) => Err(S3Error::from(err).message),
+            },
         } {
             errors.push((
                 obj.key.clone(),
@@ -1387,7 +2004,20 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
             ));
             continue;
         }
-        match state.storage.delete_object(bucket, &obj.key).await {
+        let delete_result = if let Some(version_id) = obj.version_id.as_deref() {
+            if version_id == "null" {
+                state.storage.delete_object(bucket, &obj.key).await
+            } else {
+                state
+                    .storage
+                    .delete_object_version(bucket, &obj.key, version_id)
+                    .await
+            }
+        } else {
+            state.storage.delete_object(bucket, &obj.key).await
+        };
+
+        match delete_result {
             Ok(()) => {
                 notifications::emit_object_removed(state, bucket, &obj.key, "", "", "", "Delete");
                 trigger_replication(state, bucket, &obj.key, "delete");
@@ -1415,9 +2045,23 @@ async fn range_get_handler(
     range_str: &str,
     query: &ObjectQuery,
 ) -> Response {
-    let meta = match state.storage.head_object(bucket, key).await {
-        Ok(m) => m,
-        Err(e) => return storage_err_response(e),
+    let version_id = query
+        .version_id
+        .as_deref()
+        .filter(|value| !is_null_version(Some(*value)));
+    let meta = match version_id {
+        Some(version_id) => match state
+            .storage
+            .head_object_version(bucket, key, version_id)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
+        None => match state.storage.head_object(bucket, key).await {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
     };
 
     let total_size = meta.size;
@@ -1431,9 +2075,19 @@ async fn range_get_handler(
         }
     };
 
-    let path = match state.storage.get_object_path(bucket, key).await {
-        Ok(p) => p,
-        Err(e) => return storage_err_response(e),
+    let path = match version_id {
+        Some(version_id) => match state
+            .storage
+            .get_object_version_path(bucket, key, version_id)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => return storage_err_response(e),
+        },
+        None => match state.storage.get_object_path(bucket, key).await {
+            Ok(p) => p,
+            Err(e) => return storage_err_response(e),
+        },
     };
 
     let mut file = match tokio::fs::File::open(&path).await {
@@ -1463,6 +2117,11 @@ async fn range_get_handler(
     }
     insert_content_type(&mut headers, key, meta.content_type.as_deref());
     headers.insert("accept-ranges", "bytes".parse().unwrap());
+    if let Some(ref requested_version) = query.version_id {
+        if let Ok(value) = requested_version.parse() {
+            headers.insert("x-amz-version-id", value);
+        }
+    }
 
     apply_response_overrides(&mut headers, query);
 
@@ -1512,6 +2171,49 @@ fn evaluate_get_preconditions(
     }
 
     None
+}
+
+async fn evaluate_put_preconditions(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let has_if_match = headers.contains_key("if-match");
+    let has_if_none_match = headers.contains_key("if-none-match");
+    if !has_if_match && !has_if_none_match {
+        return None;
+    }
+
+    match state.storage.head_object(bucket, key).await {
+        Ok(meta) => {
+            if let Some(value) = headers.get("if-match").and_then(|v| v.to_str().ok()) {
+                if !etag_condition_matches(value, meta.etag.as_deref()) {
+                    return Some(s3_error_response(S3Error::from_code(
+                        S3ErrorCode::PreconditionFailed,
+                    )));
+                }
+            }
+            if let Some(value) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
+                if etag_condition_matches(value, meta.etag.as_deref()) {
+                    return Some(s3_error_response(S3Error::from_code(
+                        S3ErrorCode::PreconditionFailed,
+                    )));
+                }
+            }
+            None
+        }
+        Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => {
+            if has_if_match {
+                Some(s3_error_response(S3Error::from_code(
+                    S3ErrorCode::PreconditionFailed,
+                )))
+            } else {
+                None
+            }
+        }
+        Err(err) => Some(storage_err_response(err)),
+    }
 }
 
 fn evaluate_copy_preconditions(
@@ -2174,6 +2876,20 @@ mod tests {
             .header("x-secret-key", TEST_SECRET_KEY)
             .body(body)
             .unwrap()
+    }
+
+    #[test]
+    fn aws_chunked_wire_encoding_is_not_persisted_as_object_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "aws-chunked".parse().unwrap());
+        let mut metadata = HashMap::new();
+        insert_standard_object_metadata(&headers, &mut metadata).unwrap();
+        assert!(!metadata.contains_key("__content_encoding__"));
+
+        headers.insert("content-encoding", "aws-chunked, gzip".parse().unwrap());
+        let mut metadata = HashMap::new();
+        insert_standard_object_metadata(&headers, &mut metadata).unwrap();
+        assert_eq!(metadata.get("__content_encoding__").unwrap(), "gzip");
     }
 
     #[tokio::test]

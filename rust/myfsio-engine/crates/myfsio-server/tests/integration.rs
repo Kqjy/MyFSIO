@@ -2122,6 +2122,445 @@ async fn test_bucket_versioning() {
 }
 
 #[tokio::test]
+async fn test_versioned_object_can_be_read_and_deleted_by_version_id() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/versions-bucket",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/versions-bucket?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/versions-bucket/doc.txt",
+            Body::from("first"),
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/versions-bucket/doc.txt",
+            Body::from("second"),
+        ))
+        .await
+        .unwrap();
+
+    let list_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/versions-bucket?versions",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = String::from_utf8(
+        list_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let archived_version_id = list_body
+        .split("<VersionId>")
+        .filter_map(|part| part.split_once("</VersionId>").map(|(id, _)| id))
+        .find(|id| *id != "null")
+        .expect("archived version id")
+        .to_string();
+
+    let version_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/versions-bucket/doc.txt?versionId={}", archived_version_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(version_resp.status(), StatusCode::OK);
+    assert_eq!(
+        version_resp.headers()["x-amz-version-id"].to_str().unwrap(),
+        archived_version_id
+    );
+    let version_body = version_resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&version_body[..], b"first");
+
+    let traversal_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            &format!(
+                "/versions-bucket/doc.txt?versionId=../other/{}",
+                archived_version_id
+            ),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(traversal_resp.status(), StatusCode::NOT_FOUND);
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/versions-bucket/doc.txt",
+            Body::from("third"),
+        ))
+        .await
+        .unwrap();
+    let limited_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/versions-bucket?versions&max-keys=1",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(limited_resp.status(), StatusCode::OK);
+    let limited_body = String::from_utf8(
+        limited_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(limited_body.matches("<Version>").count(), 1);
+    assert!(limited_body.contains("<IsTruncated>true</IsTruncated>"));
+
+    let delete_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            &format!("/versions-bucket/doc.txt?versionId={}", archived_version_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+
+    let missing_resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/versions-bucket/doc.txt?versionId={}", archived_version_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_retention_is_enforced_when_deleting_archived_version() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/locked-versions",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/locked-versions?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/locked-versions/doc.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-object-lock-mode", "GOVERNANCE")
+                .header(
+                    "x-amz-object-lock-retain-until-date",
+                    "2099-01-01T00:00:00Z",
+                )
+                .body(Body::from("locked"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/locked-versions/doc.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-bypass-governance-retention", "true")
+                .body(Body::from("replacement"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let list_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/locked-versions?versions",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = String::from_utf8(
+        list_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let archived_version_id = list_body
+        .split("<VersionId>")
+        .filter_map(|part| part.split_once("</VersionId>").map(|(id, _)| id))
+        .find(|id| *id != "null")
+        .expect("archived version id")
+        .to_string();
+
+    let denied = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            &format!("/locked-versions/doc.txt?versionId={}", archived_version_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let allowed = app
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!(
+                    "/locked-versions/doc.txt?versionId={}",
+                    archived_version_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-bypass-governance-retention", "true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_put_object_validates_content_md5() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/md5-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let bad_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/md5-bucket/object.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-md5", "AAAAAAAAAAAAAAAAAAAAAA==")
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+    let bad_body = String::from_utf8(
+        bad_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(bad_body.contains("<Code>BadDigest</Code>"));
+
+    let good_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/md5-bucket/object.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-md5", "XUFAKrxLKna5cZ2REBfFkg==")
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(good_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_put_object_tagging_and_standard_headers_are_persisted() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/headers-bucket",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/headers-bucket/report.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-tagging", "env=prod&name=quarter%201")
+                .header("cache-control", "max-age=60")
+                .header("content-disposition", "attachment")
+                .header("content-language", "en-US")
+                .header("x-amz-storage-class", "STANDARD_IA")
+                .body(Body::from("report"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let head_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/headers-bucket/report.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(head_resp.status(), StatusCode::OK);
+    assert_eq!(head_resp.headers()["cache-control"], "max-age=60");
+    assert_eq!(head_resp.headers()["content-disposition"], "attachment");
+    assert_eq!(head_resp.headers()["content-language"], "en-US");
+    assert_eq!(head_resp.headers()["x-amz-storage-class"], "STANDARD_IA");
+
+    let tags_resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/headers-bucket/report.txt?tagging",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tags_resp.status(), StatusCode::OK);
+    let tags_body = String::from_utf8(
+        tags_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(tags_body.contains("<Key>env</Key>"));
+    assert!(tags_body.contains("<Value>prod</Value>"));
+    assert!(tags_body.contains("<Key>name</Key>"));
+    assert!(tags_body.contains("<Value>quarter 1</Value>"));
+}
+
+#[tokio::test]
+async fn test_virtual_host_bucket_routes_to_s3_object_handlers() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/vh-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/hello.txt")
+                .header("host", "vh-bucket.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("virtual host body"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/hello.txt")
+                .header("host", "vh-bucket.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body = get_resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"virtual host body");
+}
+
+#[tokio::test]
 async fn test_bucket_tagging() {
     let (app, _tmp) = test_app();
 
@@ -3323,7 +3762,7 @@ async fn test_static_website_default_404_returns_html_body() {
     )
     .unwrap();
     assert_eq!(body.len(), content_length);
-    assert_eq!(body, "404 page not found");
+    assert_eq!(body, "<h1>404 page not found</h1>");
 
     let head_resp = app
         .oneshot(website_request(Method::HEAD, "/missing.html"))

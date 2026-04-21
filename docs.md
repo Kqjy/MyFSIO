@@ -2,6 +2,8 @@
 
 This document describes the current Rust server in `rust/myfsio-engine`. It replaces the older Python-oriented runbook.
 
+The `python/` implementation is deprecated as of 2026-04-21. It is retained for migration reference and legacy validation only; production usage and new development should use the Rust server.
+
 ## 1. What Changed
 
 The active runtime is now Rust:
@@ -11,7 +13,7 @@ The active runtime is now Rust:
 - The main development workflow is `cargo run -p myfsio-server --`.
 - API-only mode is controlled with `UI_ENABLED=false`.
 
-The `python/` directory may still contain older implementation code, templates, and tests, but it is not required to run the current server.
+The deprecated `python/` directory may still contain older implementation code, templates, and tests, but it is not required to run the current server.
 
 ## 2. Quick Start
 

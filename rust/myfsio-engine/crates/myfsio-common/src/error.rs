@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum S3ErrorCode {
     AccessDenied,
+    BadDigest,
     BucketAlreadyExists,
     BucketNotEmpty,
     EntityTooLarge,
@@ -14,6 +15,7 @@ pub enum S3ErrorCode {
     InvalidPolicyDocument,
     InvalidRange,
     InvalidRequest,
+    InvalidTag,
     MalformedXML,
     MethodNotAllowed,
     NoSuchBucket,
@@ -32,6 +34,7 @@ impl S3ErrorCode {
     pub fn http_status(&self) -> u16 {
         match self {
             Self::AccessDenied => 403,
+            Self::BadDigest => 400,
             Self::BucketAlreadyExists => 409,
             Self::BucketNotEmpty => 409,
             Self::EntityTooLarge => 413,
@@ -43,6 +46,7 @@ impl S3ErrorCode {
             Self::InvalidPolicyDocument => 400,
             Self::InvalidRange => 416,
             Self::InvalidRequest => 400,
+            Self::InvalidTag => 400,
             Self::MalformedXML => 400,
             Self::MethodNotAllowed => 405,
             Self::NoSuchBucket => 404,
@@ -61,6 +65,7 @@ impl S3ErrorCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AccessDenied => "AccessDenied",
+            Self::BadDigest => "BadDigest",
             Self::BucketAlreadyExists => "BucketAlreadyExists",
             Self::BucketNotEmpty => "BucketNotEmpty",
             Self::EntityTooLarge => "EntityTooLarge",
@@ -72,6 +77,7 @@ impl S3ErrorCode {
             Self::InvalidPolicyDocument => "InvalidPolicyDocument",
             Self::InvalidRange => "InvalidRange",
             Self::InvalidRequest => "InvalidRequest",
+            Self::InvalidTag => "InvalidTag",
             Self::MalformedXML => "MalformedXML",
             Self::MethodNotAllowed => "MethodNotAllowed",
             Self::NoSuchBucket => "NoSuchBucket",
@@ -90,6 +96,7 @@ impl S3ErrorCode {
     pub fn default_message(&self) -> &'static str {
         match self {
             Self::AccessDenied => "Access Denied",
+            Self::BadDigest => "The Content-MD5 or checksum value you specified did not match what we received",
             Self::BucketAlreadyExists => "The requested bucket name is not available",
             Self::BucketNotEmpty => "The bucket you tried to delete is not empty",
             Self::EntityTooLarge => "Your proposed upload exceeds the maximum allowed size",
@@ -101,6 +108,7 @@ impl S3ErrorCode {
             Self::InvalidPolicyDocument => "The content of the form does not meet the conditions specified in the policy document",
             Self::InvalidRange => "The requested range is not satisfiable",
             Self::InvalidRequest => "Invalid request",
+            Self::InvalidTag => "The Tagging header is invalid",
             Self::MalformedXML => "The XML you provided was not well-formed",
             Self::MethodNotAllowed => "The specified method is not allowed against this resource",
             Self::NoSuchBucket => "The specified bucket does not exist",

@@ -605,6 +605,144 @@ impl FsStorageBackend {
         Ok(source_size)
     }
 
+    fn version_record_paths(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        version_id: &str,
+    ) -> (PathBuf, PathBuf) {
+        let version_dir = self.version_dir(bucket_name, key);
+        (
+            version_dir.join(format!("{}.json", version_id)),
+            version_dir.join(format!("{}.bin", version_id)),
+        )
+    }
+
+    fn validate_version_id(bucket_name: &str, key: &str, version_id: &str) -> StorageResult<()> {
+        if version_id.is_empty()
+            || version_id.contains('/')
+            || version_id.contains('\\')
+            || version_id.contains("..")
+        {
+            return Err(StorageError::VersionNotFound {
+                bucket: bucket_name.to_string(),
+                key: key.to_string(),
+                version_id: version_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn read_version_record_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<(Value, PathBuf)> {
+        self.require_bucket(bucket_name)?;
+        self.validate_key(key)?;
+        Self::validate_version_id(bucket_name, key, version_id)?;
+        let (manifest_path, data_path) = self.version_record_paths(bucket_name, key, version_id);
+        if !manifest_path.is_file() || !data_path.is_file() {
+            return Err(StorageError::VersionNotFound {
+                bucket: bucket_name.to_string(),
+                key: key.to_string(),
+                version_id: version_id.to_string(),
+            });
+        }
+
+        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let record = serde_json::from_str::<Value>(&content).map_err(StorageError::Json)?;
+        Ok((record, data_path))
+    }
+
+    fn version_metadata_from_record(record: &Value) -> HashMap<String, String> {
+        record
+            .get("metadata")
+            .and_then(Value::as_object)
+            .map(|meta| {
+                meta.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<HashMap<String, String>>()
+            })
+            .unwrap_or_default()
+    }
+
+    fn object_meta_from_version_record(
+        &self,
+        key: &str,
+        record: &Value,
+        data_path: &Path,
+    ) -> StorageResult<ObjectMeta> {
+        let metadata = Self::version_metadata_from_record(record);
+
+        let data_len = std::fs::metadata(data_path)
+            .map(|meta| meta.len())
+            .unwrap_or_default();
+        let size = record
+            .get("size")
+            .and_then(Value::as_u64)
+            .unwrap_or(data_len);
+        let last_modified = record
+            .get("archived_at")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+        let etag = record
+            .get("etag")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| metadata.get("__etag__").cloned());
+
+        let mut obj = ObjectMeta::new(key.to_string(), size, last_modified);
+        obj.etag = etag;
+        obj.content_type = metadata.get("__content_type__").cloned();
+        obj.storage_class = metadata
+            .get("__storage_class__")
+            .cloned()
+            .or_else(|| Some("STANDARD".to_string()));
+        obj.metadata = metadata
+            .into_iter()
+            .filter(|(k, _)| !k.starts_with("__"))
+            .collect();
+        Ok(obj)
+    }
+
+    fn version_info_from_record(&self, fallback_key: &str, record: &Value) -> VersionInfo {
+        let version_id = record
+            .get("version_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let key = record
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback_key)
+            .to_string();
+        let size = record.get("size").and_then(Value::as_u64).unwrap_or(0);
+        let archived_at = record
+            .get("archived_at")
+            .and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+        let etag = record
+            .get("etag")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string());
+
+        VersionInfo {
+            version_id,
+            key,
+            size,
+            last_modified: archived_at,
+            etag,
+            is_latest: false,
+            is_delete_marker: false,
+        }
+    }
+
     fn bucket_stats_sync(&self, bucket_name: &str) -> StorageResult<BucketStats> {
         let bucket_path = self.require_bucket(bucket_name)?;
 
@@ -1241,6 +1379,10 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
         obj.etag = stored_meta.get("__etag__").cloned();
         obj.content_type = stored_meta.get("__content_type__").cloned();
+        obj.storage_class = stored_meta
+            .get("__storage_class__")
+            .cloned()
+            .or_else(|| Some("STANDARD".to_string()));
         obj.metadata = stored_meta
             .into_iter()
             .filter(|(k, _)| !k.starts_with("__"))
@@ -1289,11 +1431,60 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
         obj.etag = stored_meta.get("__etag__").cloned();
         obj.content_type = stored_meta.get("__content_type__").cloned();
+        obj.storage_class = stored_meta
+            .get("__storage_class__")
+            .cloned()
+            .or_else(|| Some("STANDARD".to_string()));
         obj.metadata = stored_meta
             .into_iter()
             .filter(|(k, _)| !k.starts_with("__"))
             .collect();
         Ok(obj)
+    }
+
+    async fn get_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
+        let (record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
+        let obj = self.object_meta_from_version_record(key, &record, &data_path)?;
+        let file = tokio::fs::File::open(&data_path)
+            .await
+            .map_err(StorageError::Io)?;
+        let stream: AsyncReadStream = Box::pin(file);
+        Ok((obj, stream))
+    }
+
+    async fn get_object_version_path(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<PathBuf> {
+        let (_record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
+        Ok(data_path)
+    }
+
+    async fn head_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<ObjectMeta> {
+        let (record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
+        self.object_meta_from_version_record(key, &record, &data_path)
+    }
+
+    async fn get_object_version_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<HashMap<String, String>> {
+        let (record, _data_path) = self.read_version_record_sync(bucket, key, version_id)?;
+        Ok(Self::version_metadata_from_record(&record))
     }
 
     async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<()> {
@@ -1314,6 +1505,32 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             .map_err(StorageError::Io)?;
 
         Self::cleanup_empty_parents(&path, &bucket_path);
+        Ok(())
+    }
+
+    async fn delete_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<()> {
+        self.require_bucket(bucket)?;
+        self.validate_key(key)?;
+        Self::validate_version_id(bucket, key, version_id)?;
+        let (manifest_path, data_path) = self.version_record_paths(bucket, key, version_id);
+        if !manifest_path.is_file() && !data_path.is_file() {
+            return Err(StorageError::VersionNotFound {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+                version_id: version_id.to_string(),
+            });
+        }
+
+        Self::safe_unlink(&data_path).map_err(StorageError::Io)?;
+        Self::safe_unlink(&manifest_path).map_err(StorageError::Io)?;
+        let versions_root = self.bucket_versions_root(bucket);
+        Self::cleanup_empty_parents(&manifest_path, &versions_root);
+        self.stats_cache.remove(bucket);
         Ok(())
     }
 
@@ -1817,40 +2034,73 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
                 if let Ok(record) = serde_json::from_str::<Value>(&content) {
-                    let version_id = record
-                        .get("version_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let size = record.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let archived_at = record
-                        .get("archived_at")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                        .map(|d| d.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now);
-                    let etag = record
-                        .get("etag")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    versions.push(VersionInfo {
-                        version_id,
-                        key: key.to_string(),
-                        size,
-                        last_modified: archived_at,
-                        etag,
-                        is_latest: false,
-                    });
+                    versions.push(self.version_info_from_record(key, &record));
                 }
             }
         }
 
         versions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
-        if let Some(first) = versions.first_mut() {
-            first.is_latest = true;
+
+        Ok(versions)
+    }
+
+    async fn list_bucket_object_versions(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+    ) -> StorageResult<Vec<VersionInfo>> {
+        self.require_bucket(bucket)?;
+        let root = self.bucket_versions_root(bucket);
+        if !root.exists() {
+            return Ok(Vec::new());
         }
 
+        let mut versions = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(current) = stack.pop() {
+            let entries = match std::fs::read_dir(&current) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if ft.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !ft.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(_) => continue,
+                };
+                let record = match serde_json::from_str::<Value>(&content) {
+                    Ok(record) => record,
+                    Err(_) => continue,
+                };
+                let fallback_key = path
+                    .parent()
+                    .and_then(|parent| parent.strip_prefix(&root).ok())
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let info = self.version_info_from_record(&fallback_key, &record);
+                if prefix.is_some_and(|value| !info.key.starts_with(value)) {
+                    continue;
+                }
+                versions.push(info);
+            }
+        }
+
+        versions.sort_by(|a, b| {
+            a.key
+                .cmp(&b.key)
+                .then_with(|| b.last_modified.cmp(&a.last_modified))
+        });
         Ok(versions)
     }
 
@@ -2271,6 +2521,12 @@ mod tests {
             .unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].size, 8);
+
+        let invalid_version = format!("../other/{}", versions[0].version_id);
+        let result = backend
+            .get_object_version("test-bucket", "file.txt", &invalid_version)
+            .await;
+        assert!(matches!(result, Err(StorageError::VersionNotFound { .. })));
     }
 
     #[tokio::test]

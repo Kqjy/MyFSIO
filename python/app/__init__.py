@@ -720,7 +720,7 @@ def _configure_logging(app: Flask) -> None:
 
     def _website_error_response(status_code, message):
         if status_code == 404:
-            body = "404 page not found"
+            body = "<h1>404 page not found</h1>"
         else:
             body = f"{status_code} {message}"
         return Response(body, status=status_code, mimetype="text/html")

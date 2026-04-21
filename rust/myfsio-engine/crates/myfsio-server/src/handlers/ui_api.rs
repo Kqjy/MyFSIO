@@ -117,6 +117,7 @@ fn storage_status(err: &StorageError) -> StatusCode {
     match err {
         StorageError::BucketNotFound(_)
         | StorageError::ObjectNotFound { .. }
+        | StorageError::VersionNotFound { .. }
         | StorageError::UploadNotFound(_) => StatusCode::NOT_FOUND,
         StorageError::InvalidBucketName(_)
         | StorageError::InvalidObjectKey(_)

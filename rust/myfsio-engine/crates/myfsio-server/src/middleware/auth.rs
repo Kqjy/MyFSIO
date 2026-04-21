@@ -1,5 +1,5 @@
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -14,6 +14,9 @@ use tokio::io::AsyncReadExt;
 
 use crate::services::acl::acl_from_bucket_config;
 use crate::state::AppState;
+
+#[derive(Clone, Debug)]
+struct OriginalCanonicalPath(String);
 
 fn website_error_response(
     status: StatusCode,
@@ -45,7 +48,7 @@ fn website_error_response(
 fn default_website_error_body(status: StatusCode) -> String {
     let code = status.as_u16();
     if status == StatusCode::NOT_FOUND {
-        "404 page not found".to_string()
+        "<h1>404 page not found</h1>".to_string()
     } else {
         let reason = status.canonical_reason().unwrap_or("Error");
         format!("{code} {reason}")
@@ -324,6 +327,67 @@ async fn maybe_serve_website(
     .await
 }
 
+fn virtual_host_candidate(host: &str) -> Option<String> {
+    let (candidate, _) = host.split_once('.')?;
+    if candidate.is_empty() || matches!(candidate, "www" | "s3" | "api" | "admin" | "kms") {
+        return None;
+    }
+    if myfsio_storage::validation::validate_bucket_name(candidate).is_some() {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+async fn virtual_host_bucket(
+    state: &AppState,
+    host: &str,
+    path: &str,
+    method: &Method,
+) -> Option<String> {
+    if path.starts_with("/ui")
+        || path.starts_with("/admin")
+        || path.starts_with("/kms")
+        || path.starts_with("/myfsio")
+    {
+        return None;
+    }
+
+    let bucket = virtual_host_candidate(host)?;
+    if path == format!("/{}", bucket) || path.starts_with(&format!("/{}/", bucket)) {
+        return None;
+    }
+
+    match state.storage.bucket_exists(&bucket).await {
+        Ok(true) => Some(bucket),
+        Ok(false) if *method == Method::PUT && path == "/" => Some(bucket),
+        _ => None,
+    }
+}
+
+fn rewrite_uri_for_virtual_host(uri: &Uri, bucket: &str) -> Option<Uri> {
+    let path = uri.path();
+    let rewritten_path = if path == "/" {
+        format!("/{}/", bucket)
+    } else {
+        format!("/{}{}", bucket, path)
+    };
+    let path_and_query = match uri.query() {
+        Some(query) => format!("{}?{}", rewritten_path, query),
+        None => rewritten_path,
+    };
+
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(path_and_query.parse().ok()?);
+    Uri::from_parts(parts).ok()
+}
+
+fn sigv4_canonical_path(req: &Request) -> &str {
+    req.extensions()
+        .get::<OriginalCanonicalPath>()
+        .map(|path| path.0.as_str())
+        .unwrap_or_else(|| req.uri().path())
+}
+
 pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let start = Instant::now();
     let uri = req.uri().clone();
@@ -360,7 +424,7 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
     } else if let Some(response) = maybe_serve_website(
         &state,
         method.clone(),
-        host.unwrap_or_default(),
+        host.clone().unwrap_or_default(),
         path.clone(),
         range_header,
     )
@@ -368,38 +432,53 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
     {
         response
     } else {
+        let auth_path = if let Some(bucket) =
+            virtual_host_bucket(&state, host.as_deref().unwrap_or_default(), &path, &method).await
+        {
+            if let Some(rewritten) = rewrite_uri_for_virtual_host(req.uri(), &bucket) {
+                req.extensions_mut()
+                    .insert(OriginalCanonicalPath(path.clone()));
+                *req.uri_mut() = rewritten;
+                req.uri().path().to_string()
+            } else {
+                path.clone()
+            }
+        } else {
+            path.clone()
+        };
+
         match try_auth(&state, &req) {
             AuthResult::NoAuth => match authorize_request(
                 &state,
                 None,
                 &method,
-                &path,
+                &auth_path,
                 &query,
                 copy_source.as_deref(),
             )
             .await
             {
                 Ok(()) => next.run(req).await,
-                Err(err) => error_response(err, &path),
+                Err(err) => error_response(err, &auth_path),
             },
             AuthResult::Ok(principal) => {
                 if let Err(err) = authorize_request(
                     &state,
                     Some(&principal),
                     &method,
-                    &path,
+                    &auth_path,
                     &query,
                     copy_source.as_deref(),
                 )
                 .await
                 {
-                    error_response(err, &path)
+                    error_response(err, &auth_path)
                 } else {
                     req.extensions_mut().insert(principal);
                     next.run(req).await
                 }
             }
-            AuthResult::Denied(err) => error_response(err, &path),
+            AuthResult::Denied(err) => error_response(err, &auth_path),
         }
     };
 
@@ -1078,7 +1157,7 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
     };
 
     let method = req.method().as_str();
-    let canonical_uri = req.uri().path();
+    let canonical_uri = sigv4_canonical_path(req);
 
     let query_params = parse_query_params(req.uri().query().unwrap_or(""));
 
@@ -1234,7 +1313,7 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     };
 
     let method = req.method().as_str();
-    let canonical_uri = req.uri().path();
+    let canonical_uri = sigv4_canonical_path(req);
 
     let query_params_no_sig: Vec<(String, String)> = params
         .iter()

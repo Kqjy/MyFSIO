@@ -11,6 +11,12 @@ pub enum StorageError {
     BucketNotEmpty(String),
     #[error("Object not found: {bucket}/{key}")]
     ObjectNotFound { bucket: String, key: String },
+    #[error("Object version not found: {bucket}/{key}?versionId={version_id}")]
+    VersionNotFound {
+        bucket: String,
+        key: String,
+        version_id: String,
+    },
     #[error("Invalid bucket name: {0}")]
     InvalidBucketName(String),
     #[error("Invalid object key: {0}")]
@@ -46,6 +52,12 @@ impl From<StorageError> for S3Error {
                 S3Error::from_code(S3ErrorCode::NoSuchKey)
                     .with_resource(format!("/{}/{}", bucket, key))
             }
+            StorageError::VersionNotFound {
+                bucket,
+                key,
+                version_id,
+            } => S3Error::from_code(S3ErrorCode::NoSuchVersion)
+                .with_resource(format!("/{}/{}?versionId={}", bucket, key, version_id)),
             StorageError::InvalidBucketName(msg) => {
                 S3Error::new(S3ErrorCode::InvalidBucketName, msg)
             }

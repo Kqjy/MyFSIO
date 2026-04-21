@@ -34,7 +34,42 @@ pub trait StorageEngine: Send + Sync {
 
     async fn head_object(&self, bucket: &str, key: &str) -> StorageResult<ObjectMeta>;
 
+    async fn get_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<(ObjectMeta, AsyncReadStream)>;
+
+    async fn get_object_version_path(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<PathBuf>;
+
+    async fn head_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<ObjectMeta>;
+
+    async fn get_object_version_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<HashMap<String, String>>;
+
     async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<()>;
+
+    async fn delete_object_version(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<()>;
 
     async fn copy_object(
         &self,
@@ -118,6 +153,12 @@ pub trait StorageEngine: Send + Sync {
         &self,
         bucket: &str,
         key: &str,
+    ) -> StorageResult<Vec<VersionInfo>>;
+
+    async fn list_bucket_object_versions(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
     ) -> StorageResult<Vec<VersionInfo>>;
 
     async fn get_object_tags(&self, bucket: &str, key: &str) -> StorageResult<Vec<Tag>>;

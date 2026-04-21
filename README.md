@@ -2,7 +2,7 @@
 
 MyFSIO is an S3-compatible object storage server with a Rust runtime and a filesystem-backed storage engine. The active server lives under `rust/myfsio-engine` and serves both the S3 API and the built-in web UI from a single process.
 
-The repository still contains a `python/` tree, but you do not need Python to run the current server.
+The `python/` implementation is deprecated as of 2026-04-21. It remains in the repository for migration reference and legacy tests, but new development and supported runtime usage should target the Rust server.
 
 ## Features
 

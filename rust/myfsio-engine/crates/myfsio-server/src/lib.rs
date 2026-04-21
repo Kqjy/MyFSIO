@@ -9,7 +9,7 @@ pub mod templates;
 
 use axum::Router;
 
-pub const SERVER_HEADER: &str = "MyFSIO";
+pub const SERVER_HEADER: &str = concat!("MyFSIO-Rust/", env!("CARGO_PKG_VERSION"));
 
 pub fn create_ui_router(state: state::AppState) -> Router {
     use axum::routing::{delete, get, post, put};

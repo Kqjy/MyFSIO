@@ -28,6 +28,11 @@ from app.config import AppConfig
 from app.iam import IamService, IamError, ALLOWED_ACTIONS, _derive_fernet_key
 from app.version import get_version
 
+PYTHON_DEPRECATION_MESSAGE = (
+    "The Python MyFSIO runtime is deprecated as of 2026-04-21. "
+    "Use the Rust server in rust/myfsio-engine for supported development and production usage."
+)
+
 
 def _server_host() -> str:
     """Return the bind host for API and UI servers."""
@@ -232,6 +237,8 @@ if __name__ == "__main__":
     parser.add_argument("--reset-cred", action="store_true", help="Reset admin credentials and exit")
     parser.add_argument("--version", action="version", version=f"MyFSIO {get_version()}")
     args = parser.parse_args()
+
+    warnings.warn(PYTHON_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=1)
 
     if args.reset_cred or args.mode == "reset-cred":
         reset_credentials()

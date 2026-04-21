@@ -112,6 +112,8 @@ pub struct VersionInfo {
     pub last_modified: DateTime<Utc>,
     pub etag: Option<String>,
     pub is_latest: bool,
+    #[serde(default)]
+    pub is_delete_marker: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
