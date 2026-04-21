@@ -439,4 +439,4 @@ class TestWebsiteServing:
         store.set_mapping("noerr.example.com", "no-err")
         resp = website_client.get("/missing.html", headers={"Host": "noerr.example.com"})
         assert resp.status_code == 404
-        assert b"Not Found" in resp.data
+        assert resp.data == b"404 page not found"

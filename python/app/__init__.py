@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import html as html_module
 import itertools
 import logging
 import mimetypes
@@ -720,9 +719,10 @@ def _configure_logging(app: Flask) -> None:
             return _website_error_response(status_code, "Not Found")
 
     def _website_error_response(status_code, message):
-        safe_msg = html_module.escape(str(message))
-        safe_code = html_module.escape(str(status_code))
-        body = f"<html><head><title>{safe_code} {safe_msg}</title></head><body><h1>{safe_code} {safe_msg}</h1></body></html>"
+        if status_code == 404:
+            body = "404 page not found"
+        else:
+            body = f"{status_code} {message}"
         return Response(body, status=status_code, mimetype="text/html")
 
     @app.after_request

@@ -3323,8 +3323,7 @@ async fn test_static_website_default_404_returns_html_body() {
     )
     .unwrap();
     assert_eq!(body.len(), content_length);
-    assert!(body.contains("<h1>404 Not Found</h1>"));
-    assert!(body.len() > 512);
+    assert_eq!(body, "404 page not found");
 
     let head_resp = app
         .oneshot(website_request(Method::HEAD, "/missing.html"))

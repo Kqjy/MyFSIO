@@ -44,32 +44,12 @@ fn website_error_response(
 
 fn default_website_error_body(status: StatusCode) -> String {
     let code = status.as_u16();
-    let reason = status.canonical_reason().unwrap_or("Error");
-    format!(
-        "<!doctype html>\
-<html lang=\"en\">\
-<head>\
-<meta charset=\"utf-8\">\
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>{code} {reason}</title>\
-<style>\
-html{{font-family:Arial,Helvetica,sans-serif;background:#f8fafc;color:#172033}}\
-body{{margin:0;min-height:100vh;display:grid;place-items:center}}\
-main{{max-width:42rem;padding:3rem 2rem}}\
-p.code{{font-size:.78rem;text-transform:uppercase;letter-spacing:.12em;color:#64748b;margin:0 0 .75rem}}\
-h1{{font-size:2rem;line-height:1.15;margin:0 0 1rem}}\
-p{{font-size:1rem;line-height:1.6;margin:0;color:#334155}}\
-</style>\
-</head>\
-<body>\
-<main>\
-<p class=\"code\">HTTP {code}</p>\
-<h1>{code} {reason}</h1>\
-<p>The requested page could not be found. Check the URL, or return to the site root.</p>\
-</main>\
-</body>\
-</html>"
-    )
+    if status == StatusCode::NOT_FOUND {
+        "404 page not found".to_string()
+    } else {
+        let reason = status.canonical_reason().unwrap_or("Error");
+        format!("{code} {reason}")
+    }
 }
 
 fn parse_range_header(range_header: &str, total_size: u64) -> Option<(u64, u64)> {
