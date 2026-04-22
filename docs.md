@@ -1,26 +1,19 @@
 # MyFSIO Rust Operations Guide
 
-This document describes the current Rust server in `rust/myfsio-engine`. It replaces the older Python-oriented runbook.
+This document describes the MyFSIO Rust server. The repository root is the Cargo workspace.
 
-The `python/` implementation is deprecated as of 2026-04-21. It is retained for migration reference and legacy validation only; production usage and new development should use the Rust server.
-
-## 1. What Changed
-
-The active runtime is now Rust:
+## 1. Overview
 
 - One process serves both the S3 API and the web UI.
 - The server entrypoint is `myfsio-server`.
 - The main development workflow is `cargo run -p myfsio-server --`.
 - API-only mode is controlled with `UI_ENABLED=false`.
 
-The deprecated `python/` directory may still contain older implementation code, templates, and tests, but it is not required to run the current server.
-
 ## 2. Quick Start
 
 From the repository root:
 
 ```bash
-cd rust/myfsio-engine
 cargo run -p myfsio-server --
 ```
 
@@ -34,10 +27,9 @@ On first startup, MyFSIO bootstraps an admin user in `data/.myfsio.sys/config/ia
 
 ### Windows
 
-From PowerShell:
+From PowerShell at the repository root:
 
 ```powershell
-cd rust\myfsio-engine
 cargo run -p myfsio-server --
 ```
 
@@ -52,7 +44,6 @@ There is no separate UI-only mode in the Rust server.
 ## 3. Build and Run a Binary
 
 ```bash
-cd rust/myfsio-engine
 cargo build --release -p myfsio-server
 ```
 
@@ -104,7 +95,7 @@ That makes local development and systemd installs behave consistently.
 
 ## 6. Verified Configuration Reference
 
-These values are taken from `rust/myfsio-engine/crates/myfsio-server/src/config.rs`.
+These values are taken from `crates/myfsio-server/src/config.rs`.
 
 ### Network and runtime
 
@@ -311,10 +302,10 @@ Notes:
 
 ## 10. Docker
 
-Build the Rust image from the `rust/` directory:
+Build the Rust image from the repository root:
 
 ```bash
-docker build -t myfsio ./rust
+docker build -t myfsio .
 docker run --rm \
   -p 5000:5000 \
   -p 5100:5100 \
@@ -337,11 +328,9 @@ If you want generated links and presigned URLs to use an external hostname, set 
 The repository includes `scripts/install.sh`. For the Rust server, build the binary first and pass the path explicitly:
 
 ```bash
-cd rust/myfsio-engine
 cargo build --release -p myfsio-server
 
-cd ../..
-sudo ./scripts/install.sh --binary ./rust/myfsio-engine/target/release/myfsio-server
+sudo ./scripts/install.sh --binary ./target/release/myfsio-server
 ```
 
 The installer copies that binary to `/opt/myfsio/myfsio`, creates `/opt/myfsio/myfsio.env`, and can register a `myfsio.service` systemd unit.
@@ -396,14 +385,13 @@ The command:
 Run the Rust test suite:
 
 ```bash
-cd rust/myfsio-engine
 cargo test
 ```
 
 If you are validating documentation changes for the UI, the most relevant coverage lives under:
 
-- `rust/myfsio-engine/crates/myfsio-server/tests`
-- `rust/myfsio-engine/crates/myfsio-storage/src`
+- `crates/myfsio-server/tests`
+- `crates/myfsio-storage/src`
 
 ## 15. API Notes
 
@@ -417,5 +405,5 @@ The Rust server exposes:
 
 For a route-level view, inspect:
 
-- `rust/myfsio-engine/crates/myfsio-server/src/lib.rs`
-- `rust/myfsio-engine/crates/myfsio-server/src/handlers/`
+- `crates/myfsio-server/src/lib.rs`
+- `crates/myfsio-server/src/handlers/`

@@ -3,7 +3,7 @@
 logs
 data
 tmp
-myfsio-engine/target
-myfsio-engine/tests
+target
+crates/*/tests
 Dockerfile
 .dockerignore

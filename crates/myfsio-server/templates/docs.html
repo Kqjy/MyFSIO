@@ -73,16 +73,13 @@
         </div>
         <p class="text-muted">Build or run the Rust server and launch the API plus web UI from a single process.</p>
         <div class="alert alert-light border small mb-3">
-          Runtime note: MyFSIO now runs from the Rust server in <code>rust/myfsio-engine</code>. For the verified runtime configuration list, use the repository <code>docs.md</code>.
+          Runtime note: the repository root is the Cargo workspace. For the verified runtime configuration list, use the repository <code>docs.md</code>.
         </div>
         <ol class="docs-steps">
           <li>Install a current Rust toolchain.</li>
-          <li>Change into <code>rust/myfsio-engine</code>.</li>
-          <li>Start the server with <code>cargo run -p myfsio-server --</code>.</li>
+          <li>From the repository root, start the server with <code>cargo run -p myfsio-server --</code>.</li>
         </ol>
-<pre class="mb-3"><code class="language-bash">cd rust/myfsio-engine
-
-# Run API + UI
+<pre class="mb-3"><code class="language-bash"># Run API + UI
 cargo run -p myfsio-server --
 
 # Show resolved configuration

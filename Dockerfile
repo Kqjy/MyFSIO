@@ -6,10 +6,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY myfsio-engine ./myfsio-engine
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 
-RUN cd myfsio-engine \
-    && cargo build --release --bin myfsio-server \
+RUN cargo build --release --bin myfsio-server \
     && strip target/release/myfsio-server
 
 
@@ -24,9 +24,9 @@ RUN apt-get update \
     && useradd -m -u 1000 myfsio \
     && chown -R myfsio:myfsio /app
 
-COPY --from=builder /build/myfsio-engine/target/release/myfsio-server /usr/local/bin/myfsio-server
-COPY --from=builder /build/myfsio-engine/crates/myfsio-server/templates /app/templates
-COPY --from=builder /build/myfsio-engine/crates/myfsio-server/static /app/static
+COPY --from=builder /build/target/release/myfsio-server /usr/local/bin/myfsio-server
+COPY --from=builder /build/crates/myfsio-server/templates /app/templates
+COPY --from=builder /build/crates/myfsio-server/static /app/static
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN chmod +x /app/docker-entrypoint.sh \

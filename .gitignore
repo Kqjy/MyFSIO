@@ -26,12 +26,8 @@ dist/
 *.egg-info/
 .eggs/
 
-# Rust / maturin build artifacts
-python/myfsio_core/target/
-python/myfsio_core/Cargo.lock
-
 # Rust engine build artifacts
-rust/myfsio-engine/target/
+target/
 
 # Local runtime artifacts
 logs/

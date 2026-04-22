@@ -1,8 +1,6 @@
 # MyFSIO
 
-MyFSIO is an S3-compatible object storage server with a Rust runtime and a filesystem-backed storage engine. The active server lives under `rust/myfsio-engine` and serves both the S3 API and the built-in web UI from a single process.
-
-The `python/` implementation is deprecated as of 2026-04-21. It remains in the repository for migration reference and legacy tests, but new development and supported runtime usage should target the Rust server.
+MyFSIO is an S3-compatible object storage server with a Rust runtime and a filesystem-backed storage engine. The repository root is the Cargo workspace; the server serves both the S3 API and the built-in web UI from a single process.
 
 ## Features
 
@@ -29,7 +27,6 @@ If you want API-only mode, set `UI_ENABLED=false`. There is no separate "UI-only
 From the repository root:
 
 ```bash
-cd rust/myfsio-engine
 cargo run -p myfsio-server --
 ```
 
@@ -60,14 +57,13 @@ UI_ENABLED=false cargo run -p myfsio-server --
 ## Building a Binary
 
 ```bash
-cd rust/myfsio-engine
 cargo build --release -p myfsio-server
 ```
 
 Binary locations:
 
-- Linux/macOS: `rust/myfsio-engine/target/release/myfsio-server`
-- Windows: `rust/myfsio-engine/target/release/myfsio-server.exe`
+- Linux/macOS: `target/release/myfsio-server`
+- Windows: `target/release/myfsio-server.exe`
 
 Run the built binary directly:
 
@@ -166,10 +162,10 @@ data/
 
 ## Docker
 
-Build the Rust image from the `rust/` directory:
+Build the Rust image from the repository root:
 
 ```bash
-docker build -t myfsio ./rust
+docker build -t myfsio .
 docker run --rm -p 5000:5000 -p 5100:5100 -v "${PWD}/data:/app/data" myfsio
 ```
 
@@ -180,11 +176,9 @@ If the instance sits behind a reverse proxy, set `API_BASE_URL` to the public S3
 The repository includes `scripts/install.sh` for systemd-style Linux installs. Build the Rust binary first, then pass it to the installer:
 
 ```bash
-cd rust/myfsio-engine
 cargo build --release -p myfsio-server
 
-cd ../..
-sudo ./scripts/install.sh --binary ./rust/myfsio-engine/target/release/myfsio-server
+sudo ./scripts/install.sh --binary ./target/release/myfsio-server
 ```
 
 The installer copies the binary into `/opt/myfsio/myfsio`, writes `/opt/myfsio/myfsio.env`, and can register a `myfsio.service` unit.
@@ -194,7 +188,6 @@ The installer copies the binary into `/opt/myfsio/myfsio`, writes `/opt/myfsio/m
 Run the Rust test suite from the workspace:
 
 ```bash
-cd rust/myfsio-engine
 cargo test
 ```
 
@@ -209,4 +202,4 @@ cargo test
 }
 ```
 
-The `version` field comes from the Rust crate version in `rust/myfsio-engine/crates/myfsio-server/Cargo.toml`.
+The `version` field comes from the Rust crate version in `crates/myfsio-server/Cargo.toml`.
