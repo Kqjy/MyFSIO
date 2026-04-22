@@ -10,11 +10,91 @@ use md5::{Digest, Md5};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
+
+fn validate_list_prefix(prefix: &str) -> StorageResult<()> {
+    if prefix.contains('\0') {
+        return Err(StorageError::InvalidObjectKey(
+            "prefix contains null bytes".to_string(),
+        ));
+    }
+    if prefix.starts_with('/') || prefix.starts_with('\\') {
+        return Err(StorageError::InvalidObjectKey(
+            "prefix cannot start with a slash".to_string(),
+        ));
+    }
+    for part in prefix.split(['/', '\\']) {
+        if part == ".." {
+            return Err(StorageError::InvalidObjectKey(
+                "prefix contains parent directory references".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_blocking<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
+fn slice_range_for_prefix<T, F>(items: &[T], key_of: F, prefix: &str) -> (usize, usize)
+where
+    F: Fn(&T) -> &str,
+{
+    if prefix.is_empty() {
+        return (0, items.len());
+    }
+    let start = items.partition_point(|item| key_of(item) < prefix);
+    let end_from_start = items[start..]
+        .iter()
+        .position(|item| !key_of(item).starts_with(prefix))
+        .map(|p| start + p)
+        .unwrap_or(items.len());
+    (start, end_from_start)
+}
+
+fn normalize_path(p: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
+fn path_is_within(candidate: &Path, root: &Path) -> bool {
+    match (normalize_path(candidate), normalize_path(root)) {
+        (Some(c), Some(r)) => c.starts_with(&r),
+        _ => false,
+    }
+}
+
+type ListCacheEntry = (String, u64, f64, Option<String>);
+
+#[derive(Clone, Default)]
+struct ShallowCacheEntry {
+    files: Vec<ObjectMeta>,
+    dirs: Vec<String>,
+}
 
 pub struct FsStorageBackend {
     root: PathBuf,
@@ -26,6 +106,11 @@ pub struct FsStorageBackend {
     meta_index_locks: DashMap<String, Arc<Mutex<()>>>,
     stats_cache: DashMap<String, (BucketStats, Instant)>,
     stats_cache_ttl: std::time::Duration,
+    list_cache: DashMap<String, (Arc<Vec<ListCacheEntry>>, Instant)>,
+    shallow_cache: DashMap<(String, PathBuf, String), (Arc<ShallowCacheEntry>, Instant)>,
+    list_rebuild_locks: DashMap<String, Arc<Mutex<()>>>,
+    shallow_rebuild_locks: DashMap<(String, PathBuf, String), Arc<Mutex<()>>>,
+    list_cache_ttl: std::time::Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -61,9 +146,20 @@ impl FsStorageBackend {
             meta_index_locks: DashMap::new(),
             stats_cache: DashMap::new(),
             stats_cache_ttl: std::time::Duration::from_secs(60),
+            list_cache: DashMap::new(),
+            shallow_cache: DashMap::new(),
+            list_rebuild_locks: DashMap::new(),
+            shallow_rebuild_locks: DashMap::new(),
+            list_cache_ttl: std::time::Duration::from_secs(5),
         };
         backend.ensure_system_roots();
         backend
+    }
+
+    fn invalidate_bucket_caches(&self, bucket_name: &str) {
+        self.stats_cache.remove(bucket_name);
+        self.list_cache.remove(bucket_name);
+        self.shallow_cache.retain(|(b, _, _), _| b != bucket_name);
     }
 
     fn ensure_system_roots(&self) {
@@ -156,6 +252,39 @@ impl FsStorageBackend {
             }
             _ => (meta_root.join(INDEX_FILE), entry_name),
         }
+    }
+
+    fn index_file_for_dir(&self, bucket_name: &str, rel_dir: &Path) -> PathBuf {
+        let meta_root = self.bucket_meta_root(bucket_name);
+        if rel_dir.as_os_str().is_empty() || rel_dir == Path::new(".") {
+            meta_root.join(INDEX_FILE)
+        } else {
+            meta_root.join(rel_dir).join(INDEX_FILE)
+        }
+    }
+
+    fn load_dir_index_sync(&self, bucket_name: &str, rel_dir: &Path) -> HashMap<String, String> {
+        let index_path = self.index_file_for_dir(bucket_name, rel_dir);
+        if !index_path.exists() {
+            return HashMap::new();
+        }
+        let Ok(text) = std::fs::read_to_string(&index_path) else {
+            return HashMap::new();
+        };
+        let Ok(index) = serde_json::from_str::<HashMap<String, Value>>(&text) else {
+            return HashMap::new();
+        };
+        let mut out = HashMap::with_capacity(index.len());
+        for (name, entry) in index {
+            if let Some(etag) = entry
+                .get("metadata")
+                .and_then(|m| m.get("__etag__"))
+                .and_then(|v| v.as_str())
+            {
+                out.insert(name, etag.to_string());
+            }
+        }
+        out
     }
 
     fn get_meta_index_lock(&self, index_path: &str) -> Arc<Mutex<()>> {
@@ -872,14 +1001,14 @@ impl FsStorageBackend {
         Ok(stats)
     }
 
-    fn list_objects_sync(
+    fn build_full_listing_sync(
         &self,
         bucket_name: &str,
-        params: &ListParams,
-    ) -> StorageResult<ListObjectsResult> {
+    ) -> StorageResult<Arc<Vec<ListCacheEntry>>> {
         let bucket_path = self.require_bucket(bucket_name)?;
 
-        let mut all_keys: Vec<(String, u64, f64, Option<String>)> = Vec::new();
+        let mut all_keys: Vec<ListCacheEntry> = Vec::new();
+        let mut dir_etag_cache: HashMap<PathBuf, HashMap<String, String>> = HashMap::new();
         let internal = INTERNAL_FOLDERS;
         let bucket_str = bucket_path.to_string_lossy().to_string();
         let bucket_prefix_len = bucket_str.len() + 1;
@@ -912,28 +1041,78 @@ impl FsStorageBackend {
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs_f64())
                             .unwrap_or(0.0);
-                        all_keys.push((key, meta.len(), mtime, None));
+
+                        let rel_dir = Path::new(&key)
+                            .parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_default();
+                        let etags = dir_etag_cache
+                            .entry(rel_dir.clone())
+                            .or_insert_with(|| self.load_dir_index_sync(bucket_name, &rel_dir));
+                        let etag = etags.get(name_str.as_ref()).cloned();
+
+                        all_keys.push((key, meta.len(), mtime, etag));
                     }
                 }
             }
         }
 
         all_keys.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Arc::new(all_keys))
+    }
 
-        if let Some(ref prefix) = params.prefix {
-            all_keys.retain(|k| k.0.starts_with(prefix.as_str()));
+    fn get_full_listing_sync(&self, bucket_name: &str) -> StorageResult<Arc<Vec<ListCacheEntry>>> {
+        if let Some(entry) = self.list_cache.get(bucket_name) {
+            let (cached, cached_at) = entry.value();
+            if cached_at.elapsed() < self.list_cache_ttl {
+                return Ok(cached.clone());
+            }
         }
 
+        let lock = self
+            .list_rebuild_locks
+            .entry(bucket_name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        if let Some(entry) = self.list_cache.get(bucket_name) {
+            let (cached, cached_at) = entry.value();
+            if cached_at.elapsed() < self.list_cache_ttl {
+                return Ok(cached.clone());
+            }
+        }
+
+        let listing = self.build_full_listing_sync(bucket_name)?;
+        self.list_cache
+            .insert(bucket_name.to_string(), (listing.clone(), Instant::now()));
+        Ok(listing)
+    }
+
+    fn list_objects_sync(
+        &self,
+        bucket_name: &str,
+        params: &ListParams,
+    ) -> StorageResult<ListObjectsResult> {
+        self.require_bucket(bucket_name)?;
+        if let Some(ref prefix) = params.prefix {
+            if !prefix.is_empty() {
+                validate_list_prefix(prefix)?;
+            }
+        }
+
+        let listing = self.get_full_listing_sync(bucket_name)?;
+
+        let (slice_start, slice_end) = match params.prefix.as_deref() {
+            Some(p) if !p.is_empty() => slice_range_for_prefix(&listing[..], |e| &e.0, p),
+            _ => (0, listing.len()),
+        };
+        let prefix_filter = &listing[slice_start..slice_end];
+
         let start_idx = if let Some(ref token) = params.continuation_token {
-            all_keys
-                .iter()
-                .position(|k| k.0.as_str() > token.as_str())
-                .unwrap_or(all_keys.len())
+            prefix_filter.partition_point(|k| k.0.as_str() <= token.as_str())
         } else if let Some(ref start_after) = params.start_after {
-            all_keys
-                .iter()
-                .position(|k| k.0.as_str() > start_after.as_str())
-                .unwrap_or(all_keys.len())
+            prefix_filter.partition_point(|k| k.0.as_str() <= start_after.as_str())
         } else {
             0
         };
@@ -944,10 +1123,10 @@ impl FsStorageBackend {
             params.max_keys
         };
 
-        let end_idx = std::cmp::min(start_idx + max_keys, all_keys.len());
-        let is_truncated = end_idx < all_keys.len();
+        let end_idx = std::cmp::min(start_idx + max_keys, prefix_filter.len());
+        let is_truncated = end_idx < prefix_filter.len();
 
-        let objects: Vec<ObjectMeta> = all_keys[start_idx..end_idx]
+        let objects: Vec<ObjectMeta> = prefix_filter[start_idx..end_idx]
             .iter()
             .map(|(key, size, mtime, etag)| {
                 let lm = Utc
@@ -955,10 +1134,7 @@ impl FsStorageBackend {
                     .single()
                     .unwrap_or_else(Utc::now);
                 let mut obj = ObjectMeta::new(key.clone(), *size, lm);
-                obj.etag = etag.clone().or_else(|| {
-                    let meta = self.read_metadata_sync(bucket_name, key);
-                    meta.get("__etag__").cloned()
-                });
+                obj.etag = etag.clone();
                 obj
             })
             .collect();
@@ -976,36 +1152,39 @@ impl FsStorageBackend {
         })
     }
 
-    fn list_objects_shallow_sync(
+    fn build_shallow_sync(
         &self,
         bucket_name: &str,
-        params: &ShallowListParams,
-    ) -> StorageResult<ShallowListResult> {
+        rel_dir: &Path,
+        delimiter: &str,
+    ) -> StorageResult<Arc<ShallowCacheEntry>> {
         let bucket_path = self.require_bucket(bucket_name)?;
+        let target_dir = bucket_path.join(rel_dir);
 
-        let target_dir = if params.prefix.is_empty() {
-            bucket_path.clone()
-        } else {
-            let prefix_path = Path::new(&params.prefix);
-            let dir_part = if params.prefix.ends_with(&params.delimiter) {
-                prefix_path.to_path_buf()
-            } else {
-                prefix_path.parent().unwrap_or(Path::new("")).to_path_buf()
-            };
-            bucket_path.join(dir_part)
-        };
+        if !path_is_within(&target_dir, &bucket_path) {
+            return Err(StorageError::InvalidObjectKey(
+                "prefix escapes bucket root".to_string(),
+            ));
+        }
 
         if !target_dir.exists() {
-            return Ok(ShallowListResult {
-                objects: Vec::new(),
-                common_prefixes: Vec::new(),
-                is_truncated: false,
-                next_continuation_token: None,
-            });
+            return Ok(Arc::new(ShallowCacheEntry::default()));
         }
+
+        let dir_etags = self.load_dir_index_sync(bucket_name, rel_dir);
 
         let mut files = Vec::new();
         let mut dirs = Vec::new();
+
+        let rel_dir_prefix = if rel_dir.as_os_str().is_empty() {
+            String::new()
+        } else {
+            let mut s = rel_dir.to_string_lossy().replace('\\', "/");
+            if !s.ends_with('/') {
+                s.push('/');
+            }
+            s
+        };
 
         let entries = std::fs::read_dir(&target_dir).map_err(StorageError::Io)?;
         for entry in entries.flatten() {
@@ -1021,19 +1200,10 @@ impl FsStorageBackend {
                 Err(_) => continue,
             };
 
-            let rel = entry
-                .path()
-                .strip_prefix(&bucket_path)
-                .unwrap_or(Path::new(""))
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            if !params.prefix.is_empty() && !rel.starts_with(&params.prefix) {
-                continue;
-            }
+            let rel = format!("{}{}", rel_dir_prefix, name_str);
 
             if ft.is_dir() {
-                dirs.push(format!("{}{}", rel, &params.delimiter));
+                dirs.push(format!("{}{}", rel, delimiter));
             } else if ft.is_file() {
                 if let Ok(meta) = entry.metadata() {
                     let mtime = meta
@@ -1046,10 +1216,7 @@ impl FsStorageBackend {
                         .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
                         .single()
                         .unwrap_or_else(Utc::now);
-                    let etag = self
-                        .read_metadata_sync(bucket_name, &rel)
-                        .get("__etag__")
-                        .cloned();
+                    let etag = dir_etags.get(&name_str).cloned();
                     let mut obj = ObjectMeta::new(rel, meta.len(), lm);
                     obj.etag = etag;
                     files.push(obj);
@@ -1059,39 +1226,73 @@ impl FsStorageBackend {
 
         files.sort_by(|a, b| a.key.cmp(&b.key));
         dirs.sort();
+        Ok(Arc::new(ShallowCacheEntry { files, dirs }))
+    }
 
-        let mut merged: Vec<Either> = Vec::new();
-        let mut fi = 0;
-        let mut di = 0;
-        while fi < files.len() && di < dirs.len() {
-            if files[fi].key < dirs[di] {
-                merged.push(Either::File(fi));
-                fi += 1;
-            } else {
-                merged.push(Either::Dir(di));
-                di += 1;
+    fn get_shallow_sync(
+        &self,
+        bucket_name: &str,
+        rel_dir: &Path,
+        delimiter: &str,
+    ) -> StorageResult<Arc<ShallowCacheEntry>> {
+        let cache_key = (
+            bucket_name.to_string(),
+            rel_dir.to_path_buf(),
+            delimiter.to_string(),
+        );
+        if let Some(entry) = self.shallow_cache.get(&cache_key) {
+            let (cached, cached_at) = entry.value();
+            if cached_at.elapsed() < self.list_cache_ttl {
+                return Ok(cached.clone());
             }
         }
-        while fi < files.len() {
-            merged.push(Either::File(fi));
-            fi += 1;
-        }
-        while di < dirs.len() {
-            merged.push(Either::Dir(di));
-            di += 1;
+
+        let lock = self
+            .shallow_rebuild_locks
+            .entry(cache_key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        if let Some(entry) = self.shallow_cache.get(&cache_key) {
+            let (cached, cached_at) = entry.value();
+            if cached_at.elapsed() < self.list_cache_ttl {
+                return Ok(cached.clone());
+            }
         }
 
-        let start_idx = if let Some(ref token) = params.continuation_token {
-            merged
-                .iter()
-                .position(|e| match e {
-                    Either::File(i) => files[*i].key.as_str() > token.as_str(),
-                    Either::Dir(i) => dirs[*i].as_str() > token.as_str(),
-                })
-                .unwrap_or(merged.len())
+        let built = self.build_shallow_sync(bucket_name, rel_dir, delimiter)?;
+        self.shallow_cache
+            .insert(cache_key, (built.clone(), Instant::now()));
+        Ok(built)
+    }
+
+    fn list_objects_shallow_sync(
+        &self,
+        bucket_name: &str,
+        params: &ShallowListParams,
+    ) -> StorageResult<ShallowListResult> {
+        self.require_bucket(bucket_name)?;
+
+        let rel_dir: PathBuf = if params.prefix.is_empty() {
+            PathBuf::new()
         } else {
-            0
+            validate_list_prefix(&params.prefix)?;
+            let prefix_path = Path::new(&params.prefix);
+            if params.prefix.ends_with(&params.delimiter) {
+                prefix_path.to_path_buf()
+            } else {
+                prefix_path.parent().unwrap_or(Path::new("")).to_path_buf()
+            }
         };
+
+        let cached = self.get_shallow_sync(bucket_name, &rel_dir, &params.delimiter)?;
+
+        let (file_start, file_end) =
+            slice_range_for_prefix(&cached.files, |o| &o.key, &params.prefix);
+        let (dir_start, dir_end) = slice_range_for_prefix(&cached.dirs, |s| s, &params.prefix);
+        let files = &cached.files[file_start..file_end];
+        let dirs = &cached.dirs[dir_start..dir_end];
 
         let max_keys = if params.max_keys == 0 {
             DEFAULT_MAX_KEYS
@@ -1099,27 +1300,59 @@ impl FsStorageBackend {
             params.max_keys
         };
 
-        let end_idx = std::cmp::min(start_idx + max_keys, merged.len());
-        let is_truncated = end_idx < merged.len();
+        let token_filter = |key: &str| -> bool {
+            params
+                .continuation_token
+                .as_deref()
+                .map(|t| key > t)
+                .unwrap_or(true)
+        };
 
-        let mut result_objects = Vec::new();
-        let mut result_prefixes = Vec::new();
+        let file_skip = params
+            .continuation_token
+            .as_deref()
+            .map(|t| files.partition_point(|o| o.key.as_str() <= t))
+            .unwrap_or(0);
+        let dir_skip = params
+            .continuation_token
+            .as_deref()
+            .map(|t| dirs.partition_point(|d| d.as_str() <= t))
+            .unwrap_or(0);
 
-        for item in &merged[start_idx..end_idx] {
-            match item {
-                Either::File(i) => result_objects.push(files[*i].clone()),
-                Either::Dir(i) => result_prefixes.push(dirs[*i].clone()),
+        let mut fi = file_skip;
+        let mut di = dir_skip;
+        let mut result_objects: Vec<ObjectMeta> = Vec::new();
+        let mut result_prefixes: Vec<String> = Vec::new();
+        let mut last_key: Option<String> = None;
+        let mut total = 0usize;
+
+        while total < max_keys && (fi < files.len() || di < dirs.len()) {
+            let take_file = match (fi < files.len(), di < dirs.len()) {
+                (true, true) => files[fi].key.as_str() < dirs[di].as_str(),
+                (true, false) => true,
+                (false, true) => false,
+                _ => break,
+            };
+            if take_file {
+                if token_filter(&files[fi].key) {
+                    last_key = Some(files[fi].key.clone());
+                    result_objects.push(files[fi].clone());
+                    total += 1;
+                }
+                fi += 1;
+            } else {
+                if token_filter(&dirs[di]) {
+                    last_key = Some(dirs[di].clone());
+                    result_prefixes.push(dirs[di].clone());
+                    total += 1;
+                }
+                di += 1;
             }
         }
 
-        let next_token = if is_truncated {
-            match &merged[end_idx - 1] {
-                Either::File(i) => Some(files[*i].key.clone()),
-                Either::Dir(i) => Some(dirs[*i].clone()),
-            }
-        } else {
-            None
-        };
+        let remaining = fi < files.len() || di < dirs.len();
+        let is_truncated = remaining;
+        let next_token = if is_truncated { last_key } else { None };
 
         Ok(ShallowListResult {
             objects: result_objects,
@@ -1195,7 +1428,7 @@ impl FsStorageBackend {
             StorageError::Io(e)
         })?;
 
-        self.stats_cache.remove(bucket_name);
+        self.invalidate_bucket_caches(bucket_name);
 
         let file_meta = std::fs::metadata(&destination).map_err(StorageError::Io)?;
         let mtime = file_meta
@@ -1252,11 +1485,6 @@ impl FsStorageBackend {
 
         self.finalize_put_sync(bucket_name, key, &tmp_path, etag, new_size, metadata)
     }
-}
-
-enum Either {
-    File(usize),
-    Dir(usize),
 }
 
 impl crate::traits::StorageEngine for FsStorageBackend {
@@ -1341,7 +1569,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Self::remove_tree(&self.multipart_bucket_root(name));
 
         self.bucket_config_cache.remove(name);
-        self.stats_cache.remove(name);
+        self.invalidate_bucket_caches(name);
 
         Ok(())
     }
@@ -1550,6 +1778,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             .map_err(StorageError::Io)?;
 
         Self::cleanup_empty_parents(&path, &bucket_path);
+        self.invalidate_bucket_caches(bucket);
         Ok(())
     }
 
@@ -1575,7 +1804,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Self::safe_unlink(&manifest_path).map_err(StorageError::Io)?;
         let versions_root = self.bucket_versions_root(bucket);
         Self::cleanup_empty_parents(&manifest_path, &versions_root);
-        self.stats_cache.remove(bucket);
+        self.invalidate_bucket_caches(bucket);
         Ok(())
     }
 
@@ -1621,6 +1850,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         entry.insert("metadata".to_string(), Value::Object(meta_map));
         self.write_index_entry_sync(bucket, key, &entry)
             .map_err(StorageError::Io)?;
+        self.invalidate_bucket_caches(bucket);
         Ok(())
     }
 
@@ -1629,7 +1859,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         params: &ListParams,
     ) -> StorageResult<ListObjectsResult> {
-        self.list_objects_sync(bucket, params)
+        run_blocking(|| self.list_objects_sync(bucket, params))
     }
 
     async fn list_objects_shallow(
@@ -1637,7 +1867,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         params: &ShallowListParams,
     ) -> StorageResult<ShallowListResult> {
-        self.list_objects_shallow_sync(bucket, params)
+        run_blocking(|| self.list_objects_shallow_sync(bucket, params))
     }
 
     async fn initiate_multipart(
@@ -2192,6 +2422,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
         self.write_index_entry_sync(bucket, key, &entry)
             .map_err(StorageError::Io)?;
+        self.invalidate_bucket_caches(bucket);
         Ok(())
     }
 

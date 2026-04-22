@@ -227,9 +227,7 @@ async fn parse_form_any(
     if is_multipart {
         let boundary = multer::parse_boundary(&content_type)
             .map_err(|_| "Missing multipart boundary".to_string())?;
-        let stream = futures::stream::once(async move {
-            Ok::<_, std::io::Error>(bytes)
-        });
+        let stream = futures::stream::once(async move { Ok::<_, std::io::Error>(bytes) });
         let mut multipart = multer::Multipart::new(stream, boundary);
         let mut out = HashMap::new();
         while let Some(field) = multipart
@@ -2173,10 +2171,7 @@ pub async fn create_bucket(
     let wants_json = wants_json(&headers);
     let form = match parse_form_any(&headers, body).await {
         Ok(fields) => CreateBucketForm {
-            bucket_name: fields
-                .get("bucket_name")
-                .cloned()
-                .unwrap_or_default(),
+            bucket_name: fields.get("bucket_name").cloned().unwrap_or_default(),
             csrf_token: fields.get("csrf_token").cloned().unwrap_or_default(),
         },
         Err(message) => {

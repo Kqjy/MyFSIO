@@ -904,6 +904,35 @@ pub struct ListObjectsQuery {
     pub prefix: Option<String>,
     #[serde(default)]
     pub start_after: Option<String>,
+    #[serde(default)]
+    pub delimiter: Option<String>,
+}
+
+fn object_json(bucket_name: &str, o: &myfsio_common::types::ObjectMeta) -> Value {
+    json!({
+        "key": o.key,
+        "size": o.size,
+        "last_modified": o.last_modified.to_rfc3339(),
+        "last_modified_iso": o.last_modified.to_rfc3339(),
+        "last_modified_display": o.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+        "etag": o.etag.clone().unwrap_or_default(),
+        "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
+        "content_type": o.content_type.clone().unwrap_or_default(),
+        "download_url": build_ui_object_url(bucket_name, &o.key, "download"),
+        "preview_url": build_ui_object_url(bucket_name, &o.key, "preview"),
+        "delete_endpoint": build_ui_object_url(bucket_name, &o.key, "delete"),
+        "presign_endpoint": build_ui_object_url(bucket_name, &o.key, "presign"),
+        "metadata_url": build_ui_object_url(bucket_name, &o.key, "metadata"),
+        "versions_endpoint": build_ui_object_url(bucket_name, &o.key, "versions"),
+        "restore_template": format!(
+            "/ui/buckets/{}/objects/{}/restore/VERSION_ID_PLACEHOLDER",
+            bucket_name,
+            encode_object_key(&o.key)
+        ),
+        "tags_url": build_ui_object_url(bucket_name, &o.key, "tags"),
+        "copy_url": build_ui_object_url(bucket_name, &o.key, "copy"),
+        "move_url": build_ui_object_url(bucket_name, &o.key, "move"),
+    })
 }
 
 pub async fn list_bucket_objects(
@@ -917,6 +946,49 @@ pub async fn list_bucket_objects(
     }
 
     let max_keys = q.max_keys.unwrap_or(1000).min(5000);
+    let versioning_enabled = state
+        .storage
+        .is_versioning_enabled(&bucket_name)
+        .await
+        .unwrap_or(false);
+    let stats = state.storage.bucket_stats(&bucket_name).await.ok();
+    let total_count = stats.as_ref().map(|s| s.objects).unwrap_or(0);
+
+    let use_shallow = q.delimiter.as_deref() == Some("/");
+
+    if use_shallow {
+        let params = myfsio_common::types::ShallowListParams {
+            prefix: q.prefix.clone().unwrap_or_default(),
+            delimiter: "/".to_string(),
+            max_keys,
+            continuation_token: q.continuation_token.clone(),
+        };
+        return match state
+            .storage
+            .list_objects_shallow(&bucket_name, &params)
+            .await
+        {
+            Ok(res) => {
+                let objects: Vec<Value> = res
+                    .objects
+                    .iter()
+                    .map(|o| object_json(&bucket_name, o))
+                    .collect();
+                Json(json!({
+                    "versioning_enabled": versioning_enabled,
+                    "total_count": total_count,
+                    "is_truncated": res.is_truncated,
+                    "next_continuation_token": res.next_continuation_token,
+                    "url_templates": url_templates_for(&bucket_name),
+                    "objects": objects,
+                    "common_prefixes": res.common_prefixes,
+                }))
+                .into_response()
+            }
+            Err(e) => storage_json_error(e),
+        };
+    }
+
     let params = ListParams {
         max_keys,
         continuation_token: q.continuation_token.clone(),
@@ -924,46 +996,12 @@ pub async fn list_bucket_objects(
         start_after: q.start_after.clone(),
     };
 
-    let versioning_enabled = state
-        .storage
-        .is_versioning_enabled(&bucket_name)
-        .await
-        .unwrap_or(false);
-
-    let stats = state.storage.bucket_stats(&bucket_name).await.ok();
-    let total_count = stats.as_ref().map(|s| s.objects).unwrap_or(0);
-
     match state.storage.list_objects(&bucket_name, &params).await {
         Ok(res) => {
             let objects: Vec<Value> = res
                 .objects
                 .iter()
-                .map(|o| {
-                    json!({
-                        "key": o.key,
-                        "size": o.size,
-                        "last_modified": o.last_modified.to_rfc3339(),
-                        "last_modified_iso": o.last_modified.to_rfc3339(),
-                        "last_modified_display": o.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        "etag": o.etag.clone().unwrap_or_default(),
-                        "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
-                        "content_type": o.content_type.clone().unwrap_or_default(),
-                        "download_url": build_ui_object_url(&bucket_name, &o.key, "download"),
-                        "preview_url": build_ui_object_url(&bucket_name, &o.key, "preview"),
-                        "delete_endpoint": build_ui_object_url(&bucket_name, &o.key, "delete"),
-                        "presign_endpoint": build_ui_object_url(&bucket_name, &o.key, "presign"),
-                        "metadata_url": build_ui_object_url(&bucket_name, &o.key, "metadata"),
-                        "versions_endpoint": build_ui_object_url(&bucket_name, &o.key, "versions"),
-                        "restore_template": format!(
-                            "/ui/buckets/{}/objects/{}/restore/VERSION_ID_PLACEHOLDER",
-                            bucket_name,
-                            encode_object_key(&o.key)
-                        ),
-                        "tags_url": build_ui_object_url(&bucket_name, &o.key, "tags"),
-                        "copy_url": build_ui_object_url(&bucket_name, &o.key, "copy"),
-                        "move_url": build_ui_object_url(&bucket_name, &o.key, "move"),
-                    })
-                })
+                .map(|o| object_json(&bucket_name, o))
                 .collect();
 
             Json(json!({
@@ -1006,41 +1044,62 @@ pub async fn stream_bucket_objects(
     let stats = state.storage.bucket_stats(&bucket_name).await.ok();
     let total_count = stats.as_ref().map(|s| s.objects).unwrap_or(0);
 
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(
-        json!({
-            "type": "meta",
-            "url_templates": url_templates_for(&bucket_name),
-            "versioning_enabled": versioning_enabled,
-        })
-        .to_string(),
-    );
-    lines.push(json!({ "type": "count", "total_count": total_count }).to_string());
-
     let use_delimiter = q.delimiter.as_deref() == Some("/");
     let prefix = q.prefix.clone().unwrap_or_default();
 
-    if use_delimiter {
-        let mut token: Option<String> = None;
-        loop {
-            let params = myfsio_common::types::ShallowListParams {
-                prefix: prefix.clone(),
-                delimiter: "/".to_string(),
-                max_keys: UI_OBJECT_BROWSER_MAX_KEYS,
-                continuation_token: token.clone(),
-            };
-            match state
-                .storage
-                .list_objects_shallow(&bucket_name, &params)
-                .await
-            {
-                Ok(res) => {
-                    for p in &res.common_prefixes {
-                        lines.push(json!({ "type": "folder", "prefix": p }).to_string());
-                    }
-                    for o in &res.objects {
-                        lines.push(
-                            json!({
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(64);
+
+    let meta_line = json!({
+        "type": "meta",
+        "url_templates": url_templates_for(&bucket_name),
+        "versioning_enabled": versioning_enabled,
+    })
+    .to_string()
+        + "\n";
+    let count_line = json!({ "type": "count", "total_count": total_count }).to_string() + "\n";
+
+    let storage = state.storage.clone();
+    let bucket = bucket_name.clone();
+
+    tokio::spawn(async move {
+        if tx
+            .send(Ok(bytes::Bytes::from(meta_line.into_bytes())))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if tx
+            .send(Ok(bytes::Bytes::from(count_line.into_bytes())))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        if use_delimiter {
+            let mut token: Option<String> = None;
+            loop {
+                let params = myfsio_common::types::ShallowListParams {
+                    prefix: prefix.clone(),
+                    delimiter: "/".to_string(),
+                    max_keys: UI_OBJECT_BROWSER_MAX_KEYS,
+                    continuation_token: token.clone(),
+                };
+                match storage.list_objects_shallow(&bucket, &params).await {
+                    Ok(res) => {
+                        for p in &res.common_prefixes {
+                            let line = json!({ "type": "folder", "prefix": p }).to_string() + "\n";
+                            if tx
+                                .send(Ok(bytes::Bytes::from(line.into_bytes())))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        for o in &res.objects {
+                            let line = json!({
                                 "type": "object",
                                 "key": o.key,
                                 "size": o.size,
@@ -1050,38 +1109,46 @@ pub async fn stream_bucket_objects(
                                 "etag": o.etag.clone().unwrap_or_default(),
                                 "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
                             })
-                            .to_string(),
-                        );
+                            .to_string()
+                                + "\n";
+                            if tx
+                                .send(Ok(bytes::Bytes::from(line.into_bytes())))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        if !res.is_truncated || res.next_continuation_token.is_none() {
+                            break;
+                        }
+                        token = res.next_continuation_token;
                     }
-                    if !res.is_truncated || res.next_continuation_token.is_none() {
-                        break;
+                    Err(e) => {
+                        let line =
+                            json!({ "type": "error", "error": e.to_string() }).to_string() + "\n";
+                        let _ = tx.send(Ok(bytes::Bytes::from(line.into_bytes()))).await;
+                        return;
                     }
-                    token = res.next_continuation_token;
-                }
-                Err(e) => {
-                    lines.push(json!({ "type": "error", "error": e.to_string() }).to_string());
-                    break;
                 }
             }
-        }
-    } else {
-        let mut token: Option<String> = None;
-        loop {
-            let params = ListParams {
-                max_keys: 1000,
-                continuation_token: token.clone(),
-                prefix: if prefix.is_empty() {
-                    None
-                } else {
-                    Some(prefix.clone())
-                },
-                start_after: None,
-            };
-            match state.storage.list_objects(&bucket_name, &params).await {
-                Ok(res) => {
-                    for o in &res.objects {
-                        lines.push(
-                            json!({
+        } else {
+            let mut token: Option<String> = None;
+            loop {
+                let params = ListParams {
+                    max_keys: 1000,
+                    continuation_token: token.clone(),
+                    prefix: if prefix.is_empty() {
+                        None
+                    } else {
+                        Some(prefix.clone())
+                    },
+                    start_after: None,
+                };
+                match storage.list_objects(&bucket, &params).await {
+                    Ok(res) => {
+                        for o in &res.objects {
+                            let line = json!({
                                 "type": "object",
                                 "key": o.key,
                                 "size": o.size,
@@ -1091,30 +1158,48 @@ pub async fn stream_bucket_objects(
                                 "etag": o.etag.clone().unwrap_or_default(),
                                 "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
                             })
-                            .to_string(),
-                        );
+                            .to_string()
+                                + "\n";
+                            if tx
+                                .send(Ok(bytes::Bytes::from(line.into_bytes())))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        if !res.is_truncated || res.next_continuation_token.is_none() {
+                            break;
+                        }
+                        token = res.next_continuation_token;
                     }
-                    if !res.is_truncated || res.next_continuation_token.is_none() {
-                        break;
+                    Err(e) => {
+                        let line =
+                            json!({ "type": "error", "error": e.to_string() }).to_string() + "\n";
+                        let _ = tx.send(Ok(bytes::Bytes::from(line.into_bytes()))).await;
+                        return;
                     }
-                    token = res.next_continuation_token;
-                }
-                Err(e) => {
-                    lines.push(json!({ "type": "error", "error": e.to_string() }).to_string());
-                    break;
                 }
             }
         }
-    }
 
-    lines.push(json!({ "type": "done" }).to_string());
+        let done_line = json!({ "type": "done" }).to_string() + "\n";
+        let _ = tx
+            .send(Ok(bytes::Bytes::from(done_line.into_bytes())))
+            .await;
+    });
 
-    let body = lines.join("\n") + "\n";
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = Body::from_stream(stream);
+
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         "application/x-ndjson; charset=utf-8".parse().unwrap(),
     );
+    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    headers.insert("x-accel-buffering", "no".parse().unwrap());
+
     (StatusCode::OK, headers, body).into_response()
 }
 
