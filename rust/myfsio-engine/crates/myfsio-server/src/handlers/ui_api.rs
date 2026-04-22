@@ -49,6 +49,8 @@ const AWS_QUERY_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
+const UI_OBJECT_BROWSER_MAX_KEYS: usize = 5000;
+
 fn url_templates_for(bucket: &str) -> Value {
     json!({
         "download": format!("/ui/buckets/{}/objects/KEY_PLACEHOLDER/download", bucket),
@@ -185,10 +187,7 @@ fn safe_attachment_filename(key: &str) -> String {
 }
 
 fn parse_api_base(state: &AppState) -> String {
-    std::env::var("API_BASE_URL")
-        .unwrap_or_else(|_| format!("http://{}", state.config.bind_addr))
-        .trim_end_matches('/')
-        .to_string()
+    state.config.api_base_url.trim_end_matches('/').to_string()
 }
 
 fn aws_query_encode(value: &str) -> String {
@@ -1022,38 +1021,48 @@ pub async fn stream_bucket_objects(
     let prefix = q.prefix.clone().unwrap_or_default();
 
     if use_delimiter {
-        let params = myfsio_common::types::ShallowListParams {
-            prefix: prefix.clone(),
-            delimiter: "/".to_string(),
-            max_keys: 5000,
-            continuation_token: None,
-        };
-        match state
-            .storage
-            .list_objects_shallow(&bucket_name, &params)
-            .await
-        {
-            Ok(res) => {
-                for p in &res.common_prefixes {
-                    lines.push(json!({ "type": "folder", "prefix": p }).to_string());
+        let mut token: Option<String> = None;
+        loop {
+            let params = myfsio_common::types::ShallowListParams {
+                prefix: prefix.clone(),
+                delimiter: "/".to_string(),
+                max_keys: UI_OBJECT_BROWSER_MAX_KEYS,
+                continuation_token: token.clone(),
+            };
+            match state
+                .storage
+                .list_objects_shallow(&bucket_name, &params)
+                .await
+            {
+                Ok(res) => {
+                    for p in &res.common_prefixes {
+                        lines.push(json!({ "type": "folder", "prefix": p }).to_string());
+                    }
+                    for o in &res.objects {
+                        lines.push(
+                            json!({
+                                "type": "object",
+                                "key": o.key,
+                                "size": o.size,
+                                "last_modified": o.last_modified.to_rfc3339(),
+                                "last_modified_iso": o.last_modified.to_rfc3339(),
+                                "last_modified_display": o.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                "etag": o.etag.clone().unwrap_or_default(),
+                                "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
+                            })
+                            .to_string(),
+                        );
+                    }
+                    if !res.is_truncated || res.next_continuation_token.is_none() {
+                        break;
+                    }
+                    token = res.next_continuation_token;
                 }
-                for o in &res.objects {
-                    lines.push(
-                        json!({
-                            "type": "object",
-                            "key": o.key,
-                            "size": o.size,
-                            "last_modified": o.last_modified.to_rfc3339(),
-                            "last_modified_iso": o.last_modified.to_rfc3339(),
-                            "last_modified_display": o.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
-                            "etag": o.etag.clone().unwrap_or_default(),
-                            "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
-                        })
-                        .to_string(),
-                    );
+                Err(e) => {
+                    lines.push(json!({ "type": "error", "error": e.to_string() }).to_string());
+                    break;
                 }
             }
-            Err(e) => lines.push(json!({ "type": "error", "error": e.to_string() }).to_string()),
         }
     } else {
         let mut token: Option<String> = None;
@@ -1123,7 +1132,7 @@ pub async fn list_bucket_folders(
     let params = myfsio_common::types::ShallowListParams {
         prefix: prefix.clone(),
         delimiter: "/".to_string(),
-        max_keys: 5000,
+        max_keys: UI_OBJECT_BROWSER_MAX_KEYS,
         continuation_token: None,
     };
     match state
@@ -2408,8 +2417,11 @@ async fn update_object_tags(state: &AppState, bucket: &str, key: &str, body: Bod
         Err(response) => return response,
     };
 
-    if payload.tags.len() > 50 {
-        return json_error(StatusCode::BAD_REQUEST, "Maximum 50 tags allowed");
+    if payload.tags.len() > state.config.object_tag_limit {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Maximum {} tags allowed", state.config.object_tag_limit),
+        );
     }
 
     let tags = payload
@@ -2839,6 +2851,15 @@ pub async fn bulk_delete_objects(
         return json_error(
             StatusCode::BAD_REQUEST,
             "No objects found under the selected folders",
+        );
+    }
+    if keys.len() > state.config.bulk_delete_max_keys {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Bulk delete supports at most {} keys",
+                state.config.bulk_delete_max_keys
+            ),
         );
     }
 

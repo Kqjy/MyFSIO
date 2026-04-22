@@ -333,7 +333,16 @@ pub fn create_ui_router(state: state::AppState) -> Router {
 }
 
 pub fn create_router(state: state::AppState) -> Router {
-    let mut router = Router::new()
+    let default_rate_limit = middleware::RateLimitLayerState::new(
+        state.config.ratelimit_default,
+        state.config.num_trusted_proxies,
+    );
+    let admin_rate_limit = middleware::RateLimitLayerState::new(
+        state.config.ratelimit_admin,
+        state.config.num_trusted_proxies,
+    );
+
+    let mut api_router = Router::new()
         .route("/myfsio/health", axum::routing::get(handlers::health_check))
         .route("/", axum::routing::get(handlers::list_buckets))
         .route(
@@ -362,7 +371,7 @@ pub fn create_router(state: state::AppState) -> Router {
         );
 
     if state.config.kms_enabled {
-        router = router
+        api_router = api_router
             .route(
                 "/kms/keys",
                 axum::routing::get(handlers::kms::list_keys).post(handlers::kms::create_key),
@@ -415,7 +424,17 @@ pub fn create_router(state: state::AppState) -> Router {
             );
     }
 
-    router = router
+    api_router = api_router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_layer,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            default_rate_limit,
+            middleware::rate_limit_layer,
+        ));
+
+    let admin_router = Router::new()
         .route(
             "/admin/site",
             axum::routing::get(handlers::admin::get_local_site)
@@ -546,14 +565,81 @@ pub fn create_router(state: state::AppState) -> Router {
         .route(
             "/admin/integrity/history",
             axum::routing::get(handlers::admin::integrity_history),
-        );
-
-    router
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_layer,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            admin_rate_limit,
+            middleware::rate_limit_layer,
+        ));
+
+    api_router
+        .merge(admin_router)
         .layer(axum::middleware::from_fn(middleware::server_header))
+        .layer(cors_layer(&state.config))
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state)
+}
+
+fn cors_layer(config: &config::ServerConfig) -> tower_http::cors::CorsLayer {
+    use axum::http::{HeaderName, HeaderValue, Method};
+    use tower_http::cors::{Any, CorsLayer};
+
+    let mut layer = CorsLayer::new();
+
+    if config.cors_origins.iter().any(|origin| origin == "*") {
+        layer = layer.allow_origin(Any);
+    } else {
+        let origins = config
+            .cors_origins
+            .iter()
+            .filter_map(|origin| HeaderValue::from_str(origin).ok())
+            .collect::<Vec<_>>();
+        if !origins.is_empty() {
+            layer = layer.allow_origin(origins);
+        }
+    }
+
+    let methods = config
+        .cors_methods
+        .iter()
+        .filter_map(|method| method.parse::<Method>().ok())
+        .collect::<Vec<_>>();
+    if !methods.is_empty() {
+        layer = layer.allow_methods(methods);
+    }
+
+    if config.cors_allow_headers.iter().any(|header| header == "*") {
+        layer = layer.allow_headers(Any);
+    } else {
+        let headers = config
+            .cors_allow_headers
+            .iter()
+            .filter_map(|header| header.parse::<HeaderName>().ok())
+            .collect::<Vec<_>>();
+        if !headers.is_empty() {
+            layer = layer.allow_headers(headers);
+        }
+    }
+
+    if config
+        .cors_expose_headers
+        .iter()
+        .any(|header| header == "*")
+    {
+        layer = layer.expose_headers(Any);
+    } else {
+        let headers = config
+            .cors_expose_headers
+            .iter()
+            .filter_map(|header| header.parse::<HeaderName>().ok())
+            .collect::<Vec<_>>();
+        if !headers.is_empty() {
+            layer = layer.expose_headers(headers);
+        }
+    }
+
+    layer
 }

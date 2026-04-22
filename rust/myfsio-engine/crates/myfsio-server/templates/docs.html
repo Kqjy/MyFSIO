@@ -112,7 +112,7 @@ cargo build --release -p myfsio-server
             <tbody>
               <tr>
                 <td><code>API_BASE_URL</code></td>
-                <td><code>http://127.0.0.1:5000</code></td>
+                <td>Derived from <code>HOST</code>/<code>PORT</code></td>
                 <td>Internal S3 API URL used by the web UI proxy. Also used for presigned URL generation. Set to your public URL if running behind a reverse proxy.</td>
               </tr>
               <tr>
@@ -184,32 +184,17 @@ cargo build --release -p myfsio-server
               <tr>
                 <td><code>RATE_LIMIT_DEFAULT</code></td>
                 <td><code>200 per minute</code></td>
-                <td>Default API rate limit.</td>
-              </tr>
-              <tr>
-                <td><code>RATE_LIMIT_LIST_BUCKETS</code></td>
-                <td><code>60 per minute</code></td>
-                <td>Rate limit for listing buckets.</td>
-              </tr>
-              <tr>
-                <td><code>RATE_LIMIT_BUCKET_OPS</code></td>
-                <td><code>120 per minute</code></td>
-                <td>Rate limit for bucket operations.</td>
-              </tr>
-              <tr>
-                <td><code>RATE_LIMIT_OBJECT_OPS</code></td>
-                <td><code>240 per minute</code></td>
-                <td>Rate limit for object operations.</td>
-              </tr>
-              <tr>
-                <td><code>RATE_LIMIT_HEAD_OPS</code></td>
-                <td><code>100 per minute</code></td>
-                <td>Rate limit for HEAD requests.</td>
+                <td>Default rate limit for S3 and KMS API endpoints.</td>
               </tr>
               <tr>
                 <td><code>RATE_LIMIT_ADMIN</code></td>
                 <td><code>60 per minute</code></td>
                 <td>Rate limit for admin API endpoints (<code>/admin/*</code>).</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_STORAGE_URI</code></td>
+                <td><code>memory://</code></td>
+                <td>Rate limit storage backend. Only in-memory storage is currently supported.</td>
               </tr>
               <tr>
                 <td><code>ADMIN_ACCESS_KEY</code></td>
@@ -377,8 +362,8 @@ cargo build --release -p myfsio-server
               </tr>
               <tr>
                 <td><code>NUM_TRUSTED_PROXIES</code></td>
-                <td><code>1</code></td>
-                <td>Number of trusted reverse proxies for <code>X-Forwarded-*</code> headers.</td>
+                <td><code>0</code></td>
+                <td>Number of trusted reverse proxies for <code>X-Forwarded-*</code> headers. Forwarded IP headers are ignored when this is <code>0</code>.</td>
               </tr>
               <tr>
                 <td><code>ALLOWED_REDIRECT_HOSTS</code></td>
@@ -2078,7 +2063,7 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
               <tr>
                 <td>Large folder uploads hitting rate limits (429)</td>
                 <td><code>RATE_LIMIT_DEFAULT</code> exceeded (200/min)</td>
-                <td>Increase rate limit in env config, use Redis backend (<code>RATE_LIMIT_STORAGE_URI=redis://host:port</code>) for distributed setups, or upload in smaller batches.</td>
+                <td>Increase <code>RATE_LIMIT_DEFAULT</code> in env config or upload in smaller batches. Distributed rate-limit storage is not supported yet.</td>
               </tr>
             </tbody>
           </table>

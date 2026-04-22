@@ -15,9 +15,9 @@ use crate::session::SessionStore;
 use crate::stores::connections::ConnectionStore;
 use crate::templates::TemplateEngine;
 use myfsio_auth::iam::IamService;
-use myfsio_crypto::encryption::EncryptionService;
+use myfsio_crypto::encryption::{EncryptionConfig, EncryptionService};
 use myfsio_crypto::kms::KmsService;
-use myfsio_storage::fs_backend::FsStorageBackend;
+use myfsio_storage::fs_backend::{FsStorageBackend, FsStorageBackendConfig};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -42,7 +42,16 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
-        let storage = Arc::new(FsStorageBackend::new(config.storage_root.clone()));
+        let storage = Arc::new(FsStorageBackend::new_with_config(
+            config.storage_root.clone(),
+            FsStorageBackendConfig {
+                object_key_max_length_bytes: config.object_key_max_length_bytes,
+                object_cache_max_size: config.object_cache_max_size,
+                bucket_config_cache_ttl: Duration::from_secs_f64(
+                    config.bucket_config_cache_ttl_seconds,
+                ),
+            },
+        ));
         let iam = Arc::new(IamService::new_with_secret(
             config.iam_config_path.clone(),
             config.secret_key.clone(),
@@ -51,7 +60,13 @@ impl AppState {
         let gc = if config.gc_enabled {
             Some(Arc::new(GcService::new(
                 config.storage_root.clone(),
-                crate::services::gc::GcConfig::default(),
+                crate::services::gc::GcConfig {
+                    interval_hours: config.gc_interval_hours,
+                    temp_file_max_age_hours: config.gc_temp_file_max_age_hours,
+                    multipart_max_age_days: config.gc_multipart_max_age_days,
+                    lock_file_max_age_hours: config.gc_lock_file_max_age_hours,
+                    dry_run: config.gc_dry_run,
+                },
             )))
         } else {
             None
@@ -92,7 +107,22 @@ impl AppState {
             None
         };
 
-        let site_registry = Some(Arc::new(SiteRegistry::new(&config.storage_root)));
+        let site_registry = {
+            let registry = SiteRegistry::new(&config.storage_root);
+            if let (Some(site_id), Some(endpoint)) =
+                (config.site_id.as_deref(), config.site_endpoint.as_deref())
+            {
+                registry.set_local_site(crate::services::site_registry::SiteInfo {
+                    site_id: site_id.to_string(),
+                    endpoint: endpoint.to_string(),
+                    region: config.site_region.clone(),
+                    priority: config.site_priority,
+                    display_name: site_id.to_string(),
+                    created_at: Some(chrono::Utc::now().to_rfc3339()),
+                });
+            }
+            Some(Arc::new(registry))
+        };
 
         let website_domains = if config.website_hosting_enabled {
             Some(Arc::new(WebsiteDomainStore::new(&config.storage_root)))
@@ -132,6 +162,7 @@ impl AppState {
 
         let templates = init_templates(&config.templates_dir);
         let access_logging = Arc::new(AccessLoggingService::new(&config.storage_root));
+        let session_ttl = Duration::from_secs(config.session_lifetime_days.saturating_mul(86_400));
         Self {
             config,
             storage,
@@ -148,7 +179,7 @@ impl AppState {
             replication,
             site_sync,
             templates,
-            sessions: Arc::new(SessionStore::new(Duration::from_secs(60 * 60 * 12))),
+            sessions: Arc::new(SessionStore::new(session_ttl)),
             access_logging,
         }
     }
@@ -172,7 +203,13 @@ impl AppState {
 
         let encryption = if config.encryption_enabled {
             match myfsio_crypto::kms::load_or_create_master_key(&keys_dir).await {
-                Ok(master_key) => Some(Arc::new(EncryptionService::new(master_key, kms.clone()))),
+                Ok(master_key) => Some(Arc::new(EncryptionService::with_config(
+                    master_key,
+                    kms.clone(),
+                    EncryptionConfig {
+                        chunk_size: config.encryption_chunk_size_bytes,
+                    },
+                ))),
                 Err(e) => {
                     tracing::error!("Failed to initialize encryption: {}", e);
                     None

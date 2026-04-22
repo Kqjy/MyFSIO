@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+use axum::body::Body;
 use axum::extract::{Extension, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tera::Context;
 
@@ -203,6 +205,59 @@ fn wants_json(headers: &HeaderMap) -> bool {
             .unwrap_or(false)
 }
 
+async fn parse_form_any(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<HashMap<String, String>, String> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let is_multipart = content_type
+        .to_ascii_lowercase()
+        .starts_with("multipart/form-data");
+
+    let bytes = body
+        .collect()
+        .await
+        .map_err(|e| format!("Failed to read request body: {}", e))?
+        .to_bytes();
+
+    if is_multipart {
+        let boundary = multer::parse_boundary(&content_type)
+            .map_err(|_| "Missing multipart boundary".to_string())?;
+        let stream = futures::stream::once(async move {
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let mut multipart = multer::Multipart::new(stream, boundary);
+        let mut out = HashMap::new();
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|e| format!("Malformed multipart body: {}", e))?
+        {
+            let name = match field.name() {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            if field.file_name().is_some() {
+                continue;
+            }
+            let value = field
+                .text()
+                .await
+                .map_err(|e| format!("Invalid multipart field '{}': {}", name, e))?;
+            out.insert(name, value);
+        }
+        Ok(out)
+    } else {
+        let parsed: Vec<(String, String)> = serde_urlencoded::from_bytes(&bytes)
+            .map_err(|e| format!("Invalid form body: {}", e))?;
+        Ok(parsed.into_iter().collect())
+    }
+}
+
 fn bucket_tab_redirect(bucket_name: &str, tab: &str) -> Response {
     Redirect::to(&format!("/ui/buckets/{}?tab={}", bucket_name, tab)).into_response()
 }
@@ -231,10 +286,7 @@ fn default_public_policy(bucket_name: &str) -> String {
 }
 
 fn parse_api_base(state: &AppState) -> (String, String) {
-    let api_base = std::env::var("API_BASE_URL")
-        .unwrap_or_else(|_| format!("http://{}", state.config.bind_addr))
-        .trim_end_matches('/')
-        .to_string();
+    let api_base = state.config.api_base_url.trim_end_matches('/').to_string();
     let api_host = api_base
         .split("://")
         .nth(1)
@@ -1173,16 +1225,13 @@ pub async fn sites_dashboard(
     ctx.insert("connections", &conns);
     ctx.insert(
         "config_site_id",
-        &std::env::var("SITE_ID").unwrap_or_default(),
+        &state.config.site_id.clone().unwrap_or_default(),
     );
     ctx.insert(
         "config_site_endpoint",
-        &std::env::var("SITE_ENDPOINT").unwrap_or_default(),
+        &state.config.site_endpoint.clone().unwrap_or_default(),
     );
-    ctx.insert(
-        "config_site_region",
-        &std::env::var("SITE_REGION").unwrap_or_else(|_| state.config.region.clone()),
-    );
+    ctx.insert("config_site_region", &state.config.site_region);
     ctx.insert("topology", &json!({"sites": [], "connections": []}));
     render(&state, "sites.html", &ctx)
 }
@@ -2119,9 +2168,29 @@ pub async fn create_bucket(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     headers: HeaderMap,
-    axum::extract::Form(form): axum::extract::Form<CreateBucketForm>,
+    body: Body,
 ) -> Response {
     let wants_json = wants_json(&headers);
+    let form = match parse_form_any(&headers, body).await {
+        Ok(fields) => CreateBucketForm {
+            bucket_name: fields
+                .get("bucket_name")
+                .cloned()
+                .unwrap_or_default(),
+            csrf_token: fields.get("csrf_token").cloned().unwrap_or_default(),
+        },
+        Err(message) => {
+            if wants_json {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/buckets").into_response();
+        }
+    };
     let bucket_name = form.bucket_name.trim().to_string();
 
     if bucket_name.is_empty() {

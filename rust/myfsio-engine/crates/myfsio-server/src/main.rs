@@ -28,10 +28,19 @@ enum Command {
 #[tokio::main]
 async fn main() {
     load_env_files();
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     let cli = Cli::parse();
     let config = ServerConfig::from_env();
+    if !config
+        .ratelimit_storage_uri
+        .eq_ignore_ascii_case("memory://")
+    {
+        tracing::warn!(
+            "RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory rate limits",
+            config.ratelimit_storage_uri
+        );
+    }
 
     if cli.reset_cred {
         reset_admin_credentials(&config);
@@ -114,7 +123,10 @@ async fn main() {
             std::sync::Arc::new(myfsio_server::services::lifecycle::LifecycleService::new(
                 state.storage.clone(),
                 config.storage_root.clone(),
-                myfsio_server::services::lifecycle::LifecycleConfig::default(),
+                myfsio_server::services::lifecycle::LifecycleConfig {
+                    interval_seconds: 3600,
+                    max_history_per_bucket: config.lifecycle_max_history_per_bucket,
+                },
             ));
         bg_handles.push(lifecycle.start_background());
         tracing::info!("Lifecycle manager background service started");
@@ -178,11 +190,14 @@ async fn main() {
     let shutdown = shutdown_signal_shared();
     let api_shutdown = shutdown.clone();
     let api_task = tokio::spawn(async move {
-        axum::serve(api_listener, api_app)
-            .with_graceful_shutdown(async move {
-                api_shutdown.notified().await;
-            })
-            .await
+        axum::serve(
+            api_listener,
+            api_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            api_shutdown.notified().await;
+        })
+        .await
     });
 
     let ui_task = if let (Some(listener), Some(app)) = (ui_listener, ui_app) {
@@ -228,15 +243,43 @@ fn print_config_summary(config: &ServerConfig) {
     println!("IAM config: {}", config.iam_config_path.display());
     println!("Region: {}", config.region);
     println!("Encryption enabled: {}", config.encryption_enabled);
+    println!(
+        "Encryption chunk size: {} bytes",
+        config.encryption_chunk_size_bytes
+    );
     println!("KMS enabled: {}", config.kms_enabled);
+    println!(
+        "KMS data key bounds: {}-{} bytes",
+        config.kms_generate_data_key_min_bytes, config.kms_generate_data_key_max_bytes
+    );
     println!("GC enabled: {}", config.gc_enabled);
+    println!(
+        "GC interval: {} hours, dry run: {}",
+        config.gc_interval_hours, config.gc_dry_run
+    );
     println!("Integrity enabled: {}", config.integrity_enabled);
     println!("Lifecycle enabled: {}", config.lifecycle_enabled);
+    println!(
+        "Lifecycle history limit: {}",
+        config.lifecycle_max_history_per_bucket
+    );
     println!(
         "Website hosting enabled: {}",
         config.website_hosting_enabled
     );
     println!("Site sync enabled: {}", config.site_sync_enabled);
+    println!("API base URL: {}", config.api_base_url);
+    println!(
+        "Object key max: {} bytes, tag limit: {}",
+        config.object_key_max_length_bytes, config.object_tag_limit
+    );
+    println!(
+        "Rate limits: default {} per {}s, admin {} per {}s",
+        config.ratelimit_default.max_requests,
+        config.ratelimit_default.window_seconds,
+        config.ratelimit_admin.max_requests,
+        config.ratelimit_admin.window_seconds
+    );
     println!(
         "Metrics history enabled: {}",
         config.metrics_history_enabled
@@ -255,6 +298,32 @@ fn validate_config(config: &ServerConfig) -> Vec<String> {
     }
     if config.presigned_url_min_expiry > config.presigned_url_max_expiry {
         issues.push("CRITICAL: PRESIGNED_URL_MIN_EXPIRY_SECONDS cannot exceed PRESIGNED_URL_MAX_EXPIRY_SECONDS.".to_string());
+    }
+    if config.encryption_chunk_size_bytes == 0 {
+        issues.push("CRITICAL: ENCRYPTION_CHUNK_SIZE_BYTES must be greater than zero.".to_string());
+    }
+    if config.kms_generate_data_key_min_bytes == 0 {
+        issues.push(
+            "CRITICAL: KMS_GENERATE_DATA_KEY_MIN_BYTES must be greater than zero.".to_string(),
+        );
+    }
+    if config.kms_generate_data_key_min_bytes > config.kms_generate_data_key_max_bytes {
+        issues.push("CRITICAL: KMS_GENERATE_DATA_KEY_MIN_BYTES cannot exceed KMS_GENERATE_DATA_KEY_MAX_BYTES.".to_string());
+    }
+    if config.gc_interval_hours <= 0.0 {
+        issues.push("CRITICAL: GC_INTERVAL_HOURS must be greater than zero.".to_string());
+    }
+    if config.bucket_config_cache_ttl_seconds < 0.0 {
+        issues.push("CRITICAL: BUCKET_CONFIG_CACHE_TTL_SECONDS cannot be negative.".to_string());
+    }
+    if !config
+        .ratelimit_storage_uri
+        .eq_ignore_ascii_case("memory://")
+    {
+        issues.push(format!(
+            "WARNING: RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory limits.",
+            config.ratelimit_storage_uri
+        ));
     }
     if let Err(err) = std::fs::create_dir_all(&config.storage_root) {
         issues.push(format!(
@@ -284,6 +353,17 @@ fn validate_config(config: &ServerConfig) -> Vec<String> {
     }
 
     issues
+}
+
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_env("RUST_LOG")
+        .or_else(|_| {
+            EnvFilter::try_new(std::env::var("LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string()))
+        })
+        .unwrap_or_else(|_| EnvFilter::new("INFO"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
 fn shutdown_signal_shared() -> std::sync::Arc<tokio::sync::Notify> {
@@ -419,8 +499,49 @@ fn reset_admin_credentials(config: &ServerConfig) {
             std::process::exit(1);
         }
         println!("Backed up existing IAM config to {}", backup.display());
+        prune_iam_backups(&config.iam_config_path, 5);
     }
 
     ensure_iam_bootstrap(config);
     println!("Admin credentials reset.");
+}
+
+fn prune_iam_backups(iam_path: &std::path::Path, keep: usize) {
+    let parent = match iam_path.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    let stem = match iam_path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return,
+    };
+    let prefix = format!("{}.bak-", stem);
+
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut backups: Vec<(i64, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_str()?;
+            let rest = name.strip_prefix(&prefix)?;
+            let ts: i64 = rest.parse().ok()?;
+            Some((ts, path))
+        })
+        .collect();
+    backups.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (_, path) in backups.into_iter().skip(keep) {
+        if let Err(err) = std::fs::remove_file(&path) {
+            eprintln!(
+                "Failed to remove old IAM backup {}: {}",
+                path.display(),
+                err
+            );
+        } else {
+            println!("Pruned old IAM backup {}", path.display());
+        }
+    }
 }

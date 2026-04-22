@@ -133,7 +133,7 @@
     {% endif %}
     <div class="row g-3">
       {% for user in users %}
-      <div class="col-md-6 col-xl-4 iam-user-item" data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}">
+      <div class="col-md-6 col-xl-4 iam-user-item" data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}" data-update-url="{{ url_for(endpoint="ui.update_iam_user", user_id=user.user_id) }}">
         <div class="card h-100 iam-user-card{% if user.is_admin %} iam-admin-card{% else %}{% endif %}">
           <div class="card-body">
             <div class="d-flex align-items-start justify-content-between mb-3">

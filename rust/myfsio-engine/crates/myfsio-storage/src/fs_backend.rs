@@ -19,6 +19,7 @@ use uuid::Uuid;
 pub struct FsStorageBackend {
     root: PathBuf,
     object_key_max_length_bytes: usize,
+    object_cache_max_size: usize,
     bucket_config_cache: DashMap<String, (BucketConfig, Instant)>,
     bucket_config_cache_ttl: std::time::Duration,
     meta_read_cache: DashMap<(String, String), Option<HashMap<String, Value>>>,
@@ -27,13 +28,35 @@ pub struct FsStorageBackend {
     stats_cache_ttl: std::time::Duration,
 }
 
+#[derive(Debug, Clone)]
+pub struct FsStorageBackendConfig {
+    pub object_key_max_length_bytes: usize,
+    pub object_cache_max_size: usize,
+    pub bucket_config_cache_ttl: std::time::Duration,
+}
+
+impl Default for FsStorageBackendConfig {
+    fn default() -> Self {
+        Self {
+            object_key_max_length_bytes: DEFAULT_OBJECT_KEY_MAX_BYTES,
+            object_cache_max_size: 100,
+            bucket_config_cache_ttl: std::time::Duration::from_secs(30),
+        }
+    }
+}
+
 impl FsStorageBackend {
     pub fn new(root: PathBuf) -> Self {
+        Self::new_with_config(root, FsStorageBackendConfig::default())
+    }
+
+    pub fn new_with_config(root: PathBuf, config: FsStorageBackendConfig) -> Self {
         let backend = Self {
             root,
-            object_key_max_length_bytes: DEFAULT_OBJECT_KEY_MAX_BYTES,
+            object_key_max_length_bytes: config.object_key_max_length_bytes,
+            object_cache_max_size: config.object_cache_max_size,
             bucket_config_cache: DashMap::new(),
-            bucket_config_cache_ttl: std::time::Duration::from_secs(30),
+            bucket_config_cache_ttl: config.bucket_config_cache_ttl,
             meta_read_cache: DashMap::new(),
             meta_index_locks: DashMap::new(),
             stats_cache: DashMap::new(),
@@ -142,6 +165,27 @@ impl FsStorageBackend {
             .clone()
     }
 
+    fn prune_meta_read_cache(&self) {
+        if self.object_cache_max_size == 0 {
+            self.meta_read_cache.clear();
+            return;
+        }
+        let len = self.meta_read_cache.len();
+        if len <= self.object_cache_max_size {
+            return;
+        }
+        let excess = len - self.object_cache_max_size;
+        let keys = self
+            .meta_read_cache
+            .iter()
+            .take(excess)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.meta_read_cache.remove(&key);
+        }
+    }
+
     fn bucket_config_path(&self, bucket_name: &str) -> PathBuf {
         self.system_bucket_root(bucket_name)
             .join(BUCKET_CONFIG_FILE)
@@ -229,6 +273,7 @@ impl FsStorageBackend {
         };
 
         self.meta_read_cache.insert(cache_key, result.clone());
+        self.prune_meta_read_cache();
         result
     }
 

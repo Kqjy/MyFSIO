@@ -294,8 +294,17 @@ async fn generate_data_key_inner(state: AppState, body: Body, include_plaintext:
         .and_then(|v| v.as_u64())
         .unwrap_or(32) as usize;
 
-    if !(1..=1024).contains(&num_bytes) {
-        return json_err(StatusCode::BAD_REQUEST, "NumberOfBytes must be 1-1024");
+    if num_bytes < state.config.kms_generate_data_key_min_bytes
+        || num_bytes > state.config.kms_generate_data_key_max_bytes
+    {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "NumberOfBytes must be {}-{}",
+                state.config.kms_generate_data_key_min_bytes,
+                state.config.kms_generate_data_key_max_bytes
+            ),
+        );
     }
 
     match kms.generate_data_key(key_id, num_bytes).await {
@@ -389,8 +398,17 @@ pub async fn generate_random(State(state): State<AppState>, body: Body) -> Respo
         .and_then(|v| v.as_u64())
         .unwrap_or(32) as usize;
 
-    if !(1..=1024).contains(&num_bytes) {
-        return json_err(StatusCode::BAD_REQUEST, "NumberOfBytes must be 1-1024");
+    if num_bytes < state.config.kms_generate_data_key_min_bytes
+        || num_bytes > state.config.kms_generate_data_key_max_bytes
+    {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "NumberOfBytes must be {}-{}",
+                state.config.kms_generate_data_key_min_bytes,
+                state.config.kms_generate_data_key_max_bytes
+            ),
+        );
     }
 
     let mut bytes = vec![0u8; num_bytes];

@@ -1,7 +1,9 @@
 mod auth;
+pub mod ratelimit;
 pub mod session;
 
 pub use auth::auth_layer;
+pub use ratelimit::{rate_limit_layer, RateLimitLayerState};
 pub use session::{csrf_layer, session_layer, SessionHandle, SessionLayerState};
 
 use axum::extract::{Request, State};

@@ -82,11 +82,35 @@ impl EncryptionMetadata {
 pub struct EncryptionService {
     master_key: [u8; 32],
     kms: Option<std::sync::Arc<KmsService>>,
+    config: EncryptionConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EncryptionConfig {
+    pub chunk_size: usize,
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self { chunk_size: 65_536 }
+    }
 }
 
 impl EncryptionService {
     pub fn new(master_key: [u8; 32], kms: Option<std::sync::Arc<KmsService>>) -> Self {
-        Self { master_key, kms }
+        Self::with_config(master_key, kms, EncryptionConfig::default())
+    }
+
+    pub fn with_config(
+        master_key: [u8; 32],
+        kms: Option<std::sync::Arc<KmsService>>,
+        config: EncryptionConfig,
+    ) -> Self {
+        Self {
+            master_key,
+            kms,
+            config,
+        }
     }
 
     pub fn generate_data_key(&self) -> ([u8; 32], [u8; 12]) {
@@ -192,9 +216,12 @@ impl EncryptionService {
         let op = output_path.to_owned();
         let ak = actual_key;
         let n = nonce;
-        tokio::task::spawn_blocking(move || encrypt_stream_chunked(&ip, &op, &ak, &n, None))
-            .await
-            .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        let chunk_size = self.config.chunk_size;
+        tokio::task::spawn_blocking(move || {
+            encrypt_stream_chunked(&ip, &op, &ak, &n, Some(chunk_size))
+        })
+        .await
+        .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
         Ok(EncryptionMetadata {
             algorithm: ctx.algorithm.as_str().to_string(),

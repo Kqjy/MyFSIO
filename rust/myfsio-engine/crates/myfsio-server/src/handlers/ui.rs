@@ -66,7 +66,7 @@ pub async fn login_submit(
             let next = form
                 .next
                 .as_deref()
-                .filter(|n| n.starts_with("/ui/") || *n == "/ui")
+                .filter(|n| is_allowed_redirect(n, &state.config.allowed_redirect_hosts))
                 .unwrap_or("/ui/buckets")
                 .to_string();
             Redirect::to(&next).into_response()
@@ -78,6 +78,32 @@ pub async fn login_submit(
             Redirect::to("/login").into_response()
         }
     }
+}
+
+fn is_allowed_redirect(target: &str, allowed_hosts: &[String]) -> bool {
+    if target == "/ui" || target.starts_with("/ui/") {
+        return true;
+    }
+    let Some(rest) = target
+        .strip_prefix("https://")
+        .or_else(|| target.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split('@')
+        .last()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    allowed_hosts
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&host))
 }
 
 pub async fn logout(Extension(session): Extension<SessionHandle>) -> Response {

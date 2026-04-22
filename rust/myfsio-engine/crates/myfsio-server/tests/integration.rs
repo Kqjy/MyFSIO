@@ -53,6 +53,7 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
     let app = myfsio_server::create_router(state);
@@ -78,6 +79,120 @@ fn test_app() -> (axum::Router, tempfile::TempDir) {
             }]
         }]
     }))
+}
+
+fn test_app_with_rate_limits(
+    default: myfsio_server::config::RateLimitSetting,
+    admin: myfsio_server::config::RateLimitSetting,
+) -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        iam_config_path: iam_path.join("iam.json"),
+        ratelimit_default: default,
+        ratelimit_admin: admin,
+        ui_enabled: false,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new(config);
+    let app = myfsio_server::create_router(state);
+    (app, tmp)
+}
+
+#[tokio::test]
+async fn rate_limit_default_and_admin_are_independent() {
+    let (app, _tmp) = test_app_with_rate_limits(
+        myfsio_server::config::RateLimitSetting::new(1, 60),
+        myfsio_server::config::RateLimitSetting::new(2, 60),
+    );
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/myfsio/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/myfsio/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(second.headers().contains_key("retry-after"));
+
+    let admin_first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/gc/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin_first.status(), StatusCode::FORBIDDEN);
+
+    let admin_second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/gc/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin_second.status(), StatusCode::FORBIDDEN);
+
+    let admin_third = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/gc/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(admin_third.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
@@ -147,6 +262,7 @@ fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         ui_enabled: true,
         templates_dir: manifest_dir.join("templates"),
         static_dir: manifest_dir.join("static"),
+        ..myfsio_server::config::ServerConfig::default()
     };
     (myfsio_server::state::AppState::new(config), tmp)
 }
@@ -303,6 +419,7 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        ..myfsio_server::config::ServerConfig::default()
     };
     (myfsio_server::state::AppState::new(config), tmp)
 }
@@ -1082,7 +1199,7 @@ async fn test_ui_metrics_history_endpoint_reads_system_history() {
         config_root.join("metrics_history.json"),
         serde_json::json!({
             "history": [{
-                "timestamp": "2026-04-20T00:00:00Z",
+                "timestamp": chrono::Utc::now().to_rfc3339(),
                 "cpu_percent": 12.5,
                 "memory_percent": 33.3,
                 "disk_percent": 44.4,
@@ -1131,6 +1248,7 @@ async fn test_ui_metrics_history_endpoint_reads_system_history() {
         ui_enabled: true,
         templates_dir: manifest_dir.join("templates"),
         static_dir: manifest_dir.join("static"),
+        ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
     let (session_id, _csrf) = authenticated_ui_session(&state);
@@ -3851,6 +3969,7 @@ async fn test_non_admin_authorization_enforced() {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
     state.storage.create_bucket("authz-bucket").await.unwrap();
@@ -3932,6 +4051,7 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new_with_encryption(config).await;
     let app = myfsio_server::create_router(state);

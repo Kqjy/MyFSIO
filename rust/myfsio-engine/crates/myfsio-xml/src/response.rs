@@ -8,6 +8,12 @@ pub fn format_s3_datetime(dt: &DateTime<Utc>) -> String {
     dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
+pub fn rate_limit_exceeded_xml() -> String {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<Error><Code>SlowDown</Code><Message>Rate limit exceeded</Message></Error>"
+        .to_string()
+}
+
 pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 

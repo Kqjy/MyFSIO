@@ -1172,6 +1172,16 @@ pub async fn put_object_tagging(state: &AppState, bucket: &str, key: &str, body:
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
     let tags = parse_tagging_xml(&xml_str);
+    if tags.len() > state.config.object_tag_limit {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(
+                S3ErrorCode::InvalidTag,
+                format!("Maximum {} tags allowed", state.config.object_tag_limit),
+            )
+            .to_xml(),
+        );
+    }
 
     match state.storage.set_object_tags(bucket, key, &tags).await {
         Ok(()) => StatusCode::OK.into_response(),

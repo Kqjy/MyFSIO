@@ -24,6 +24,35 @@ impl Default for GcConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dry_run_reports_but_does_not_delete_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_dir = tmp.path().join(".myfsio.sys").join("tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let file_path = tmp_dir.join("stale.tmp");
+        std::fs::write(&file_path, b"temporary").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let service = GcService::new(
+            tmp.path().to_path_buf(),
+            GcConfig {
+                temp_file_max_age_hours: 0.0,
+                dry_run: true,
+                ..GcConfig::default()
+            },
+        );
+
+        let result = service.run_now(false).await.unwrap();
+
+        assert_eq!(result["temp_files_deleted"], 1);
+        assert!(file_path.exists());
+    }
+}
+
 pub struct GcService {
     storage_root: PathBuf,
     config: GcConfig,

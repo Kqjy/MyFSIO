@@ -1122,6 +1122,14 @@ pub async fn put_object(
         Ok(tags) => tags,
         Err(response) => return response,
     };
+    if let Some(ref tags) = tags {
+        if tags.len() > state.config.object_tag_limit {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidTag,
+                format!("Maximum {} tags allowed", state.config.object_tag_limit),
+            ));
+        }
+    }
 
     let aws_chunked = is_aws_chunked(&headers);
     let boxed: myfsio_storage::traits::AsyncReadStream = if has_upload_checksum(&headers) {
@@ -2860,6 +2868,7 @@ mod tests {
             ui_enabled: false,
             templates_dir: manifest_dir.join("templates"),
             static_dir: manifest_dir.join("static"),
+            ..ServerConfig::default()
         };
         (AppState::new(config), tmp)
     }
