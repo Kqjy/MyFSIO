@@ -90,7 +90,11 @@ pub async fn session_layer(
     resp
 }
 
-pub async fn csrf_layer(req: Request, next: Next) -> Response {
+pub async fn csrf_layer(
+    State(state): State<crate::state::AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
     const CSRF_HEADER_ALIAS: &str = "x-csrftoken";
 
     let method = req.method().clone();
@@ -169,7 +173,32 @@ pub async fn csrf_layer(req: Request, next: Next) -> Response {
         header_present = header_token.is_some(),
         "CSRF token mismatch"
     );
-    (StatusCode::FORBIDDEN, "Invalid CSRF token").into_response()
+
+    let accept = parts
+        .headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_form_submit = content_type.starts_with("application/x-www-form-urlencoded")
+        || content_type.starts_with("multipart/form-data");
+    let wants_json = accept.contains("application/json")
+        || content_type.starts_with("application/json");
+
+    if is_form_submit && !wants_json {
+        let ctx = crate::handlers::ui::base_context(&handle, None);
+        let mut resp = crate::handlers::ui::render(&state, "csrf_error.html", &ctx);
+        *resp.status_mut() = StatusCode::FORBIDDEN;
+        return resp;
+    }
+
+    let mut resp = (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "application/json")],
+        r#"{"error":"Invalid CSRF token"}"#,
+    )
+        .into_response();
+    *resp.status_mut() = StatusCode::FORBIDDEN;
+    resp
 }
 
 fn extract_multipart_token(content_type: &str, body: &[u8]) -> Option<String> {

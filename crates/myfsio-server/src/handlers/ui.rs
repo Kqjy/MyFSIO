@@ -117,16 +117,6 @@ pub async fn logout(Extension(session): Extension<SessionHandle>) -> Response {
     Redirect::to("/login").into_response()
 }
 
-pub async fn csrf_error_page(
-    State(state): State<AppState>,
-    Extension(session): Extension<SessionHandle>,
-) -> Response {
-    let ctx = base_context(&session, None);
-    let mut resp = render(&state, "csrf_error.html", &ctx);
-    *resp.status_mut() = StatusCode::FORBIDDEN;
-    resp
-}
-
 pub async fn root_redirect() -> Response {
     Redirect::to("/ui/buckets").into_response()
 }

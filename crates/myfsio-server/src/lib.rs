@@ -304,8 +304,7 @@ pub fn create_ui_router(state: state::AppState) -> Router {
 
     let public = Router::new()
         .route("/login", get(ui::login_page).post(ui::login_submit))
-        .route("/logout", post(ui::logout).get(ui::logout))
-        .route("/csrf-error", get(ui::csrf_error_page));
+        .route("/logout", post(ui::logout).get(ui::logout));
 
     let session_state = middleware::SessionLayerState {
         store: state.sessions.clone(),
@@ -317,7 +316,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
     protected
         .merge(public)
         .fallback(ui::not_found_page)
-        .layer(axum::middleware::from_fn(middleware::csrf_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::csrf_layer,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             session_state,
             middleware::session_layer,
