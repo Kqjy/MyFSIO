@@ -5,6 +5,7 @@ pub enum S3ErrorCode {
     AccessDenied,
     BadDigest,
     BucketAlreadyExists,
+    BucketAlreadyOwnedByYou,
     BucketNotEmpty,
     EntityTooLarge,
     EntityTooSmall,
@@ -43,6 +44,7 @@ impl S3ErrorCode {
             Self::AccessDenied => 403,
             Self::BadDigest => 400,
             Self::BucketAlreadyExists => 409,
+            Self::BucketAlreadyOwnedByYou => 409,
             Self::BucketNotEmpty => 409,
             Self::EntityTooLarge => 413,
             Self::EntityTooSmall => 400,
@@ -72,7 +74,7 @@ impl S3ErrorCode {
             Self::RequestTimeTooSkewed => 403,
             Self::ServerSideEncryptionConfigurationNotFoundError => 404,
             Self::SignatureDoesNotMatch => 403,
-            Self::SlowDown => 429,
+            Self::SlowDown => 503,
         }
     }
 
@@ -81,6 +83,7 @@ impl S3ErrorCode {
             Self::AccessDenied => "AccessDenied",
             Self::BadDigest => "BadDigest",
             Self::BucketAlreadyExists => "BucketAlreadyExists",
+            Self::BucketAlreadyOwnedByYou => "BucketAlreadyOwnedByYou",
             Self::BucketNotEmpty => "BucketNotEmpty",
             Self::EntityTooLarge => "EntityTooLarge",
             Self::EntityTooSmall => "EntityTooSmall",
@@ -121,6 +124,7 @@ impl S3ErrorCode {
             Self::AccessDenied => "Access Denied",
             Self::BadDigest => "The Content-MD5 or checksum value you specified did not match what we received",
             Self::BucketAlreadyExists => "The requested bucket name is not available",
+            Self::BucketAlreadyOwnedByYou => "Your previous request to create the named bucket succeeded and you already own it",
             Self::BucketNotEmpty => "The bucket you tried to delete is not empty",
             Self::EntityTooLarge => "Your proposed upload exceeds the maximum allowed size",
             Self::EntityTooSmall => "Your proposed upload is smaller than the minimum allowed object size",

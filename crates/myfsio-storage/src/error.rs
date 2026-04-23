@@ -50,7 +50,7 @@ impl From<StorageError> for S3Error {
                 S3Error::from_code(S3ErrorCode::NoSuchBucket).with_resource(format!("/{}", name))
             }
             StorageError::BucketAlreadyExists(name) => {
-                S3Error::from_code(S3ErrorCode::BucketAlreadyExists)
+                S3Error::from_code(S3ErrorCode::BucketAlreadyOwnedByYou)
                     .with_resource(format!("/{}", name))
             }
             StorageError::BucketNotEmpty(name) => {

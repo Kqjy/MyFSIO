@@ -8,10 +8,21 @@ pub fn format_s3_datetime(dt: &DateTime<Utc>) -> String {
     dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
-pub fn rate_limit_exceeded_xml() -> String {
-    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<Error><Code>SlowDown</Code><Message>Rate limit exceeded</Message><Resource></Resource><RequestId></RequestId></Error>"
-        .to_string()
+pub fn rate_limit_exceeded_xml(resource: &str, request_id: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+<Error><Code>SlowDown</Code><Message>Please reduce your request rate</Message><Resource>{}</Resource><RequestId>{}</RequestId></Error>",
+        xml_escape(resource),
+        xml_escape(request_id),
+    )
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]) -> String {

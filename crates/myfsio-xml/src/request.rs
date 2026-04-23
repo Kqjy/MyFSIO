@@ -86,6 +86,11 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
 }
 
 pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
+    let trimmed = xml.trim();
+    if trimmed.is_empty() {
+        return Err("Request body is empty".to_string());
+    }
+
     let mut reader = Reader::from_str(xml);
     let mut result = DeleteObjectsRequest::default();
     let mut buf = Vec::new();
@@ -93,16 +98,41 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
     let mut current_key: Option<String> = None;
     let mut current_version_id: Option<String> = None;
     let mut in_object = false;
+    let mut saw_delete_root = false;
+    let mut first_element_seen = false;
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        let event = reader.read_event_into(&mut buf);
+        match event {
             Ok(Event::Start(ref e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 current_tag = name.clone();
-                if name == "Object" {
+                if !first_element_seen {
+                    first_element_seen = true;
+                    if name != "Delete" {
+                        return Err(format!(
+                            "Expected <Delete> root element, found <{}>",
+                            name
+                        ));
+                    }
+                    saw_delete_root = true;
+                } else if name == "Object" {
                     in_object = true;
                     current_key = None;
                     current_version_id = None;
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if !first_element_seen {
+                    first_element_seen = true;
+                    if name != "Delete" {
+                        return Err(format!(
+                            "Expected <Delete> root element, found <{}>",
+                            name
+                        ));
+                    }
+                    saw_delete_root = true;
                 }
             }
             Ok(Event::Text(ref e)) => {
@@ -137,6 +167,13 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
             _ => {}
         }
         buf.clear();
+    }
+
+    if !saw_delete_root {
+        return Err("Expected <Delete> root element".to_string());
+    }
+    if result.objects.is_empty() {
+        return Err("Delete request must contain at least one <Object>".to_string());
     }
 
     Ok(result)

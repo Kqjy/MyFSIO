@@ -47,6 +47,7 @@ pub fn validate_object_key(
         normalized.split('/').collect()
     };
 
+
     for part in &parts {
         if part.is_empty() {
             continue;
@@ -105,7 +106,10 @@ pub fn validate_object_key(
     }
 
     for part in &non_empty_parts {
-        if *part == ".__myfsio_dirobj__" || part.starts_with("_index.json") {
+        if *part == ".__myfsio_dirobj__"
+            || *part == ".__myfsio_empty__"
+            || part.starts_with("_index.json")
+        {
             return Some("Object key segment uses a reserved internal name".to_string());
         }
     }

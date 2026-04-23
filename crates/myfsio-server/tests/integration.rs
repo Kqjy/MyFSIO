@@ -163,7 +163,7 @@ async fn rate_limit_default_and_admin_are_independent() {
         )
         .await
         .unwrap();
-    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(second.headers().contains_key("retry-after"));
 
     let admin_first = app
@@ -199,7 +199,7 @@ async fn rate_limit_default_and_admin_are_independent() {
         )
         .await
         .unwrap();
-    assert_eq!(admin_third.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(admin_third.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
@@ -2311,9 +2311,16 @@ async fn test_versioned_object_can_be_read_and_deleted_by_version_id() {
     )
     .unwrap();
     let archived_version_id = list_body
-        .split("<VersionId>")
-        .filter_map(|part| part.split_once("</VersionId>").map(|(id, _)| id))
-        .find(|id| *id != "null")
+        .split("<Version>")
+        .skip(1)
+        .find(|block| block.contains("<IsLatest>false</IsLatest>"))
+        .and_then(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id))
+        })
+        .filter(|id| *id != "null")
         .expect("archived version id")
         .to_string();
 
@@ -2507,6 +2514,352 @@ async fn test_versioned_put_and_delete_emit_version_headers_and_delete_markers()
 }
 
 #[tokio::test]
+async fn test_consecutive_slashes_in_key_round_trip() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/slashes-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_ab = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/slashes-bucket/a/b",
+            Body::from("single"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_ab.status(), StatusCode::OK);
+
+    let put_double = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/slashes-bucket/a//b",
+            Body::from("double"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_double.status(), StatusCode::OK);
+
+    let put_triple = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/slashes-bucket/a///b",
+            Body::from("triple"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_triple.status(), StatusCode::OK);
+
+    let get_ab = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/slashes-bucket/a/b",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_ab.status(), StatusCode::OK);
+    let body_ab = get_ab.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body_ab[..], b"single");
+
+    let get_triple = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/slashes-bucket/a///b",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_triple.status(), StatusCode::OK);
+    let body_triple = get_triple.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body_triple[..], b"triple");
+
+    let list_resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/slashes-bucket?list-type=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let list_body = String::from_utf8(
+        list_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        list_body.contains("<Key>a/b</Key>"),
+        "expected a/b in listing: {}",
+        list_body
+    );
+    assert!(
+        list_body.contains("<Key>a//b</Key>"),
+        "expected a//b in listing: {}",
+        list_body
+    );
+    assert!(
+        list_body.contains("<Key>a///b</Key>"),
+        "expected a///b in listing: {}",
+        list_body
+    );
+}
+
+#[tokio::test]
+async fn test_delete_live_version_restores_previous_to_live_slot() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/restore-bucket", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/restore-bucket?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let v1_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/restore-bucket/k",
+            Body::from("one"),
+        ))
+        .await
+        .unwrap();
+    let v1 = v1_resp
+        .headers()
+        .get("x-amz-version-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let v2_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/restore-bucket/k",
+            Body::from("two"),
+        ))
+        .await
+        .unwrap();
+    let v2 = v2_resp
+        .headers()
+        .get("x-amz-version-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(v1, v2);
+
+    let del = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            &format!("/restore-bucket/k?versionId={}", v2),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+    let get_live = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/restore-bucket/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_live.status(), StatusCode::OK);
+    let body = get_live.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"one");
+
+    let get_v1 = app
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/restore-bucket/k?versionId={}", v1),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_v1.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_delete_active_delete_marker_restores_previous_to_live_slot() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/undel-bucket", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/undel-bucket?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/undel-bucket/k",
+            Body::from("only"),
+        ))
+        .await
+        .unwrap();
+
+    let del = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/undel-bucket/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let dm_version = del
+        .headers()
+        .get("x-amz-version-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        del.headers()
+            .get("x-amz-delete-marker")
+            .and_then(|v| v.to_str().ok()),
+        Some("true")
+    );
+
+    let shadowed = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/undel-bucket/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(shadowed.status(), StatusCode::NOT_FOUND);
+
+    let del_dm = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            &format!("/undel-bucket/k?versionId={}", dm_version),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(del_dm.status(), StatusCode::NO_CONTENT);
+
+    let restored = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/undel-bucket/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), StatusCode::OK);
+    let body = restored.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"only");
+}
+
+#[tokio::test]
+async fn test_versioned_get_on_delete_marker_returns_method_not_allowed() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/dm-bucket", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/dm-bucket?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/dm-bucket/k",
+            Body::from("x"),
+        ))
+        .await
+        .unwrap();
+
+    let del = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/dm-bucket/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let dm_version = del
+        .headers()
+        .get("x-amz-version-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let versioned = app
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/dm-bucket/k?versionId={}", dm_version),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(versioned.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
 async fn test_retention_is_enforced_when_deleting_archived_version() {
     let (app, _tmp) = test_app();
 
@@ -2586,9 +2939,16 @@ async fn test_retention_is_enforced_when_deleting_archived_version() {
     )
     .unwrap();
     let archived_version_id = list_body
-        .split("<VersionId>")
-        .filter_map(|part| part.split_once("</VersionId>").map(|(id, _)| id))
-        .find(|id| *id != "null")
+        .split("<Version>")
+        .skip(1)
+        .find(|block| block.contains("<IsLatest>false</IsLatest>"))
+        .and_then(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id))
+        })
+        .filter(|id| *id != "null")
         .expect("archived version id")
         .to_string();
 

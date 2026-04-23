@@ -148,6 +148,7 @@ async fn ensure_object_lock_allows_write(
             Ok(())
         }
         Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
+        Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => Ok(()),
         Err(err) => Err(storage_err_response(err)),
     }
 }
@@ -2666,7 +2667,8 @@ async fn evaluate_put_preconditions(
             }
             None
         }
-        Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => {
+        Err(myfsio_storage::error::StorageError::ObjectNotFound { .. })
+        | Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => {
             if has_if_match {
                 Some(s3_error_response(S3Error::from_code(
                     S3ErrorCode::PreconditionFailed,

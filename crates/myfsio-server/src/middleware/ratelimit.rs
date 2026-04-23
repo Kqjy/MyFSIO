@@ -162,20 +162,31 @@ pub async fn rate_limit_layer(
     let limiter = state.select_limiter(&req);
     match limiter.check(&key) {
         Ok(()) => next.run(req).await,
-        Err(retry_after) => too_many_requests(retry_after),
+        Err(retry_after) => {
+            let resource = req.uri().path().to_string();
+            too_many_requests(retry_after, &resource)
+        }
     }
 }
 
-fn too_many_requests(retry_after: u64) -> Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
+fn too_many_requests(retry_after: u64, resource: &str) -> Response {
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    let body = myfsio_xml::response::rate_limit_exceeded_xml(resource, &request_id);
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
         [
             (header::CONTENT_TYPE, "application/xml".to_string()),
             (header::RETRY_AFTER, retry_after.to_string()),
         ],
-        myfsio_xml::response::rate_limit_exceeded_xml(),
+        body,
     )
-        .into_response()
+        .into_response();
+    if let Ok(value) = request_id.parse() {
+        response
+            .headers_mut()
+            .insert("x-amz-request-id", value);
+    }
+    response
 }
 
 fn rate_limit_key(req: &Request, num_trusted_proxies: usize) -> String {
