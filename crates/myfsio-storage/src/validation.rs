@@ -132,6 +132,13 @@ pub fn validate_bucket_name(bucket_name: &str) -> Option<String> {
         return Some("Bucket name must not be formatted as an IP address".to_string());
     }
 
+    if bucket_name.starts_with("xn--") {
+        return Some("Bucket name must not start with the reserved prefix 'xn--'".to_string());
+    }
+    if bucket_name.ends_with("-s3alias") || bucket_name.ends_with("--ol-s3") {
+        return Some("Bucket name must not end with a reserved suffix".to_string());
+    }
+
     None
 }
 

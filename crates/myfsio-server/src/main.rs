@@ -189,6 +189,11 @@ async fn main() {
 
     let shutdown = shutdown_signal_shared();
     let api_shutdown = shutdown.clone();
+    let api_listener = axum::serve::ListenerExt::tap_io(api_listener, |stream| {
+        if let Err(err) = stream.set_nodelay(true) {
+            tracing::trace!("failed to set TCP_NODELAY on api socket: {}", err);
+        }
+    });
     let api_task = tokio::spawn(async move {
         axum::serve(
             api_listener,
@@ -202,6 +207,11 @@ async fn main() {
 
     let ui_task = if let (Some(listener), Some(app)) = (ui_listener, ui_app) {
         let ui_shutdown = shutdown.clone();
+        let listener = axum::serve::ListenerExt::tap_io(listener, |stream| {
+            if let Err(err) = stream.set_nodelay(true) {
+                tracing::trace!("failed to set TCP_NODELAY on ui socket: {}", err);
+            }
+        });
         Some(tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {

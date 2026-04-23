@@ -10,7 +10,7 @@ pub fn format_s3_datetime(dt: &DateTime<Utc>) -> String {
 
 pub fn rate_limit_exceeded_xml() -> String {
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<Error><Code>SlowDown</Code><Message>Rate limit exceeded</Message></Error>"
+<Error><Code>SlowDown</Code><Message>Rate limit exceeded</Message><Resource></Resource><RequestId></RequestId></Error>"
         .to_string()
 }
 

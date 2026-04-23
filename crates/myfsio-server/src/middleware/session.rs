@@ -181,8 +181,8 @@ pub async fn csrf_layer(
         .unwrap_or("");
     let is_form_submit = content_type.starts_with("application/x-www-form-urlencoded")
         || content_type.starts_with("multipart/form-data");
-    let wants_json = accept.contains("application/json")
-        || content_type.starts_with("application/json");
+    let wants_json =
+        accept.contains("application/json") || content_type.starts_with("application/json");
 
     if is_form_submit && !wants_json {
         let ctx = crate::handlers::ui::base_context(&handle, None);

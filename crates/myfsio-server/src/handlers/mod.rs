@@ -47,6 +47,11 @@ fn s3_error_response(err: S3Error) -> Response {
 }
 
 fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
+    if let myfsio_storage::error::StorageError::Io(io_err) = &err {
+        if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(io_err) {
+            return bad_digest_response(message);
+        }
+    }
     s3_error_response(S3Error::from(err))
 }
 
@@ -391,6 +396,75 @@ pub async fn get_bucket(
         Some(marker.clone())
     };
 
+    if max_keys == 0 {
+        let has_any = if delimiter.is_empty() {
+            state
+                .storage
+                .list_objects(
+                    &bucket,
+                    &myfsio_common::types::ListParams {
+                        max_keys: 1,
+                        continuation_token: effective_start.clone(),
+                        prefix: if prefix.is_empty() {
+                            None
+                        } else {
+                            Some(prefix.clone())
+                        },
+                        start_after: if is_v2 {
+                            query.start_after.clone()
+                        } else {
+                            None
+                        },
+                    },
+                )
+                .await
+                .map(|r| !r.objects.is_empty())
+                .unwrap_or(false)
+        } else {
+            state
+                .storage
+                .list_objects_shallow(
+                    &bucket,
+                    &myfsio_common::types::ShallowListParams {
+                        prefix: prefix.clone(),
+                        delimiter: delimiter.clone(),
+                        max_keys: 1,
+                        continuation_token: effective_start.clone(),
+                    },
+                )
+                .await
+                .map(|r| !r.objects.is_empty() || !r.common_prefixes.is_empty())
+                .unwrap_or(false)
+        };
+        let xml = if is_v2 {
+            myfsio_xml::response::list_objects_v2_xml(
+                &bucket,
+                &prefix,
+                &delimiter,
+                0,
+                &[],
+                &[],
+                has_any,
+                query.continuation_token.as_deref(),
+                None,
+                0,
+            )
+        } else {
+            myfsio_xml::response::list_objects_v1_xml(
+                &bucket,
+                &prefix,
+                &marker,
+                &delimiter,
+                0,
+                &[],
+                &[],
+                has_any,
+                None,
+            )
+        };
+        return (StatusCode::OK, [("content-type", "application/xml")], xml).into_response();
+    }
+
     if delimiter.is_empty() {
         let params = myfsio_common::types::ListParams {
             max_keys,
@@ -408,10 +482,14 @@ pub async fn get_bucket(
         };
         match state.storage.list_objects(&bucket, &params).await {
             Ok(result) => {
-                let next_marker = result
-                    .next_continuation_token
-                    .clone()
-                    .or_else(|| result.objects.last().map(|o| o.key.clone()));
+                let next_marker = if result.is_truncated {
+                    result
+                        .next_continuation_token
+                        .clone()
+                        .or_else(|| result.objects.last().map(|o| o.key.clone()))
+                } else {
+                    None
+                };
                 let xml = if is_v2 {
                     let next_token = next_marker
                         .as_deref()
@@ -922,11 +1000,15 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<Vec<u8>, R
     http_body_util::BodyExt::collect(body)
         .await
         .map(|collected| collected.to_bytes().to_vec())
-        .map_err(|_| {
-            s3_error_response(S3Error::new(
-                S3ErrorCode::InvalidRequest,
-                "Failed to read request body",
-            ))
+        .map_err(|err| {
+            if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(&err) {
+                bad_digest_response(message)
+            } else {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidRequest,
+                    "Failed to read request body",
+                ))
+            }
         })
 }
 
@@ -1537,7 +1619,7 @@ pub async fn delete_object(
         Ok(()) => {
             notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
             trigger_replication(&state, &bucket, &key, "delete");
-            StatusCode::NO_CONTENT.into_response()
+            (StatusCode::NO_CONTENT, HeaderMap::new()).into_response()
         }
         Err(e) => storage_err_response(e),
     }
@@ -1764,6 +1846,70 @@ async fn complete_multipart_handler(
         }
     };
 
+    if parsed.parts.is_empty() {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::MalformedXML,
+            "CompleteMultipartUpload requires at least one part",
+        ));
+    }
+
+    let mut last_part_num: u32 = 0;
+    for p in &parsed.parts {
+        if p.part_number == 0 {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidPartOrder,
+                "Part numbers must be greater than zero",
+            ));
+        }
+        if p.part_number <= last_part_num {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidPartOrder,
+                "Parts must be specified in ascending order with no duplicates",
+            ));
+        }
+        last_part_num = p.part_number;
+    }
+
+    let stored_parts = match state.storage.list_parts(bucket, upload_id).await {
+        Ok(list) => list,
+        Err(e) => return storage_err_response(e),
+    };
+    let stored_map: HashMap<u32, (String, u64)> = stored_parts
+        .iter()
+        .map(|p| (p.part_number, (p.etag.clone(), p.size)))
+        .collect();
+    let min_part_size: u64 = state.config.multipart_min_part_size;
+    let total_parts = parsed.parts.len();
+    for (idx, p) in parsed.parts.iter().enumerate() {
+        let stored = match stored_map.get(&p.part_number) {
+            Some(s) => s,
+            None => {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidPart,
+                    format!("Part {} not found", p.part_number),
+                ));
+            }
+        };
+        let client_etag = p.etag.trim().trim_matches('"').to_ascii_lowercase();
+        let stored_etag = stored.0.trim().trim_matches('"').to_ascii_lowercase();
+        if !client_etag.is_empty() && client_etag != stored_etag {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidPart,
+                format!("ETag mismatch for part {}", p.part_number),
+            ));
+        }
+        let is_final = idx + 1 == total_parts;
+        if !is_final && stored.1 < min_part_size {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::EntityTooSmall,
+                format!(
+                    "Part {} is smaller than the minimum allowed size of {} bytes",
+                    p.part_number, min_part_size
+                ),
+            ));
+        }
+    }
+
     let parts: Vec<PartInfo> = parsed
         .parts
         .iter()
@@ -1852,7 +1998,8 @@ async fn object_attributes_handler(
 
     if all || attrs.contains("etag") {
         if let Some(etag) = &meta.etag {
-            xml.push_str(&format!("<ETag>{}</ETag>", xml_escape(etag)));
+            let trimmed = etag.trim_matches('"');
+            xml.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(trimmed)));
         }
     }
     if all || attrs.contains("storageclass") {
@@ -1909,48 +2056,151 @@ async fn copy_object_handler(
         return resp;
     }
 
-    let copy_result = if let Some(version_id) = src_version_id
-        .as_deref()
-        .filter(|value| !is_null_version(Some(*value)))
-    {
-        let (_meta, mut reader) = match state
+    let metadata_directive = headers
+        .get("x-amz-metadata-directive")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_ascii_uppercase())
+        .unwrap_or_else(|| "COPY".to_string());
+    let tagging_directive = headers
+        .get("x-amz-tagging-directive")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_ascii_uppercase())
+        .unwrap_or_else(|| "COPY".to_string());
+    let replace_metadata = metadata_directive == "REPLACE";
+    let replace_tagging = tagging_directive == "REPLACE";
+
+    let same_object = src_bucket == dst_bucket
+        && src_key == dst_key
+        && src_version_id.as_deref().unwrap_or("") == "";
+    if same_object && !replace_metadata && !replace_tagging {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.",
+        ));
+    }
+
+    let source_metadata_existing = match src_version_id.as_deref() {
+        Some(version_id) if version_id != "null" => {
+            match state
+                .storage
+                .get_object_version_metadata(&src_bucket, &src_key, version_id)
+                .await
+            {
+                Ok(metadata) => metadata,
+                Err(e) => return storage_err_response(e),
+            }
+        }
+        _ => match state
             .storage
-            .get_object_version(&src_bucket, &src_key, version_id)
+            .get_object_metadata(&src_bucket, &src_key)
             .await
         {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
+    };
+
+    let dst_metadata = if replace_metadata {
+        let mut m: HashMap<String, String> = HashMap::new();
+        for (request_header, metadata_key, _) in internal_header_pairs() {
+            if let Some(value) = headers.get(*request_header).and_then(|v| v.to_str().ok()) {
+                if *request_header == "content-encoding" {
+                    if let Some(decoded_encoding) = decoded_content_encoding(value) {
+                        m.insert((*metadata_key).to_string(), decoded_encoding);
+                    }
+                } else {
+                    m.insert((*metadata_key).to_string(), value.to_string());
+                }
+            }
+        }
+        let content_type = guessed_content_type(
+            dst_key,
+            headers.get("content-type").and_then(|v| v.to_str().ok()),
+        );
+        m.insert("__content_type__".to_string(), content_type);
+        for (name, value) in headers.iter() {
+            let name_str = name.as_str();
+            if let Some(meta_key) = name_str.strip_prefix("x-amz-meta-") {
+                if let Ok(val) = value.to_str() {
+                    m.insert(meta_key.to_string(), val.to_string());
+                }
+            }
+        }
+        if let Some(value) = headers
+            .get("x-amz-storage-class")
+            .and_then(|v| v.to_str().ok())
+        {
+            m.insert("__storage_class__".to_string(), value.to_ascii_uppercase());
+        }
+        m
+    } else {
+        source_metadata_existing.clone()
+    };
+
+    let (_meta, mut reader) = match src_version_id.as_deref() {
+        Some(version_id) if version_id != "null" => {
+            match state
+                .storage
+                .get_object_version(&src_bucket, &src_key, version_id)
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => return storage_err_response(e),
+            }
+        }
+        _ => match state.storage.get_object(&src_bucket, &src_key).await {
             Ok(result) => result,
             Err(e) => return storage_err_response(e),
-        };
-        let mut data = Vec::new();
-        if let Err(e) = reader.read_to_end(&mut data).await {
-            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-        }
-        let metadata = match state
-            .storage
-            .get_object_version_metadata(&src_bucket, &src_key, version_id)
-            .await
-        {
-            Ok(metadata) => metadata,
-            Err(e) => return storage_err_response(e),
-        };
-        state
-            .storage
-            .put_object(
-                dst_bucket,
-                dst_key,
-                Box::pin(std::io::Cursor::new(data)),
-                Some(metadata),
-            )
-            .await
-    } else {
-        state
-            .storage
-            .copy_object(&src_bucket, &src_key, dst_bucket, dst_key)
-            .await
+        },
     };
+    let mut data = Vec::new();
+    if let Err(e) = reader.read_to_end(&mut data).await {
+        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+    }
+
+    let copy_result = state
+        .storage
+        .put_object(
+            dst_bucket,
+            dst_key,
+            Box::pin(std::io::Cursor::new(data)),
+            Some(dst_metadata),
+        )
+        .await;
 
     match copy_result {
         Ok(meta) => {
+            if replace_tagging {
+                let tags = match headers
+                    .get("x-amz-tagging")
+                    .and_then(|value| value.to_str().ok())
+                    .map(parse_tagging_header)
+                    .transpose()
+                {
+                    Ok(tags) => tags,
+                    Err(response) => return response,
+                };
+                if let Some(ref tags) = tags {
+                    if tags.len() > state.config.object_tag_limit {
+                        return s3_error_response(S3Error::new(
+                            S3ErrorCode::InvalidTag,
+                            format!("Maximum {} tags allowed", state.config.object_tag_limit),
+                        ));
+                    }
+                    if let Err(e) = state
+                        .storage
+                        .set_object_tags(dst_bucket, dst_key, tags)
+                        .await
+                    {
+                        return storage_err_response(e);
+                    }
+                } else {
+                    let _ = state
+                        .storage
+                        .set_object_tags(dst_bucket, dst_key, &[])
+                        .await;
+                }
+            }
             let etag = meta.etag.as_deref().unwrap_or("");
             let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
             let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
@@ -1982,6 +2232,13 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
             ));
         }
     };
+
+    if parsed.objects.len() > 1000 {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::MalformedXML,
+            "The request must not contain more than 1000 keys",
+        ));
+    }
 
     let mut deleted = Vec::new();
     let mut errors = Vec::new();
@@ -2280,9 +2537,20 @@ fn evaluate_copy_preconditions(
 }
 
 fn parse_http_date(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc2822(value)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
+    let trimmed = value.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc2822(trimmed) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%A, %d-%b-%y %H:%M:%S GMT") {
+        return Some(naive.and_utc());
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%a %b %e %H:%M:%S %Y") {
+        return Some(naive.and_utc());
+    }
+    None
 }
 
 fn etag_condition_matches(condition: &str, etag: Option<&str>) -> bool {

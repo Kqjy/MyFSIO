@@ -1,6 +1,7 @@
 mod auth;
 pub mod ratelimit;
 pub mod session;
+pub(crate) mod sha_body;
 
 pub use auth::auth_layer;
 pub use ratelimit::{rate_limit_layer, RateLimitLayerState};

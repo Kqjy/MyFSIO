@@ -577,11 +577,17 @@ pub fn create_router(state: state::AppState) -> Router {
             middleware::rate_limit_layer,
         ));
 
+    let request_body_timeout =
+        std::time::Duration::from_secs(state.config.request_body_timeout_secs);
+
     api_router
         .merge(admin_router)
         .layer(axum::middleware::from_fn(middleware::server_header))
         .layer(cors_layer(&state.config))
         .layer(tower_http::compression::CompressionLayer::new())
+        .layer(tower_http::timeout::RequestBodyTimeoutLayer::new(
+            request_body_timeout,
+        ))
         .with_state(state)
 }
 

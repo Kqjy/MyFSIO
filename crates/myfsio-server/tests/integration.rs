@@ -1,5 +1,7 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
+use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine;
 use http_body_util::BodyExt;
 use myfsio_storage::traits::{AsyncReadStream, StorageEngine};
 use serde_json::Value;
@@ -53,6 +55,7 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        multipart_min_part_size: 1,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -2395,6 +2398,87 @@ async fn test_versioned_object_can_be_read_and_deleted_by_version_id() {
 }
 
 #[tokio::test]
+async fn test_versioned_put_and_delete_do_not_advertise_unstored_ids() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/compat-bucket", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/compat-bucket?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let put_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/compat-bucket/doc.txt",
+            Body::from("first"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+    assert!(!put_resp.headers().contains_key("x-amz-version-id"));
+
+    let overwrite_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/compat-bucket/doc.txt",
+            Body::from("second"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(overwrite_resp.status(), StatusCode::OK);
+    assert!(!overwrite_resp.headers().contains_key("x-amz-version-id"));
+
+    let delete_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/compat-bucket/doc.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+    assert!(!delete_resp.headers().contains_key("x-amz-version-id"));
+    assert!(!delete_resp.headers().contains_key("x-amz-delete-marker"));
+
+    let versions_resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/compat-bucket?versions",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let versions_body = String::from_utf8(
+        versions_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!versions_body.contains("<DeleteMarker>"));
+}
+
+#[tokio::test]
 async fn test_retention_is_enforced_when_deleting_archived_version() {
     let (app, _tmp) = test_app();
 
@@ -2560,6 +2644,132 @@ async fn test_put_object_validates_content_md5() {
         .await
         .unwrap();
     assert_eq!(good_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_x_amz_content_sha256_mismatch_returns_bad_digest() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sha256-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let bad_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sha256-bucket/object.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header(
+                    "x-amz-content-sha256",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_resp.status(), StatusCode::BAD_REQUEST);
+    let bad_body = String::from_utf8(
+        bad_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(bad_body.contains("<Code>BadDigest</Code>"));
+    assert!(bad_body.contains("x-amz-content-sha256"));
+}
+
+#[tokio::test]
+async fn test_max_keys_zero_respects_marker_and_v2_cursors() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/cursor-bucket", Body::empty()))
+        .await
+        .unwrap();
+    for key in ["a.txt", "b.txt"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/cursor-bucket/{}", key),
+                Body::from(key.to_string()),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let marker_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/cursor-bucket?max-keys=0&marker=b.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let marker_body = String::from_utf8(
+        marker_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(marker_body.contains("<IsTruncated>false</IsTruncated>"));
+
+    let start_after_resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/cursor-bucket?list-type=2&max-keys=0&start-after=b.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let start_after_body = String::from_utf8(
+        start_after_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(start_after_body.contains("<IsTruncated>false</IsTruncated>"));
+
+    let token = URL_SAFE.encode("b.txt");
+    let token_resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            &format!(
+                "/cursor-bucket?list-type=2&max-keys=0&continuation-token={}",
+                token
+            ),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let token_body = String::from_utf8(
+        token_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(token_body.contains("<IsTruncated>false</IsTruncated>"));
 }
 
 #[tokio::test]

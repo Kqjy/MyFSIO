@@ -218,11 +218,8 @@ pub async fn get_encryption(state: &AppState, bucket: &str) -> Response {
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
-                    S3Error::new(
-                        S3ErrorCode::InvalidRequest,
-                        "The server side encryption configuration was not found",
-                    )
-                    .to_xml(),
+                    S3Error::from_code(S3ErrorCode::ServerSideEncryptionConfigurationNotFoundError)
+                        .to_xml(),
                 )
             }
         }
@@ -270,11 +267,7 @@ pub async fn get_lifecycle(state: &AppState, bucket: &str) -> Response {
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
-                    S3Error::new(
-                        S3ErrorCode::NoSuchKey,
-                        "The lifecycle configuration does not exist",
-                    )
-                    .to_xml(),
+                    S3Error::from_code(S3ErrorCode::NoSuchLifecycleConfiguration).to_xml(),
                 )
             }
         }
@@ -421,7 +414,7 @@ pub async fn get_policy(state: &AppState, bucket: &str) -> Response {
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
-                    S3Error::new(S3ErrorCode::NoSuchKey, "No bucket policy attached").to_xml(),
+                    S3Error::from_code(S3ErrorCode::NoSuchBucketPolicy).to_xml(),
                 )
             }
         }
@@ -1095,6 +1088,35 @@ pub async fn list_object_versions(
         || archived_versions.len() > archived_count;
     xml.push_str(&format!("<IsTruncated>{}</IsTruncated>", is_truncated));
 
+    let current_keys: std::collections::HashSet<String> = objects
+        .iter()
+        .take(current_count)
+        .map(|o| o.key.clone())
+        .collect();
+    let mut latest_archived_per_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for v in archived_versions.iter().take(archived_count) {
+        if current_keys.contains(&v.key) {
+            continue;
+        }
+        let existing = latest_archived_per_key.get(&v.key).cloned();
+        match existing {
+            None => {
+                latest_archived_per_key.insert(v.key.clone(), v.version_id.clone());
+            }
+            Some(existing_id) => {
+                let existing_ts = archived_versions
+                    .iter()
+                    .find(|x| x.key == v.key && x.version_id == existing_id)
+                    .map(|x| x.last_modified)
+                    .unwrap_or(v.last_modified);
+                if v.last_modified > existing_ts {
+                    latest_archived_per_key.insert(v.key.clone(), v.version_id.clone());
+                }
+            }
+        }
+    }
+
     for obj in objects.iter().take(current_count) {
         xml.push_str("<Version>");
         xml.push_str(&format!("<Key>{}</Key>", xml_escape(&obj.key)));
@@ -1116,23 +1138,34 @@ pub async fn list_object_versions(
     }
 
     for version in archived_versions.iter().take(archived_count) {
-        xml.push_str("<Version>");
+        let is_latest = latest_archived_per_key
+            .get(&version.key)
+            .map(|id| id == &version.version_id)
+            .unwrap_or(false);
+        let tag = if version.is_delete_marker {
+            "DeleteMarker"
+        } else {
+            "Version"
+        };
+        xml.push_str(&format!("<{}>", tag));
         xml.push_str(&format!("<Key>{}</Key>", xml_escape(&version.key)));
         xml.push_str(&format!(
             "<VersionId>{}</VersionId>",
             xml_escape(&version.version_id)
         ));
-        xml.push_str("<IsLatest>false</IsLatest>");
+        xml.push_str(&format!("<IsLatest>{}</IsLatest>", is_latest));
         xml.push_str(&format!(
             "<LastModified>{}</LastModified>",
             myfsio_xml::response::format_s3_datetime(&version.last_modified)
         ));
-        if let Some(ref etag) = version.etag {
-            xml.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(etag)));
+        if !version.is_delete_marker {
+            if let Some(ref etag) = version.etag {
+                xml.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(etag)));
+            }
+            xml.push_str(&format!("<Size>{}</Size>", version.size));
+            xml.push_str("<StorageClass>STANDARD</StorageClass>");
         }
-        xml.push_str(&format!("<Size>{}</Size>", version.size));
-        xml.push_str("<StorageClass>STANDARD</StorageClass>");
-        xml.push_str("</Version>");
+        xml.push_str(&format!("</{}>", tag));
     }
 
     xml.push_str("</ListVersionsResult>");
@@ -1181,6 +1214,26 @@ pub async fn put_object_tagging(state: &AppState, bucket: &str, key: &str, body:
             )
             .to_xml(),
         );
+    }
+    for tag in &tags {
+        if tag.key.is_empty() || tag.key.len() > 128 {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::InvalidTag, "Tag key length must be 1-128").to_xml(),
+            );
+        }
+        if tag.value.len() > 256 {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::InvalidTag, "Tag value length must be 0-256").to_xml(),
+            );
+        }
+        if tag.key.contains('=') {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(S3ErrorCode::InvalidTag, "Tag keys must not contain '='").to_xml(),
+            );
+        }
     }
 
     match state.storage.set_object_tags(bucket, key, &tags).await {

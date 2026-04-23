@@ -12,8 +12,35 @@ use serde_json::Value;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 
+use crate::middleware::sha_body::{is_hex_sha256, Sha256VerifyBody};
 use crate::services::acl::acl_from_bucket_config;
 use crate::state::AppState;
+
+fn wrap_body_for_sha256_verification(req: &mut Request) {
+    let declared = match req
+        .headers()
+        .get("x-amz-content-sha256")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(v) => v.to_string(),
+        None => return,
+    };
+    if !is_hex_sha256(&declared) {
+        return;
+    }
+    let is_chunked = req
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_ascii_lowercase().contains("aws-chunked"))
+        .unwrap_or(false);
+    if is_chunked {
+        return;
+    }
+    let body = std::mem::replace(req.body_mut(), axum::body::Body::empty());
+    let wrapped = Sha256VerifyBody::new(body, declared);
+    *req.body_mut() = axum::body::Body::new(wrapped);
+}
 
 #[derive(Clone, Debug)]
 struct OriginalCanonicalPath(String);
@@ -475,6 +502,7 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
                     error_response(err, &auth_path)
                 } else {
                     req.extensions_mut().insert(principal);
+                    wrap_body_for_sha256_verification(&mut req);
                     next.run(req).await
                 }
             }
@@ -1102,7 +1130,9 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
     let parts: Vec<&str> = auth_str
         .strip_prefix("AWS4-HMAC-SHA256 ")
         .unwrap()
-        .split(", ")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .collect();
 
     if parts.len() != 3 {
@@ -1112,9 +1142,24 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
         ));
     }
 
-    let credential = parts[0].strip_prefix("Credential=").unwrap_or("");
-    let signed_headers_str = parts[1].strip_prefix("SignedHeaders=").unwrap_or("");
-    let provided_signature = parts[2].strip_prefix("Signature=").unwrap_or("");
+    let mut credential: &str = "";
+    let mut signed_headers_str: &str = "";
+    let mut provided_signature: &str = "";
+    for part in &parts {
+        if let Some(v) = part.strip_prefix("Credential=") {
+            credential = v;
+        } else if let Some(v) = part.strip_prefix("SignedHeaders=") {
+            signed_headers_str = v;
+        } else if let Some(v) = part.strip_prefix("Signature=") {
+            provided_signature = v;
+        }
+    }
+    if credential.is_empty() || signed_headers_str.is_empty() || provided_signature.is_empty() {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Malformed Authorization header",
+        ));
+    }
 
     let cred_parts: Vec<&str> = credential.split('/').collect();
     if cred_parts.len() != 5 {

@@ -81,6 +81,7 @@ pub struct ServerConfig {
     pub multipart_min_part_size: u64,
     pub bulk_delete_max_keys: usize,
     pub stream_chunk_size: usize,
+    pub request_body_timeout_secs: u64,
     pub ratelimit_default: RateLimitSetting,
     pub ratelimit_admin: RateLimitSetting,
     pub ratelimit_storage_uri: String,
@@ -225,6 +226,7 @@ impl ServerConfig {
         let multipart_min_part_size = parse_u64_env("MULTIPART_MIN_PART_SIZE", 5_242_880);
         let bulk_delete_max_keys = parse_usize_env("BULK_DELETE_MAX_KEYS", 1000);
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
+        let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 60);
         let ratelimit_default =
             parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(200, 60));
         let ratelimit_admin =
@@ -304,6 +306,7 @@ impl ServerConfig {
             multipart_min_part_size,
             bulk_delete_max_keys,
             stream_chunk_size,
+            request_body_timeout_secs,
             ratelimit_default,
             ratelimit_admin,
             ratelimit_storage_uri,
@@ -387,6 +390,7 @@ impl Default for ServerConfig {
             multipart_min_part_size: 5_242_880,
             bulk_delete_max_keys: 1000,
             stream_chunk_size: 1_048_576,
+            request_body_timeout_secs: 60,
             ratelimit_default: RateLimitSetting::new(200, 60),
             ratelimit_admin: RateLimitSetting::new(60, 60),
             ratelimit_storage_uri: "memory://".to_string(),
