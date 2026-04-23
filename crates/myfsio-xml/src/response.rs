@@ -62,6 +62,21 @@ pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
+fn maybe_url_encode(value: &str, encoding_type: Option<&str>) -> String {
+    if matches!(encoding_type, Some(v) if v.eq_ignore_ascii_case("url")) {
+        percent_encoding::utf8_percent_encode(value, KEY_ENCODE_SET).to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+const KEY_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~')
+    .remove(b'/');
+
 pub fn list_objects_v2_xml(
     bucket_name: &str,
     prefix: &str,
@@ -74,6 +89,34 @@ pub fn list_objects_v2_xml(
     next_continuation_token: Option<&str>,
     key_count: usize,
 ) -> String {
+    list_objects_v2_xml_with_encoding(
+        bucket_name,
+        prefix,
+        delimiter,
+        max_keys,
+        objects,
+        common_prefixes,
+        is_truncated,
+        continuation_token,
+        next_continuation_token,
+        key_count,
+        None,
+    )
+}
+
+pub fn list_objects_v2_xml_with_encoding(
+    bucket_name: &str,
+    prefix: &str,
+    delimiter: &str,
+    max_keys: usize,
+    objects: &[ObjectMeta],
+    common_prefixes: &[String],
+    is_truncated: bool,
+    continuation_token: Option<&str>,
+    next_continuation_token: Option<&str>,
+    key_count: usize,
+    encoding_type: Option<&str>,
+) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
     writer
@@ -85,13 +128,22 @@ pub fn list_objects_v2_xml(
     writer.write_event(Event::Start(start)).unwrap();
 
     write_text_element(&mut writer, "Name", bucket_name);
-    write_text_element(&mut writer, "Prefix", prefix);
+    write_text_element(&mut writer, "Prefix", &maybe_url_encode(prefix, encoding_type));
     if !delimiter.is_empty() {
-        write_text_element(&mut writer, "Delimiter", delimiter);
+        write_text_element(
+            &mut writer,
+            "Delimiter",
+            &maybe_url_encode(delimiter, encoding_type),
+        );
     }
     write_text_element(&mut writer, "MaxKeys", &max_keys.to_string());
     write_text_element(&mut writer, "KeyCount", &key_count.to_string());
     write_text_element(&mut writer, "IsTruncated", &is_truncated.to_string());
+    if let Some(encoding) = encoding_type {
+        if !encoding.is_empty() {
+            write_text_element(&mut writer, "EncodingType", encoding);
+        }
+    }
 
     if let Some(token) = continuation_token {
         write_text_element(&mut writer, "ContinuationToken", token);
@@ -104,7 +156,7 @@ pub fn list_objects_v2_xml(
         writer
             .write_event(Event::Start(BytesStart::new("Contents")))
             .unwrap();
-        write_text_element(&mut writer, "Key", &obj.key);
+        write_text_element(&mut writer, "Key", &maybe_url_encode(&obj.key, encoding_type));
         write_text_element(
             &mut writer,
             "LastModified",
@@ -128,7 +180,7 @@ pub fn list_objects_v2_xml(
         writer
             .write_event(Event::Start(BytesStart::new("CommonPrefixes")))
             .unwrap();
-        write_text_element(&mut writer, "Prefix", prefix);
+        write_text_element(&mut writer, "Prefix", &maybe_url_encode(prefix, encoding_type));
         writer
             .write_event(Event::End(BytesEnd::new("CommonPrefixes")))
             .unwrap();
@@ -152,6 +204,32 @@ pub fn list_objects_v1_xml(
     is_truncated: bool,
     next_marker: Option<&str>,
 ) -> String {
+    list_objects_v1_xml_with_encoding(
+        bucket_name,
+        prefix,
+        marker,
+        delimiter,
+        max_keys,
+        objects,
+        common_prefixes,
+        is_truncated,
+        next_marker,
+        None,
+    )
+}
+
+pub fn list_objects_v1_xml_with_encoding(
+    bucket_name: &str,
+    prefix: &str,
+    marker: &str,
+    delimiter: &str,
+    max_keys: usize,
+    objects: &[ObjectMeta],
+    common_prefixes: &[String],
+    is_truncated: bool,
+    next_marker: Option<&str>,
+    encoding_type: Option<&str>,
+) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
     writer
@@ -163,19 +241,28 @@ pub fn list_objects_v1_xml(
     writer.write_event(Event::Start(start)).unwrap();
 
     write_text_element(&mut writer, "Name", bucket_name);
-    write_text_element(&mut writer, "Prefix", prefix);
-    write_text_element(&mut writer, "Marker", marker);
+    write_text_element(&mut writer, "Prefix", &maybe_url_encode(prefix, encoding_type));
+    write_text_element(&mut writer, "Marker", &maybe_url_encode(marker, encoding_type));
     write_text_element(&mut writer, "MaxKeys", &max_keys.to_string());
     write_text_element(&mut writer, "IsTruncated", &is_truncated.to_string());
 
     if !delimiter.is_empty() {
-        write_text_element(&mut writer, "Delimiter", delimiter);
+        write_text_element(
+            &mut writer,
+            "Delimiter",
+            &maybe_url_encode(delimiter, encoding_type),
+        );
     }
     if !delimiter.is_empty() && is_truncated {
         if let Some(nm) = next_marker {
             if !nm.is_empty() {
-                write_text_element(&mut writer, "NextMarker", nm);
+                write_text_element(&mut writer, "NextMarker", &maybe_url_encode(nm, encoding_type));
             }
+        }
+    }
+    if let Some(encoding) = encoding_type {
+        if !encoding.is_empty() {
+            write_text_element(&mut writer, "EncodingType", encoding);
         }
     }
 
@@ -183,7 +270,7 @@ pub fn list_objects_v1_xml(
         writer
             .write_event(Event::Start(BytesStart::new("Contents")))
             .unwrap();
-        write_text_element(&mut writer, "Key", &obj.key);
+        write_text_element(&mut writer, "Key", &maybe_url_encode(&obj.key, encoding_type));
         write_text_element(
             &mut writer,
             "LastModified",
@@ -202,7 +289,7 @@ pub fn list_objects_v1_xml(
         writer
             .write_event(Event::Start(BytesStart::new("CommonPrefixes")))
             .unwrap();
-        write_text_element(&mut writer, "Prefix", cp);
+        write_text_element(&mut writer, "Prefix", &maybe_url_encode(cp, encoding_type));
         writer
             .write_event(Event::End(BytesEnd::new("CommonPrefixes")))
             .unwrap();
@@ -325,8 +412,15 @@ pub fn copy_object_result_xml(etag: &str, last_modified: &str) -> String {
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
+pub struct DeletedEntry {
+    pub key: String,
+    pub version_id: Option<String>,
+    pub delete_marker: bool,
+    pub delete_marker_version_id: Option<String>,
+}
+
 pub fn delete_result_xml(
-    deleted: &[(String, Option<String>)],
+    deleted: &[DeletedEntry],
     errors: &[(String, String, String)],
     quiet: bool,
 ) -> String {
@@ -340,13 +434,19 @@ pub fn delete_result_xml(
     writer.write_event(Event::Start(start)).unwrap();
 
     if !quiet {
-        for (key, version_id) in deleted {
+        for entry in deleted {
             writer
                 .write_event(Event::Start(BytesStart::new("Deleted")))
                 .unwrap();
-            write_text_element(&mut writer, "Key", key);
-            if let Some(vid) = version_id {
+            write_text_element(&mut writer, "Key", &entry.key);
+            if let Some(ref vid) = entry.version_id {
                 write_text_element(&mut writer, "VersionId", vid);
+            }
+            if entry.delete_marker {
+                write_text_element(&mut writer, "DeleteMarker", "true");
+                if let Some(ref dm_vid) = entry.delete_marker_version_id {
+                    write_text_element(&mut writer, "DeleteMarkerVersionId", dm_vid);
+                }
             }
             writer
                 .write_event(Event::End(BytesEnd::new("Deleted")))

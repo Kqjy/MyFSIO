@@ -17,10 +17,18 @@ pub enum StorageError {
         key: String,
         version_id: String,
     },
+    #[error("Object is a delete marker: {bucket}/{key}")]
+    DeleteMarker {
+        bucket: String,
+        key: String,
+        version_id: String,
+    },
     #[error("Invalid bucket name: {0}")]
     InvalidBucketName(String),
     #[error("Invalid object key: {0}")]
     InvalidObjectKey(String),
+    #[error("Method not allowed: {0}")]
+    MethodNotAllowed(String),
     #[error("Upload not found: {0}")]
     UploadNotFound(String),
     #[error("Quota exceeded: {0}")]
@@ -58,10 +66,17 @@ impl From<StorageError> for S3Error {
                 version_id,
             } => S3Error::from_code(S3ErrorCode::NoSuchVersion)
                 .with_resource(format!("/{}/{}?versionId={}", bucket, key, version_id)),
+            StorageError::DeleteMarker {
+                bucket,
+                key,
+                version_id,
+            } => S3Error::from_code(S3ErrorCode::MethodNotAllowed)
+                .with_resource(format!("/{}/{}?versionId={}", bucket, key, version_id)),
             StorageError::InvalidBucketName(msg) => {
                 S3Error::new(S3ErrorCode::InvalidBucketName, msg)
             }
             StorageError::InvalidObjectKey(msg) => S3Error::new(S3ErrorCode::InvalidKey, msg),
+            StorageError::MethodNotAllowed(msg) => S3Error::new(S3ErrorCode::MethodNotAllowed, msg),
             StorageError::UploadNotFound(id) => S3Error::new(
                 S3ErrorCode::NoSuchUpload,
                 format!("Upload {} not found", id),

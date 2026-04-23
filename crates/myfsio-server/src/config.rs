@@ -83,6 +83,10 @@ pub struct ServerConfig {
     pub stream_chunk_size: usize,
     pub request_body_timeout_secs: u64,
     pub ratelimit_default: RateLimitSetting,
+    pub ratelimit_list_buckets: RateLimitSetting,
+    pub ratelimit_bucket_ops: RateLimitSetting,
+    pub ratelimit_object_ops: RateLimitSetting,
+    pub ratelimit_head_ops: RateLimitSetting,
     pub ratelimit_admin: RateLimitSetting,
     pub ratelimit_storage_uri: String,
     pub ui_enabled: bool,
@@ -228,7 +232,15 @@ impl ServerConfig {
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
         let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 60);
         let ratelimit_default =
-            parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(200, 60));
+            parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(500, 60));
+        let ratelimit_list_buckets =
+            parse_rate_limit_env("RATE_LIMIT_LIST_BUCKETS", ratelimit_default);
+        let ratelimit_bucket_ops =
+            parse_rate_limit_env("RATE_LIMIT_BUCKET_OPS", ratelimit_default);
+        let ratelimit_object_ops =
+            parse_rate_limit_env("RATE_LIMIT_OBJECT_OPS", ratelimit_default);
+        let ratelimit_head_ops =
+            parse_rate_limit_env("RATE_LIMIT_HEAD_OPS", ratelimit_default);
         let ratelimit_admin =
             parse_rate_limit_env("RATE_LIMIT_ADMIN", RateLimitSetting::new(60, 60));
         let ratelimit_storage_uri =
@@ -308,6 +320,10 @@ impl ServerConfig {
             stream_chunk_size,
             request_body_timeout_secs,
             ratelimit_default,
+            ratelimit_list_buckets,
+            ratelimit_bucket_ops,
+            ratelimit_object_ops,
+            ratelimit_head_ops,
             ratelimit_admin,
             ratelimit_storage_uri,
             ui_enabled,
@@ -391,7 +407,11 @@ impl Default for ServerConfig {
             bulk_delete_max_keys: 1000,
             stream_chunk_size: 1_048_576,
             request_body_timeout_secs: 60,
-            ratelimit_default: RateLimitSetting::new(200, 60),
+            ratelimit_default: RateLimitSetting::new(500, 60),
+            ratelimit_list_buckets: RateLimitSetting::new(500, 60),
+            ratelimit_bucket_ops: RateLimitSetting::new(500, 60),
+            ratelimit_object_ops: RateLimitSetting::new(500, 60),
+            ratelimit_head_ops: RateLimitSetting::new(500, 60),
             ratelimit_admin: RateLimitSetting::new(60, 60),
             ratelimit_storage_uri: "memory://".to_string(),
             ui_enabled: true,
@@ -476,7 +496,31 @@ fn parse_list_env(key: &str, default: &str) -> Vec<String> {
 }
 
 pub fn parse_rate_limit(value: &str) -> Option<RateLimitSetting> {
-    let parts = value.split_whitespace().collect::<Vec<_>>();
+    let trimmed = value.trim();
+    if let Some((requests, window)) = trimmed.split_once('/') {
+        let max_requests = requests.trim().parse::<u32>().ok()?;
+        if max_requests == 0 {
+            return None;
+        }
+        let window_str = window.trim().to_ascii_lowercase();
+        let window_seconds = if let Ok(n) = window_str.parse::<u64>() {
+            if n == 0 {
+                return None;
+            }
+            n
+        } else {
+            match window_str.as_str() {
+                "s" | "sec" | "second" | "seconds" => 1,
+                "m" | "min" | "minute" | "minutes" => 60,
+                "h" | "hr" | "hour" | "hours" => 3600,
+                "d" | "day" | "days" => 86_400,
+                _ => return None,
+            }
+        };
+        return Some(RateLimitSetting::new(max_requests, window_seconds));
+    }
+
+    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
     if parts.len() != 3 || !parts[1].eq_ignore_ascii_case("per") {
         return None;
     }
@@ -521,6 +565,15 @@ mod tests {
             parse_rate_limit("3 per hours"),
             Some(RateLimitSetting::new(3, 3600))
         );
+        assert_eq!(
+            parse_rate_limit("50000/60"),
+            Some(RateLimitSetting::new(50000, 60))
+        );
+        assert_eq!(
+            parse_rate_limit("100/minute"),
+            Some(RateLimitSetting::new(100, 60))
+        );
+        assert_eq!(parse_rate_limit("0/60"), None);
         assert_eq!(parse_rate_limit("0 per minute"), None);
         assert_eq!(parse_rate_limit("bad"), None);
     }
@@ -536,7 +589,7 @@ mod tests {
 
         assert_eq!(config.object_key_max_length_bytes, 1024);
         assert_eq!(config.object_tag_limit, 50);
-        assert_eq!(config.ratelimit_default, RateLimitSetting::new(200, 60));
+        assert_eq!(config.ratelimit_default, RateLimitSetting::new(500, 60));
 
         std::env::remove_var("OBJECT_TAG_LIMIT");
         std::env::remove_var("RATE_LIMIT_DEFAULT");

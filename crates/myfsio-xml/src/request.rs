@@ -1,13 +1,13 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DeleteObjectsRequest {
     pub objects: Vec<ObjectIdentifier>,
     pub quiet: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ObjectIdentifier {
     pub key: String,
     pub version_id: Option<String>,

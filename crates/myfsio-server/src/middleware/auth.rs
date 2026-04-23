@@ -1344,7 +1344,7 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
         }
         if elapsed < -(state.config.sigv4_timestamp_tolerance_secs as i64) {
             return AuthResult::Denied(S3Error::new(
-                S3ErrorCode::AccessDenied,
+                S3ErrorCode::RequestTimeTooSkewed,
                 "Request is too far in the future",
             ));
         }
@@ -1414,8 +1414,11 @@ fn check_timestamp_freshness(amz_date: &str, tolerance_secs: u64) -> Option<S3Er
 
     if diff > tolerance_secs {
         return Some(S3Error::new(
-            S3ErrorCode::AccessDenied,
-            "Request timestamp too old or too far in the future",
+            S3ErrorCode::RequestTimeTooSkewed,
+            format!(
+                "The difference between the request time and the server's time is too large ({}s, tolerance {}s)",
+                diff, tolerance_secs
+            ),
         ));
     }
     None

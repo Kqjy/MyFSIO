@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use parking_lot::Mutex;
@@ -13,16 +13,76 @@ use crate::config::RateLimitSetting;
 
 #[derive(Clone)]
 pub struct RateLimitLayerState {
-    limiter: Arc<FixedWindowLimiter>,
+    default_limiter: Arc<FixedWindowLimiter>,
+    list_buckets_limiter: Option<Arc<FixedWindowLimiter>>,
+    bucket_ops_limiter: Option<Arc<FixedWindowLimiter>>,
+    object_ops_limiter: Option<Arc<FixedWindowLimiter>>,
+    head_ops_limiter: Option<Arc<FixedWindowLimiter>>,
     num_trusted_proxies: usize,
 }
 
 impl RateLimitLayerState {
     pub fn new(setting: RateLimitSetting, num_trusted_proxies: usize) -> Self {
         Self {
-            limiter: Arc::new(FixedWindowLimiter::new(setting)),
+            default_limiter: Arc::new(FixedWindowLimiter::new(setting)),
+            list_buckets_limiter: None,
+            bucket_ops_limiter: None,
+            object_ops_limiter: None,
+            head_ops_limiter: None,
             num_trusted_proxies,
         }
+    }
+
+    pub fn with_per_op(
+        default: RateLimitSetting,
+        list_buckets: RateLimitSetting,
+        bucket_ops: RateLimitSetting,
+        object_ops: RateLimitSetting,
+        head_ops: RateLimitSetting,
+        num_trusted_proxies: usize,
+    ) -> Self {
+        Self {
+            default_limiter: Arc::new(FixedWindowLimiter::new(default)),
+            list_buckets_limiter: (list_buckets != default)
+                .then(|| Arc::new(FixedWindowLimiter::new(list_buckets))),
+            bucket_ops_limiter: (bucket_ops != default)
+                .then(|| Arc::new(FixedWindowLimiter::new(bucket_ops))),
+            object_ops_limiter: (object_ops != default)
+                .then(|| Arc::new(FixedWindowLimiter::new(object_ops))),
+            head_ops_limiter: (head_ops != default)
+                .then(|| Arc::new(FixedWindowLimiter::new(head_ops))),
+            num_trusted_proxies,
+        }
+    }
+
+    fn select_limiter(&self, req: &Request) -> &Arc<FixedWindowLimiter> {
+        let path = req.uri().path();
+        let method = req.method();
+        if path == "/" && *method == Method::GET {
+            if let Some(ref limiter) = self.list_buckets_limiter {
+                return limiter;
+            }
+        }
+        let segments: Vec<&str> = path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if *method == Method::HEAD {
+            if let Some(ref limiter) = self.head_ops_limiter {
+                return limiter;
+            }
+        }
+        if segments.len() == 1 {
+            if let Some(ref limiter) = self.bucket_ops_limiter {
+                return limiter;
+            }
+        } else if segments.len() >= 2 {
+            if let Some(ref limiter) = self.object_ops_limiter {
+                return limiter;
+            }
+        }
+        &self.default_limiter
     }
 }
 
@@ -99,7 +159,8 @@ pub async fn rate_limit_layer(
     next: Next,
 ) -> Response {
     let key = rate_limit_key(&req, state.num_trusted_proxies);
-    match state.limiter.check(&key) {
+    let limiter = state.select_limiter(&req);
+    match limiter.check(&key) {
         Ok(()) => next.run(req).await,
         Err(retry_after) => too_many_requests(retry_after),
     }

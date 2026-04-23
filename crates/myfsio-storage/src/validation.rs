@@ -60,6 +60,12 @@ pub fn validate_object_key(
             return Some("Object key contains invalid segments".to_string());
         }
 
+        if part.len() > 255 {
+            return Some(
+                "Object key contains a path segment that exceeds 255 bytes".to_string(),
+            );
+        }
+
         if part.chars().any(|c| (c as u32) < 32) {
             return Some("Object key contains control characters".to_string());
         }
@@ -95,6 +101,12 @@ pub fn validate_object_key(
                     return Some("Object key uses a reserved prefix".to_string());
                 }
             }
+        }
+    }
+
+    for part in &non_empty_parts {
+        if *part == ".__myfsio_dirobj__" || part.starts_with("_index.json") {
+            return Some("Object key segment uses a reserved internal name".to_string());
         }
     }
 

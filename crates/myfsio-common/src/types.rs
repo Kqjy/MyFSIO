@@ -12,6 +12,10 @@ pub struct ObjectMeta {
     pub content_type: Option<String>,
     pub storage_class: Option<String>,
     pub metadata: HashMap<String, String>,
+    #[serde(default)]
+    pub version_id: Option<String>,
+    #[serde(default)]
+    pub is_delete_marker: bool,
 }
 
 impl ObjectMeta {
@@ -24,8 +28,17 @@ impl ObjectMeta {
             content_type: None,
             storage_class: Some("STANDARD".to_string()),
             metadata: HashMap::new(),
+            version_id: None,
+            is_delete_marker: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOutcome {
+    pub version_id: Option<String>,
+    pub is_delete_marker: bool,
+    pub existed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

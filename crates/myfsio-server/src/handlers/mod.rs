@@ -51,8 +51,62 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
         if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(io_err) {
             return bad_digest_response(message);
         }
+        if let Some(response) = io_error_to_s3_response(io_err) {
+            return response;
+        }
+    }
+    if let myfsio_storage::error::StorageError::DeleteMarker {
+        bucket,
+        key,
+        version_id,
+    } = &err
+    {
+        let s3_err = S3Error::from_code(S3ErrorCode::NoSuchKey)
+            .with_resource(format!("/{}/{}", bucket, key))
+            .with_request_id(uuid::Uuid::new_v4().simple().to_string());
+        let status = StatusCode::from_u16(s3_err.http_status())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let mut resp_headers = HeaderMap::new();
+        resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+        if let Ok(vid) = version_id.parse() {
+            resp_headers.insert("x-amz-version-id", vid);
+        }
+        resp_headers.insert("content-type", "application/xml".parse().unwrap());
+        return (status, resp_headers, s3_err.to_xml()).into_response();
     }
     s3_error_response(S3Error::from(err))
+}
+
+fn io_error_to_s3_response(err: &std::io::Error) -> Option<Response> {
+    use std::io::ErrorKind;
+    let message = err.to_string();
+    let lower = message.to_ascii_lowercase();
+    let hit_collision = matches!(
+        err.kind(),
+        ErrorKind::NotADirectory
+            | ErrorKind::IsADirectory
+            | ErrorKind::AlreadyExists
+            | ErrorKind::DirectoryNotEmpty
+    ) || lower.contains("not a directory")
+        || lower.contains("is a directory")
+        || lower.contains("file exists")
+        || lower.contains("directory not empty");
+    let hit_name_too_long = matches!(err.kind(), ErrorKind::InvalidFilename)
+        || lower.contains("file name too long");
+    if !hit_collision && !hit_name_too_long {
+        return None;
+    }
+    let code = if hit_name_too_long {
+        S3ErrorCode::InvalidKey
+    } else {
+        S3ErrorCode::InvalidRequest
+    };
+    let detail = if hit_name_too_long {
+        "Object key exceeds the filesystem's per-segment length limit"
+    } else {
+        "Object key collides with an existing object path on the storage backend"
+    };
+    Some(s3_error_response(S3Error::new(code, detail)))
 }
 
 fn trigger_replication(state: &AppState, bucket: &str, key: &str, action: &str) {
@@ -242,6 +296,8 @@ pub struct BucketQuery {
     pub continuation_token: Option<String>,
     #[serde(rename = "start-after")]
     pub start_after: Option<String>,
+    #[serde(rename = "encoding-type")]
+    pub encoding_type: Option<String>,
     pub uploads: Option<String>,
     pub delete: Option<String>,
     pub versioning: Option<String>,
@@ -490,11 +546,12 @@ pub async fn get_bucket(
                 } else {
                     None
                 };
+                let encoding_type = query.encoding_type.as_deref();
                 let xml = if is_v2 {
                     let next_token = next_marker
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml(
+                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
                         &bucket,
                         &prefix,
                         &delimiter,
@@ -505,9 +562,10 @@ pub async fn get_bucket(
                         query.continuation_token.as_deref(),
                         next_token.as_deref(),
                         result.objects.len(),
+                        encoding_type,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml(
+                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
                         &bucket,
                         &prefix,
                         &marker,
@@ -517,6 +575,7 @@ pub async fn get_bucket(
                         &[],
                         result.is_truncated,
                         next_marker.as_deref(),
+                        encoding_type,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -532,12 +591,13 @@ pub async fn get_bucket(
         };
         match state.storage.list_objects_shallow(&bucket, &params).await {
             Ok(result) => {
+                let encoding_type = query.encoding_type.as_deref();
                 let xml = if is_v2 {
                     let next_token = result
                         .next_continuation_token
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml(
+                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
                         &bucket,
                         &params.prefix,
                         &delimiter,
@@ -548,9 +608,10 @@ pub async fn get_bucket(
                         query.continuation_token.as_deref(),
                         next_token.as_deref(),
                         result.objects.len() + result.common_prefixes.len(),
+                        encoding_type,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml(
+                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
                         &bucket,
                         &params.prefix,
                         &marker,
@@ -560,6 +621,7 @@ pub async fn get_bucket(
                         &result.common_prefixes,
                         result.is_truncated,
                         result.next_continuation_token.as_deref(),
+                        encoding_type,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -955,6 +1017,47 @@ fn has_upload_checksum(headers: &HeaderMap) -> bool {
         || headers.contains_key("x-amz-checksum-crc32")
 }
 
+fn persist_additional_checksums(headers: &HeaderMap, metadata: &mut HashMap<String, String>) {
+    for algo in [
+        "sha256", "sha1", "crc32", "crc32c", "crc64nvme",
+    ] {
+        let header_name = format!("x-amz-checksum-{}", algo);
+        if let Some(value) = headers.get(&header_name).and_then(|v| v.to_str().ok()) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                metadata.insert(format!("__checksum_{}__", algo), trimmed.to_string());
+            }
+        }
+    }
+    if let Some(value) = headers
+        .get("x-amz-sdk-checksum-algorithm")
+        .and_then(|v| v.to_str().ok())
+    {
+        let trimmed = value.trim().to_ascii_uppercase();
+        if !trimmed.is_empty() {
+            metadata.insert("__checksum_algorithm__".to_string(), trimmed);
+        }
+    }
+}
+
+fn apply_stored_checksum_headers(resp_headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
+    for algo in [
+        "sha256", "sha1", "crc32", "crc32c", "crc64nvme",
+    ] {
+        if let Some(value) = metadata.get(&format!("__checksum_{}__", algo)) {
+            if let Ok(parsed) = value.parse() {
+                resp_headers.insert(
+                    axum::http::HeaderName::from_bytes(
+                        format!("x-amz-checksum-{}", algo).as_bytes(),
+                    )
+                    .unwrap(),
+                    parsed,
+                );
+            }
+        }
+    }
+}
+
 fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Response> {
     if let Some(expected) = base64_header_bytes(headers, "content-md5")? {
         if expected.len() != 16 || Md5::digest(data).as_slice() != expected.as_slice() {
@@ -984,7 +1087,7 @@ fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Res
     Ok(())
 }
 
-async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<Vec<u8>, Response> {
+async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Bytes, Response> {
     if aws_chunked {
         let mut reader = chunked::decode_body(body);
         let mut data = Vec::new();
@@ -994,12 +1097,12 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<Vec<u8>, R
                 "Failed to read aws-chunked request body",
             ))
         })?;
-        return Ok(data);
+        return Ok(bytes::Bytes::from(data));
     }
 
     http_body_util::BodyExt::collect(body)
         .await
-        .map(|collected| collected.to_bytes().to_vec())
+        .map(|collected| collected.to_bytes())
         .map_err(|err| {
             if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(&err) {
                 bad_digest_response(message)
@@ -1213,6 +1316,8 @@ pub async fn put_object(
         }
     }
 
+    persist_additional_checksums(&headers, &mut metadata);
+
     let aws_chunked = is_aws_chunked(&headers);
     let boxed: myfsio_storage::traits::AsyncReadStream = if has_upload_checksum(&headers) {
         let data = match collect_upload_body(body, aws_chunked).await {
@@ -1227,8 +1332,7 @@ pub async fn put_object(
         Box::pin(chunked::decode_body(body))
     } else {
         let stream = tokio_util::io::StreamReader::new(
-            http_body_util::BodyStream::new(body)
-                .map_ok(|frame| frame.into_data().unwrap_or_default())
+            body.into_data_stream()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
         );
         Box::pin(stream)
@@ -1288,10 +1392,16 @@ pub async fn put_object(
                                 resp_headers
                                     .insert("etag", format!("\"{}\"", etag).parse().unwrap());
                             }
+                            if let Some(ref vid) = meta.version_id {
+                                if let Ok(value) = vid.parse() {
+                                    resp_headers.insert("x-amz-version-id", value);
+                                }
+                            }
                             resp_headers.insert(
                                 "x-amz-server-side-encryption",
                                 enc_ctx.algorithm.as_str().parse().unwrap(),
                             );
+                            apply_stored_checksum_headers(&mut resp_headers, &enc_metadata);
                             notifications::emit_object_created(
                                 &state,
                                 &bucket,
@@ -1321,6 +1431,17 @@ pub async fn put_object(
             if let Some(ref etag) = meta.etag {
                 resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
             }
+            if let Some(ref vid) = meta.version_id {
+                if let Ok(value) = vid.parse() {
+                    resp_headers.insert("x-amz-version-id", value);
+                }
+            }
+            let stored = state
+                .storage
+                .get_object_metadata(&bucket, &key)
+                .await
+                .unwrap_or_default();
+            apply_stored_checksum_headers(&mut resp_headers, &stored);
             notifications::emit_object_created(
                 &state,
                 &bucket,
@@ -1450,7 +1571,7 @@ pub async fn get_object(
             }
         };
         let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-        let stream = ReaderStream::new(file);
+        let stream = ReaderStream::with_capacity(file, 256 * 1024);
         let body = Body::from_stream(stream);
 
         let meta = head_meta.clone();
@@ -1481,8 +1602,13 @@ pub async fn get_object(
             enc_info.algorithm.parse().unwrap(),
         );
         apply_stored_response_headers(&mut resp_headers, &all_meta);
+        apply_stored_checksum_headers(&mut resp_headers, &all_meta);
         if let Some(ref requested_version) = query.version_id {
             if let Ok(value) = requested_version.parse() {
+                resp_headers.insert("x-amz-version-id", value);
+            }
+        } else if let Some(vid) = all_meta.get("__version_id__") {
+            if let Ok(value) = vid.parse() {
                 resp_headers.insert("x-amz-version-id", value);
             }
         }
@@ -1506,7 +1632,7 @@ pub async fn get_object(
 
     match object_result {
         Ok((meta, reader)) => {
-            let stream = ReaderStream::new(reader);
+            let stream = ReaderStream::with_capacity(reader, 256 * 1024);
             let body = Body::from_stream(stream);
 
             let mut headers = HeaderMap::new();
@@ -1525,8 +1651,13 @@ pub async fn get_object(
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
             apply_stored_response_headers(&mut headers, &all_meta);
+            apply_stored_checksum_headers(&mut headers, &all_meta);
             if let Some(ref requested_version) = query.version_id {
                 if let Ok(value) = requested_version.parse() {
+                    headers.insert("x-amz-version-id", value);
+                }
+            } else if let Some(ref vid) = meta.version_id {
+                if let Ok(value) = vid.parse() {
                     headers.insert("x-amz-version-id", value);
                 }
             }
@@ -1596,10 +1727,15 @@ pub async fn delete_object(
             .delete_object_version(&bucket, &key, version_id)
             .await
         {
-            Ok(()) => {
+            Ok(outcome) => {
                 let mut resp_headers = HeaderMap::new();
-                if let Ok(value) = version_id.parse() {
-                    resp_headers.insert("x-amz-version-id", value);
+                if let Some(ref vid) = outcome.version_id {
+                    if let Ok(value) = vid.parse() {
+                        resp_headers.insert("x-amz-version-id", value);
+                    }
+                }
+                if outcome.is_delete_marker {
+                    resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
                 }
                 notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
                 trigger_replication(&state, &bucket, &key, "delete");
@@ -1616,10 +1752,19 @@ pub async fn delete_object(
     }
 
     match state.storage.delete_object(&bucket, &key).await {
-        Ok(()) => {
+        Ok(outcome) => {
+            let mut resp_headers = HeaderMap::new();
+            if let Some(ref vid) = outcome.version_id {
+                if let Ok(value) = vid.parse() {
+                    resp_headers.insert("x-amz-version-id", value);
+                }
+            }
+            if outcome.is_delete_marker {
+                resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+            }
             notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
             trigger_replication(&state, &bucket, &key, "delete");
-            (StatusCode::NO_CONTENT, HeaderMap::new()).into_response()
+            (StatusCode::NO_CONTENT, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
     }
@@ -1678,8 +1823,13 @@ pub async fn head_object(
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
             apply_stored_response_headers(&mut headers, &all_meta);
+            apply_stored_checksum_headers(&mut headers, &all_meta);
             if let Some(ref requested_version) = query.version_id {
                 if let Ok(value) = requested_version.parse() {
+                    headers.insert("x-amz-version-id", value);
+                }
+            } else if let Some(ref vid) = meta.version_id {
+                if let Ok(value) = vid.parse() {
                     headers.insert("x-amz-version-id", value);
                 }
             }
@@ -1714,8 +1864,7 @@ async fn upload_part_handler_with_chunking(
         Box::pin(chunked::decode_body(body))
     } else {
         let stream = tokio_util::io::StreamReader::new(
-            http_body_util::BodyStream::new(body)
-                .map_ok(|frame| frame.into_data().unwrap_or_default())
+            body.into_data_stream()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
         );
         Box::pin(stream)
@@ -2240,61 +2389,110 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
         ));
     }
 
-    let mut deleted = Vec::new();
-    let mut errors = Vec::new();
+    use futures::stream::{self, StreamExt};
 
-    for obj in &parsed.objects {
-        if let Err(message) = match obj.version_id.as_deref() {
-            Some(version_id) if version_id != "null" => match state
-                .storage
-                .get_object_version_metadata(bucket, &obj.key, version_id)
-                .await
-            {
-                Ok(metadata) => object_lock::can_delete_object(&metadata, false),
-                Err(err) => Err(S3Error::from(err).message),
-            },
-            _ => match state.storage.head_object(bucket, &obj.key).await {
-                Ok(_) => match state.storage.get_object_metadata(bucket, &obj.key).await {
-                    Ok(metadata) => object_lock::can_delete_object(&metadata, false),
-                    Err(err) => Err(S3Error::from(err).message),
-                },
-                Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
-                Err(err) => Err(S3Error::from(err).message),
-            },
-        } {
-            errors.push((
-                obj.key.clone(),
-                S3ErrorCode::AccessDenied.as_str().to_string(),
-                message,
-            ));
-            continue;
-        }
-        let delete_result = if let Some(version_id) = obj.version_id.as_deref() {
-            if version_id == "null" {
-                state.storage.delete_object(bucket, &obj.key).await
-            } else {
-                state
-                    .storage
-                    .delete_object_version(bucket, &obj.key, version_id)
-                    .await
-            }
-        } else {
-            state.storage.delete_object(bucket, &obj.key).await
-        };
+    let results: Vec<(String, Option<String>, Result<myfsio_common::types::DeleteOutcome, (String, String)>)> =
+        stream::iter(parsed.objects.iter().cloned())
+            .map(|obj| {
+                let state = state.clone();
+                let bucket = bucket.to_string();
+                async move {
+                    let key = obj.key.clone();
+                    let requested_vid = obj.version_id.clone();
+                    let lock_check: Result<(), (String, String)> = match obj.version_id.as_deref() {
+                        Some(version_id) if version_id != "null" => match state
+                            .storage
+                            .get_object_version_metadata(&bucket, &obj.key, version_id)
+                            .await
+                        {
+                            Ok(metadata) => object_lock::can_delete_object(&metadata, false)
+                                .map_err(|m| {
+                                    (S3ErrorCode::AccessDenied.as_str().to_string(), m)
+                                }),
+                            Err(err) => {
+                                let s3err = S3Error::from(err);
+                                Err((s3err.code.as_str().to_string(), s3err.message))
+                            }
+                        },
+                        _ => match state.storage.head_object(&bucket, &obj.key).await {
+                            Ok(_) => {
+                                match state
+                                    .storage
+                                    .get_object_metadata(&bucket, &obj.key)
+                                    .await
+                                {
+                                    Ok(metadata) => object_lock::can_delete_object(&metadata, false)
+                                        .map_err(|m| {
+                                            (
+                                                S3ErrorCode::AccessDenied.as_str().to_string(),
+                                                m,
+                                            )
+                                        }),
+                                    Err(err) => {
+                                        let s3err = S3Error::from(err);
+                                        Err((s3err.code.as_str().to_string(), s3err.message))
+                                    }
+                                }
+                            }
+                            Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => {
+                                Ok(())
+                            }
+                            Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => {
+                                Ok(())
+                            }
+                            Err(err) => {
+                                let s3err = S3Error::from(err);
+                                Err((s3err.code.as_str().to_string(), s3err.message))
+                            }
+                        },
+                    };
 
-        match delete_result {
-            Ok(()) => {
-                notifications::emit_object_removed(state, bucket, &obj.key, "", "", "", "Delete");
-                trigger_replication(state, bucket, &obj.key, "delete");
-                deleted.push((obj.key.clone(), obj.version_id.clone()))
+                    let result = match lock_check {
+                        Err(e) => Err(e),
+                        Ok(()) => {
+                            let outcome = match obj.version_id.as_deref() {
+                                Some(version_id) if version_id != "null" => {
+                                    state
+                                        .storage
+                                        .delete_object_version(&bucket, &obj.key, version_id)
+                                        .await
+                                }
+                                _ => state.storage.delete_object(&bucket, &obj.key).await,
+                            };
+                            outcome.map_err(|e| {
+                                let s3err = S3Error::from(e);
+                                (s3err.code.as_str().to_string(), s3err.message)
+                            })
+                        }
+                    };
+                    (key, requested_vid, result)
+                }
+            })
+            .buffer_unordered(32)
+            .collect()
+            .await;
+
+    let mut deleted: Vec<myfsio_xml::response::DeletedEntry> = Vec::new();
+    let mut errors: Vec<(String, String, String)> = Vec::new();
+    for (key, requested_vid, result) in results {
+        match result {
+            Ok(outcome) => {
+                notifications::emit_object_removed(state, bucket, &key, "", "", "", "Delete");
+                trigger_replication(state, bucket, &key, "delete");
+                let delete_marker_version_id = if outcome.is_delete_marker {
+                    outcome.version_id.clone()
+                } else {
+                    None
+                };
+                deleted.push(myfsio_xml::response::DeletedEntry {
+                    key,
+                    version_id: requested_vid,
+                    delete_marker: outcome.is_delete_marker,
+                    delete_marker_version_id,
+                });
             }
-            Err(e) => {
-                let s3err = S3Error::from(e);
-                errors.push((
-                    obj.key.clone(),
-                    s3err.code.as_str().to_string(),
-                    s3err.message,
-                ));
+            Err((code, message)) => {
+                errors.push((key, code, message));
             }
         }
     }
@@ -2366,7 +2564,7 @@ async fn range_get_handler(
 
     let length = end - start + 1;
     let limited = file.take(length);
-    let stream = ReaderStream::new(limited);
+    let stream = ReaderStream::with_capacity(limited, 256 * 1024);
     let body = Body::from_stream(stream);
 
     let mut headers = HeaderMap::new();

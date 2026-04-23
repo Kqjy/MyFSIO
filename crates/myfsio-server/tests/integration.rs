@@ -121,6 +121,10 @@ fn test_app_with_rate_limits(
         storage_root: tmp.path().to_path_buf(),
         iam_config_path: iam_path.join("iam.json"),
         ratelimit_default: default,
+        ratelimit_list_buckets: default,
+        ratelimit_bucket_ops: default,
+        ratelimit_object_ops: default,
+        ratelimit_head_ops: default,
         ratelimit_admin: admin,
         ui_enabled: false,
         ..myfsio_server::config::ServerConfig::default()
@@ -2398,7 +2402,7 @@ async fn test_versioned_object_can_be_read_and_deleted_by_version_id() {
 }
 
 #[tokio::test]
-async fn test_versioned_put_and_delete_do_not_advertise_unstored_ids() {
+async fn test_versioned_put_and_delete_emit_version_headers_and_delete_markers() {
     let (app, _tmp) = test_app();
 
     app.clone()
@@ -2430,7 +2434,14 @@ async fn test_versioned_put_and_delete_do_not_advertise_unstored_ids() {
         .await
         .unwrap();
     assert_eq!(put_resp.status(), StatusCode::OK);
-    assert!(!put_resp.headers().contains_key("x-amz-version-id"));
+    let first_version = put_resp
+        .headers()
+        .get("x-amz-version-id")
+        .expect("PUT on versioned bucket must emit x-amz-version-id")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(!first_version.is_empty());
 
     let overwrite_resp = app
         .clone()
@@ -2442,7 +2453,14 @@ async fn test_versioned_put_and_delete_do_not_advertise_unstored_ids() {
         .await
         .unwrap();
     assert_eq!(overwrite_resp.status(), StatusCode::OK);
-    assert!(!overwrite_resp.headers().contains_key("x-amz-version-id"));
+    let second_version = overwrite_resp
+        .headers()
+        .get("x-amz-version-id")
+        .expect("overwrite on versioned bucket must emit a new x-amz-version-id")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(first_version, second_version);
 
     let delete_resp = app
         .clone()
@@ -2454,8 +2472,14 @@ async fn test_versioned_put_and_delete_do_not_advertise_unstored_ids() {
         .await
         .unwrap();
     assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
-    assert!(!delete_resp.headers().contains_key("x-amz-version-id"));
-    assert!(!delete_resp.headers().contains_key("x-amz-delete-marker"));
+    assert_eq!(
+        delete_resp
+            .headers()
+            .get("x-amz-delete-marker")
+            .and_then(|v| v.to_str().ok()),
+        Some("true")
+    );
+    assert!(delete_resp.headers().contains_key("x-amz-version-id"));
 
     let versions_resp = app
         .oneshot(signed_request(
@@ -2475,7 +2499,11 @@ async fn test_versioned_put_and_delete_do_not_advertise_unstored_ids() {
             .to_vec(),
     )
     .unwrap();
-    assert!(!versions_body.contains("<DeleteMarker>"));
+    assert!(
+        versions_body.contains("<DeleteMarker>"),
+        "expected DeleteMarker entry in ListObjectVersions output, got: {}",
+        versions_body
+    );
 }
 
 #[tokio::test]

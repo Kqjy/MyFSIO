@@ -1118,9 +1118,13 @@ pub async fn list_object_versions(
     }
 
     for obj in objects.iter().take(current_count) {
+        let version_id = obj.version_id.clone().unwrap_or_else(|| "null".to_string());
         xml.push_str("<Version>");
         xml.push_str(&format!("<Key>{}</Key>", xml_escape(&obj.key)));
-        xml.push_str("<VersionId>null</VersionId>");
+        xml.push_str(&format!(
+            "<VersionId>{}</VersionId>",
+            xml_escape(&version_id)
+        ));
         xml.push_str("<IsLatest>true</IsLatest>");
         xml.push_str(&format!(
             "<LastModified>{}</LastModified>",

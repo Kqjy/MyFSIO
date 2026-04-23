@@ -31,6 +31,7 @@ pub enum S3ErrorCode {
     PreconditionFailed,
     NotModified,
     QuotaExceeded,
+    RequestTimeTooSkewed,
     ServerSideEncryptionConfigurationNotFoundError,
     SignatureDoesNotMatch,
     SlowDown,
@@ -68,6 +69,7 @@ impl S3ErrorCode {
             Self::PreconditionFailed => 412,
             Self::NotModified => 304,
             Self::QuotaExceeded => 403,
+            Self::RequestTimeTooSkewed => 403,
             Self::ServerSideEncryptionConfigurationNotFoundError => 404,
             Self::SignatureDoesNotMatch => 403,
             Self::SlowDown => 429,
@@ -105,6 +107,7 @@ impl S3ErrorCode {
             Self::PreconditionFailed => "PreconditionFailed",
             Self::NotModified => "NotModified",
             Self::QuotaExceeded => "QuotaExceeded",
+            Self::RequestTimeTooSkewed => "RequestTimeTooSkewed",
             Self::ServerSideEncryptionConfigurationNotFoundError => {
                 "ServerSideEncryptionConfigurationNotFoundError"
             }
@@ -144,6 +147,7 @@ impl S3ErrorCode {
             Self::PreconditionFailed => "At least one of the preconditions you specified did not hold",
             Self::NotModified => "Not Modified",
             Self::QuotaExceeded => "The bucket quota has been exceeded",
+            Self::RequestTimeTooSkewed => "The difference between the request time and the server's time is too large",
             Self::ServerSideEncryptionConfigurationNotFoundError => "The server side encryption configuration was not found",
             Self::SignatureDoesNotMatch => "The request signature we calculated does not match the signature you provided",
             Self::SlowDown => "Please reduce your request rate",

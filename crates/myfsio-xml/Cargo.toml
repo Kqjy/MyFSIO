@@ -8,3 +8,4 @@ myfsio-common = { path = "../myfsio-common" }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }
+percent-encoding = { workspace = true }

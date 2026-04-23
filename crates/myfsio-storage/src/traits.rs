@@ -62,14 +62,14 @@ pub trait StorageEngine: Send + Sync {
         version_id: &str,
     ) -> StorageResult<HashMap<String, String>>;
 
-    async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<()>;
+    async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<DeleteOutcome>;
 
     async fn delete_object_version(
         &self,
         bucket: &str,
         key: &str,
         version_id: &str,
-    ) -> StorageResult<()>;
+    ) -> StorageResult<DeleteOutcome>;
 
     async fn copy_object(
         &self,

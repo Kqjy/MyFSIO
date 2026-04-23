@@ -2780,6 +2780,7 @@ version = "0.4.4"
 dependencies = [
  "chrono",
  "myfsio-common",
+ "percent-encoding",
  "quick-xml",
  "serde",
 ]

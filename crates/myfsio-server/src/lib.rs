@@ -335,8 +335,12 @@ pub fn create_ui_router(state: state::AppState) -> Router {
 }
 
 pub fn create_router(state: state::AppState) -> Router {
-    let default_rate_limit = middleware::RateLimitLayerState::new(
+    let default_rate_limit = middleware::RateLimitLayerState::with_per_op(
         state.config.ratelimit_default,
+        state.config.ratelimit_list_buckets,
+        state.config.ratelimit_bucket_ops,
+        state.config.ratelimit_object_ops,
+        state.config.ratelimit_head_ops,
         state.config.num_trusted_proxies,
     );
     let admin_rate_limit = middleware::RateLimitLayerState::new(

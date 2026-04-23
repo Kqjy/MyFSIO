@@ -8,6 +8,7 @@ pub const STATS_FILE: &str = "stats.json";
 pub const ETAG_INDEX_FILE: &str = "etag_index.json";
 pub const INDEX_FILE: &str = "_index.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
+pub const DIR_MARKER_FILE: &str = ".__myfsio_dirobj__";
 
 pub const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
 

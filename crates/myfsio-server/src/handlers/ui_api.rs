@@ -121,6 +121,8 @@ fn storage_status(err: &StorageError) -> StatusCode {
         | StorageError::ObjectNotFound { .. }
         | StorageError::VersionNotFound { .. }
         | StorageError::UploadNotFound(_) => StatusCode::NOT_FOUND,
+        StorageError::DeleteMarker { .. } => StatusCode::NOT_FOUND,
+        StorageError::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
         StorageError::InvalidBucketName(_)
         | StorageError::InvalidObjectKey(_)
         | StorageError::InvalidRange
@@ -2599,7 +2601,7 @@ async fn move_object_json(state: &AppState, bucket: &str, key: &str, body: Body)
 
     match state.storage.copy_object(bucket, key, dest_bucket, dest_key).await {
         Ok(_) => match state.storage.delete_object(bucket, key).await {
-            Ok(()) => {
+            Ok(_) => {
                 super::trigger_replication(state, dest_bucket, dest_key, "write");
                 super::trigger_replication(state, bucket, key, "delete");
                 Json(json!({
@@ -2674,7 +2676,7 @@ async fn delete_object_json(
     }
 
     match state.storage.delete_object(bucket, key).await {
-        Ok(()) => {
+        Ok(_) => {
             super::trigger_replication(state, bucket, key, "delete");
             Json(json!({
                 "status": "ok",
@@ -2953,7 +2955,7 @@ pub async fn bulk_delete_objects(
 
     for key in keys {
         match state.storage.delete_object(&bucket_name, &key).await {
-            Ok(()) => {
+            Ok(_) => {
                 super::trigger_replication(&state, &bucket_name, &key, "delete");
                 if payload.purge_versions {
                     if let Err(err) =
