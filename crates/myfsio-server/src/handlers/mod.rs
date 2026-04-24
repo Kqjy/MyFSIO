@@ -2395,7 +2395,7 @@ async fn copy_object_handler(
         source_metadata_existing.clone()
     };
 
-    let (_meta, mut reader) = match src_version_id.as_deref() {
+    let (_meta, reader) = match src_version_id.as_deref() {
         Some(version_id) if version_id != "null" => {
             match state
                 .storage
@@ -2411,19 +2411,10 @@ async fn copy_object_handler(
             Err(e) => return storage_err_response(e),
         },
     };
-    let mut data = Vec::new();
-    if let Err(e) = reader.read_to_end(&mut data).await {
-        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-    }
 
     let copy_result = state
         .storage
-        .put_object(
-            dst_bucket,
-            dst_key,
-            Box::pin(std::io::Cursor::new(data)),
-            Some(dst_metadata),
-        )
+        .put_object(dst_bucket, dst_key, reader, Some(dst_metadata))
         .await;
 
     match copy_result {

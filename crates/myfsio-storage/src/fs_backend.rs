@@ -882,17 +882,11 @@ impl FsStorageBackend {
     fn cleanup_empty_parents(path: &Path, stop_at: &Path) {
         let mut parent = path.parent();
         while let Some(p) = parent {
-            if p == stop_at || !p.exists() {
+            if p == stop_at {
                 break;
             }
-            match std::fs::read_dir(p) {
-                Ok(mut entries) => {
-                    if entries.next().is_some() {
-                        break;
-                    }
-                    let _ = std::fs::remove_dir(p);
-                }
-                Err(_) => break,
+            if std::fs::remove_dir(p).is_err() {
+                break;
             }
             parent = p.parent();
         }
@@ -1937,29 +1931,6 @@ impl FsStorageBackend {
         obj.version_id = new_version_id;
         Ok(obj)
     }
-
-    fn put_object_sync(
-        &self,
-        bucket_name: &str,
-        key: &str,
-        data: &[u8],
-        metadata: Option<HashMap<String, String>>,
-    ) -> StorageResult<ObjectMeta> {
-        self.validate_key(key)?;
-
-        let tmp_dir = self.tmp_dir();
-        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
-        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
-
-        let mut hasher = Md5::new();
-        hasher.update(data);
-        let etag = format!("{:x}", hasher.finalize());
-
-        std::fs::write(&tmp_path, data).map_err(StorageError::Io)?;
-        let new_size = data.len() as u64;
-
-        self.finalize_put_sync(bucket_name, key, &tmp_path, etag, new_size, metadata)
-    }
 }
 
 impl crate::traits::StorageEngine for FsStorageBackend {
@@ -2453,9 +2424,54 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             });
         }
 
-        let data = std::fs::read(&src_path).map_err(StorageError::Io)?;
+        self.validate_key(dst_key)?;
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
+        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+
+        let (etag, new_size) = {
+            use std::io::{BufReader, BufWriter, Read, Write};
+            let src_file = std::fs::File::open(&src_path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                StorageError::Io(e)
+            })?;
+            let mut reader = BufReader::with_capacity(256 * 1024, src_file);
+            let tmp_file = std::fs::File::create(&tmp_path).map_err(StorageError::Io)?;
+            let mut writer = BufWriter::with_capacity(256 * 1024, tmp_file);
+            let mut hasher = Md5::new();
+            let mut buf = [0u8; 256 * 1024];
+            let mut total: u64 = 0;
+            loop {
+                let n = reader.read(&mut buf).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    StorageError::Io(e)
+                })?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                writer.write_all(&buf[..n]).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    StorageError::Io(e)
+                })?;
+                total += n as u64;
+            }
+            writer.flush().map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path);
+                StorageError::Io(e)
+            })?;
+            (format!("{:x}", hasher.finalize()), total)
+        };
+
         let src_metadata = self.read_metadata_sync(src_bucket, src_key);
-        self.put_object_sync(dst_bucket, dst_key, &data, Some(src_metadata))
+        self.finalize_put_sync(
+            dst_bucket,
+            dst_key,
+            &tmp_path,
+            etag,
+            new_size,
+            Some(src_metadata),
+        )
     }
 
     async fn get_object_metadata(

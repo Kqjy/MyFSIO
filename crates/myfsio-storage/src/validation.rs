@@ -63,7 +63,8 @@ pub fn validate_object_key(
 
         if part.len() > 255 {
             return Some(
-                "Object key contains a path segment that exceeds 255 bytes".to_string(),
+                "Object key contains a path segment longer than 255 bytes (filesystem backend limit)"
+                    .to_string(),
             );
         }
 
@@ -197,10 +198,18 @@ mod tests {
 
     #[test]
     fn test_object_key_max_length() {
-        let long_key = "a".repeat(1025);
-        assert!(validate_object_key(&long_key, 1024, false, None).is_some());
-        let ok_key = "a".repeat(1024);
+        let too_long_total = "a/".repeat(513) + "a";
+        assert!(validate_object_key(&too_long_total, 1024, false, None).is_some());
+
+        let too_long_segment = "a".repeat(256);
+        assert!(validate_object_key(&too_long_segment, 1024, false, None).is_some());
+
+        let ok_key = vec!["a".repeat(255); 4].join("/");
+        assert_eq!(ok_key.len(), 255 * 4 + 3);
         assert!(validate_object_key(&ok_key, 1024, false, None).is_none());
+
+        let ok_max_segment = "a".repeat(255);
+        assert!(validate_object_key(&ok_max_segment, 1024, false, None).is_none());
     }
 
     #[test]
