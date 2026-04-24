@@ -20,6 +20,13 @@ fn xml_response(status: StatusCode, xml: String) -> Response {
     (status, [("content-type", "application/xml")], xml).into_response()
 }
 
+fn stored_xml(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 fn storage_err(err: myfsio_storage::error::StorageError) -> Response {
     let s3err = S3Error::from(err);
     let status =
@@ -52,17 +59,31 @@ fn custom_xml_error(status: StatusCode, code: &str, message: &str) -> Response {
 }
 
 pub async fn get_versioning(state: &AppState, bucket: &str) -> Response {
-    match state.storage.is_versioning_enabled(bucket).await {
-        Ok(enabled) => {
-            let status_str = if enabled { "Enabled" } else { "Suspended" };
-            let xml = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                <Status>{}</Status>\
-                </VersioningConfiguration>",
-                status_str
-            );
-            xml_response(StatusCode::OK, xml)
+    match state.storage.get_versioning_status(bucket).await {
+        Ok(status) => {
+            let body = match status {
+                myfsio_common::types::VersioningStatus::Enabled => {
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                    <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                    <Status>Enabled</Status>\
+                    </VersioningConfiguration>"
+                        .to_string()
+                }
+                myfsio_common::types::VersioningStatus::Suspended => {
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                    <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                    <Status>Suspended</Status>\
+                    </VersioningConfiguration>"
+                        .to_string()
+                }
+                myfsio_common::types::VersioningStatus::Disabled => {
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                    <VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                    </VersioningConfiguration>"
+                        .to_string()
+                }
+            };
+            xml_response(StatusCode::OK, body)
         }
         Err(e) => storage_err(e),
     }
@@ -80,9 +101,22 @@ pub async fn put_versioning(state: &AppState, bucket: &str, body: Body) -> Respo
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
-    let enabled = xml_str.contains("<Status>Enabled</Status>");
+    let status = if xml_str.contains("<Status>Enabled</Status>") {
+        myfsio_common::types::VersioningStatus::Enabled
+    } else if xml_str.contains("<Status>Suspended</Status>") {
+        myfsio_common::types::VersioningStatus::Suspended
+    } else {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "VersioningConfiguration Status must be Enabled or Suspended",
+            )
+            .to_xml(),
+        );
+    };
 
-    match state.storage.set_versioning(bucket, enabled).await {
+    match state.storage.set_versioning_status(bucket, status).await {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => storage_err(e),
     }
@@ -151,7 +185,7 @@ pub async fn get_cors(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(cors) = &config.cors {
-                xml_response(StatusCode::OK, cors.to_string())
+                xml_response(StatusCode::OK, stored_xml(cors))
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
@@ -214,7 +248,7 @@ pub async fn get_encryption(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(enc) = &config.encryption {
-                xml_response(StatusCode::OK, enc.to_string())
+                xml_response(StatusCode::OK, stored_xml(enc))
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
@@ -263,7 +297,7 @@ pub async fn get_lifecycle(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(lc) = &config.lifecycle {
-                xml_response(StatusCode::OK, lc.to_string())
+                xml_response(StatusCode::OK, stored_xml(lc))
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
@@ -490,10 +524,7 @@ pub async fn get_replication(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(replication) = &config.replication {
-                match replication {
-                    serde_json::Value::String(s) => xml_response(StatusCode::OK, s.clone()),
-                    other => xml_response(StatusCode::OK, other.to_string()),
-                }
+                xml_response(StatusCode::OK, stored_xml(replication))
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
@@ -586,7 +617,7 @@ pub async fn get_acl(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(acl) = &config.acl {
-                xml_response(StatusCode::OK, acl.to_string())
+                xml_response(StatusCode::OK, stored_xml(acl))
             } else {
                 let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                     <AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
@@ -626,7 +657,7 @@ pub async fn get_website(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(ws) = &config.website {
-                xml_response(StatusCode::OK, ws.to_string())
+                xml_response(StatusCode::OK, stored_xml(ws))
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
@@ -678,7 +709,7 @@ pub async fn get_object_lock(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(ol) = &config.object_lock {
-                xml_response(StatusCode::OK, ol.to_string())
+                xml_response(StatusCode::OK, stored_xml(ol))
             } else {
                 let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                     <ObjectLockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
@@ -695,7 +726,7 @@ pub async fn get_notification(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(n) = &config.notification {
-                xml_response(StatusCode::OK, n.to_string())
+                xml_response(StatusCode::OK, stored_xml(n))
             } else {
                 let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                     <NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
@@ -1035,22 +1066,23 @@ pub async fn list_object_versions(
     state: &AppState,
     bucket: &str,
     prefix: Option<&str>,
+    delimiter: Option<&str>,
+    key_marker: Option<&str>,
+    version_id_marker: Option<&str>,
     max_keys: usize,
 ) -> Response {
-    match state.storage.list_buckets().await {
-        Ok(buckets) => {
-            if !buckets.iter().any(|b| b.name == bucket) {
-                return storage_err(myfsio_storage::error::StorageError::BucketNotFound(
-                    bucket.to_string(),
-                ));
-            }
+    match state.storage.bucket_exists(bucket).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return storage_err(myfsio_storage::error::StorageError::BucketNotFound(
+                bucket.to_string(),
+            ));
         }
         Err(e) => return storage_err(e),
     }
 
-    let fetch_limit = max_keys.saturating_add(1).max(1);
     let params = myfsio_common::types::ListParams {
-        max_keys: fetch_limit,
+        max_keys: usize::MAX,
         prefix: prefix.map(ToOwned::to_owned),
         ..Default::default()
     };
@@ -1059,7 +1091,8 @@ pub async fn list_object_versions(
         Ok(result) => result,
         Err(e) => return storage_err(e),
     };
-    let objects = object_result.objects;
+    let live_objects = object_result.objects;
+
     let archived_versions = match state
         .storage
         .list_bucket_object_versions(bucket, prefix)
@@ -1069,107 +1102,215 @@ pub async fn list_object_versions(
         Err(e) => return storage_err(e),
     };
 
+    #[derive(Clone)]
+    struct Entry {
+        key: String,
+        version_id: String,
+        last_modified: chrono::DateTime<chrono::Utc>,
+        etag: Option<String>,
+        size: u64,
+        storage_class: String,
+        is_delete_marker: bool,
+    }
+
+    let mut entries: Vec<Entry> = Vec::with_capacity(live_objects.len() + archived_versions.len());
+    for obj in &live_objects {
+        entries.push(Entry {
+            key: obj.key.clone(),
+            version_id: obj.version_id.clone().unwrap_or_else(|| "null".to_string()),
+            last_modified: obj.last_modified,
+            etag: obj.etag.clone(),
+            size: obj.size,
+            storage_class: obj
+                .storage_class
+                .clone()
+                .unwrap_or_else(|| "STANDARD".to_string()),
+            is_delete_marker: false,
+        });
+    }
+    for version in &archived_versions {
+        entries.push(Entry {
+            key: version.key.clone(),
+            version_id: version.version_id.clone(),
+            last_modified: version.last_modified,
+            etag: version.etag.clone(),
+            size: version.size,
+            storage_class: "STANDARD".to_string(),
+            is_delete_marker: version.is_delete_marker,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        a.key
+            .cmp(&b.key)
+            .then_with(|| b.last_modified.cmp(&a.last_modified))
+            .then_with(|| a.version_id.cmp(&b.version_id))
+    });
+
+    let mut latest_marked: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut is_latest_flags: Vec<bool> = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if latest_marked.insert(entry.key.clone()) {
+            is_latest_flags.push(true);
+        } else {
+            is_latest_flags.push(false);
+        }
+    }
+
+    let km = key_marker.unwrap_or("");
+    let vim = version_id_marker.unwrap_or("");
+    let start_index = if km.is_empty() {
+        0
+    } else if vim.is_empty() {
+        entries
+            .iter()
+            .position(|e| e.key.as_str() > km)
+            .unwrap_or(entries.len())
+    } else if let Some(pos) = entries
+        .iter()
+        .position(|e| e.key == km && e.version_id == vim)
+    {
+        pos + 1
+    } else {
+        entries
+            .iter()
+            .position(|e| e.key.as_str() > km)
+            .unwrap_or(entries.len())
+    };
+
+    let delim = delimiter.unwrap_or("");
+    let prefix_str = prefix.unwrap_or("");
+
+    let mut common_prefixes: Vec<String> = Vec::new();
+    let mut seen_prefixes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rendered = String::new();
+    let mut count = 0usize;
+    let mut is_truncated = false;
+    let mut next_key_marker: Option<String> = None;
+    let mut next_version_id_marker: Option<String> = None;
+    let mut last_emitted: Option<(String, String)> = None;
+
+    let mut idx = start_index;
+    while idx < entries.len() {
+        let entry = &entries[idx];
+        let is_latest = is_latest_flags[idx];
+
+        if !delim.is_empty() {
+            let rest = entry.key.strip_prefix(prefix_str).unwrap_or(&entry.key);
+            if let Some(delim_pos) = rest.find(delim) {
+                let grouped = entry.key[..prefix_str.len() + delim_pos + delim.len()].to_string();
+                if seen_prefixes.contains(&grouped) {
+                    idx += 1;
+                    continue;
+                }
+                if count >= max_keys {
+                    is_truncated = true;
+                    if let Some((k, v)) = last_emitted.clone() {
+                        next_key_marker = Some(k);
+                        next_version_id_marker = Some(v);
+                    }
+                    break;
+                }
+                common_prefixes.push(grouped.clone());
+                seen_prefixes.insert(grouped.clone());
+                count += 1;
+
+                let mut group_last = (entry.key.clone(), entry.version_id.clone());
+                idx += 1;
+                while idx < entries.len() && entries[idx].key.starts_with(&grouped) {
+                    group_last = (entries[idx].key.clone(), entries[idx].version_id.clone());
+                    idx += 1;
+                }
+                last_emitted = Some(group_last);
+                continue;
+            }
+        }
+
+        if count >= max_keys {
+            is_truncated = true;
+            if let Some((k, v)) = last_emitted.clone() {
+                next_key_marker = Some(k);
+                next_version_id_marker = Some(v);
+            }
+            break;
+        }
+
+        let tag = if entry.is_delete_marker {
+            "DeleteMarker"
+        } else {
+            "Version"
+        };
+        rendered.push_str(&format!("<{}>", tag));
+        rendered.push_str(&format!("<Key>{}</Key>", xml_escape(&entry.key)));
+        rendered.push_str(&format!(
+            "<VersionId>{}</VersionId>",
+            xml_escape(&entry.version_id)
+        ));
+        rendered.push_str(&format!("<IsLatest>{}</IsLatest>", is_latest));
+        rendered.push_str(&format!(
+            "<LastModified>{}</LastModified>",
+            myfsio_xml::response::format_s3_datetime(&entry.last_modified)
+        ));
+        if !entry.is_delete_marker {
+            if let Some(ref etag) = entry.etag {
+                rendered.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(etag)));
+            }
+            rendered.push_str(&format!("<Size>{}</Size>", entry.size));
+            rendered.push_str(&format!(
+                "<StorageClass>{}</StorageClass>",
+                xml_escape(&entry.storage_class)
+            ));
+        }
+        rendered.push_str(&format!("</{}>", tag));
+
+        last_emitted = Some((entry.key.clone(), entry.version_id.clone()));
+        count += 1;
+        idx += 1;
+    }
+
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
         <ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
     );
     xml.push_str(&format!("<Name>{}</Name>", xml_escape(bucket)));
-    xml.push_str(&format!(
-        "<Prefix>{}</Prefix>",
-        xml_escape(prefix.unwrap_or(""))
-    ));
+    xml.push_str(&format!("<Prefix>{}</Prefix>", xml_escape(prefix_str)));
+    if !km.is_empty() {
+        xml.push_str(&format!("<KeyMarker>{}</KeyMarker>", xml_escape(km)));
+    } else {
+        xml.push_str("<KeyMarker></KeyMarker>");
+    }
+    if !vim.is_empty() {
+        xml.push_str(&format!(
+            "<VersionIdMarker>{}</VersionIdMarker>",
+            xml_escape(vim)
+        ));
+    } else {
+        xml.push_str("<VersionIdMarker></VersionIdMarker>");
+    }
     xml.push_str(&format!("<MaxKeys>{}</MaxKeys>", max_keys));
-
-    let current_count = objects.len().min(max_keys);
-    let remaining = max_keys.saturating_sub(current_count);
-    let archived_count = archived_versions.len().min(remaining);
-    let is_truncated = object_result.is_truncated
-        || objects.len() > current_count
-        || archived_versions.len() > archived_count;
+    if !delim.is_empty() {
+        xml.push_str(&format!("<Delimiter>{}</Delimiter>", xml_escape(delim)));
+    }
     xml.push_str(&format!("<IsTruncated>{}</IsTruncated>", is_truncated));
-
-    let current_keys: std::collections::HashSet<String> = objects
-        .iter()
-        .take(current_count)
-        .map(|o| o.key.clone())
-        .collect();
-    let mut latest_archived_per_key: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for v in archived_versions.iter().take(archived_count) {
-        if current_keys.contains(&v.key) {
-            continue;
-        }
-        let existing = latest_archived_per_key.get(&v.key).cloned();
-        match existing {
-            None => {
-                latest_archived_per_key.insert(v.key.clone(), v.version_id.clone());
-            }
-            Some(existing_id) => {
-                let existing_ts = archived_versions
-                    .iter()
-                    .find(|x| x.key == v.key && x.version_id == existing_id)
-                    .map(|x| x.last_modified)
-                    .unwrap_or(v.last_modified);
-                if v.last_modified > existing_ts {
-                    latest_archived_per_key.insert(v.key.clone(), v.version_id.clone());
-                }
-            }
-        }
+    if let Some(ref nk) = next_key_marker {
+        xml.push_str(&format!(
+            "<NextKeyMarker>{}</NextKeyMarker>",
+            xml_escape(nk)
+        ));
+    }
+    if let Some(ref nv) = next_version_id_marker {
+        xml.push_str(&format!(
+            "<NextVersionIdMarker>{}</NextVersionIdMarker>",
+            xml_escape(nv)
+        ));
     }
 
-    for obj in objects.iter().take(current_count) {
-        let version_id = obj.version_id.clone().unwrap_or_else(|| "null".to_string());
-        xml.push_str("<Version>");
-        xml.push_str(&format!("<Key>{}</Key>", xml_escape(&obj.key)));
+    xml.push_str(&rendered);
+    for cp in &common_prefixes {
         xml.push_str(&format!(
-            "<VersionId>{}</VersionId>",
-            xml_escape(&version_id)
+            "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
+            xml_escape(cp)
         ));
-        xml.push_str("<IsLatest>true</IsLatest>");
-        xml.push_str(&format!(
-            "<LastModified>{}</LastModified>",
-            myfsio_xml::response::format_s3_datetime(&obj.last_modified)
-        ));
-        if let Some(ref etag) = obj.etag {
-            xml.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(etag)));
-        }
-        xml.push_str(&format!("<Size>{}</Size>", obj.size));
-        xml.push_str(&format!(
-            "<StorageClass>{}</StorageClass>",
-            xml_escape(obj.storage_class.as_deref().unwrap_or("STANDARD"))
-        ));
-        xml.push_str("</Version>");
-    }
-
-    for version in archived_versions.iter().take(archived_count) {
-        let is_latest = latest_archived_per_key
-            .get(&version.key)
-            .map(|id| id == &version.version_id)
-            .unwrap_or(false);
-        let tag = if version.is_delete_marker {
-            "DeleteMarker"
-        } else {
-            "Version"
-        };
-        xml.push_str(&format!("<{}>", tag));
-        xml.push_str(&format!("<Key>{}</Key>", xml_escape(&version.key)));
-        xml.push_str(&format!(
-            "<VersionId>{}</VersionId>",
-            xml_escape(&version.version_id)
-        ));
-        xml.push_str(&format!("<IsLatest>{}</IsLatest>", is_latest));
-        xml.push_str(&format!(
-            "<LastModified>{}</LastModified>",
-            myfsio_xml::response::format_s3_datetime(&version.last_modified)
-        ));
-        if !version.is_delete_marker {
-            if let Some(ref etag) = version.etag {
-                xml.push_str(&format!("<ETag>\"{}\"</ETag>", xml_escape(etag)));
-            }
-            xml.push_str(&format!("<Size>{}</Size>", version.size));
-            xml.push_str("<StorageClass>STANDARD</StorageClass>");
-        }
-        xml.push_str(&format!("</{}>", tag));
     }
 
     xml.push_str("</ListVersionsResult>");

@@ -2209,6 +2209,42 @@ async fn test_bucket_versioning() {
     )
     .unwrap();
     assert!(body.contains("VersioningConfiguration"));
+    assert!(!body.contains("<Status>Enabled</Status>"));
+    assert!(!body.contains("<Status>Suspended</Status>"));
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/ver-bucket?versioning")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/ver-bucket?versioning",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("<Status>Suspended</Status>"));
 
     app.clone()

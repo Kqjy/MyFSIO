@@ -1,9 +1,11 @@
 mod auth;
+mod bucket_cors;
 pub mod ratelimit;
 pub mod session;
 pub(crate) mod sha_body;
 
 pub use auth::auth_layer;
+pub use bucket_cors::bucket_cors_layer;
 pub use ratelimit::{rate_limit_layer, RateLimitLayerState};
 pub use session::{csrf_layer, session_layer, SessionHandle, SessionLayerState};
 
@@ -19,6 +21,42 @@ pub async fn server_header(req: Request, next: Next) -> Response {
     resp.headers_mut()
         .insert("server", crate::SERVER_HEADER.parse().unwrap());
     resp
+}
+
+pub async fn request_log_layer(req: Request, next: Next) -> Response {
+    let start = Instant::now();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let version = req.version();
+    let remote = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    let response = next.run(req).await;
+
+    let status = response.status().as_u16();
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let bytes_out = response
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    tracing::info!(
+        target: "myfsio::access",
+        remote = %remote,
+        method = %method,
+        uri = %uri,
+        version = ?version,
+        status,
+        bytes_out = bytes_out.unwrap_or(0),
+        elapsed_ms = format!("{:.3}", elapsed_ms),
+        "request"
+    );
+
+    response
 }
 
 pub async fn ui_metrics_layer(State(state): State<AppState>, req: Request, next: Next) -> Response {

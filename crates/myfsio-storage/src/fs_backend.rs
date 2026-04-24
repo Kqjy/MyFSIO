@@ -928,11 +928,33 @@ impl FsStorageBackend {
 
         let etag = Self::compute_etag_sync(&source).unwrap_or_default();
 
+        let live_last_modified = metadata
+            .get("__last_modified__")
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|mtime| {
+                Utc.timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
+                    .single()
+                    .unwrap_or_else(Utc::now)
+            })
+            .or_else(|| {
+                source_meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| {
+                        Utc.timestamp_opt(d.as_secs() as i64, d.subsec_nanos())
+                            .single()
+                            .unwrap_or_else(Utc::now)
+                    })
+            })
+            .unwrap_or(now);
+
         let record = serde_json::json!({
             "version_id": version_id,
             "key": key,
             "size": source_size,
             "archived_at": now.to_rfc3339(),
+            "last_modified": live_last_modified.to_rfc3339(),
             "etag": etag,
             "metadata": metadata,
             "reason": reason,
@@ -1214,8 +1236,9 @@ impl FsStorageBackend {
             .and_then(Value::as_u64)
             .unwrap_or(data_len);
         let last_modified = record
-            .get("archived_at")
+            .get("last_modified")
             .and_then(Value::as_str)
+            .or_else(|| record.get("archived_at").and_then(Value::as_str))
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
@@ -1262,9 +1285,10 @@ impl FsStorageBackend {
             .unwrap_or(fallback_key)
             .to_string();
         let size = record.get("size").and_then(Value::as_u64).unwrap_or(0);
-        let archived_at = record
-            .get("archived_at")
+        let last_modified = record
+            .get("last_modified")
             .and_then(Value::as_str)
+            .or_else(|| record.get("archived_at").and_then(Value::as_str))
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
@@ -1281,7 +1305,7 @@ impl FsStorageBackend {
             version_id,
             key,
             size,
-            last_modified: archived_at,
+            last_modified,
             etag,
             is_latest: false,
             is_delete_marker,
@@ -1570,11 +1594,9 @@ impl FsStorageBackend {
         let rel_dir_prefix = if rel_dir.as_os_str().is_empty() {
             String::new()
         } else {
-            let mut s = rel_dir.to_string_lossy().into_owned();
+            let s = rel_dir.to_string_lossy().into_owned();
             #[cfg(windows)]
-            {
-                s = s.replace('\\', "/");
-            }
+            let s = s.replace('\\', "/");
             let mut decoded = fs_decode_key(&s);
             if !decoded.ends_with('/') {
                 decoded.push('/');
@@ -1840,10 +1862,26 @@ impl FsStorageBackend {
         let lock_dir = self.system_bucket_root(bucket_name).join("locks");
         std::fs::create_dir_all(&lock_dir).map_err(StorageError::Io)?;
 
-        let versioning_enabled = bucket_config.versioning_enabled;
-        if versioning_enabled && is_overwrite {
-            self.archive_current_version_sync(bucket_name, key, "overwrite")
-                .map_err(StorageError::Io)?;
+        let versioning_status = bucket_config.versioning_status();
+        if is_overwrite {
+            match versioning_status {
+                VersioningStatus::Enabled => {
+                    self.archive_current_version_sync(bucket_name, key, "overwrite")
+                        .map_err(StorageError::Io)?;
+                }
+                VersioningStatus::Suspended => {
+                    let existing_meta = self.read_metadata_sync(bucket_name, key);
+                    let existing_vid = existing_meta
+                        .get("__version_id__")
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    if !existing_vid.is_empty() && existing_vid != "null" {
+                        self.archive_current_version_sync(bucket_name, key, "overwrite")
+                            .map_err(StorageError::Io)?;
+                    }
+                }
+                VersioningStatus::Disabled => {}
+            }
         }
 
         std::fs::rename(tmp_path, &destination).map_err(|e| {
@@ -1861,10 +1899,10 @@ impl FsStorageBackend {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
 
-        let new_version_id = if versioning_enabled {
-            Some(Self::new_version_id_sync())
-        } else {
-            None
+        let new_version_id = match versioning_status {
+            VersioningStatus::Enabled => Some(Self::new_version_id_sync()),
+            VersioningStatus::Suspended => Some("null".to_string()),
+            VersioningStatus::Disabled => None,
         };
 
         let mut internal_meta = HashMap::new();
@@ -1884,7 +1922,7 @@ impl FsStorageBackend {
         self.write_metadata_sync(bucket_name, key, &internal_meta)
             .map_err(StorageError::Io)?;
 
-        if versioning_enabled {
+        if versioning_status.is_active() {
             self.clear_delete_marker_sync(bucket_name, key);
         }
 
@@ -2072,7 +2110,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
             if !path.is_file() {
-                if self.read_bucket_config_sync(bucket).versioning_enabled {
+                if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
                             bucket: bucket.to_string(),
@@ -2148,7 +2186,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
             if !path.is_file() {
-                if self.read_bucket_config_sync(bucket).versioning_enabled {
+                if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
                             bucket: bucket.to_string(),
@@ -2268,12 +2306,26 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         run_blocking(|| {
             let bucket_path = self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
-            let versioning_enabled = self.read_bucket_config_sync(bucket).versioning_enabled;
+            let versioning_status = self.read_bucket_config_sync(bucket).versioning_status();
 
-            if versioning_enabled {
+            if versioning_status.is_active() {
                 if path.exists() {
-                    self.archive_current_version_sync(bucket, key, "delete")
-                        .map_err(StorageError::Io)?;
+                    let existing_meta = self.read_metadata_sync(bucket, key);
+                    let existing_vid = existing_meta
+                        .get("__version_id__")
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let should_archive = match versioning_status {
+                        VersioningStatus::Enabled => true,
+                        VersioningStatus::Suspended => {
+                            !existing_vid.is_empty() && existing_vid != "null"
+                        }
+                        VersioningStatus::Disabled => false,
+                    };
+                    if should_archive {
+                        self.archive_current_version_sync(bucket, key, "delete")
+                            .map_err(StorageError::Io)?;
+                    }
                     Self::safe_unlink(&path).map_err(StorageError::Io)?;
                     self.delete_metadata_sync(bucket, key)
                         .map_err(StorageError::Io)?;
@@ -2867,7 +2919,30 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     async fn set_versioning(&self, bucket: &str, enabled: bool) -> StorageResult<()> {
         self.require_bucket(bucket)?;
         let mut config = self.read_bucket_config_sync(bucket);
-        config.versioning_enabled = enabled;
+        let new_status = if enabled {
+            VersioningStatus::Enabled
+        } else if config.versioning_enabled || config.versioning_suspended {
+            VersioningStatus::Suspended
+        } else {
+            VersioningStatus::Disabled
+        };
+        config.set_versioning_status(new_status);
+        self.write_bucket_config_sync(bucket, &config)
+            .map_err(StorageError::Io)
+    }
+
+    async fn get_versioning_status(&self, bucket: &str) -> StorageResult<VersioningStatus> {
+        Ok(self.read_bucket_config_sync(bucket).versioning_status())
+    }
+
+    async fn set_versioning_status(
+        &self,
+        bucket: &str,
+        status: VersioningStatus,
+    ) -> StorageResult<()> {
+        self.require_bucket(bucket)?;
+        let mut config = self.read_bucket_config_sync(bucket);
+        config.set_versioning_status(status);
         self.write_bucket_config_sync(bucket, &config)
             .map_err(StorageError::Io)
     }
@@ -2945,11 +3020,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     .parent()
                     .and_then(|parent| parent.strip_prefix(&root).ok())
                     .map(|rel| {
-                        let mut s = rel.to_string_lossy().into_owned();
+                        let s = rel.to_string_lossy().into_owned();
                         #[cfg(windows)]
-                        {
-                            s = s.replace('\\', "/");
-                        }
+                        let s = s.replace('\\', "/");
                         fs_decode_key(&s)
                     })
                     .unwrap_or_default();

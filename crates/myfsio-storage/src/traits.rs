@@ -148,6 +148,12 @@ pub trait StorageEngine: Send + Sync {
 
     async fn is_versioning_enabled(&self, bucket: &str) -> StorageResult<bool>;
     async fn set_versioning(&self, bucket: &str, enabled: bool) -> StorageResult<()>;
+    async fn get_versioning_status(&self, bucket: &str) -> StorageResult<VersioningStatus>;
+    async fn set_versioning_status(
+        &self,
+        bucket: &str,
+        status: VersioningStatus,
+    ) -> StorageResult<()>;
 
     async fn list_object_versions(
         &self,

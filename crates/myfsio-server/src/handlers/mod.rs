@@ -319,6 +319,10 @@ pub struct BucketQuery {
     pub notification: Option<String>,
     pub logging: Option<String>,
     pub versions: Option<String>,
+    #[serde(rename = "key-marker")]
+    pub key_marker: Option<String>,
+    #[serde(rename = "version-id-marker")]
+    pub version_id_marker: Option<String>,
 }
 
 async fn virtual_host_bucket_from_headers(state: &AppState, headers: &HeaderMap) -> Option<String> {
@@ -410,6 +414,9 @@ pub async fn get_bucket(
             &state,
             &bucket,
             query.prefix.as_deref(),
+            query.delimiter.as_deref(),
+            query.key_marker.as_deref(),
+            query.version_id_marker.as_deref(),
             query.max_keys.unwrap_or(1000),
         )
         .await;
@@ -966,6 +973,71 @@ fn insert_standard_object_metadata(
     Ok(())
 }
 
+const CANNED_ACL_VALUES: &[&str] = &[
+    "private",
+    "public-read",
+    "public-read-write",
+    "authenticated-read",
+    "bucket-owner-read",
+    "bucket-owner-full-control",
+    "aws-exec-read",
+];
+
+fn apply_canned_acl_header(
+    headers: &HeaderMap,
+    metadata: &mut HashMap<String, String>,
+) -> Result<(), Response> {
+    let Some(raw) = headers.get("x-amz-acl").and_then(|v| v.to_str().ok()) else {
+        return Ok(());
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(());
+    }
+    if !CANNED_ACL_VALUES
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(value))
+    {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            format!("Unsupported canned ACL: {}", value),
+        )));
+    }
+    let acl = crate::services::acl::create_canned_acl(value, "myfsio");
+    crate::services::acl::store_object_acl(metadata, &acl);
+    Ok(())
+}
+
+fn validate_sse_request(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let alg = headers
+        .get("x-amz-server-side-encryption")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(alg) = alg else {
+        return Ok(());
+    };
+    if alg != "AES256" && alg != "aws:kms" {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            format!("Unsupported server-side encryption algorithm: {}", alg),
+        )));
+    }
+    if alg == "aws:kms" && !state.config.kms_enabled {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "KMS is not enabled on this server",
+        )));
+    }
+    if state.encryption.is_none() {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Server-side encryption is not enabled on this server",
+        )));
+    }
+    Ok(())
+}
+
 fn apply_stored_response_headers(headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
     for (_, metadata_key, response_header) in internal_header_pairs() {
         if let Some(value) = metadata
@@ -1287,6 +1359,12 @@ pub async fn put_object(
     let mut metadata = HashMap::new();
     metadata.insert("__content_type__".to_string(), content_type);
     if let Err(response) = insert_standard_object_metadata(&headers, &mut metadata) {
+        return response;
+    }
+    if let Err(response) = apply_canned_acl_header(&headers, &mut metadata) {
+        return response;
+    }
+    if let Err(response) = validate_sse_request(&state, &headers) {
         return response;
     }
 
@@ -2143,6 +2221,12 @@ async fn object_attributes_handler(
         .collect();
     let all = attrs.is_empty();
 
+    let stored_meta = state
+        .storage
+        .get_object_metadata(bucket, key)
+        .await
+        .unwrap_or_default();
+
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     xml.push_str("<GetObjectAttributesResponse xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
 
@@ -2159,8 +2243,32 @@ async fn object_attributes_handler(
     if all || attrs.contains("objectsize") {
         xml.push_str(&format!("<ObjectSize>{}</ObjectSize>", meta.size));
     }
-    if attrs.contains("checksum") {
-        xml.push_str("<Checksum></Checksum>");
+    if all || attrs.contains("checksum") {
+        let mut checksum_xml = String::new();
+        for (algo, tag) in [
+            ("sha256", "ChecksumSHA256"),
+            ("sha1", "ChecksumSHA1"),
+            ("crc32", "ChecksumCRC32"),
+            ("crc32c", "ChecksumCRC32C"),
+            ("crc64nvme", "ChecksumCRC64NVME"),
+        ] {
+            let key_name = format!("__checksum_{}__", algo);
+            if let Some(value) = stored_meta.get(&key_name) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    checksum_xml.push_str(&format!(
+                        "<{tag}>{}</{tag}>",
+                        xml_escape(trimmed),
+                        tag = tag
+                    ));
+                }
+            }
+        }
+        if !checksum_xml.is_empty() {
+            xml.push_str("<Checksum>");
+            xml.push_str(&checksum_xml);
+            xml.push_str("</Checksum>");
+        }
     }
     if attrs.contains("objectparts") {
         xml.push_str("<ObjectParts></ObjectParts>");

@@ -135,10 +135,30 @@ pub struct Tag {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VersioningStatus {
+    #[default]
+    Disabled,
+    Enabled,
+    Suspended,
+}
+
+impl VersioningStatus {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, VersioningStatus::Enabled)
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, VersioningStatus::Enabled | VersioningStatus::Suspended)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BucketConfig {
     #[serde(default)]
     pub versioning_enabled: bool,
+    #[serde(default)]
+    pub versioning_suspended: bool,
     #[serde(default)]
     pub tags: Vec<Tag>,
     #[serde(default)]
@@ -163,6 +183,35 @@ pub struct BucketConfig {
     pub policy: Option<serde_json::Value>,
     #[serde(default)]
     pub replication: Option<serde_json::Value>,
+}
+
+impl BucketConfig {
+    pub fn versioning_status(&self) -> VersioningStatus {
+        if self.versioning_enabled {
+            VersioningStatus::Enabled
+        } else if self.versioning_suspended {
+            VersioningStatus::Suspended
+        } else {
+            VersioningStatus::Disabled
+        }
+    }
+
+    pub fn set_versioning_status(&mut self, status: VersioningStatus) {
+        match status {
+            VersioningStatus::Enabled => {
+                self.versioning_enabled = true;
+                self.versioning_suspended = false;
+            }
+            VersioningStatus::Suspended => {
+                self.versioning_enabled = false;
+                self.versioning_suspended = true;
+            }
+            VersioningStatus::Disabled => {
+                self.versioning_enabled = false;
+                self.versioning_suspended = false;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

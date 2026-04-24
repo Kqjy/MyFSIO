@@ -588,6 +588,11 @@ pub fn create_router(state: state::AppState) -> Router {
         .merge(admin_router)
         .layer(axum::middleware::from_fn(middleware::server_header))
         .layer(cors_layer(&state.config))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::bucket_cors_layer,
+        ))
+        .layer(axum::middleware::from_fn(middleware::request_log_layer))
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::timeout::RequestBodyTimeoutLayer::new(
             request_body_timeout,

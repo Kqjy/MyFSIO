@@ -232,7 +232,7 @@ impl ServerConfig {
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
         let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 60);
         let ratelimit_default =
-            parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(500, 60));
+            parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(5000, 60));
         let ratelimit_list_buckets =
             parse_rate_limit_env("RATE_LIMIT_LIST_BUCKETS", ratelimit_default);
         let ratelimit_bucket_ops =
@@ -407,11 +407,11 @@ impl Default for ServerConfig {
             bulk_delete_max_keys: 1000,
             stream_chunk_size: 1_048_576,
             request_body_timeout_secs: 60,
-            ratelimit_default: RateLimitSetting::new(500, 60),
-            ratelimit_list_buckets: RateLimitSetting::new(500, 60),
-            ratelimit_bucket_ops: RateLimitSetting::new(500, 60),
-            ratelimit_object_ops: RateLimitSetting::new(500, 60),
-            ratelimit_head_ops: RateLimitSetting::new(500, 60),
+            ratelimit_default: RateLimitSetting::new(5000, 60),
+            ratelimit_list_buckets: RateLimitSetting::new(5000, 60),
+            ratelimit_bucket_ops: RateLimitSetting::new(5000, 60),
+            ratelimit_object_ops: RateLimitSetting::new(5000, 60),
+            ratelimit_head_ops: RateLimitSetting::new(5000, 60),
             ratelimit_admin: RateLimitSetting::new(60, 60),
             ratelimit_storage_uri: "memory://".to_string(),
             ui_enabled: true,
@@ -589,7 +589,7 @@ mod tests {
 
         assert_eq!(config.object_key_max_length_bytes, 1024);
         assert_eq!(config.object_tag_limit, 50);
-        assert_eq!(config.ratelimit_default, RateLimitSetting::new(500, 60));
+        assert_eq!(config.ratelimit_default, RateLimitSetting::new(5000, 60));
 
         std::env::remove_var("OBJECT_TAG_LIMIT");
         std::env::remove_var("RATE_LIMIT_DEFAULT");
