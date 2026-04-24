@@ -1906,6 +1906,99 @@ async fn test_range_request() {
 }
 
 #[tokio::test]
+async fn test_range_get_omits_whole_object_checksum() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use sha2::{Digest, Sha256};
+
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/csum-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let data = b"Hello, World! This is range checksum data.";
+    let sha = B64.encode(Sha256::digest(data));
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/csum-bucket/obj.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-checksum-sha256", &sha)
+                .body(Body::from(&data[..]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let full = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/csum-bucket/obj.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(
+        full.headers().get("x-amz-checksum-sha256").unwrap(),
+        sha.as_str()
+    );
+
+    let partial = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/csum-bucket/obj.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("range", "bytes=0-4")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    for algo in ["sha256", "sha1", "crc32", "crc32c", "crc64nvme"] {
+        let header = format!("x-amz-checksum-{}", algo);
+        assert!(
+            partial.headers().get(&header).is_none(),
+            "ranged GET must not include {}",
+            header
+        );
+    }
+
+    let body_bytes = partial.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body_bytes[..], &data[..5]);
+
+    let full_range = format!("bytes=0-{}", data.len() - 1);
+    let covering = app
+        .oneshot(
+            Request::builder()
+                .uri("/csum-bucket/obj.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("range", &full_range)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(covering.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        covering.headers().get("x-amz-checksum-sha256").unwrap(),
+        sha.as_str()
+    );
+}
+
+#[tokio::test]
 async fn test_copy_object() {
     let (app, _tmp) = test_app();
 

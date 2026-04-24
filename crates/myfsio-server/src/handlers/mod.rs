@@ -2783,7 +2783,9 @@ async fn stream_partial_content(
         headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
     }
     apply_stored_response_headers(&mut headers, &meta.internal_metadata);
-    apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
+    if start == 0 && end + 1 == plaintext_size {
+        apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
+    }
     if let Some(ref requested_version) = query.version_id {
         if let Ok(value) = requested_version.parse() {
             headers.insert("x-amz-version-id", value);
