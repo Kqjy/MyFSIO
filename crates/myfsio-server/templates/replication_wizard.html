@@ -18,7 +18,7 @@
             </svg>
             Set Up Replication
         </h1>
-        <p class="text-muted mb-0 mt-1">Configure bucket replication to <strong>{{ peer.display_name or peer.site_id }}</strong></p>
+        <p class="text-muted mb-0 mt-1">Configure bucket replication to <strong>{% if peer.display_name %}{{ peer.display_name }}{% else %}{{ peer.site_id }}{% endif %}</strong></p>
     </div>
 </div>
 
@@ -100,7 +100,7 @@
                         <hr class="my-2">
                         <p class="mb-2 fw-semibold">After completing this wizard, you must also:</p>
                         <ol class="mb-2 ps-3">
-                            <li>Go to <strong>{{ peer.display_name or peer.site_id }}</strong>'s admin UI</li>
+                            <li>Go to <strong>{% if peer.display_name %}{{ peer.display_name }}{% else %}{{ peer.site_id }}{% endif %}</strong>'s admin UI</li>
                             <li>Register <strong>this site</strong> as a peer (with a connection)</li>
                             <li>Create matching bidirectional replication rules pointing back to this site</li>
                             <li>Ensure <code>SITE_SYNC_ENABLED=true</code> is set on both sites</li>
@@ -147,7 +147,7 @@
                                     <td>
                                         <input type="text" class="form-control form-control-sm"
                                             name="target_{{ bucket.name }}"
-                                            value="{{ bucket.existing_target or bucket.name }}"
+                                            value="{% if bucket.existing_target %}{{ bucket.existing_target }}{% else %}{{ bucket.name }}{% endif %}"
                                             placeholder="{{ bucket.name }}"
                                             {% if bucket.has_rule %}disabled{% endif %}>
                                     </td>

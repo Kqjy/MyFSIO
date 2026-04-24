@@ -336,6 +336,72 @@
     }
   };
 
+  const renderObjectsLimit = (totalObjects, maxObjects) => {
+    if (maxObjects && maxObjects > 0) {
+      const pct = Math.min(100, Math.floor(totalObjects / maxObjects * 100));
+      const cls = pct >= 90 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-success';
+      return '<div class="progress mt-2" style="height: 4px;">' +
+        '<div class="progress-bar ' + cls + '" style="width: ' + pct + '%"></div>' +
+        '</div>' +
+        '<div class="small text-muted mt-1">' + pct + '% of ' + maxObjects.toLocaleString() + ' limit</div>';
+    }
+    return '<div class="small text-muted mt-2">No limit</div>';
+  };
+
+  const renderBytesLimit = (totalBytes, maxBytes) => {
+    if (maxBytes && maxBytes > 0) {
+      const pct = Math.min(100, Math.floor(totalBytes / maxBytes * 100));
+      const cls = pct >= 90 ? 'bg-danger' : pct >= 75 ? 'bg-warning' : 'bg-success';
+      return '<div class="progress mt-2" style="height: 4px;">' +
+        '<div class="progress-bar ' + cls + '" style="width: ' + pct + '%"></div>' +
+        '</div>' +
+        '<div class="small text-muted mt-1">' + pct + '% of ' + formatBytes(maxBytes) + ' limit</div>';
+    }
+    return '<div class="small text-muted mt-2">No limit</div>';
+  };
+
+  const redrawUsageLimits = () => {
+    const objectsCard = document.querySelector('[data-usage-objects]');
+    const objectsLimit = document.querySelector('[data-usage-objects-limit]');
+    if (objectsCard && objectsLimit) {
+      const totalObjects = parseInt(objectsCard.dataset.totalObjects || '0', 10);
+      const maxObjectsRaw = objectsCard.dataset.maxObjects;
+      const maxObjects = maxObjectsRaw ? parseInt(maxObjectsRaw, 10) : 0;
+      objectsLimit.innerHTML = renderObjectsLimit(totalObjects, maxObjects);
+    }
+    const bytesCard = document.querySelector('[data-usage-bytes]');
+    const bytesLimit = document.querySelector('[data-usage-bytes-limit]');
+    if (bytesCard && bytesLimit) {
+      const totalBytes = parseInt(bytesCard.dataset.totalBytes || '0', 10);
+      const maxBytesRaw = bytesCard.dataset.maxBytes;
+      const maxBytes = maxBytesRaw ? parseInt(maxBytesRaw, 10) : 0;
+      bytesLimit.innerHTML = renderBytesLimit(totalBytes, maxBytes);
+    }
+  };
+
+  const refreshBucketUsage = async () => {
+    try {
+      const bucketName = objectsContainer?.dataset.bucket;
+      if (!bucketName) return;
+      const url = `/ui/buckets/${encodeURIComponent(bucketName)}/stats`;
+      const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (!response.ok) return;
+      const data = await response.json();
+
+      const objectsCard = document.querySelector('[data-usage-objects]');
+      const objectsValue = document.querySelector('[data-usage-objects-value]');
+      if (objectsCard) objectsCard.dataset.totalObjects = String(data.total_objects);
+      if (objectsValue) objectsValue.textContent = data.total_objects.toLocaleString();
+
+      const bytesCard = document.querySelector('[data-usage-bytes]');
+      const bytesValue = document.querySelector('[data-usage-bytes-value]');
+      if (bytesCard) bytesCard.dataset.totalBytes = String(data.total_bytes);
+      if (bytesValue) bytesValue.textContent = formatBytes(data.total_bytes);
+
+      redrawUsageLimits();
+    } catch (e) { }
+  };
+
   let topSpacer = null;
   let bottomSpacer = null;
 
@@ -660,6 +726,10 @@
                 break;
               case 'count':
                 totalObjectCount = msg.total_count || 0;
+                if (!currentPrefix) {
+                  bucketTotalObjects = totalObjectCount;
+                  updateObjectCountBadge();
+                }
                 if (objectsLoadingRow) {
                   const loadingText = objectsLoadingRow.querySelector('p');
                   if (loadingText) loadingText.textContent = `Loading 0 of ${totalObjectCount.toLocaleString()} objects...`;
@@ -770,7 +840,7 @@
       }
 
       totalObjectCount = data.total_count || 0;
-      if (!append && !currentPrefix && !useDelimiterMode) bucketTotalObjects = totalObjectCount;
+      if (!append && !currentPrefix) bucketTotalObjects = totalObjectCount;
       nextContinuationToken = data.next_continuation_token;
 
       if (!append && objectsLoadingRow) {
@@ -1491,6 +1561,7 @@
       previewPanel.classList.add('d-none');
       activeRow = null;
       loadObjects(false);
+      refreshBucketUsage();
     } catch (error) {
       bulkDeleteModal?.hide();
       showMessage({ title: 'Delete failed', body: (error && error.message) || 'Unable to delete selected objects', variant: 'danger' });
@@ -1966,6 +2037,7 @@
         previewPanel.classList.add('d-none');
         activeRow = null;
         loadObjects(false);
+        refreshBucketUsage();
       } catch (err) {
         if (deleteModal) deleteModal.hide();
         showMessage({ title: 'Delete failed', body: err.message || 'Unable to delete object', variant: 'danger' });
@@ -3071,6 +3143,7 @@
       } else if (errorCount > 0) {
         showMessage({ title: 'Upload failed', body: `${errorCount} file(s) failed to upload.`, variant: 'danger' });
       }
+      if (successCount > 0) refreshBucketUsage();
     };
 
     const performBulkUpload = async (files) => {
@@ -4542,6 +4615,16 @@
     var maxObjInput = document.getElementById('max_objects');
     if (maxMbInput) maxMbInput.value = maxBytes ? Math.floor(maxBytes / 1048576) : '';
     if (maxObjInput) maxObjInput.value = maxObjects || '';
+
+    var objectsCard = document.querySelector('[data-usage-objects]');
+    if (objectsCard) {
+      objectsCard.dataset.maxObjects = maxObjects && maxObjects > 0 ? String(maxObjects) : '';
+    }
+    var bytesCard = document.querySelector('[data-usage-bytes]');
+    if (bytesCard) {
+      bytesCard.dataset.maxBytes = maxBytes && maxBytes > 0 ? String(maxBytes) : '';
+    }
+    redrawUsageLimits();
   }
 
   function updatePolicyCard(hasPolicy, preset) {
@@ -4815,7 +4898,7 @@
       e.preventDefault();
       window.UICore.submitFormAjax(deleteBucketForm, {
         onSuccess: function () {
-          sessionStorage.setItem('flashMessage', JSON.stringify({ title: 'Bucket deleted', variant: 'success' }));
+          sessionStorage.setItem('flashMessage', JSON.stringify({ title: 'Success', body: 'Bucket deleted', variant: 'success' }));
           window.location.href = window.BucketDetailConfig?.endpoints?.bucketsOverview || '/ui/buckets';
         }
       });

@@ -1205,6 +1205,100 @@ pub async fn stream_bucket_objects(
     (StatusCode::OK, headers, body).into_response()
 }
 
+#[derive(Deserialize, Default)]
+pub struct SearchObjectsQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+pub async fn search_bucket_objects(
+    State(state): State<AppState>,
+    Extension(_session): Extension<SessionHandle>,
+    Path(bucket_name): Path<String>,
+    Query(q): Query<SearchObjectsQuery>,
+) -> Response {
+    if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
+        return json_error(StatusCode::NOT_FOUND, "Bucket not found");
+    }
+
+    let term = q.q.unwrap_or_default().to_lowercase();
+    let limit = q.limit.unwrap_or(500).clamp(1, 1000);
+    let prefix = q.prefix.clone().unwrap_or_default();
+
+    if term.is_empty() {
+        return Json(json!({ "results": [], "truncated": false })).into_response();
+    }
+
+    let mut results: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    let mut token: Option<String> = None;
+    loop {
+        let params = ListParams {
+            max_keys: 1000,
+            continuation_token: token.clone(),
+            prefix: if prefix.is_empty() {
+                None
+            } else {
+                Some(prefix.clone())
+            },
+            start_after: None,
+        };
+        match state.storage.list_objects(&bucket_name, &params).await {
+            Ok(res) => {
+                for o in &res.objects {
+                    if o.key.to_lowercase().contains(&term) {
+                        if results.len() >= limit {
+                            truncated = true;
+                            break;
+                        }
+                        results.push(object_json(&bucket_name, o));
+                    }
+                }
+                if truncated || !res.is_truncated || res.next_continuation_token.is_none() {
+                    if res.is_truncated && results.len() >= limit {
+                        truncated = true;
+                    }
+                    break;
+                }
+                token = res.next_continuation_token;
+            }
+            Err(e) => return storage_json_error(e),
+        }
+    }
+
+    Json(json!({
+        "results": results,
+        "truncated": truncated,
+    }))
+    .into_response()
+}
+
+pub async fn bucket_stats_json(
+    State(state): State<AppState>,
+    Extension(_session): Extension<SessionHandle>,
+    Path(bucket_name): Path<String>,
+) -> Response {
+    if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
+        return json_error(StatusCode::NOT_FOUND, "Bucket not found");
+    }
+    match state.storage.bucket_stats(&bucket_name).await {
+        Ok(stats) => Json(json!({
+            "objects": stats.objects,
+            "bytes": stats.bytes,
+            "version_count": stats.version_count,
+            "version_bytes": stats.version_bytes,
+            "total_objects": stats.objects + stats.version_count,
+            "total_bytes": stats.bytes + stats.version_bytes,
+        }))
+        .into_response(),
+        Err(e) => storage_json_error(e),
+    }
+}
+
 pub async fn list_bucket_folders(
     State(state): State<AppState>,
     Extension(_session): Extension<SessionHandle>,
@@ -2323,7 +2417,11 @@ async fn object_metadata_json(state: &AppState, bucket: &str, key: &str) -> Resp
         .await
         .unwrap_or_default();
 
-    let mut out = metadata.clone();
+    let mut out: std::collections::HashMap<String, String> = metadata
+        .iter()
+        .filter(|(k, _)| !(k.starts_with("__") && k.ends_with("__")))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     if let Some(content_type) = head.content_type {
         out.insert("Content-Type".to_string(), content_type);
     }

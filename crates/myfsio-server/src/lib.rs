@@ -92,6 +92,14 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             get(ui_api::stream_bucket_objects),
         )
         .route(
+            "/ui/buckets/{bucket_name}/objects/search",
+            get(ui_api::search_bucket_objects),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/stats",
+            get(ui_api::bucket_stats_json),
+        )
+        .route(
             "/ui/buckets/{bucket_name}/folders",
             get(ui_api::list_bucket_folders),
         )
@@ -311,7 +319,12 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         secure: false,
     };
 
-    let static_service = tower_http::services::ServeDir::new(&state.config.static_dir);
+    let static_service = tower::ServiceBuilder::new()
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        ))
+        .service(tower_http::services::ServeDir::new(&state.config.static_dir));
 
     protected
         .merge(public)

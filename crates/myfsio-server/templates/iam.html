@@ -31,7 +31,7 @@
 {% if iam_locked %}
 <div class="alert alert-warning" role="alert">
   <div class="fw-semibold mb-1">Administrator permissions required</div>
-  <p class="mb-0">You need the <code>iam:list_users</code> action to edit users or policies. {{ locked_reason or "Sign in with an admin identity to continue." }}</p>
+  <p class="mb-0">You need the <code>iam:list_users</code> action to edit users or policies. {% if locked_reason %}{{ locked_reason }}{% else %}Sign in with an admin identity to continue.{% endif %}</p>
 </div>
 {% endif %}
 

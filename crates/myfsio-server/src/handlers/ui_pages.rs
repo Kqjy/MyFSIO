@@ -396,7 +396,13 @@ pub async fn bucket_detail(
     Query(request_args): Query<HashMap<String, String>>,
 ) -> Response {
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
-        return (StatusCode::NOT_FOUND, "Bucket not found").into_response();
+        session.write(|s| {
+            s.push_flash(
+                "danger",
+                format!("Bucket '{}' does not exist.", bucket_name),
+            )
+        });
+        return Redirect::to("/ui/buckets").into_response();
     }
 
     let mut ctx = page_context(&state, &session, "ui.bucket_detail");

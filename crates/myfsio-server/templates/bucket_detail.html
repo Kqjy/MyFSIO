@@ -869,9 +869,10 @@
                 <h6 class="small fw-semibold mb-3">Current Usage</h6>
                 <div class="row g-3">
                   <div class="col-6">
-                    <div class="border rounded p-3 text-center">
-                      <div class="fs-4 fw-bold text-primary">{{ total_objects }}</div>
+                    <div class="border rounded p-3 text-center" data-usage-objects data-total-objects="{{ total_objects }}" data-max-objects="{% if has_max_objects %}{{ max_objects }}{% endif %}">
+                      <div class="fs-4 fw-bold text-primary" data-usage-objects-value>{{ total_objects }}</div>
                       <div class="small text-muted">Total Objects</div>
+                      <div data-usage-objects-limit>
                       {% if has_max_objects %}
                       <div class="progress mt-2" style="height: 4px;">
                         {% if max_objects > 0 %}{% set obj_pct = total_objects / max_objects * 100 | int %}{% else %}{% set obj_pct = 0 %}{% endif %}
@@ -881,6 +882,7 @@
                       {% else %}
                       <div class="small text-muted mt-2">No limit</div>
                       {% endif %}
+                      </div>
                       {% if version_count > 0 %}
                       <div class="small text-muted mt-1">
                         <span class="text-body-secondary">({{ current_objects }} current + {{ version_count }} versions)</span>
@@ -889,9 +891,10 @@
                     </div>
                   </div>
                   <div class="col-6">
-                    <div class="border rounded p-3 text-center">
-                      <div class="fs-4 fw-bold text-primary">{{ total_bytes | filesizeformat }}</div>
+                    <div class="border rounded p-3 text-center" data-usage-bytes data-total-bytes="{{ total_bytes }}" data-max-bytes="{% if has_max_bytes %}{{ max_bytes }}{% endif %}">
+                      <div class="fs-4 fw-bold text-primary" data-usage-bytes-value>{{ total_bytes | filesizeformat }}</div>
                       <div class="small text-muted">Total Storage</div>
+                      <div data-usage-bytes-limit>
                       {% if has_max_bytes %}
                       <div class="progress mt-2" style="height: 4px;">
                         {% if max_bytes > 0 %}{% set bytes_pct = total_bytes / max_bytes * 100 | int %}{% else %}{% set bytes_pct = 0 %}{% endif %}
@@ -901,6 +904,7 @@
                       {% else %}
                       <div class="small text-muted mt-2">No limit</div>
                       {% endif %}
+                      </div>
                       {% if version_bytes > 0 %}
                       <div class="small text-muted mt-1">
                         <span class="text-body-secondary">({{ current_bytes | filesizeformat }} current + {{ version_bytes | filesizeformat }} versions)</span>
