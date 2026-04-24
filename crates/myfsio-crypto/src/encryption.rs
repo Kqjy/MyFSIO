@@ -4,7 +4,9 @@ use rand::RngCore;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::aes_gcm::{decrypt_stream_chunked, encrypt_stream_chunked, CryptoError};
+use crate::aes_gcm::{
+    decrypt_stream_chunked, decrypt_stream_chunked_range, encrypt_stream_chunked, CryptoError,
+};
 use crate::kms::KmsService;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +39,8 @@ pub struct EncryptionMetadata {
     pub nonce: String,
     pub encrypted_data_key: Option<String>,
     pub kms_key_id: Option<String>,
+    pub chunk_size: Option<usize>,
+    pub plaintext_size: Option<u64>,
 }
 
 impl EncryptionMetadata {
@@ -53,6 +57,15 @@ impl EncryptionMetadata {
         if let Some(ref kid) = self.kms_key_id {
             map.insert("x-amz-encryption-key-id".to_string(), kid.clone());
         }
+        if let Some(cs) = self.chunk_size {
+            map.insert("x-amz-encryption-chunk-size".to_string(), cs.to_string());
+        }
+        if let Some(ps) = self.plaintext_size {
+            map.insert(
+                "x-amz-encryption-plaintext-size".to_string(),
+                ps.to_string(),
+            );
+        }
         map
     }
 
@@ -64,6 +77,12 @@ impl EncryptionMetadata {
             nonce: nonce.clone(),
             encrypted_data_key: meta.get("x-amz-encrypted-data-key").cloned(),
             kms_key_id: meta.get("x-amz-encryption-key-id").cloned(),
+            chunk_size: meta
+                .get("x-amz-encryption-chunk-size")
+                .and_then(|s| s.parse().ok()),
+            plaintext_size: meta
+                .get("x-amz-encryption-plaintext-size")
+                .and_then(|s| s.parse().ok()),
         })
     }
 
@@ -76,6 +95,8 @@ impl EncryptionMetadata {
         meta.remove("x-amz-encryption-nonce");
         meta.remove("x-amz-encrypted-data-key");
         meta.remove("x-amz-encryption-key-id");
+        meta.remove("x-amz-encryption-chunk-size");
+        meta.remove("x-amz-encryption-plaintext-size");
     }
 }
 
@@ -212,6 +233,11 @@ impl EncryptionService {
             data_key
         };
 
+        let plaintext_size = tokio::fs::metadata(input_path)
+            .await
+            .map_err(CryptoError::Io)?
+            .len();
+
         let ip = input_path.to_owned();
         let op = output_path.to_owned();
         let ak = actual_key;
@@ -228,22 +254,23 @@ impl EncryptionService {
             nonce: B64.encode(nonce),
             encrypted_data_key,
             kms_key_id,
+            chunk_size: Some(chunk_size),
+            plaintext_size: Some(plaintext_size),
         })
     }
 
-    pub async fn decrypt_object(
+    async fn resolve_data_key(
         &self,
-        input_path: &Path,
-        output_path: &Path,
         enc_meta: &EncryptionMetadata,
         customer_key: Option<&[u8]>,
-    ) -> Result<(), CryptoError> {
+    ) -> Result<([u8; 32], [u8; 12]), CryptoError> {
         let nonce_bytes = B64
             .decode(&enc_meta.nonce)
             .map_err(|e| CryptoError::EncryptionFailed(format!("Bad nonce encoding: {}", e)))?;
         if nonce_bytes.len() != 12 {
             return Err(CryptoError::InvalidNonceSize(nonce_bytes.len()));
         }
+        let nonce: [u8; 12] = nonce_bytes.try_into().unwrap();
 
         let data_key: [u8; 32] = if let Some(ck) = customer_key {
             if ck.len() != 32 {
@@ -281,14 +308,61 @@ impl EncryptionService {
             self.unwrap_data_key(wrapped)?
         };
 
+        Ok((data_key, nonce))
+    }
+
+    pub async fn decrypt_object(
+        &self,
+        input_path: &Path,
+        output_path: &Path,
+        enc_meta: &EncryptionMetadata,
+        customer_key: Option<&[u8]>,
+    ) -> Result<(), CryptoError> {
+        let (data_key, nonce) = self.resolve_data_key(enc_meta, customer_key).await?;
+
         let ip = input_path.to_owned();
         let op = output_path.to_owned();
-        let nb: [u8; 12] = nonce_bytes.try_into().unwrap();
-        tokio::task::spawn_blocking(move || decrypt_stream_chunked(&ip, &op, &data_key, &nb))
+        tokio::task::spawn_blocking(move || decrypt_stream_chunked(&ip, &op, &data_key, &nonce))
             .await
             .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
 
         Ok(())
+    }
+
+    pub async fn decrypt_object_range(
+        &self,
+        input_path: &Path,
+        output_path: &Path,
+        enc_meta: &EncryptionMetadata,
+        customer_key: Option<&[u8]>,
+        plain_start: u64,
+        plain_end_inclusive: u64,
+    ) -> Result<u64, CryptoError> {
+        let chunk_size = enc_meta.chunk_size.ok_or_else(|| {
+            CryptoError::EncryptionFailed("chunk_size missing from encryption metadata".into())
+        })?;
+        let plaintext_size = enc_meta.plaintext_size.ok_or_else(|| {
+            CryptoError::EncryptionFailed("plaintext_size missing from encryption metadata".into())
+        })?;
+
+        let (data_key, nonce) = self.resolve_data_key(enc_meta, customer_key).await?;
+
+        let ip = input_path.to_owned();
+        let op = output_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            decrypt_stream_chunked_range(
+                &ip,
+                &op,
+                &data_key,
+                &nonce,
+                chunk_size,
+                plaintext_size,
+                plain_start,
+                plain_end_inclusive,
+            )
+        })
+        .await
+        .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
     }
 }
 
@@ -383,12 +457,26 @@ mod tests {
             nonce: "dGVzdG5vbmNlMTI=".to_string(),
             encrypted_data_key: Some("c29tZWtleQ==".to_string()),
             kms_key_id: None,
+            chunk_size: Some(65_536),
+            plaintext_size: Some(1_234_567),
         };
         let map = meta.to_metadata_map();
         let restored = EncryptionMetadata::from_metadata(&map).unwrap();
         assert_eq!(restored.algorithm, "AES256");
         assert_eq!(restored.nonce, meta.nonce);
         assert_eq!(restored.encrypted_data_key, meta.encrypted_data_key);
+        assert_eq!(restored.chunk_size, Some(65_536));
+        assert_eq!(restored.plaintext_size, Some(1_234_567));
+    }
+
+    #[test]
+    fn test_encryption_metadata_legacy_missing_sizes() {
+        let mut map = HashMap::new();
+        map.insert("x-amz-server-side-encryption".to_string(), "AES256".into());
+        map.insert("x-amz-encryption-nonce".to_string(), "aGVsbG8=".into());
+        let restored = EncryptionMetadata::from_metadata(&map).unwrap();
+        assert_eq!(restored.chunk_size, None);
+        assert_eq!(restored.plaintext_size, None);
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub struct ObjectMeta {
     pub version_id: Option<String>,
     #[serde(default)]
     pub is_delete_marker: bool,
+    #[serde(default, skip_serializing)]
+    pub internal_metadata: HashMap<String, String>,
 }
 
 impl ObjectMeta {
@@ -30,6 +32,7 @@ impl ObjectMeta {
             metadata: HashMap::new(),
             version_id: None,
             is_delete_marker: false,
+            internal_metadata: HashMap::new(),
         }
     }
 }

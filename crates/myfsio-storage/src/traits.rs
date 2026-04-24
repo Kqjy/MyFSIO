@@ -30,7 +30,43 @@ pub trait StorageEngine: Send + Sync {
         key: &str,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)>;
 
+    async fn get_object_range(
+        &self,
+        bucket: &str,
+        key: &str,
+        start: u64,
+        len: Option<u64>,
+    ) -> StorageResult<(ObjectMeta, AsyncReadStream)>;
+
+    async fn get_object_snapshot(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<(ObjectMeta, tokio::fs::File)>;
+
+    async fn get_object_version_snapshot(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<(ObjectMeta, tokio::fs::File)>;
+
     async fn get_object_path(&self, bucket: &str, key: &str) -> StorageResult<PathBuf>;
+
+    async fn snapshot_object_to_link(
+        &self,
+        bucket: &str,
+        key: &str,
+        link_path: &std::path::Path,
+    ) -> StorageResult<ObjectMeta>;
+
+    async fn snapshot_object_version_to_link(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        link_path: &std::path::Path,
+    ) -> StorageResult<ObjectMeta>;
 
     async fn head_object(&self, bucket: &str, key: &str) -> StorageResult<ObjectMeta>;
 
@@ -39,6 +75,15 @@ pub trait StorageEngine: Send + Sync {
         bucket: &str,
         key: &str,
         version_id: &str,
+    ) -> StorageResult<(ObjectMeta, AsyncReadStream)>;
+
+    async fn get_object_version_range(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        start: u64,
+        len: Option<u64>,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)>;
 
     async fn get_object_version_path(

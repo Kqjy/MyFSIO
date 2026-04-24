@@ -9,6 +9,7 @@ myfsio-crypto = { path = "../myfsio-crypto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }

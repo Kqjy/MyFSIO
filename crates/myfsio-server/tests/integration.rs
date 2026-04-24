@@ -4853,3 +4853,197 @@ async fn test_kms_encrypt_decrypt() {
     let result = B64.decode(pt_b64).unwrap();
     assert_eq!(result, plaintext);
 }
+
+fn deterministic_payload(len: usize) -> Vec<u8> {
+    (0..len).map(|i| ((i * 2654435761usize) >> 16) as u8).collect()
+}
+
+async fn put_sse_s3(
+    app: &axum::routing::RouterIntoService<Body>,
+    bucket: &str,
+    key: &str,
+    body: Vec<u8>,
+) {
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/{}", bucket))
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::empty())
+        .unwrap();
+    let _ = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/{}/{}", bucket, key))
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .header("x-amz-server-side-encryption", "AES256")
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+async fn range_get(
+    app: &axum::routing::RouterIntoService<Body>,
+    uri: &str,
+    range: &str,
+    extra_headers: &[(&str, &str)],
+) -> axum::http::Response<Body> {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .header("range", range);
+    for (k, v) in extra_headers {
+        builder = builder.header(*k, *v);
+    }
+    tower::ServiceExt::oneshot(app.clone(), builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn body_bytes(resp: axum::http::Response<Body>) -> Vec<u8> {
+    resp.into_body().collect().await.unwrap().to_bytes().to_vec()
+}
+
+#[tokio::test]
+async fn test_sse_s3_range_get_multi_chunk() {
+    let (app, _tmp) = test_app_encrypted().await;
+    let app = app.into_service();
+    let payload = deterministic_payload(200_000);
+    put_sse_s3(&app, "rng-mc", "obj.bin", payload.clone()).await;
+
+    let resp = range_get(&app, "/rng-mc/obj.bin", "bytes=60000-140000", &[]).await;
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap(), "80001");
+    assert_eq!(
+        resp.headers().get("content-range").unwrap(),
+        "bytes 60000-140000/200000"
+    );
+    assert_eq!(
+        resp.headers().get("x-amz-server-side-encryption").unwrap(),
+        "AES256"
+    );
+    assert_eq!(body_bytes(resp).await, payload[60000..=140000]);
+}
+
+#[tokio::test]
+async fn test_sse_s3_range_get_within_single_chunk() {
+    let (app, _tmp) = test_app_encrypted().await;
+    let app = app.into_service();
+    let payload = deterministic_payload(200_000);
+    put_sse_s3(&app, "rng-sc", "obj.bin", payload.clone()).await;
+
+    let resp = range_get(&app, "/rng-sc/obj.bin", "bytes=100-4999", &[]).await;
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap(), "4900");
+    assert_eq!(body_bytes(resp).await, payload[100..=4999]);
+}
+
+#[tokio::test]
+async fn test_sse_s3_range_get_suffix() {
+    let (app, _tmp) = test_app_encrypted().await;
+    let app = app.into_service();
+    let payload = deterministic_payload(200_000);
+    put_sse_s3(&app, "rng-sx", "obj.bin", payload.clone()).await;
+
+    let resp = range_get(&app, "/rng-sx/obj.bin", "bytes=-1024", &[]).await;
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap(), "1024");
+    assert_eq!(
+        resp.headers().get("content-range").unwrap(),
+        "bytes 198976-199999/200000"
+    );
+    assert_eq!(body_bytes(resp).await, payload[198_976..]);
+}
+
+#[tokio::test]
+async fn test_sse_s3_range_get_final_partial_chunk() {
+    let (app, _tmp) = test_app_encrypted().await;
+    let app = app.into_service();
+    let size = 65_536 + 12_345;
+    let payload = deterministic_payload(size);
+    put_sse_s3(&app, "rng-fp", "obj.bin", payload.clone()).await;
+
+    let last_start = 70_000;
+    let last_end = size as u64 - 1;
+    let range = format!("bytes={}-{}", last_start, last_end);
+    let resp = range_get(&app, "/rng-fp/obj.bin", &range, &[]).await;
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    let expected_len = (last_end - last_start + 1).to_string();
+    assert_eq!(
+        resp.headers().get("content-length").unwrap(),
+        &expected_len.as_str()
+    );
+    assert_eq!(
+        body_bytes(resp).await,
+        payload[last_start as usize..=last_end as usize]
+    );
+}
+
+#[tokio::test]
+async fn test_sse_s3_range_get_open_ended() {
+    let (app, _tmp) = test_app_encrypted().await;
+    let app = app.into_service();
+    let payload = deterministic_payload(100_000);
+    put_sse_s3(&app, "rng-oe", "obj.bin", payload.clone()).await;
+
+    let resp = range_get(&app, "/rng-oe/obj.bin", "bytes=90000-", &[]).await;
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap(), "10000");
+    assert_eq!(
+        resp.headers().get("content-range").unwrap(),
+        "bytes 90000-99999/100000"
+    );
+    assert_eq!(body_bytes(resp).await, payload[90_000..]);
+}
+
+#[tokio::test]
+async fn test_sse_s3_range_unsatisfiable_for_plaintext_size() {
+    let (app, _tmp) = test_app_encrypted().await;
+    let app = app.into_service();
+    let payload = deterministic_payload(10_000);
+    put_sse_s3(&app, "rng-un", "obj.bin", payload).await;
+
+    let resp = range_get(&app, "/rng-un/obj.bin", "bytes=20000-30000", &[]).await;
+    assert!(
+        resp.status() == StatusCode::RANGE_NOT_SATISFIABLE
+            || resp.status() == StatusCode::BAD_REQUEST,
+        "unexpected status: {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn test_plaintext_range_still_works() {
+    let (app, _tmp) = test_app_encrypted().await;
+    let app = app.into_service();
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/plain-rng")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::empty())
+        .unwrap();
+    let _ = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+
+    let payload = deterministic_payload(8_000);
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/plain-rng/obj.bin")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from(payload.clone()))
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = range_get(&app, "/plain-rng/obj.bin", "bytes=100-199", &[]).await;
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert!(resp.headers().get("x-amz-server-side-encryption").is_none());
+    assert_eq!(body_bytes(resp).await, payload[100..=199]);
+}

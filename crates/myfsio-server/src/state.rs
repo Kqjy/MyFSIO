@@ -50,6 +50,7 @@ impl AppState {
                 bucket_config_cache_ttl: Duration::from_secs_f64(
                     config.bucket_config_cache_ttl_seconds,
                 ),
+                stream_chunk_size: config.stream_chunk_size,
             },
         ));
         let iam = Arc::new(IamService::new_with_secret(

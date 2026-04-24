@@ -31,6 +31,33 @@ use crate::services::notifications;
 use crate::services::object_lock;
 use crate::state::AppState;
 
+async fn open_self_deleting(path: std::path::PathBuf) -> std::io::Result<tokio::fs::File> {
+    #[cfg(unix)]
+    {
+        let file = tokio::fs::File::open(&path).await?;
+        let _ = tokio::fs::remove_file(&path).await;
+        Ok(file)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+        let file = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(&path)
+        })
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))??;
+        Ok(tokio::fs::File::from_std(file))
+    }
+}
+
 fn s3_error_response(err: S3Error) -> Response {
     let status =
         StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1568,23 +1595,6 @@ pub async fn get_object(
         .version_id
         .as_deref()
         .filter(|value| !is_null_version(Some(*value)));
-    let head_meta = match version_id {
-        Some(version_id) => match state
-            .storage
-            .head_object_version(&bucket, &key, version_id)
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => return storage_err_response(e),
-        },
-        None => match state.storage.head_object(&bucket, &key).await {
-            Ok(m) => m,
-            Err(e) => return storage_err_response(e),
-        },
-    };
-    if let Some(resp) = evaluate_get_preconditions(&headers, &head_meta) {
-        return resp;
-    }
 
     let range_header = headers
         .get("range")
@@ -1592,163 +1602,144 @@ pub async fn get_object(
         .map(|s| s.to_string());
 
     if let Some(ref range_str) = range_header {
-        return range_get_handler(&state, &bucket, &key, range_str, &query).await;
+        return range_get_handler(&state, &bucket, &key, range_str, &query, &headers).await;
     }
 
-    let all_meta = match version_id {
-        Some(version_id) => state
-            .storage
-            .get_object_version_metadata(&bucket, &key, version_id)
-            .await
-            .unwrap_or_default(),
-        None => state
-            .storage
-            .get_object_metadata(&bucket, &key)
-            .await
-            .unwrap_or_default(),
-    };
-    let enc_meta = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&all_meta);
+    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
 
-    if let (Some(ref enc_info), Some(ref enc_svc)) = (&enc_meta, &state.encryption) {
-        let obj_path = match version_id {
-            Some(version_id) => match state
-                .storage
-                .get_object_version_path(&bucket, &key, version_id)
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => return storage_err_response(e),
-            },
-            None => match state.storage.get_object_path(&bucket, &key).await {
-                Ok(p) => p,
-                Err(e) => return storage_err_response(e),
-            },
-        };
-        let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
-        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-        let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
-
-        let customer_key = extract_sse_c_key(&headers);
-        let ck_ref = customer_key.as_deref();
-
-        if let Err(e) = enc_svc
-            .decrypt_object(&obj_path, &dec_tmp, enc_info, ck_ref)
-            .await
-        {
-            let _ = tokio::fs::remove_file(&dec_tmp).await;
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InternalError,
-                format!("Decryption failed: {}", e),
-            ));
-        }
-
-        let file = match tokio::fs::File::open(&dec_tmp).await {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&dec_tmp).await;
-                return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-            }
-        };
-        let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-        let stream = ReaderStream::with_capacity(file, 256 * 1024);
-        let body = Body::from_stream(stream);
-
-        let meta = head_meta.clone();
-
-        let tmp_path = dec_tmp.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-        });
-
-        let mut resp_headers = HeaderMap::new();
-        resp_headers.insert("content-length", file_size.to_string().parse().unwrap());
-        if let Some(ref etag) = meta.etag {
-            resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
-        }
-        insert_content_type(&mut resp_headers, &key, meta.content_type.as_deref());
-        resp_headers.insert(
-            "last-modified",
-            meta.last_modified
-                .format("%a, %d %b %Y %H:%M:%S GMT")
-                .to_string()
-                .parse()
-                .unwrap(),
-        );
-        resp_headers.insert("accept-ranges", "bytes".parse().unwrap());
-        resp_headers.insert(
-            "x-amz-server-side-encryption",
-            enc_info.algorithm.parse().unwrap(),
-        );
-        apply_stored_response_headers(&mut resp_headers, &all_meta);
-        apply_stored_checksum_headers(&mut resp_headers, &all_meta);
-        if let Some(ref requested_version) = query.version_id {
-            if let Ok(value) = requested_version.parse() {
-                resp_headers.insert("x-amz-version-id", value);
-            }
-        } else if let Some(vid) = all_meta.get("__version_id__") {
-            if let Ok(value) = vid.parse() {
-                resp_headers.insert("x-amz-version-id", value);
-            }
-        }
-
-        apply_user_metadata(&mut resp_headers, &meta.metadata);
-
-        apply_response_overrides(&mut resp_headers, &query);
-
-        return (StatusCode::OK, resp_headers, body).into_response();
-    }
-
-    let object_result = match version_id {
-        Some(version_id) => {
+    // Take a single snapshot of the live object BEFORE deciding whether it's
+    // encrypted. If we sniffed encryption from head_meta first, a PUT could
+    // flip the object's encryption state between head and snapshot — leaving
+    // us either serving ciphertext through the raw path or failing because
+    // the snapshot no longer has encryption metadata. All decisions must
+    // come from this snapshot.
+    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    let snap_link = tmp_dir.join(format!("src-{}", uuid::Uuid::new_v4()));
+    let snap_res = match version_id {
+        Some(v) => {
             state
                 .storage
-                .get_object_version(&bucket, &key, version_id)
+                .snapshot_object_version_to_link(&bucket, &key, v, &snap_link)
                 .await
         }
-        None => state.storage.get_object(&bucket, &key).await,
+        None => {
+            state
+                .storage
+                .snapshot_object_to_link(&bucket, &key, &snap_link)
+                .await
+        }
+    };
+    let snap_meta = match snap_res {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
     };
 
-    match object_result {
-        Ok((meta, reader)) => {
-            let stream = ReaderStream::with_capacity(reader, 256 * 1024);
-            let body = Body::from_stream(stream);
-
-            let mut headers = HeaderMap::new();
-            headers.insert("content-length", meta.size.to_string().parse().unwrap());
-            if let Some(ref etag) = meta.etag {
-                headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
-            }
-            insert_content_type(&mut headers, &key, meta.content_type.as_deref());
-            headers.insert(
-                "last-modified",
-                meta.last_modified
-                    .format("%a, %d %b %Y %H:%M:%S GMT")
-                    .to_string()
-                    .parse()
-                    .unwrap(),
-            );
-            headers.insert("accept-ranges", "bytes".parse().unwrap());
-            apply_stored_response_headers(&mut headers, &all_meta);
-            apply_stored_checksum_headers(&mut headers, &all_meta);
-            if let Some(ref requested_version) = query.version_id {
-                if let Ok(value) = requested_version.parse() {
-                    headers.insert("x-amz-version-id", value);
-                }
-            } else if let Some(ref vid) = meta.version_id {
-                if let Ok(value) = vid.parse() {
-                    headers.insert("x-amz-version-id", value);
-                }
-            }
-
-            apply_user_metadata(&mut headers, &meta.metadata);
-
-            apply_response_overrides(&mut headers, &query);
-
-            (StatusCode::OK, headers, body).into_response()
-        }
-        Err(e) => storage_err_response(e),
+    // Evaluate preconditions against the served snapshot's metadata. A HEAD
+    // taken earlier could disagree with the snapshot if a concurrent PUT
+    // landed in between, causing us to serve a body that doesn't satisfy
+    // the caller's If-Match / If-None-Match / time conditions.
+    if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
+        let _ = tokio::fs::remove_file(&snap_link).await;
+        return resp;
     }
+
+    let enc_info = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(
+        &snap_meta.internal_metadata,
+    );
+
+    let (file, file_size, enc_header): (tokio::fs::File, u64, Option<&str>) = match (
+        enc_info.as_ref(),
+        state.encryption.as_ref(),
+    ) {
+        (Some(enc_info), Some(enc_svc)) => {
+            let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
+            let customer_key = extract_sse_c_key(&headers);
+            let decrypt_res = enc_svc
+                .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
+                .await;
+            // Hardlink served its purpose; the decrypted plaintext is in
+            // dec_tmp now.
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            if let Err(e) = decrypt_res {
+                let _ = tokio::fs::remove_file(&dec_tmp).await;
+                return s3_error_response(S3Error::new(
+                    myfsio_common::error::S3ErrorCode::InternalError,
+                    format!("Decryption failed: {}", e),
+                ));
+            }
+            let file = match open_self_deleting(dec_tmp.clone()).await {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&dec_tmp).await;
+                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                }
+            };
+            let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+            (file, file_size, Some(enc_info.algorithm.as_str()))
+        }
+        (Some(_), None) => {
+            // Snapshot is encrypted but the server has no encryption
+            // service configured to decrypt it. Serving ciphertext as
+            // plaintext would be actively wrong; refuse explicitly.
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return s3_error_response(S3Error::new(
+                myfsio_common::error::S3ErrorCode::InternalError,
+                "Object is encrypted but encryption service is disabled".to_string(),
+            ));
+        }
+        (None, _) => {
+            // Raw path: stream directly from the hardlink, which becomes
+            // self-deleting on open (kernel keeps the inode alive via our
+            // fd).
+            let file = match open_self_deleting(snap_link.clone()).await {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&snap_link).await;
+                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                }
+            };
+            (file, snap_meta.size, None)
+        }
+    };
+
+    let stream = ReaderStream::with_capacity(file, stream_cap);
+    let body = Body::from_stream(stream);
+
+    let meta = &snap_meta;
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert("content-length", file_size.to_string().parse().unwrap());
+    if let Some(ref etag) = meta.etag {
+        resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+    }
+    insert_content_type(&mut resp_headers, &key, meta.content_type.as_deref());
+    resp_headers.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    resp_headers.insert("accept-ranges", "bytes".parse().unwrap());
+    if let Some(alg) = enc_header {
+        resp_headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
+    }
+    apply_stored_response_headers(&mut resp_headers, &meta.internal_metadata);
+    apply_stored_checksum_headers(&mut resp_headers, &meta.internal_metadata);
+    if let Some(ref requested_version) = query.version_id {
+        if let Ok(value) = requested_version.parse() {
+            resp_headers.insert("x-amz-version-id", value);
+        }
+    } else if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            resp_headers.insert("x-amz-version-id", value);
+        }
+    }
+    apply_user_metadata(&mut resp_headers, &meta.metadata);
+    apply_response_overrides(&mut resp_headers, &query);
+
+    (StatusCode::OK, resp_headers, body).into_response()
 }
 
 pub async fn post_object(
@@ -1874,18 +1865,6 @@ pub async fn head_object(
             if let Some(resp) = evaluate_get_preconditions(&headers, &meta) {
                 return resp;
             }
-            let all_meta = match version_id {
-                Some(version_id) => state
-                    .storage
-                    .get_object_version_metadata(&bucket, &key, version_id)
-                    .await
-                    .unwrap_or_default(),
-                None => state
-                    .storage
-                    .get_object_metadata(&bucket, &key)
-                    .await
-                    .unwrap_or_default(),
-            };
             let mut headers = HeaderMap::new();
             headers.insert("content-length", meta.size.to_string().parse().unwrap());
             if let Some(ref etag) = meta.etag {
@@ -1901,8 +1880,8 @@ pub async fn head_object(
                     .unwrap(),
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
-            apply_stored_response_headers(&mut headers, &all_meta);
-            apply_stored_checksum_headers(&mut headers, &all_meta);
+            apply_stored_response_headers(&mut headers, &meta.internal_metadata);
+            apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
             if let Some(ref requested_version) = query.version_id {
                 if let Ok(value) = requested_version.parse() {
                     headers.insert("x-amz-version-id", value);
@@ -2607,71 +2586,191 @@ async fn range_get_handler(
     key: &str,
     range_str: &str,
     query: &ObjectQuery,
+    headers: &HeaderMap,
 ) -> Response {
     let version_id = query
         .version_id
         .as_deref()
         .filter(|value| !is_null_version(Some(*value)));
-    let meta = match version_id {
-        Some(version_id) => match state
-            .storage
-            .head_object_version(bucket, key, version_id)
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => return storage_err_response(e),
-        },
-        None => match state.storage.head_object(bucket, key).await {
-            Ok(m) => m,
-            Err(e) => return storage_err_response(e),
-        },
+
+    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    let snap_link = tmp_dir.join(format!("rsrc-{}", uuid::Uuid::new_v4()));
+
+    let snap_meta = match version_id {
+        Some(v) => {
+            state
+                .storage
+                .snapshot_object_version_to_link(bucket, key, v, &snap_link)
+                .await
+        }
+        None => {
+            state
+                .storage
+                .snapshot_object_to_link(bucket, key, &snap_link)
+                .await
+        }
+    };
+    let meta = match snap_meta {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
     };
 
-    let total_size = meta.size;
-    let (start, end) = match parse_range(range_str, total_size) {
+    if let Some(resp) = evaluate_get_preconditions(headers, &meta) {
+        let _ = tokio::fs::remove_file(&snap_link).await;
+        return resp;
+    }
+
+    let enc_info =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata);
+
+    let (body_path, plaintext_size, enc_header): (std::path::PathBuf, u64, Option<&str>) =
+        match (enc_info.as_ref(), state.encryption.as_ref()) {
+            (Some(enc_info), Some(enc_svc)) => {
+                let customer_key = extract_sse_c_key(headers);
+                let has_fast_path = enc_info.chunk_size.is_some()
+                    && enc_info.plaintext_size.is_some();
+
+                if has_fast_path {
+                    let plaintext_size = enc_info.plaintext_size.unwrap();
+                    let (start, end) = match parse_range(range_str, plaintext_size) {
+                        Some(r) => r,
+                        None => {
+                            let _ = tokio::fs::remove_file(&snap_link).await;
+                            return s3_error_response(S3Error::new(
+                                myfsio_common::error::S3ErrorCode::InvalidRange,
+                                format!("Range not satisfiable for size {}", plaintext_size),
+                            ));
+                        }
+                    };
+
+                    let dec_tmp = tmp_dir.join(format!("rdec-{}", uuid::Uuid::new_v4()));
+                    let res = enc_svc
+                        .decrypt_object_range(
+                            &snap_link,
+                            &dec_tmp,
+                            enc_info,
+                            customer_key.as_deref(),
+                            start,
+                            end,
+                        )
+                        .await;
+                    let _ = tokio::fs::remove_file(&snap_link).await;
+                    if let Err(e) = res {
+                        let _ = tokio::fs::remove_file(&dec_tmp).await;
+                        return s3_error_response(S3Error::new(
+                            myfsio_common::error::S3ErrorCode::InternalError,
+                            format!("Decryption failed: {}", e),
+                        ));
+                    }
+
+                    return stream_partial_content(
+                        state,
+                        &dec_tmp,
+                        start,
+                        end,
+                        plaintext_size,
+                        &meta,
+                        key,
+                        query,
+                        Some(enc_info.algorithm.as_str()),
+                        /* already_trimmed */ true,
+                    )
+                    .await;
+                }
+
+                let dec_tmp = tmp_dir.join(format!("rdec-{}", uuid::Uuid::new_v4()));
+                let res = enc_svc
+                    .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
+                    .await;
+                let _ = tokio::fs::remove_file(&snap_link).await;
+                if let Err(e) = res {
+                    let _ = tokio::fs::remove_file(&dec_tmp).await;
+                    return s3_error_response(S3Error::new(
+                        myfsio_common::error::S3ErrorCode::InternalError,
+                        format!("Decryption failed: {}", e),
+                    ));
+                }
+                let plaintext_size = tokio::fs::metadata(&dec_tmp)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                (dec_tmp, plaintext_size, Some(enc_info.algorithm.as_str()))
+            }
+            (Some(_), None) => {
+                let _ = tokio::fs::remove_file(&snap_link).await;
+                return s3_error_response(S3Error::new(
+                    myfsio_common::error::S3ErrorCode::InternalError,
+                    "Object is encrypted but encryption service is disabled".to_string(),
+                ));
+            }
+            (None, _) => (snap_link.clone(), meta.size, None),
+        };
+
+    let (start, end) = match parse_range(range_str, plaintext_size) {
         Some(r) => r,
         None => {
+            let _ = tokio::fs::remove_file(&body_path).await;
             return s3_error_response(S3Error::new(
                 myfsio_common::error::S3ErrorCode::InvalidRange,
-                format!("Range not satisfiable for size {}", total_size),
+                format!("Range not satisfiable for size {}", plaintext_size),
             ));
         }
     };
 
-    let path = match version_id {
-        Some(version_id) => match state
-            .storage
-            .get_object_version_path(bucket, key, version_id)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => return storage_err_response(e),
-        },
-        None => match state.storage.get_object_path(bucket, key).await {
-            Ok(p) => p,
-            Err(e) => return storage_err_response(e),
-        },
-    };
+    stream_partial_content(
+        state,
+        &body_path,
+        start,
+        end,
+        plaintext_size,
+        &meta,
+        key,
+        query,
+        enc_header,
+        /* already_trimmed */ false,
+    )
+    .await
+}
 
-    let mut file = match tokio::fs::File::open(&path).await {
-        Ok(f) => f,
-        Err(e) => return storage_err_response(myfsio_storage::error::StorageError::Io(e)),
-    };
-
-    if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
-        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-    }
-
+async fn stream_partial_content(
+    state: &AppState,
+    body_path: &std::path::Path,
+    start: u64,
+    end: u64,
+    plaintext_size: u64,
+    meta: &myfsio_common::types::ObjectMeta,
+    key: &str,
+    query: &ObjectQuery,
+    enc_header: Option<&str>,
+    already_trimmed: bool,
+) -> Response {
     let length = end - start + 1;
+
+    let mut file = match open_self_deleting(body_path.to_path_buf()).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(body_path).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    };
+
+    if !already_trimmed {
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    }
     let limited = file.take(length);
-    let stream = ReaderStream::with_capacity(limited, 256 * 1024);
+
+    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
+    let stream = ReaderStream::with_capacity(limited, stream_cap);
     let body = Body::from_stream(stream);
 
     let mut headers = HeaderMap::new();
     headers.insert("content-length", length.to_string().parse().unwrap());
     headers.insert(
         "content-range",
-        format!("bytes {}-{}/{}", start, end, total_size)
+        format!("bytes {}-{}/{}", start, end, plaintext_size)
             .parse()
             .unwrap(),
     );
@@ -2680,8 +2779,17 @@ async fn range_get_handler(
     }
     insert_content_type(&mut headers, key, meta.content_type.as_deref());
     headers.insert("accept-ranges", "bytes".parse().unwrap());
+    if let Some(alg) = enc_header {
+        headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
+    }
+    apply_stored_response_headers(&mut headers, &meta.internal_metadata);
+    apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
     if let Some(ref requested_version) = query.version_id {
         if let Ok(value) = requested_version.parse() {
+            headers.insert("x-amz-version-id", value);
+        }
+    } else if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
             headers.insert("x-amz-version-id", value);
         }
     }
