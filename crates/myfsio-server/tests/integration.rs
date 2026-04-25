@@ -63,6 +63,84 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
     (app, tmp)
 }
 
+fn test_app_and_state() -> (
+    axum::Router,
+    myfsio_server::state::AppState,
+    tempfile::TempDir,
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        region: "us-east-1".to_string(),
+        iam_config_path: iam_path.join("iam.json"),
+        sigv4_timestamp_tolerance_secs: 900,
+        presigned_url_min_expiry: 1,
+        presigned_url_max_expiry: 604800,
+        secret_key: None,
+        encryption_enabled: false,
+        kms_enabled: false,
+        gc_enabled: false,
+        integrity_enabled: false,
+        metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
+        lifecycle_enabled: false,
+        website_hosting_enabled: false,
+        replication_connect_timeout_secs: 5,
+        replication_read_timeout_secs: 30,
+        replication_max_retries: 2,
+        replication_streaming_threshold_bytes: 10_485_760,
+        replication_max_failures_per_bucket: 50,
+        site_sync_enabled: false,
+        site_sync_interval_secs: 60,
+        site_sync_batch_size: 100,
+        site_sync_connect_timeout_secs: 10,
+        site_sync_read_timeout_secs: 120,
+        site_sync_max_retries: 2,
+        site_sync_clock_skew_tolerance: 1.0,
+        ui_enabled: false,
+        templates_dir: std::path::PathBuf::from("templates"),
+        static_dir: std::path::PathBuf::from("static"),
+        multipart_min_part_size: 1,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new(config);
+    let app = myfsio_server::create_router(state.clone());
+    (app, state, tmp)
+}
+
 fn test_app() -> (axum::Router, tempfile::TempDir) {
     test_app_with_iam(serde_json::json!({
         "version": 2,
@@ -5150,4 +5228,978 @@ async fn test_plaintext_range_still_works() {
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
     assert!(resp.headers().get("x-amz-server-side-encryption").is_none());
     assert_eq!(body_bytes(resp).await, payload[100..=199]);
+}
+
+async fn poison_object(state: &myfsio_server::state::AppState, bucket: &str, key: &str) {
+    use myfsio_storage::fs_backend::{META_KEY_CORRUPTED, META_KEY_CORRUPTION_DETAIL};
+    let mut meta = state
+        .storage
+        .get_object_metadata(bucket, key)
+        .await
+        .unwrap();
+    meta.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
+    meta.insert(
+        META_KEY_CORRUPTION_DETAIL.to_string(),
+        "test poisoned for §E recovery".to_string(),
+    );
+    state
+        .storage
+        .put_object_metadata(bucket, key, &meta)
+        .await
+        .unwrap();
+}
+
+async fn set_legal_hold(state: &myfsio_server::state::AppState, bucket: &str, key: &str) {
+    let mut meta = state
+        .storage
+        .get_object_metadata(bucket, key)
+        .await
+        .unwrap();
+    meta.insert("__legal_hold__".to_string(), "true".to_string());
+    state
+        .storage
+        .put_object_metadata(bucket, key, &meta)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_poisoned_object_can_be_overwritten_via_put() {
+    let (app, state, _tmp) = test_app_and_state();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/heal-put", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/heal-put/healme",
+            Body::from("v1 bytes"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    poison_object(&state, "heal-put", "healme").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/heal-put/healme",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        422,
+        "poisoned GET must surface 422 ObjectCorrupted"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/heal-put/healme",
+            Body::from("v2 bytes"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PUT must overwrite a poisoned object instead of returning 422"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/heal-put/healme",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_bytes(resp).await, b"v2 bytes".to_vec());
+}
+
+#[tokio::test]
+async fn test_poisoned_object_can_be_deleted() {
+    let (app, state, _tmp) = test_app_and_state();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/heal-del", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/heal-del/healme",
+            Body::from("rotting"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    poison_object(&state, "heal-del", "healme").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/heal-del/healme",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "DELETE must succeed on a poisoned object instead of returning 422"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/heal-del/healme",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "HEAD after DELETE must be 404, not 422 (poison flag was cleared)"
+    );
+}
+
+#[tokio::test]
+async fn test_poisoned_quarantined_object_can_be_deleted() {
+    let (app, state, _tmp) = test_app_and_state();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/heal-q", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/heal-q/healme",
+            Body::from("rotting"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    poison_object(&state, "heal-q", "healme").await;
+
+    let live_path = state
+        .storage
+        .get_object_path("heal-q", "healme")
+        .await
+        .unwrap();
+    std::fs::remove_file(&live_path).unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/heal-q/healme",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/heal-q/healme",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+async fn complete_two_part_upload(
+    app: &axum::Router,
+    bucket: &str,
+    key: &str,
+    part1: Vec<u8>,
+    part2: Vec<u8>,
+) {
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            &format!("/{}", bucket),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            &format!("/{}/{}?uploads", bucket, key),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/{}/{}?uploadId={}&partNumber=1",
+                    bucket, key, upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(part1))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag1 = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/{}/{}?uploadId={}&partNumber=2",
+                    bucket, key, upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(part2))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag2 = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{etag1}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{etag2}\"</ETag></Part></CompleteMultipartUpload>"
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/{}/{}?uploadId={}", bucket, key, upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(complete_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_part_number_get_returns_only_that_part() {
+    let (app, _tmp) = test_app();
+    let part1 = vec![b'A'; 1024];
+    let part2 = vec![b'B'; 512];
+    complete_two_part_upload(&app, "mp-pn", "obj.bin", part1.clone(), part2.clone()).await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/mp-pn/obj.bin?partNumber=1",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        resp.headers().get("x-amz-mp-parts-count").unwrap(),
+        "2",
+        "x-amz-mp-parts-count must reflect the assembled object"
+    );
+    assert_eq!(
+        resp.headers().get("content-range").unwrap(),
+        "bytes 0-1023/1536"
+    );
+    assert_eq!(resp.headers().get("content-length").unwrap(), "1024");
+    assert_eq!(body_bytes(resp).await, part1);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/mp-pn/obj.bin?partNumber=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        resp.headers().get("content-range").unwrap(),
+        "bytes 1024-1535/1536"
+    );
+    assert_eq!(resp.headers().get("content-length").unwrap(), "512");
+    assert_eq!(body_bytes(resp).await, part2);
+}
+
+#[tokio::test]
+async fn test_head_part_number_returns_part_size() {
+    let (app, _tmp) = test_app();
+    let part1 = vec![b'X'; 2048];
+    let part2 = vec![b'Y'; 256];
+    complete_two_part_upload(&app, "mp-head", "obj.bin", part1, part2).await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/mp-head/obj.bin?partNumber=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap(), "256");
+    assert_eq!(
+        resp.headers().get("content-range").unwrap(),
+        "bytes 2048-2303/2304"
+    );
+    assert_eq!(resp.headers().get("x-amz-mp-parts-count").unwrap(), "2");
+}
+
+#[tokio::test]
+async fn test_part_number_out_of_range_rejected() {
+    let (app, _tmp) = test_app();
+    complete_two_part_upload(
+        &app,
+        "mp-oob",
+        "obj.bin",
+        vec![b'A'; 8],
+        vec![b'B'; 8],
+    )
+    .await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/mp-oob/obj.bin?partNumber=5",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        resp.headers().get("x-amz-error-code").unwrap(),
+        "InvalidPart"
+    );
+}
+
+#[tokio::test]
+async fn test_part_number_one_on_non_multipart_returns_full_body() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/single", Body::empty()))
+        .await
+        .unwrap();
+
+    let payload = b"single-shot upload".to_vec();
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/single/obj.bin",
+            Body::from(payload.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/single/obj.bin?partNumber=1",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "partNumber=1 on a non-multipart object must return the whole body as 200 OK"
+    );
+    assert!(resp.headers().get("x-amz-mp-parts-count").is_none());
+    assert_eq!(body_bytes(resp).await, payload);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/single/obj.bin?partNumber=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_legal_hold_blocks_delete_even_when_poisoned() {
+    let (app, state, _tmp) = test_app_and_state();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/lock-poison", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/lock-poison/locked.bin",
+            Body::from("v1"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    set_legal_hold(&state, "lock-poison", "locked.bin").await;
+    poison_object(&state, "lock-poison", "locked.bin").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/lock-poison/locked.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "legal-hold must still block DELETE on a poisoned object (poison must not bypass object lock)"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/lock-poison/locked.bin",
+            Body::from("v2"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "legal-hold must still block PUT-overwrite on a poisoned object"
+    );
+}
+
+#[tokio::test]
+async fn test_governance_retention_blocks_poisoned_delete_without_bypass() {
+    let (app, state, _tmp) = test_app_and_state();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/gov-poison", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/gov-poison/locked.bin",
+            Body::from("v1"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut meta = state
+        .storage
+        .get_object_metadata("gov-poison", "locked.bin")
+        .await
+        .unwrap();
+    let retain_until = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+    meta.insert(
+        "__object_retention__".to_string(),
+        format!(
+            "{{\"mode\":\"GOVERNANCE\",\"retain_until_date\":\"{}\"}}",
+            retain_until
+        ),
+    );
+    state
+        .storage
+        .put_object_metadata("gov-poison", "locked.bin", &meta)
+        .await
+        .unwrap();
+
+    poison_object(&state, "gov-poison", "locked.bin").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/gov-poison/locked.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "governance retention must block DELETE without bypass header even when object is poisoned"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/gov-poison/locked.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-bypass-governance-retention", "true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "with x-amz-bypass-governance-retention=true, poisoned governance-locked object can be deleted"
+    );
+}
+
+#[tokio::test]
+async fn test_part_number_uses_served_snapshot_metadata() {
+    let (app, state, _tmp) = test_app_and_state();
+    let part1 = vec![b'A'; 1024];
+    let part2 = vec![b'B'; 512];
+    complete_two_part_upload(&app, "race-pn", "obj.bin", part1.clone(), part2.clone()).await;
+
+    let live_meta = state
+        .storage
+        .get_object_metadata("race-pn", "obj.bin")
+        .await
+        .unwrap();
+    let original_part_sizes = live_meta
+        .get(myfsio_storage::fs_backend::META_KEY_PART_SIZES)
+        .cloned()
+        .unwrap();
+    assert_eq!(original_part_sizes, "1024,512");
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/race-pn/obj.bin?partNumber=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        resp.headers().get("content-range").unwrap(),
+        "bytes 1024-1535/1536",
+        "Content-Range must be derived from the snapshot's __part_sizes__"
+    );
+    assert_eq!(resp.headers().get("x-amz-mp-parts-count").unwrap(), "2");
+    assert_eq!(body_bytes(resp).await, part2);
+}
+
+#[tokio::test]
+async fn test_bulk_delete_poisoned_unlocked_object_succeeds() {
+    let (app, state, _tmp) = test_app_and_state();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/bulk-poison",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/bulk-poison/dead.bin",
+            Body::from("rotting"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    poison_object(&state, "bulk-poison", "dead.bin").await;
+
+    let body = "<Delete><Object><Key>dead.bin</Key></Object></Delete>";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/bulk-poison?delete")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_str = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body_str.contains("<Deleted>") && body_str.contains("<Key>dead.bin</Key>"),
+        "bulk delete on poisoned-unlocked object should report success, got: {}",
+        body_str
+    );
+    assert!(
+        !body_str.contains("ObjectCorrupted"),
+        "bulk delete must not surface ObjectCorrupted on a poisoned-unlocked object: {}",
+        body_str
+    );
+}
+
+#[tokio::test]
+async fn test_bulk_delete_poisoned_locked_object_blocked_by_legal_hold() {
+    let (app, state, _tmp) = test_app_and_state();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/bulk-locked",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/bulk-locked/locked.bin",
+            Body::from("rotting"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    set_legal_hold(&state, "bulk-locked", "locked.bin").await;
+    poison_object(&state, "bulk-locked", "locked.bin").await;
+
+    let body = "<Delete><Object><Key>locked.bin</Key></Object></Delete>";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/bulk-locked?delete")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_str = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body_str.contains("<Error>") && body_str.contains("AccessDenied"),
+        "bulk delete on legal-hold-locked poisoned object must report AccessDenied, got: {}",
+        body_str
+    );
+    assert!(
+        !body_str.contains("ObjectCorrupted"),
+        "bulk delete must not surface ObjectCorrupted on a poisoned-locked object: {}",
+        body_str
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/bulk-locked/locked.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        422,
+        "object must still be poisoned after blocked bulk-delete"
+    );
+}
+
+async fn upload_zero_length_final_part_object(
+    app: &axum::Router,
+    bucket: &str,
+    key: &str,
+    part1: Vec<u8>,
+) {
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            &format!("/{}", bucket),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            &format!("/{}/{}?uploads", bucket, key),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/{}/{}?uploadId={}&partNumber=1",
+                    bucket, key, upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(part1))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag1 = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/{}/{}?uploadId={}&partNumber=2",
+                    bucket, key, upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let etag2 = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{etag1}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{etag2}\"</ETag></Part></CompleteMultipartUpload>"
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/{}/{}?uploadId={}", bucket, key, upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(complete_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_zero_length_part_get_omits_content_range() {
+    let (app, _tmp) = test_app();
+    upload_zero_length_final_part_object(&app, "zero-pn", "obj.bin", vec![b'A'; 1024]).await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/zero-pn/obj.bin?partNumber=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap(), "0");
+    assert!(
+        resp.headers().get("content-range").is_none(),
+        "zero-length part GET must not emit Content-Range (would be misleading)"
+    );
+    assert_eq!(resp.headers().get("x-amz-mp-parts-count").unwrap(), "2");
+    assert_eq!(body_bytes(resp).await, Vec::<u8>::new());
+}
+
+#[tokio::test]
+async fn test_zero_length_part_head_omits_content_range() {
+    let (app, _tmp) = test_app();
+    upload_zero_length_final_part_object(&app, "zero-pn-h", "obj.bin", vec![b'A'; 1024]).await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/zero-pn-h/obj.bin?partNumber=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resp.headers().get("content-length").unwrap(), "0");
+    assert!(
+        resp.headers().get("content-range").is_none(),
+        "zero-length part HEAD must not emit Content-Range"
+    );
+    assert_eq!(resp.headers().get("x-amz-mp-parts-count").unwrap(), "2");
+}
+
+#[tokio::test]
+async fn test_zero_length_part_get_evaluates_if_none_match() {
+    let (app, _tmp) = test_app();
+    upload_zero_length_final_part_object(&app, "zero-pn-cond", "obj.bin", vec![b'A'; 1024]).await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/zero-pn-cond/obj.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let etag = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/zero-pn-cond/obj.bin?partNumber=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("if-none-match", etag.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_MODIFIED,
+        "zero-length part GET must honor If-None-Match like any other GET"
+    );
 }

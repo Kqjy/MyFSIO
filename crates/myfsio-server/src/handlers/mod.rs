@@ -164,32 +164,37 @@ async fn ensure_object_lock_allows_write(
     key: &str,
     headers: Option<&HeaderMap>,
 ) -> Result<(), Response> {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            let metadata = match state.storage.get_object_metadata(bucket, key).await {
-                Ok(metadata) => metadata,
-                Err(err) => return Err(storage_err_response(err)),
-            };
-            let bypass_governance = headers
-                .and_then(|headers| {
-                    headers
-                        .get("x-amz-bypass-governance-retention")
-                        .and_then(|value| value.to_str().ok())
-                })
-                .map(|value| value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
-                return Err(s3_error_response(S3Error::new(
-                    S3ErrorCode::AccessDenied,
-                    message,
-                )));
-            }
-            Ok(())
-        }
-        Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
-        Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => Ok(()),
-        Err(err) => Err(storage_err_response(err)),
+    let head_res = state.storage.head_object(bucket, key).await;
+    let needs_lock_check = match &head_res {
+        Ok(_) => true,
+        Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => true,
+        Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => return Ok(()),
+        Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => return Ok(()),
+        Err(_) => false,
+    };
+    if !needs_lock_check {
+        return Err(storage_err_response(head_res.err().unwrap()));
     }
+
+    let metadata = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(metadata) => metadata,
+        Err(err) => return Err(storage_err_response(err)),
+    };
+    let bypass_governance = headers
+        .and_then(|headers| {
+            headers
+                .get("x-amz-bypass-governance-retention")
+                .and_then(|value| value.to_str().ok())
+        })
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            message,
+        )));
+    }
+    Ok(())
 }
 
 async fn ensure_object_version_lock_allows_delete(
@@ -1609,6 +1614,13 @@ pub async fn get_object(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    if range_header.is_some() && query.part_number.is_some() {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "Cannot specify both Range and partNumber on the same request",
+        ));
+    }
+
     if let Some(ref range_str) = range_header {
         return range_get_handler(&state, &bucket, &key, range_str, &query, &headers).await;
     }
@@ -1642,6 +1654,40 @@ pub async fn get_object(
         Ok(m) => m,
         Err(e) => return storage_err_response(e),
     };
+
+    if let Some(part_number) = query.part_number {
+        match resolve_part_view(&snap_meta, part_number) {
+            Ok(view) if view.multipart => {
+                if view.length == 0 {
+                    if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
+                        let _ = tokio::fs::remove_file(&snap_link).await;
+                        return resp;
+                    }
+                    let _ = tokio::fs::remove_file(&snap_link).await;
+                    let mut h =
+                        build_part_response_headers(&key, &snap_meta, &view, &query);
+                    apply_user_metadata(&mut h, &snap_meta.metadata);
+                    return (StatusCode::PARTIAL_CONTENT, h).into_response();
+                }
+                let range_str = format!("bytes={}-{}", view.start, view.start + view.length - 1);
+                return serve_range_from_snapshot(
+                    &state,
+                    snap_link,
+                    snap_meta,
+                    &range_str,
+                    &query,
+                    &headers,
+                    Some(view.parts_count),
+                )
+                .await;
+            }
+            Ok(_) => {}
+            Err(resp) => {
+                let _ = tokio::fs::remove_file(&snap_link).await;
+                return resp;
+            }
+        }
+    }
 
     // Evaluate preconditions against the served snapshot's metadata. A HEAD
     // taken earlier could disagree with the snapshot if a concurrent PUT
@@ -1870,6 +1916,21 @@ pub async fn head_object(
             if let Some(resp) = evaluate_get_preconditions(&headers, &meta) {
                 return resp;
             }
+
+            let part_view = match query.part_number {
+                Some(n) => match resolve_part_view(&meta, n) {
+                    Ok(v) => Some(v),
+                    Err(resp) => return resp,
+                },
+                None => None,
+            };
+
+            if let Some(view) = part_view.as_ref().filter(|v| v.multipart) {
+                let mut headers = build_part_response_headers(&key, &meta, view, &query);
+                apply_user_metadata(&mut headers, &meta.metadata);
+                return (StatusCode::PARTIAL_CONTENT, headers).into_response();
+            }
+
             let mut headers = HeaderMap::new();
             headers.insert("content-length", meta.size.to_string().parse().unwrap());
             if let Some(ref etag) = meta.etag {
@@ -1903,6 +1964,134 @@ pub async fn head_object(
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+struct PartView {
+    start: u64,
+    length: u64,
+    parts_count: u32,
+    multipart: bool,
+}
+
+fn build_part_response_headers(
+    key: &str,
+    meta: &myfsio_common::types::ObjectMeta,
+    view: &PartView,
+    query: &ObjectQuery,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-length", view.length.to_string().parse().unwrap());
+    if view.length > 0 {
+        headers.insert(
+            "content-range",
+            format!(
+                "bytes {}-{}/{}",
+                view.start,
+                view.start + view.length - 1,
+                meta.size
+            )
+            .parse()
+            .unwrap(),
+        );
+    }
+    if let Some(ref etag) = meta.etag {
+        headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+    }
+    insert_content_type(&mut headers, key, meta.content_type.as_deref());
+    headers.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    headers.insert("accept-ranges", "bytes".parse().unwrap());
+    apply_stored_response_headers(&mut headers, &meta.internal_metadata);
+    if let Some(ref requested_version) = query.version_id {
+        if let Ok(value) = requested_version.parse() {
+            headers.insert("x-amz-version-id", value);
+        }
+    } else if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            headers.insert("x-amz-version-id", value);
+        }
+    }
+    headers.insert(
+        "x-amz-mp-parts-count",
+        view.parts_count.to_string().parse().unwrap(),
+    );
+    apply_response_overrides(&mut headers, query);
+    headers
+}
+
+fn resolve_part_view(
+    meta: &myfsio_common::types::ObjectMeta,
+    part_number: u32,
+) -> Result<PartView, Response> {
+    if part_number < 1 {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "partNumber must be >= 1",
+        )));
+    }
+
+    let etag = meta.etag.as_deref().unwrap_or("");
+    let is_multipart = myfsio_storage::fs_backend::is_multipart_etag(etag);
+
+    if !is_multipart {
+        if part_number == 1 {
+            return Ok(PartView {
+                start: 0,
+                length: meta.size,
+                parts_count: 1,
+                multipart: false,
+            });
+        }
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidPart,
+            format!(
+                "partNumber {} is out of range for a non-multipart object",
+                part_number
+            ),
+        )));
+    }
+
+    let part_sizes = match meta
+        .internal_metadata
+        .get(myfsio_storage::fs_backend::META_KEY_PART_SIZES)
+        .and_then(|raw| myfsio_storage::fs_backend::parse_part_sizes(raw))
+    {
+        Some(sizes) => sizes,
+        None => {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Object is multipart but has no recorded part-size manifest; \
+                 partNumber addressing is unavailable",
+            )));
+        }
+    };
+
+    let idx = (part_number as usize).saturating_sub(1);
+    if idx >= part_sizes.len() {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidPart,
+            format!(
+                "partNumber {} exceeds the {} parts in this object",
+                part_number,
+                part_sizes.len()
+            ),
+        )));
+    }
+
+    let start: u64 = part_sizes.iter().take(idx).sum();
+    let length = part_sizes[idx];
+    Ok(PartView {
+        start,
+        length,
+        parts_count: part_sizes.len() as u32,
+        multipart: true,
+    })
 }
 
 async fn initiate_multipart_handler(state: &AppState, bucket: &str, key: &str) -> Response {
@@ -2486,34 +2675,37 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
             async move {
                 let key = obj.key.clone();
                 let requested_vid = obj.version_id.clone();
+                let to_err = |err: myfsio_storage::error::StorageError| -> (String, String) {
+                    let s3err = S3Error::from(err);
+                    (s3err.code.as_str().to_string(), s3err.message)
+                };
+                let run_can_delete =
+                    |metadata: &HashMap<String, String>| -> Result<(), (String, String)> {
+                        object_lock::can_delete_object(metadata, false)
+                            .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m))
+                    };
                 let lock_check: Result<(), (String, String)> = match obj.version_id.as_deref() {
-                    Some(version_id) if version_id != "null" => match state
-                        .storage
-                        .get_object_version_metadata(&bucket, &obj.key, version_id)
-                        .await
-                    {
-                        Ok(metadata) => object_lock::can_delete_object(&metadata, false)
-                            .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m)),
-                        Err(err) => {
-                            let s3err = S3Error::from(err);
-                            Err((s3err.code.as_str().to_string(), s3err.message))
+                    Some(version_id) if version_id != "null" => {
+                        match state
+                            .storage
+                            .get_object_version_metadata(&bucket, &obj.key, version_id)
+                            .await
+                        {
+                            Ok(metadata) => run_can_delete(&metadata),
+                            Err(err) => Err(to_err(err)),
                         }
-                    },
+                    }
                     _ => match state.storage.head_object(&bucket, &obj.key).await {
-                        Ok(_) => match state.storage.get_object_metadata(&bucket, &obj.key).await {
-                            Ok(metadata) => object_lock::can_delete_object(&metadata, false)
-                                .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m)),
-                            Err(err) => {
-                                let s3err = S3Error::from(err);
-                                Err((s3err.code.as_str().to_string(), s3err.message))
+                        Ok(_)
+                        | Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => {
+                            match state.storage.get_object_metadata(&bucket, &obj.key).await {
+                                Ok(metadata) => run_can_delete(&metadata),
+                                Err(err) => Err(to_err(err)),
                             }
-                        },
+                        }
                         Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
                         Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => Ok(()),
-                        Err(err) => {
-                            let s3err = S3Error::from(err);
-                            Err((s3err.code.as_str().to_string(), s3err.message))
-                        }
+                        Err(err) => Err(to_err(err)),
                     },
                 };
 
@@ -2579,6 +2771,18 @@ async fn range_get_handler(
     query: &ObjectQuery,
     headers: &HeaderMap,
 ) -> Response {
+    range_get_handler_inner(state, bucket, key, range_str, query, headers, None).await
+}
+
+async fn range_get_handler_inner(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    range_str: &str,
+    query: &ObjectQuery,
+    headers: &HeaderMap,
+    parts_count: Option<u32>,
+) -> Response {
     let version_id = query
         .version_id
         .as_deref()
@@ -2606,6 +2810,21 @@ async fn range_get_handler(
         Ok(m) => m,
         Err(e) => return storage_err_response(e),
     };
+
+    serve_range_from_snapshot(state, snap_link, meta, range_str, query, headers, parts_count).await
+}
+
+async fn serve_range_from_snapshot(
+    state: &AppState,
+    snap_link: std::path::PathBuf,
+    meta: myfsio_common::types::ObjectMeta,
+    range_str: &str,
+    query: &ObjectQuery,
+    headers: &HeaderMap,
+    parts_count: Option<u32>,
+) -> Response {
+    let key = meta.key.as_str();
+    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
 
     if let Some(resp) = evaluate_get_preconditions(headers, &meta) {
         let _ = tokio::fs::remove_file(&snap_link).await;
@@ -2666,6 +2885,7 @@ async fn range_get_handler(
                         query,
                         Some(enc_info.algorithm.as_str()),
                         /* already_trimmed */ true,
+                        parts_count,
                     )
                     .await;
                 }
@@ -2720,6 +2940,7 @@ async fn range_get_handler(
         query,
         enc_header,
         /* already_trimmed */ false,
+        parts_count,
     )
     .await
 }
@@ -2735,6 +2956,7 @@ async fn stream_partial_content(
     query: &ObjectQuery,
     enc_header: Option<&str>,
     already_trimmed: bool,
+    parts_count: Option<u32>,
 ) -> Response {
     let length = end - start + 1;
 
@@ -2788,6 +3010,10 @@ async fn stream_partial_content(
     }
 
     apply_response_overrides(&mut headers, query);
+
+    if let Some(count) = parts_count {
+        headers.insert("x-amz-mp-parts-count", count.to_string().parse().unwrap());
+    }
 
     (StatusCode::PARTIAL_CONTENT, headers, body).into_response()
 }
