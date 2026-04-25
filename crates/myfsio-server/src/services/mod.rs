@@ -6,6 +6,7 @@ pub mod lifecycle;
 pub mod metrics;
 pub mod notifications;
 pub mod object_lock;
+pub mod peer_fetch;
 pub mod replication;
 pub mod s3_client;
 pub mod site_registry;

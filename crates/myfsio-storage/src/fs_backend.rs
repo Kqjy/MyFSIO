@@ -17,6 +17,37 @@ use uuid::Uuid;
 
 const EMPTY_SEGMENT_SENTINEL: &str = ".__myfsio_empty__";
 
+pub const META_KEY_CORRUPTED: &str = "__corrupted__";
+pub const META_KEY_CORRUPTED_AT: &str = "__corrupted_at__";
+pub const META_KEY_CORRUPTION_DETAIL: &str = "__corruption_detail__";
+pub const META_KEY_QUARANTINE_PATH: &str = "__quarantine_path__";
+
+pub fn metadata_is_corrupted(meta: &HashMap<String, String>) -> bool {
+    meta.get(META_KEY_CORRUPTED)
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+pub fn metadata_corruption_detail(meta: &HashMap<String, String>) -> String {
+    meta.get(META_KEY_CORRUPTION_DETAIL)
+        .cloned()
+        .unwrap_or_else(|| "data integrity check failed".to_string())
+}
+
+pub fn is_multipart_etag(etag: &str) -> bool {
+    let Some(dash_idx) = etag.rfind('-') else {
+        return false;
+    };
+    if dash_idx != 32 {
+        return false;
+    }
+    let (head, tail) = etag.split_at(dash_idx);
+    let tail = &tail[1..];
+    !tail.is_empty()
+        && tail.chars().all(|c| c.is_ascii_digit())
+        && head.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn fs_encode_key(key: &str) -> String {
     if key.is_empty() {
         return String::new();
@@ -739,6 +770,18 @@ impl FsStorageBackend {
         }
 
         Ok(())
+    }
+
+    pub async fn delete_object_metadata_entry(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<()> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.delete_metadata_sync(bucket, key)
+                .map_err(StorageError::Io)
+        })
     }
 
     fn compute_etag_sync(path: &Path) -> std::io::Result<String> {
@@ -2139,6 +2182,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
             if !path.is_file() {
+                let stored_meta = self.read_metadata_sync(bucket, key);
+                if metadata_is_corrupted(&stored_meta) {
+                    return Err(StorageError::ObjectCorrupted {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                        detail: metadata_corruption_detail(&stored_meta),
+                    });
+                }
                 if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
@@ -2171,6 +2222,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 .unwrap_or_else(Utc::now);
 
             let stored_meta = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&stored_meta) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    detail: metadata_corruption_detail(&stored_meta),
+                });
+            }
             let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
             obj.etag = stored_meta.get("__etag__").cloned();
             obj.content_type = stored_meta.get("__content_type__").cloned();
@@ -2204,6 +2262,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
             if !path.is_file() {
+                let stored_meta = self.read_metadata_sync(bucket, key);
+                if metadata_is_corrupted(&stored_meta) {
+                    return Err(StorageError::ObjectCorrupted {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                        detail: metadata_corruption_detail(&stored_meta),
+                    });
+                }
                 if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
@@ -2241,6 +2307,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 .unwrap_or_else(Utc::now);
 
             let stored_meta = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&stored_meta) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    detail: metadata_corruption_detail(&stored_meta),
+                });
+            }
             let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
             obj.etag = stored_meta.get("__etag__").cloned();
             obj.content_type = stored_meta.get("__content_type__").cloned();
@@ -2279,6 +2352,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
             if !path.is_file() {
+                let stored_meta = self.read_metadata_sync(bucket, key);
+                if metadata_is_corrupted(&stored_meta) {
+                    return Err(StorageError::ObjectCorrupted {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                        detail: metadata_corruption_detail(&stored_meta),
+                    });
+                }
                 if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
@@ -2308,6 +2389,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 .unwrap_or_else(Utc::now);
 
             let stored_meta = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&stored_meta) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    detail: metadata_corruption_detail(&stored_meta),
+                });
+            }
             let mut obj = ObjectMeta::new(key.to_string(), meta_fs.len(), lm);
             obj.etag = stored_meta.get("__etag__").cloned();
             obj.content_type = stored_meta.get("__content_type__").cloned();
@@ -2364,6 +2452,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
             if !path.is_file() {
+                let stored_meta = self.read_metadata_sync(bucket, key);
+                if metadata_is_corrupted(&stored_meta) {
+                    return Err(StorageError::ObjectCorrupted {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                        detail: metadata_corruption_detail(&stored_meta),
+                    });
+                }
                 if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
@@ -2402,6 +2498,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 .unwrap_or_else(Utc::now);
 
             let stored_meta = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&stored_meta) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    detail: metadata_corruption_detail(&stored_meta),
+                });
+            }
             let mut obj = ObjectMeta::new(key.to_string(), meta_fs.len(), lm);
             obj.etag = stored_meta.get("__etag__").cloned();
             obj.content_type = stored_meta.get("__content_type__").cloned();
@@ -2453,6 +2556,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         self.require_bucket(bucket)?;
         let path = self.object_path(bucket, key)?;
         if !path.is_file() {
+            let stored_meta = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&stored_meta) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    detail: metadata_corruption_detail(&stored_meta),
+                });
+            }
             if self.read_bucket_config_sync(bucket).versioning_enabled {
                 if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                     return Err(StorageError::DeleteMarker {
@@ -2476,6 +2587,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
             if !path.is_file() {
+                let stored_meta = self.read_metadata_sync(bucket, key);
+                if metadata_is_corrupted(&stored_meta) {
+                    return Err(StorageError::ObjectCorrupted {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                        detail: metadata_corruption_detail(&stored_meta),
+                    });
+                }
                 if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
@@ -2504,6 +2623,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 .unwrap_or_else(Utc::now);
 
             let stored_meta = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&stored_meta) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    detail: metadata_corruption_detail(&stored_meta),
+                });
+            }
             let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
             obj.etag = stored_meta.get("__etag__").cloned();
             obj.content_type = stored_meta.get("__content_type__").cloned();
@@ -2834,6 +2960,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             writer.flush().map_err(StorageError::Io)?;
 
             let src_metadata = self.read_metadata_sync(src_bucket, src_key);
+            if metadata_is_corrupted(&src_metadata) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: src_bucket.to_string(),
+                    key: src_key.to_string(),
+                    detail: metadata_corruption_detail(&src_metadata),
+                });
+            }
             Ok((format!("{:x}", hasher.finalize()), total, src_metadata))
         });
 
@@ -3748,6 +3881,163 @@ mod tests {
         assert_eq!(stored.get("x-amz-meta-custom").unwrap(), "myvalue");
         assert_eq!(stored.get("__content_type__").unwrap(), "text/plain");
         assert!(stored.contains_key("__etag__"));
+    }
+
+    #[tokio::test]
+    async fn test_poisoned_object_returns_object_corrupted_on_read() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"poisoned bytes".to_vec()));
+        backend
+            .put_object("test-bucket", "rotted.txt", data, None)
+            .await
+            .unwrap();
+
+        let mut meta = backend
+            .get_object_metadata("test-bucket", "rotted.txt")
+            .await
+            .unwrap();
+        meta.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
+        meta.insert(
+            META_KEY_CORRUPTION_DETAIL.to_string(),
+            "etag mismatch: stored=abc actual=def".to_string(),
+        );
+        backend
+            .put_object_metadata("test-bucket", "rotted.txt", &meta)
+            .await
+            .unwrap();
+
+        let res = backend.get_object("test-bucket", "rotted.txt").await;
+        match res {
+            Err(StorageError::ObjectCorrupted { .. }) => {}
+            Err(other) => panic!("expected ObjectCorrupted, got {:?}", other),
+            Ok(_) => panic!("expected ObjectCorrupted, got Ok"),
+        }
+
+        let res = backend.head_object("test-bucket", "rotted.txt").await;
+        match res {
+            Err(StorageError::ObjectCorrupted { .. }) => {}
+            Err(other) => panic!("expected ObjectCorrupted, got {:?}", other),
+            Ok(_) => panic!("expected ObjectCorrupted, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_poisoned_object_with_missing_file_still_returns_corrupted() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"will be quarantined".to_vec()));
+        backend
+            .put_object("test-bucket", "rotted.txt", data, None)
+            .await
+            .unwrap();
+
+        let mut meta = backend
+            .get_object_metadata("test-bucket", "rotted.txt")
+            .await
+            .unwrap();
+        meta.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
+        meta.insert(
+            META_KEY_CORRUPTION_DETAIL.to_string(),
+            "etag mismatch (no peer)".to_string(),
+        );
+        backend
+            .put_object_metadata("test-bucket", "rotted.txt", &meta)
+            .await
+            .unwrap();
+
+        let live_path = backend
+            .get_object_path("test-bucket", "rotted.txt")
+            .await
+            .expect("path lookup should succeed before quarantine");
+        std::fs::remove_file(&live_path).expect("simulate quarantine: remove live file");
+
+        let res = backend.get_object("test-bucket", "rotted.txt").await;
+        match res {
+            Err(StorageError::ObjectCorrupted { .. }) => {}
+            Err(other) => panic!("expected ObjectCorrupted after quarantine, got {:?}", other),
+            Ok(_) => panic!("expected ObjectCorrupted, got Ok"),
+        }
+
+        let res = backend.head_object("test-bucket", "rotted.txt").await;
+        match res {
+            Err(StorageError::ObjectCorrupted { .. }) => {}
+            Err(other) => panic!("expected ObjectCorrupted after quarantine, got {:?}", other),
+            Ok(_) => panic!("expected ObjectCorrupted, got Ok"),
+        }
+
+        let res = backend.get_object_path("test-bucket", "rotted.txt").await;
+        match res {
+            Err(StorageError::ObjectCorrupted { .. }) => {}
+            Err(other) => panic!("expected ObjectCorrupted, got {:?}", other),
+            Ok(_) => panic!("expected ObjectCorrupted, got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_object_metadata_entry_removes_index_entry() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"x".to_vec()));
+        backend
+            .put_object("test-bucket", "ghost.txt", data, None)
+            .await
+            .unwrap();
+        let path = backend
+            .get_object_path("test-bucket", "ghost.txt")
+            .await
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        backend
+            .delete_object_metadata_entry("test-bucket", "ghost.txt")
+            .await
+            .unwrap();
+
+        let stored = backend
+            .get_object_metadata("test-bucket", "ghost.txt")
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "metadata entry must be gone, got: {:?}",
+            stored
+        );
+    }
+
+    #[tokio::test]
+    async fn test_put_clears_poison_flag() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"first".to_vec()));
+        backend
+            .put_object("test-bucket", "file.txt", data, None)
+            .await
+            .unwrap();
+
+        let mut meta = backend
+            .get_object_metadata("test-bucket", "file.txt")
+            .await
+            .unwrap();
+        meta.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
+        backend
+            .put_object_metadata("test-bucket", "file.txt", &meta)
+            .await
+            .unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"replacement".to_vec()));
+        backend
+            .put_object("test-bucket", "file.txt", data, None)
+            .await
+            .unwrap();
+
+        match backend.get_object("test-bucket", "file.txt").await {
+            Ok(_) => {}
+            Err(e) => panic!("get must succeed after PUT clears poison, got {:?}", e),
+        }
     }
 
     #[tokio::test]

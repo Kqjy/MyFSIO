@@ -1,22 +1,31 @@
 use myfsio_common::constants::{
     BUCKET_META_DIR, BUCKET_VERSIONS_DIR, INDEX_FILE, SYSTEM_BUCKETS_DIR, SYSTEM_ROOT,
 };
-use myfsio_storage::fs_backend::FsStorageBackend;
+use myfsio_storage::fs_backend::{
+    is_multipart_etag, metadata_is_corrupted, FsStorageBackend, META_KEY_CORRUPTED,
+    META_KEY_CORRUPTED_AT, META_KEY_CORRUPTION_DETAIL, META_KEY_QUARANTINE_PATH,
+};
+use myfsio_storage::traits::StorageEngine;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
+
+use crate::services::peer_fetch::{HealOutcome, PeerFetcher};
 
 const MAX_ISSUES: usize = 500;
 const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
+const QUARANTINE_DIR: &str = "quarantine";
 
 pub struct IntegrityConfig {
     pub interval_hours: f64,
     pub batch_size: usize,
     pub auto_heal: bool,
     pub dry_run: bool,
+    pub heal_concurrency: usize,
+    pub quarantine_retention_days: u64,
 }
 
 impl Default for IntegrityConfig {
@@ -26,19 +35,48 @@ impl Default for IntegrityConfig {
             batch_size: 10_000,
             auto_heal: false,
             dry_run: false,
+            heal_concurrency: 4,
+            quarantine_retention_days: 7,
         }
     }
 }
 
 pub struct IntegrityService {
-    #[allow(dead_code)]
     storage: Arc<FsStorageBackend>,
     storage_root: PathBuf,
     config: IntegrityConfig,
+    peer_fetcher: Option<Arc<PeerFetcher>>,
     running: Arc<RwLock<bool>>,
     started_at: Arc<RwLock<Option<Instant>>>,
     history: Arc<RwLock<Vec<Value>>>,
     history_path: PathBuf,
+}
+
+#[derive(Default, Clone)]
+struct HealStats {
+    found: u64,
+    healed: u64,
+    poisoned: u64,
+    peer_mismatch: u64,
+    peer_unavailable: u64,
+    verify_failed: u64,
+    failed: u64,
+    skipped: u64,
+}
+
+impl HealStats {
+    fn to_value(&self) -> Value {
+        json!({
+            "found": self.found,
+            "healed": self.healed,
+            "poisoned": self.poisoned,
+            "peer_mismatch": self.peer_mismatch,
+            "peer_unavailable": self.peer_unavailable,
+            "verify_failed": self.verify_failed,
+            "failed": self.failed,
+            "skipped": self.skipped,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -69,22 +107,6 @@ impl ScanState {
             }));
         }
     }
-
-    fn into_json(self, elapsed: f64) -> Value {
-        json!({
-            "objects_scanned": self.objects_scanned,
-            "buckets_scanned": self.buckets_scanned,
-            "corrupted_objects": self.corrupted_objects,
-            "orphaned_objects": self.orphaned_objects,
-            "phantom_metadata": self.phantom_metadata,
-            "stale_versions": self.stale_versions,
-            "etag_cache_inconsistencies": self.etag_cache_inconsistencies,
-            "issues_healed": 0,
-            "issues": self.issues,
-            "errors": self.errors,
-            "execution_time_seconds": elapsed,
-        })
-    }
 }
 
 impl IntegrityService {
@@ -92,6 +114,7 @@ impl IntegrityService {
         storage: Arc<FsStorageBackend>,
         storage_root: &Path,
         config: IntegrityConfig,
+        peer_fetcher: Option<Arc<PeerFetcher>>,
     ) -> Self {
         let history_path = storage_root
             .join(SYSTEM_ROOT)
@@ -112,6 +135,7 @@ impl IntegrityService {
             storage,
             storage_root: storage_root.to_path_buf(),
             config,
+            peer_fetcher,
             running: Arc::new(RwLock::new(false)),
             started_at: Arc::new(RwLock::new(None)),
             history: Arc::new(RwLock::new(history)),
@@ -136,6 +160,8 @@ impl IntegrityService {
             "batch_size": self.config.batch_size,
             "auto_heal": self.config.auto_heal,
             "dry_run": self.config.dry_run,
+            "heal_concurrency": self.config.heal_concurrency,
+            "peer_heal_available": self.peer_fetcher.is_some(),
         })
     }
 
@@ -159,7 +185,7 @@ impl IntegrityService {
         let start = Instant::now();
         let storage_root = self.storage_root.clone();
         let batch_size = self.config.batch_size;
-        let result =
+        let scan_state =
             tokio::task::spawn_blocking(move || scan_all_buckets(&storage_root, batch_size))
                 .await
                 .unwrap_or_else(|e| {
@@ -167,12 +193,19 @@ impl IntegrityService {
                     st.errors.push(format!("scan task failed: {}", e));
                     st
                 });
+
+        let heal_stats = if auto_heal && !dry_run {
+            self.run_heal_phase(&scan_state).await
+        } else {
+            BTreeMap::new()
+        };
+
         let elapsed = start.elapsed().as_secs_f64();
 
         *self.running.write().await = false;
         *self.started_at.write().await = None;
 
-        let result_json = result.into_json(elapsed);
+        let result_json = build_result_json(scan_state, heal_stats, elapsed);
 
         let record = json!({
             "timestamp": chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
@@ -194,6 +227,77 @@ impl IntegrityService {
         Ok(result_json)
     }
 
+    async fn run_heal_phase(&self, scan: &ScanState) -> BTreeMap<String, HealStats> {
+        let mut stats: BTreeMap<String, HealStats> = BTreeMap::new();
+        let issues: Vec<Value> = scan.issues.clone();
+        let semaphore = Arc::new(Semaphore::new(self.config.heal_concurrency.max(1)));
+        let mut tasks: Vec<tokio::task::JoinHandle<HealReport>> = Vec::new();
+
+        for issue in issues {
+            let issue_type = issue
+                .get("issue_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let bucket = issue
+                .get("bucket")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let key = issue
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let detail = issue
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            stats.entry(issue_type.clone()).or_default().found += 1;
+
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let storage = self.storage.clone();
+            let storage_root = self.storage_root.clone();
+            let peer_fetcher = self.peer_fetcher.clone();
+
+            tasks.push(tokio::spawn(async move {
+                let _permit = permit;
+                heal_issue(
+                    &storage,
+                    &storage_root,
+                    peer_fetcher.as_deref(),
+                    &issue_type,
+                    &bucket,
+                    &key,
+                    &detail,
+                )
+                .await
+            }));
+        }
+
+        for task in tasks {
+            if let Ok(report) = task.await {
+                let entry = stats.entry(report.issue_type).or_default();
+                match report.status {
+                    HealStatus::Healed => entry.healed += 1,
+                    HealStatus::Poisoned => entry.poisoned += 1,
+                    HealStatus::PeerMismatch => entry.peer_mismatch += 1,
+                    HealStatus::PeerUnavailable => entry.peer_unavailable += 1,
+                    HealStatus::VerifyFailed => entry.verify_failed += 1,
+                    HealStatus::Failed => entry.failed += 1,
+                    HealStatus::Skipped => entry.skipped += 1,
+                }
+            }
+        }
+
+        stats
+    }
+
     async fn save_history(&self) {
         let history = self.history.read().await;
         let data = json!({ "executions": *history });
@@ -208,19 +312,391 @@ impl IntegrityService {
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         let interval = std::time::Duration::from_secs_f64(self.config.interval_hours * 3600.0);
+        let auto_heal = self.config.auto_heal;
+        let dry_run = self.config.dry_run;
         tokio::spawn(async move {
             let mut timer = tokio::time::interval(interval);
             timer.tick().await;
             loop {
                 timer.tick().await;
                 tracing::info!("Integrity check starting");
-                match self.run_now(false, false).await {
+                match self.run_now(dry_run, auto_heal).await {
                     Ok(result) => tracing::info!("Integrity check complete: {:?}", result),
                     Err(e) => tracing::warn!("Integrity check failed: {}", e),
                 }
             }
         })
     }
+}
+
+#[derive(Debug)]
+enum HealStatus {
+    Healed,
+    Poisoned,
+    PeerMismatch,
+    PeerUnavailable,
+    VerifyFailed,
+    Failed,
+    Skipped,
+}
+
+struct HealReport {
+    issue_type: String,
+    status: HealStatus,
+}
+
+async fn heal_issue(
+    storage: &FsStorageBackend,
+    storage_root: &Path,
+    peer_fetcher: Option<&PeerFetcher>,
+    issue_type: &str,
+    bucket: &str,
+    key: &str,
+    detail: &str,
+) -> HealReport {
+    let status = match issue_type {
+        "corrupted_object" => {
+            heal_corrupted(storage, storage_root, peer_fetcher, bucket, key, detail).await
+        }
+        "stale_version" => heal_stale_version(storage_root, bucket, key).await,
+        "etag_cache_inconsistency" => heal_etag_cache(storage_root, bucket, key, detail).await,
+        "phantom_metadata" => heal_phantom_metadata(storage, bucket, key).await,
+        _ => HealStatus::Skipped,
+    };
+    HealReport {
+        issue_type: issue_type.to_string(),
+        status,
+    }
+}
+
+async fn heal_corrupted(
+    storage: &FsStorageBackend,
+    storage_root: &Path,
+    peer_fetcher: Option<&PeerFetcher>,
+    bucket: &str,
+    key: &str,
+    detail: &str,
+) -> HealStatus {
+    let stored_etag = parse_stored_etag(detail);
+    let actual_etag = parse_actual_etag(detail);
+
+    let live_path = storage_root.join(bucket).join(key);
+    let quarantine_rel = quarantine_relative_path(bucket, key);
+    let quarantine_full = storage_root.join(&quarantine_rel);
+
+    if let Some(parent) = quarantine_full.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("Heal {}/{}: mkdir quarantine failed: {}", bucket, key, e);
+            return HealStatus::Failed;
+        }
+    }
+
+    if live_path.exists() {
+        if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
+            tracing::error!(
+                "Heal {}/{}: quarantine rename failed: {}",
+                bucket,
+                key,
+                e
+            );
+            return HealStatus::Failed;
+        }
+    }
+
+    let quarantine_rel_str = quarantine_rel.to_string_lossy().replace('\\', "/");
+
+    if !stored_etag.is_empty() {
+        if let Some(fetcher) = peer_fetcher {
+            let nonce = uuid::Uuid::new_v4().simple().to_string();
+            let temp_path = live_path.with_file_name(format!(
+                "{}.healing.{}",
+                live_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "healing".to_string()),
+                nonce
+            ));
+            match fetcher
+                .fetch_for_heal(bucket, key, &stored_etag, &temp_path)
+                .await
+            {
+                HealOutcome::Healed { peer_etag, bytes } => {
+                    if let Err(e) = atomic_swap(&temp_path, &live_path) {
+                        tracing::error!(
+                            "Heal {}/{}: atomic swap failed: {} (restoring from quarantine)",
+                            bucket,
+                            key,
+                            e
+                        );
+                        let _ = std::fs::rename(&quarantine_full, &live_path);
+                        let _ = std::fs::remove_file(&temp_path);
+                        return HealStatus::Failed;
+                    }
+                    let _ = clear_poison_metadata(storage, bucket, key).await;
+                    tracing::info!(
+                        "Healed {}/{} from peer (etag={}, bytes={})",
+                        bucket,
+                        key,
+                        peer_etag,
+                        bytes
+                    );
+                    return HealStatus::Healed;
+                }
+                HealOutcome::PeerMismatch { stored, peer } => {
+                    let msg = format!("peer etag {} != stored {}", peer, stored);
+                    let _ =
+                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    tracing::warn!("Heal {}/{}: peer mismatch ({}), poisoned", bucket, key, msg);
+                    return HealStatus::PeerMismatch;
+                }
+                HealOutcome::PeerUnavailable { error } => {
+                    tracing::warn!(
+                        "Heal {}/{}: peer unavailable ({}), poisoning",
+                        bucket,
+                        key,
+                        error
+                    );
+                    let msg = format!(
+                        "etag mismatch (stored={}, actual={}) — peer unavailable: {}",
+                        stored_etag, actual_etag, error
+                    );
+                    let _ =
+                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    return HealStatus::PeerUnavailable;
+                }
+                HealOutcome::VerifyFailed { expected, actual } => {
+                    let msg = format!("peer download verify failed: expected={} actual={}", expected, actual);
+                    let _ =
+                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    tracing::warn!("Heal {}/{}: {}", bucket, key, msg);
+                    return HealStatus::VerifyFailed;
+                }
+                HealOutcome::NotConfigured => {
+                    let msg = format!(
+                        "etag mismatch (stored={}, actual={}); no peer configured",
+                        stored_etag, actual_etag
+                    );
+                    let _ =
+                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    return HealStatus::Poisoned;
+                }
+            }
+        }
+    }
+
+    let msg = format!(
+        "etag mismatch (stored={}, actual={}); no peer fetcher",
+        stored_etag, actual_etag
+    );
+    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+    HealStatus::Poisoned
+}
+
+async fn heal_stale_version(storage_root: &Path, bucket: &str, key: &str) -> HealStatus {
+    let versions_root = storage_root
+        .join(SYSTEM_ROOT)
+        .join(SYSTEM_BUCKETS_DIR)
+        .join(bucket)
+        .join(BUCKET_VERSIONS_DIR);
+    let src = versions_root.join(key);
+    if !src.exists() {
+        return HealStatus::Skipped;
+    }
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let dst = storage_root
+        .join(SYSTEM_ROOT)
+        .join(QUARANTINE_DIR)
+        .join(bucket)
+        .join(&ts)
+        .join("versions")
+        .join(key);
+    if let Some(parent) = dst.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("Stale-version quarantine mkdir failed {}/{}: {}", bucket, key, e);
+            return HealStatus::Failed;
+        }
+    }
+    if let Err(e) = std::fs::rename(&src, &dst) {
+        tracing::error!("Stale-version quarantine rename failed {}/{}: {}", bucket, key, e);
+        return HealStatus::Failed;
+    }
+    tracing::info!("Quarantined stale version {}/{}", bucket, key);
+    HealStatus::Healed
+}
+
+async fn heal_etag_cache(
+    storage_root: &Path,
+    bucket: &str,
+    key: &str,
+    _detail: &str,
+) -> HealStatus {
+    let etag_index_path = storage_root
+        .join(SYSTEM_ROOT)
+        .join(SYSTEM_BUCKETS_DIR)
+        .join(bucket)
+        .join("etag_index.json");
+    if !etag_index_path.exists() {
+        return HealStatus::Skipped;
+    }
+
+    let meta_root = storage_root
+        .join(SYSTEM_ROOT)
+        .join(SYSTEM_BUCKETS_DIR)
+        .join(bucket)
+        .join(BUCKET_META_DIR);
+    let entries = collect_index_entries(&meta_root);
+    let canonical = entries.get(key).and_then(|info| stored_etag(&info.entry));
+
+    let mut cache: HashMap<String, Value> = match std::fs::read_to_string(&etag_index_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(Value::Object(m)) => m.into_iter().collect(),
+        _ => return HealStatus::Failed,
+    };
+
+    match canonical {
+        Some(etag) => {
+            cache.insert(key.to_string(), Value::String(etag));
+        }
+        None => {
+            cache.remove(key);
+        }
+    }
+
+    let json_obj: serde_json::Map<String, Value> = cache.into_iter().collect();
+    match std::fs::write(
+        &etag_index_path,
+        serde_json::to_string_pretty(&Value::Object(json_obj)).unwrap_or_default(),
+    ) {
+        Ok(_) => HealStatus::Healed,
+        Err(e) => {
+            tracing::error!("etag-cache rewrite failed {}/{}: {}", bucket, key, e);
+            HealStatus::Failed
+        }
+    }
+}
+
+async fn heal_phantom_metadata(
+    storage: &FsStorageBackend,
+    bucket: &str,
+    key: &str,
+) -> HealStatus {
+    match storage.delete_object_metadata_entry(bucket, key).await {
+        Ok(_) => {
+            tracing::info!("Dropped phantom metadata for {}/{}", bucket, key);
+            HealStatus::Healed
+        }
+        Err(e) => {
+            tracing::error!("Failed to drop phantom metadata {}/{}: {}", bucket, key, e);
+            HealStatus::Failed
+        }
+    }
+}
+
+async fn poison_metadata(
+    storage: &FsStorageBackend,
+    bucket: &str,
+    key: &str,
+    detail: &str,
+    quarantine_rel: &str,
+) -> Result<(), String> {
+    let mut meta = storage
+        .get_object_metadata(bucket, key)
+        .await
+        .unwrap_or_default();
+    meta.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
+    meta.insert(
+        META_KEY_CORRUPTED_AT.to_string(),
+        chrono::Utc::now().to_rfc3339(),
+    );
+    meta.insert(META_KEY_CORRUPTION_DETAIL.to_string(), detail.to_string());
+    meta.insert(
+        META_KEY_QUARANTINE_PATH.to_string(),
+        quarantine_rel.to_string(),
+    );
+    storage
+        .put_object_metadata(bucket, key, &meta)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn clear_poison_metadata(
+    storage: &FsStorageBackend,
+    bucket: &str,
+    key: &str,
+) -> Result<(), String> {
+    let mut meta = storage
+        .get_object_metadata(bucket, key)
+        .await
+        .unwrap_or_default();
+    meta.remove(META_KEY_CORRUPTED);
+    meta.remove(META_KEY_CORRUPTED_AT);
+    meta.remove(META_KEY_CORRUPTION_DETAIL);
+    meta.remove(META_KEY_QUARANTINE_PATH);
+    storage
+        .put_object_metadata(bucket, key, &meta)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn quarantine_relative_path(bucket: &str, key: &str) -> PathBuf {
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    PathBuf::from(SYSTEM_ROOT)
+        .join(QUARANTINE_DIR)
+        .join(bucket)
+        .join(ts)
+        .join(key)
+}
+
+fn atomic_swap(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(src, dst)
+}
+
+fn parse_stored_etag(detail: &str) -> String {
+    detail
+        .split_whitespace()
+        .find_map(|s| s.strip_prefix("stored_etag="))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn parse_actual_etag(detail: &str) -> String {
+    detail
+        .split_whitespace()
+        .find_map(|s| s.strip_prefix("actual_etag="))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn build_result_json(
+    state: ScanState,
+    heal_stats: BTreeMap<String, HealStats>,
+    elapsed: f64,
+) -> Value {
+    let issues_healed: u64 = heal_stats.values().map(|s| s.healed).sum();
+    let heal_stats_json: serde_json::Map<String, Value> = heal_stats
+        .iter()
+        .map(|(k, v)| (k.clone(), v.to_value()))
+        .collect();
+
+    json!({
+        "objects_scanned": state.objects_scanned,
+        "buckets_scanned": state.buckets_scanned,
+        "corrupted_objects": state.corrupted_objects,
+        "orphaned_objects": state.orphaned_objects,
+        "phantom_metadata": state.phantom_metadata,
+        "stale_versions": state.stale_versions,
+        "etag_cache_inconsistencies": state.etag_cache_inconsistencies,
+        "issues_healed": issues_healed,
+        "heal_stats": Value::Object(heal_stats_json),
+        "issues": state.issues,
+        "errors": state.errors,
+        "execution_time_seconds": elapsed,
+    })
 }
 
 fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
@@ -359,6 +835,18 @@ fn stored_etag(entry: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn entry_metadata_map(entry: &Value) -> HashMap<String, String> {
+    entry
+        .get("metadata")
+        .and_then(|m| m.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn check_corrupted(
     state: &mut ScanState,
     bucket: &str,
@@ -378,11 +866,19 @@ fn check_corrupted(
         if !object_path.exists() {
             continue;
         }
+        let meta_map = entry_metadata_map(&info.entry);
+        if metadata_is_corrupted(&meta_map) {
+            continue;
+        }
         state.objects_scanned += 1;
 
         let Some(stored) = stored_etag(&info.entry) else {
             continue;
         };
+
+        if is_multipart_etag(&stored) {
+            continue;
+        }
 
         match myfsio_crypto::hashing::md5_file(&object_path) {
             Ok(actual) => {
@@ -416,6 +912,10 @@ fn check_phantom(
     for full_key in keys {
         if state.batch_exhausted(batch_size) {
             return;
+        }
+        let info = &entries[full_key];
+        if metadata_is_corrupted(&entry_metadata_map(&info.entry)) {
+            continue;
         }
         state.objects_scanned += 1;
         let object_path = bucket_path.join(full_key);
@@ -728,5 +1228,121 @@ mod tests {
         fs::create_dir_all(tmp.path().join(SYSTEM_ROOT).join("config")).unwrap();
         let state = scan_all_buckets(tmp.path(), 100);
         assert_eq!(state.buckets_scanned, 0);
+    }
+
+    #[test]
+    fn poisoned_entries_are_skipped_during_corruption_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        let bytes = b"some bytes that wont match";
+        fs::write(bucket_path.join("rotted.txt"), bytes).unwrap();
+
+        let mut map = Map::new();
+        map.insert(
+            "rotted.txt".to_string(),
+            json!({
+                "metadata": {
+                    "__etag__": "00000000000000000000000000000000",
+                    "__corrupted__": "true",
+                    "__corruption_detail__": "etag mismatch (already poisoned)",
+                }
+            }),
+        );
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&Value::Object(map)).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000);
+        assert_eq!(state.corrupted_objects, 0, "poisoned entries must not re-flag");
+    }
+
+    #[test]
+    fn parse_etag_helpers() {
+        let detail = "stored_etag=abc123 actual_etag=def456";
+        assert_eq!(parse_stored_etag(detail), "abc123");
+        assert_eq!(parse_actual_etag(detail), "def456");
+    }
+
+    #[test]
+    fn poisoned_entry_with_missing_file_is_not_phantom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        let mut map = Map::new();
+        map.insert(
+            "quarantined.txt".to_string(),
+            json!({
+                "metadata": {
+                    "__etag__": "deadbeefdeadbeefdeadbeefdeadbeef",
+                    "__corrupted__": "true",
+                    "__corruption_detail__": "etag mismatch (no peer)",
+                    "__quarantine_path__": ".myfsio.sys/quarantine/testbucket/2026/quarantined.txt",
+                }
+            }),
+        );
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&Value::Object(map)).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000);
+        assert_eq!(
+            state.phantom_metadata, 0,
+            "poisoned entries with quarantined files must not be reported as phantom metadata"
+        );
+        assert_eq!(state.corrupted_objects, 0);
+    }
+
+    #[test]
+    fn healthy_multipart_object_is_not_flagged_corrupted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+
+        fs::write(bucket_path.join("multi.bin"), b"healthy multipart body").unwrap();
+
+        write_index(
+            &meta_root,
+            &[(
+                "multi.bin",
+                "deadbeefdeadbeefdeadbeefdeadbeef-3",
+            )],
+        );
+
+        let state = scan_all_buckets(root, 10_000);
+        assert_eq!(
+            state.corrupted_objects, 0,
+            "multipart-style ETags must not be checked against whole-body MD5"
+        );
+        assert!(state.errors.is_empty(), "unexpected errors: {:?}", state.errors);
     }
 }

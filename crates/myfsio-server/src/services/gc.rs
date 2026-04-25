@@ -9,6 +9,7 @@ pub struct GcConfig {
     pub temp_file_max_age_hours: f64,
     pub multipart_max_age_days: u64,
     pub lock_file_max_age_hours: f64,
+    pub quarantine_max_age_days: u64,
     pub dry_run: bool,
 }
 
@@ -19,6 +20,7 @@ impl Default for GcConfig {
             temp_file_max_age_hours: 24.0,
             multipart_max_age_days: 7,
             lock_file_max_age_hours: 1.0,
+            quarantine_max_age_days: 7,
             dry_run: false,
         }
     }
@@ -106,6 +108,7 @@ impl GcService {
             "temp_file_max_age_hours": self.config.temp_file_max_age_hours,
             "multipart_max_age_days": self.config.multipart_max_age_days,
             "lock_file_max_age_hours": self.config.lock_file_max_age_hours,
+            "quarantine_max_age_days": self.config.quarantine_max_age_days,
             "dry_run": self.config.dry_run,
         })
     }
@@ -164,6 +167,8 @@ impl GcService {
         let mut multipart_uploads_deleted = 0u64;
         let mut lock_files_deleted = 0u64;
         let mut empty_dirs_removed = 0u64;
+        let mut quarantine_entries_deleted = 0u64;
+        let mut quarantine_bytes_freed = 0u64;
         let mut errors: Vec<String> = Vec::new();
 
         let now = std::time::SystemTime::now();
@@ -173,6 +178,8 @@ impl GcService {
             std::time::Duration::from_secs(self.config.multipart_max_age_days * 86400);
         let lock_max_age =
             std::time::Duration::from_secs_f64(self.config.lock_file_max_age_hours * 3600.0);
+        let quarantine_max_age =
+            std::time::Duration::from_secs(self.config.quarantine_max_age_days * 86400);
 
         let tmp_dir = self.storage_root.join(".myfsio.sys").join("tmp");
         if tmp_dir.exists() {
@@ -256,6 +263,58 @@ impl GcService {
             }
         }
 
+        let quarantine_dir = self.storage_root.join(".myfsio.sys").join("quarantine");
+        if quarantine_dir.exists() {
+            if let Ok(bucket_dirs) = std::fs::read_dir(&quarantine_dir) {
+                for bucket_entry in bucket_dirs.flatten() {
+                    if !bucket_entry.path().is_dir() {
+                        continue;
+                    }
+                    if let Ok(ts_dirs) = std::fs::read_dir(bucket_entry.path()) {
+                        for ts_entry in ts_dirs.flatten() {
+                            let ts_path = ts_entry.path();
+                            if !ts_path.is_dir() {
+                                continue;
+                            }
+                            let modified = ts_entry
+                                .metadata()
+                                .ok()
+                                .and_then(|m| m.modified().ok());
+                            let Some(modified) = modified else {
+                                continue;
+                            };
+                            let Ok(age) = now.duration_since(modified) else {
+                                continue;
+                            };
+                            if age <= quarantine_max_age {
+                                continue;
+                            }
+                            let bytes = dir_total_bytes(&ts_path);
+                            if !dry_run {
+                                if let Err(e) = std::fs::remove_dir_all(&ts_path) {
+                                    errors.push(format!(
+                                        "Failed to remove quarantine {}: {}",
+                                        ts_path.display(),
+                                        e
+                                    ));
+                                    continue;
+                                }
+                            }
+                            quarantine_entries_deleted += 1;
+                            quarantine_bytes_freed += bytes;
+                        }
+                    }
+                    if !dry_run {
+                        if let Ok(mut remaining) = std::fs::read_dir(bucket_entry.path()) {
+                            if remaining.next().is_none() {
+                                let _ = std::fs::remove_dir(bucket_entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if !dry_run {
             for dir in [&tmp_dir, &multipart_dir] {
                 if dir.exists() {
@@ -281,6 +340,8 @@ impl GcService {
             "multipart_uploads_deleted": multipart_uploads_deleted,
             "lock_files_deleted": lock_files_deleted,
             "empty_dirs_removed": empty_dirs_removed,
+            "quarantine_entries_deleted": quarantine_entries_deleted,
+            "quarantine_bytes_freed": quarantine_bytes_freed,
             "errors": errors,
         })
     }
@@ -312,4 +373,23 @@ impl GcService {
             }
         })
     }
+}
+
+fn dir_total_bytes(path: &std::path::Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+            }
+        }
+    }
+    total
 }

@@ -122,6 +122,40 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `SECRET_KEY` | unset, then fallback to `.myfsio.sys/config/.secret` if present | Session signing and IAM config encryption key |
 | `ADMIN_ACCESS_KEY` | unset | Optional deterministic first-run/reset access key |
 | `ADMIN_SECRET_KEY` | unset | Optional deterministic first-run/reset secret key |
+| `SESSION_LIFETIME_DAYS` | `1` | UI session lifetime in days |
+| `LOG_LEVEL` | `INFO` | Log verbosity (also honored as `RUST_LOG`) |
+| `REQUEST_BODY_TIMEOUT_SECONDS` | `60` | Per-request body read timeout |
+| `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum part size enforced where applicable (5 MiB) |
+| `BULK_DELETE_MAX_KEYS` | `1000` | Maximum keys per UI bulk-delete request |
+| `STREAM_CHUNK_SIZE` | `1048576` | Default streaming chunk size for opt-in routes |
+| `OBJECT_KEY_MAX_LENGTH_BYTES` | `1024` | Maximum object key length |
+| `OBJECT_CACHE_MAX_SIZE` | `100` | Object metadata cache capacity |
+| `BUCKET_CONFIG_CACHE_TTL_SECONDS` | `30` | Bucket config cache TTL |
+| `OBJECT_TAG_LIMIT` | `50` | Maximum tags per object |
+
+### Rate limiting
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RATE_LIMIT_DEFAULT` | `5000 per minute` | Default S3 / KMS rate limit. Accepts `N per <s/m/h/d>` or `N/<seconds>` |
+| `RATE_LIMIT_LIST_BUCKETS` | inherits `RATE_LIMIT_DEFAULT` | Override for `GET /` |
+| `RATE_LIMIT_BUCKET_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for `/{bucket}` |
+| `RATE_LIMIT_OBJECT_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for `/{bucket}/{key}` |
+| `RATE_LIMIT_HEAD_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for HEAD requests |
+| `RATE_LIMIT_ADMIN` | `60 per minute` | Override for `/admin/*` |
+| `RATE_LIMIT_STORAGE_URI` | `memory://` | Backend for rate-limit state. Only `memory://` is supported today |
+
+### CORS and proxying
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CORS_ORIGINS` | `*` | Server-level allowed origins (comma-separated) |
+| `CORS_METHODS` | `GET,PUT,POST,DELETE,OPTIONS,HEAD` | Server-level allowed methods |
+| `CORS_ALLOW_HEADERS` | `*` | Allowed request headers |
+| `CORS_EXPOSE_HEADERS` | `*` | Headers exposed to the browser |
+| `NUM_TRUSTED_PROXIES` | `0` | Trusted reverse-proxy count. Forwarded-IP headers are ignored when `0` |
+| `ALLOWED_REDIRECT_HOSTS` | empty | Comma-separated whitelist of safe UI login redirect hosts |
+| `ALLOW_INTERNAL_ENDPOINTS` | `false` | Gate for internal diagnostic routes |
 
 ### Feature toggles
 
@@ -131,6 +165,12 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `KMS_ENABLED` | `false` | Enable built-in KMS support |
 | `GC_ENABLED` | `false` | Start the garbage collector worker |
 | `INTEGRITY_ENABLED` | `false` | Start the integrity worker |
+| `INTEGRITY_AUTO_HEAL` | `false` | When the periodic scan finishes, attempt to heal each issue (peer-fetch corrupted bytes, drop phantom metadata, etc.) |
+| `INTEGRITY_DRY_RUN` | `false` | Report what the periodic scan would heal without touching anything |
+| `INTEGRITY_INTERVAL_HOURS` | `24` | Period between background integrity scans |
+| `INTEGRITY_BATCH_SIZE` | `10000` | Max objects scanned per cycle |
+| `INTEGRITY_HEAL_CONCURRENCY` | `4` | Max concurrent heal tasks per cycle |
+| `INTEGRITY_QUARANTINE_RETENTION_DAYS` | `7` | How long to retain quarantined files (cleaned up by GC) |
 | `LIFECYCLE_ENABLED` | `false` | Start the lifecycle worker |
 | `METRICS_HISTORY_ENABLED` | `false` | Persist system metrics snapshots |
 | `OPERATION_METRICS_ENABLED` | `false` | Persist API operation metrics |
@@ -162,15 +202,35 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `SITE_SYNC_MAX_RETRIES` | `2` | Site sync retry count |
 | `SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS` | `1.0` | Allowed skew between peers |
 
+### Garbage collection
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GC_INTERVAL_HOURS` | `6` | Hours between GC cycles |
+| `GC_TEMP_FILE_MAX_AGE_HOURS` | `24` | Delete temp files older than this |
+| `GC_MULTIPART_MAX_AGE_DAYS` | `7` | Delete orphaned multipart uploads older than this |
+| `GC_LOCK_FILE_MAX_AGE_HOURS` | `1` | Delete stale lock files older than this |
+| `GC_DRY_RUN` | `false` | Log deletions without removing files |
+
+### Encryption tuning
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ENCRYPTION_CHUNK_SIZE_BYTES` | `65536` | Plaintext chunk size for streaming AES-256-GCM (64 KiB) |
+| `KMS_GENERATE_DATA_KEY_MIN_BYTES` | `1` | Minimum size for `generate-data-key` |
+| `KMS_GENERATE_DATA_KEY_MAX_BYTES` | `1024` | Maximum size for `generate-data-key` |
+| `LIFECYCLE_MAX_HISTORY_PER_BUCKET` | `50` | Max lifecycle history records kept per bucket |
+
 ### Site identity values used by the UI
 
 These are read directly by UI pages:
 
-| Variable | Description |
-| --- | --- |
-| `SITE_ID` | Local site identifier shown in the UI |
-| `SITE_ENDPOINT` | Public endpoint for this site |
-| `SITE_REGION` | Display region for the local site |
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SITE_ID` | unset | Local site identifier shown in the UI |
+| `SITE_ENDPOINT` | unset | Public endpoint for this site |
+| `SITE_REGION` | matches `AWS_REGION` | Display region for the local site |
+| `SITE_PRIORITY` | `100` | Routing priority (lower = preferred) |
 
 ## 7. Data Layout
 
@@ -178,29 +238,39 @@ With the default `STORAGE_ROOT=./data`, the Rust server writes:
 
 ```text
 data/
-  <bucket>/
+  <bucket>/                              # raw object data
   .myfsio.sys/
     config/
-      iam.json
-      bucket_policies.json
-      connections.json
-      gc_history.json
-      integrity_history.json
-      metrics_history.json
-      operation_metrics.json
+      .secret                            # persisted SECRET_KEY (if generated)
+      iam.json                           # IAM users / access keys / policies
+      bucket_policies.json               # legacy bucket policies (fallback only)
+      connections.json                   # remote endpoint credentials
+      replication_rules.json             # replication rules
+      site_registry.json                 # local site + peer registry
+      website_domains.json               # domain → bucket mapping (if enabled)
+      gc_history.json                    # GC execution history (if enabled)
+      integrity_history.json             # integrity scan history (if enabled)
+      metrics_history.json               # system metrics history (if enabled)
+      operation_metrics.json             # API operation metrics (if enabled)
     buckets/<bucket>/
-      meta/
-      versions/
-    multipart/
+      .bucket.json                       # bucket config (versioning, cors, lifecycle, etc.)
+      meta/                              # per-object metadata
+      versions/                          # archived versions (if versioning enabled)
+      lifecycle_history.json             # lifecycle action log (if any rule has fired)
+      replication_failures.json          # bounded failure log
+      site_sync_state.json               # bidi sync watermark
+    multipart/                           # in-progress multipart uploads
     keys/
+      kms_master.key                     # 32-byte master key (base64)
+      kms_keys.json                      # KMS keys, encrypted under master key
 ```
 
-Important files:
+Notable files:
 
-- `data/.myfsio.sys/config/iam.json`: IAM users, access keys, and inline policies
-- `data/.myfsio.sys/config/bucket_policies.json`: bucket policies
-- `data/.myfsio.sys/config/connections.json`: replication connection settings
-- `data/.myfsio.sys/config/.secret`: persisted secret key when one has been generated for the install
+- `iam.json` is Fernet-encrypted at rest when `SECRET_KEY` is set.
+- `bucket_policies.json` is read only as a fallback for policies that pre-date per-bucket `.bucket.json`.
+- `kms_master.key` is plaintext on disk — protect `keys/` with filesystem permissions.
+- `*_history.json` files only appear when their owning service has been enabled at least once.
 
 ## 8. Background Services
 
@@ -230,14 +300,17 @@ Enable with:
 GC_ENABLED=true cargo run -p myfsio-server --
 ```
 
-Current Rust defaults from `GcConfig::default()`:
+Defaults (override with the env vars in section 6):
 
-- Run every 6 hours
-- Temp files older than 24 hours are eligible for cleanup
-- Multipart uploads older than 7 days are eligible for cleanup
-- Lock files older than 1 hour are eligible for cleanup
+- `GC_INTERVAL_HOURS=6`
+- `GC_TEMP_FILE_MAX_AGE_HOURS=24`
+- `GC_MULTIPART_MAX_AGE_DAYS=7`
+- `GC_LOCK_FILE_MAX_AGE_HOURS=1`
+- `GC_DRY_RUN=false`
 
-Those GC timings are currently hardcoded defaults, not environment-driven configuration.
+Each GC cycle also sweeps `data/.myfsio.sys/quarantine/<bucket>/<ts>/` directories whose `<ts>` mtime is older than `INTEGRITY_QUARANTINE_RETENTION_DAYS`, freeing the bytes recorded in `quarantine_bytes_freed` / `quarantine_entries_deleted` in the result JSON.
+
+History is persisted at `data/.myfsio.sys/config/gc_history.json` and can be triggered manually via `POST /admin/gc/run` (use `{"dry_run": true}` to preview).
 
 ### Integrity scanning
 
@@ -247,11 +320,27 @@ Enable with:
 INTEGRITY_ENABLED=true cargo run -p myfsio-server --
 ```
 
-Current Rust defaults from `IntegrityConfig::default()`:
+Tune with:
 
-- Run every 24 hours
-- Batch size 1000
-- Auto-heal disabled
+```bash
+INTEGRITY_INTERVAL_HOURS=24
+INTEGRITY_BATCH_SIZE=10000
+INTEGRITY_AUTO_HEAL=false
+INTEGRITY_DRY_RUN=false
+INTEGRITY_HEAL_CONCURRENCY=4
+INTEGRITY_QUARANTINE_RETENTION_DAYS=7
+```
+
+When `INTEGRITY_AUTO_HEAL=true` (and `INTEGRITY_DRY_RUN=false`), each scan ends with a heal phase that processes the issues it just recorded. For `corrupted_object` the bad bytes are renamed into `data/.myfsio.sys/quarantine/<bucket>/<ts>/<key>` and the heal logic tries, in order:
+
+1. **Pull from peer.** If a replication rule for the bucket points at a healthy remote whose `HEAD` returns the same ETag the local index has, the body is streamed to a temp file, MD5-verified against the stored ETag, and atomically swapped into the live path. The poison flags are cleared on success.
+2. **Poison the entry.** If there is no replication target, the peer disagrees on the ETag, the peer is unreachable, or the downloaded body fails verification, the index entry is mutated to add `__corrupted__: "true"`, `__corrupted_at__`, `__corruption_detail__`, and `__quarantine_path__`. The data file stays in quarantine for `INTEGRITY_QUARANTINE_RETENTION_DAYS`.
+
+Subsequent reads (`GET`, `HEAD`, `CopyObject` source) on a poisoned key return `500 ObjectCorrupted` instead of serving rotted bytes; replication push skips poisoned keys; subsequent integrity scans skip poisoned keys instead of re-flagging them. Overwriting the key with a fresh `PUT` clears the poison.
+
+`stale_version`, `etag_cache_inconsistency`, and `phantom_metadata` issues are healed locally (move-to-quarantine, rebuild cache, drop entry); `orphaned_object` is reported only.
+
+Override per-invocation by passing `auto_heal` / `dry_run` to `POST /admin/integrity/run`. The response and history records now include a `heal_stats` map keyed by issue type with `{found, healed, poisoned, peer_mismatch, peer_unavailable, verify_failed, failed, skipped}`. History is at `data/.myfsio.sys/config/integrity_history.json`.
 
 ### Metrics history
 

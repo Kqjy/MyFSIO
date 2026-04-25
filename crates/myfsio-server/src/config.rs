@@ -39,6 +39,12 @@ pub struct ServerConfig {
     pub gc_lock_file_max_age_hours: f64,
     pub gc_dry_run: bool,
     pub integrity_enabled: bool,
+    pub integrity_interval_hours: f64,
+    pub integrity_batch_size: usize,
+    pub integrity_auto_heal: bool,
+    pub integrity_dry_run: bool,
+    pub integrity_heal_concurrency: usize,
+    pub integrity_quarantine_retention_days: u64,
     pub metrics_enabled: bool,
     pub metrics_history_enabled: bool,
     pub metrics_interval_minutes: u64,
@@ -168,6 +174,13 @@ impl ServerConfig {
         let gc_dry_run = parse_bool_env("GC_DRY_RUN", false);
 
         let integrity_enabled = parse_bool_env("INTEGRITY_ENABLED", false);
+        let integrity_interval_hours = parse_f64_env("INTEGRITY_INTERVAL_HOURS", 24.0);
+        let integrity_batch_size = parse_usize_env("INTEGRITY_BATCH_SIZE", 10_000);
+        let integrity_auto_heal = parse_bool_env("INTEGRITY_AUTO_HEAL", false);
+        let integrity_dry_run = parse_bool_env("INTEGRITY_DRY_RUN", false);
+        let integrity_heal_concurrency = parse_usize_env("INTEGRITY_HEAL_CONCURRENCY", 4);
+        let integrity_quarantine_retention_days =
+            parse_u64_env("INTEGRITY_QUARANTINE_RETENTION_DAYS", 7);
 
         let metrics_enabled = parse_bool_env("OPERATION_METRICS_ENABLED", false);
 
@@ -276,6 +289,12 @@ impl ServerConfig {
             gc_lock_file_max_age_hours,
             gc_dry_run,
             integrity_enabled,
+            integrity_interval_hours,
+            integrity_batch_size,
+            integrity_auto_heal,
+            integrity_dry_run,
+            integrity_heal_concurrency,
+            integrity_quarantine_retention_days,
             metrics_enabled,
             metrics_history_enabled,
             metrics_interval_minutes,
@@ -357,6 +376,12 @@ impl Default for ServerConfig {
             gc_lock_file_max_age_hours: 1.0,
             gc_dry_run: false,
             integrity_enabled: false,
+            integrity_interval_hours: 24.0,
+            integrity_batch_size: 10_000,
+            integrity_auto_heal: false,
+            integrity_dry_run: false,
+            integrity_heal_concurrency: 4,
+            integrity_quarantine_retention_days: 7,
             metrics_enabled: false,
             metrics_history_enabled: false,
             metrics_interval_minutes: 5,

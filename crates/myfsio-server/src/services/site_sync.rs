@@ -1,19 +1,18 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_sdk_s3::Client;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncRead;
 use tokio::sync::Notify;
 
 use myfsio_common::types::{ListParams, ObjectMeta};
 use myfsio_storage::fs_backend::FsStorageBackend;
 use myfsio_storage::traits::StorageEngine;
 
+use crate::services::peer_fetch::PeerFetcher;
 use crate::services::replication::{ReplicationManager, ReplicationRule, MODE_BIDIRECTIONAL};
 use crate::services::s3_client::{build_client, ClientOptions};
 use crate::stores::connections::ConnectionStore;
@@ -53,6 +52,7 @@ pub struct SiteSyncWorker {
     storage: Arc<FsStorageBackend>,
     connections: Arc<ConnectionStore>,
     replication: Arc<ReplicationManager>,
+    peer_fetcher: Arc<PeerFetcher>,
     storage_root: PathBuf,
     interval: Duration,
     batch_size: usize,
@@ -75,22 +75,38 @@ impl SiteSyncWorker {
         max_retries: u32,
         clock_skew_tolerance: f64,
     ) -> Self {
-        Self {
-            storage,
-            connections,
-            replication,
-            storage_root,
-            interval: Duration::from_secs(interval_seconds),
-            batch_size,
-            clock_skew_tolerance,
-            client_options: ClientOptions {
+        let client_options = ClientOptions {
+            connect_timeout,
+            read_timeout,
+            max_attempts: max_retries,
+        };
+        let peer_fetcher = Arc::new(PeerFetcher::new(
+            storage.clone(),
+            connections.clone(),
+            replication.clone(),
+            ClientOptions {
                 connect_timeout,
                 read_timeout,
                 max_attempts: max_retries,
             },
+        ));
+        Self {
+            storage,
+            connections,
+            replication,
+            peer_fetcher,
+            storage_root,
+            interval: Duration::from_secs(interval_seconds),
+            batch_size,
+            clock_skew_tolerance,
+            client_options,
             bucket_stats: Mutex::new(HashMap::new()),
             shutdown: Arc::new(Notify::new()),
         }
+    }
+
+    pub fn peer_fetcher(&self) -> Arc<PeerFetcher> {
+        self.peer_fetcher.clone()
     }
 
     pub fn shutdown(&self) {
@@ -383,60 +399,9 @@ impl SiteSyncWorker {
         local_bucket: &str,
         key: &str,
     ) -> bool {
-        let resp = match client
-            .get_object()
-            .bucket(remote_bucket)
-            .key(key)
-            .send()
+        self.peer_fetcher
+            .fetch_into_storage(client, remote_bucket, local_bucket, key)
             .await
-        {
-            Ok(r) => r,
-            Err(err) => {
-                tracing::error!("Pull GetObject failed {}/{}: {:?}", local_bucket, key, err);
-                return false;
-            }
-        };
-
-        let head = match client
-            .head_object()
-            .bucket(remote_bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(err) => {
-                tracing::error!("Pull HeadObject failed {}/{}: {:?}", local_bucket, key, err);
-                return false;
-            }
-        };
-
-        let metadata: Option<HashMap<String, String>> = head
-            .metadata()
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-
-        let stream = resp.body.into_async_read();
-        let boxed: Pin<Box<dyn AsyncRead + Send>> = Box::pin(stream);
-
-        match self
-            .storage
-            .put_object(local_bucket, key, boxed, metadata)
-            .await
-        {
-            Ok(_) => {
-                tracing::debug!("Pulled object {}/{} from remote", local_bucket, key);
-                true
-            }
-            Err(err) => {
-                tracing::error!(
-                    "Store pulled object failed {}/{}: {}",
-                    local_bucket,
-                    key,
-                    err
-                );
-                false
-            }
-        }
     }
 
     async fn apply_remote_deletion(&self, bucket: &str, key: &str) -> bool {

@@ -23,6 +23,12 @@ pub enum StorageError {
         key: String,
         version_id: String,
     },
+    #[error("Object corrupted: {bucket}/{key} ({detail})")]
+    ObjectCorrupted {
+        bucket: String,
+        key: String,
+        detail: String,
+    },
     #[error("Invalid bucket name: {0}")]
     InvalidBucketName(String),
     #[error("Invalid object key: {0}")]
@@ -72,6 +78,15 @@ impl From<StorageError> for S3Error {
                 version_id,
             } => S3Error::from_code(S3ErrorCode::MethodNotAllowed)
                 .with_resource(format!("/{}/{}?versionId={}", bucket, key, version_id)),
+            StorageError::ObjectCorrupted {
+                bucket,
+                key,
+                detail,
+            } => S3Error::new(
+                S3ErrorCode::ObjectCorrupted,
+                format!("Object corrupted: {}", detail),
+            )
+            .with_resource(format!("/{}/{}", bucket, key)),
             StorageError::InvalidBucketName(msg) => {
                 S3Error::new(S3ErrorCode::InvalidBucketName, msg)
             }

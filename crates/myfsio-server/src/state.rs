@@ -6,7 +6,9 @@ use crate::services::access_logging::AccessLoggingService;
 use crate::services::gc::GcService;
 use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
+use crate::services::peer_fetch::PeerFetcher;
 use crate::services::replication::ReplicationManager;
+use crate::services::s3_client::ClientOptions;
 use crate::services::site_registry::SiteRegistry;
 use crate::services::site_sync::SiteSyncWorker;
 use crate::services::system_metrics::SystemMetricsService;
@@ -66,18 +68,9 @@ impl AppState {
                     temp_file_max_age_hours: config.gc_temp_file_max_age_hours,
                     multipart_max_age_days: config.gc_multipart_max_age_days,
                     lock_file_max_age_hours: config.gc_lock_file_max_age_hours,
+                    quarantine_max_age_days: config.integrity_quarantine_retention_days,
                     dry_run: config.gc_dry_run,
                 },
-            )))
-        } else {
-            None
-        };
-
-        let integrity = if config.integrity_enabled {
-            Some(Arc::new(IntegrityService::new(
-                storage.clone(),
-                &config.storage_root,
-                crate::services::integrity::IntegrityConfig::default(),
             )))
         } else {
             None
@@ -156,6 +149,39 @@ impl AppState {
                 Duration::from_secs(config.site_sync_read_timeout_secs),
                 config.site_sync_max_retries,
                 config.site_sync_clock_skew_tolerance,
+            )))
+        } else {
+            None
+        };
+
+        let integrity_peer_fetcher: Option<Arc<PeerFetcher>> = if let Some(ref ss) = site_sync {
+            Some(ss.peer_fetcher())
+        } else {
+            Some(Arc::new(PeerFetcher::new(
+                storage.clone(),
+                connections.clone(),
+                replication.clone(),
+                ClientOptions {
+                    connect_timeout: Duration::from_secs(config.site_sync_connect_timeout_secs),
+                    read_timeout: Duration::from_secs(config.site_sync_read_timeout_secs),
+                    max_attempts: config.site_sync_max_retries,
+                },
+            )))
+        };
+
+        let integrity = if config.integrity_enabled {
+            Some(Arc::new(IntegrityService::new(
+                storage.clone(),
+                &config.storage_root,
+                crate::services::integrity::IntegrityConfig {
+                    interval_hours: config.integrity_interval_hours,
+                    batch_size: config.integrity_batch_size,
+                    auto_heal: config.integrity_auto_heal,
+                    dry_run: config.integrity_dry_run,
+                    heal_concurrency: config.integrity_heal_concurrency,
+                    quarantine_retention_days: config.integrity_quarantine_retention_days,
+                },
+                integrity_peer_fetcher,
             )))
         } else {
             None

@@ -118,29 +118,69 @@ cargo build --release -p myfsio-server
                 <td>Directory for buckets and objects.</td>
               </tr>
               <tr>
-                <td><code>MAX_UPLOAD_SIZE</code></td>
-                <td><code>1 GB</code></td>
-                <td>Max request body size in bytes.</td>
+                <td><code>IAM_CONFIG</code></td>
+                <td><code>&lt;STORAGE_ROOT&gt;/.myfsio.sys/config/iam.json</code></td>
+                <td>IAM users / access keys file path.</td>
               </tr>
               <tr>
                 <td><code>SECRET_KEY</code></td>
-                <td>(Auto-generated)</td>
+                <td>(loaded from <code>.myfsio.sys/config/.secret</code> when present)</td>
                 <td>Session signing and IAM-at-rest encryption key. <strong>Set explicitly in production.</strong></td>
               </tr>
               <tr>
                 <td><code>HOST</code></td>
                 <td><code>127.0.0.1</code></td>
-                <td>Bind interface.</td>
+                <td>Bind interface for both API and UI listeners.</td>
               </tr>
               <tr>
                 <td><code>PORT</code></td>
                 <td><code>5000</code></td>
-                <td>Listen port (UI uses 5100).</td>
+                <td>S3 API listen port.</td>
               </tr>
               <tr>
-                <td><code>DISPLAY_TIMEZONE</code></td>
-                <td><code>UTC</code></td>
-                <td>Timezone for UI timestamps (e.g., <code>US/Eastern</code>, <code>Asia/Tokyo</code>).</td>
+                <td><code>UI_PORT</code></td>
+                <td><code>5100</code></td>
+                <td>Web UI listen port.</td>
+              </tr>
+              <tr>
+                <td><code>UI_ENABLED</code></td>
+                <td><code>true</code></td>
+                <td>Set to <code>false</code> to run API-only (no UI listener).</td>
+              </tr>
+              <tr>
+                <td><code>AWS_REGION</code></td>
+                <td><code>us-east-1</code></td>
+                <td>Region used in SigV4 scope.</td>
+              </tr>
+              <tr>
+                <td><code>LOG_LEVEL</code></td>
+                <td><code>INFO</code></td>
+                <td>Log verbosity (also honored via <code>RUST_LOG</code>).</td>
+              </tr>
+              <tr>
+                <td><code>SESSION_LIFETIME_DAYS</code></td>
+                <td><code>1</code></td>
+                <td>UI session lifetime in days.</td>
+              </tr>
+              <tr>
+                <td><code>REQUEST_BODY_TIMEOUT_SECONDS</code></td>
+                <td><code>60</code></td>
+                <td>Per-request body read timeout for the S3 API.</td>
+              </tr>
+              <tr>
+                <td><code>MULTIPART_MIN_PART_SIZE</code></td>
+                <td><code>5242880</code></td>
+                <td>Minimum part size enforced for multipart uploads (5&nbsp;MiB).</td>
+              </tr>
+              <tr>
+                <td><code>BULK_DELETE_MAX_KEYS</code></td>
+                <td><code>1000</code></td>
+                <td>Maximum keys accepted by the UI bulk-delete endpoint.</td>
+              </tr>
+              <tr>
+                <td><code>STREAM_CHUNK_SIZE</code></td>
+                <td><code>1048576</code></td>
+                <td>Default streaming chunk size for routes that opt into configured chunking (1&nbsp;MiB).</td>
               </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">CORS Settings</td>
@@ -166,22 +206,32 @@ cargo build --release -p myfsio-server
                 <td>Response headers visible to browsers (e.g., <code>ETag</code>).</td>
               </tr>
               <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Security Settings</td>
-              </tr>
-              <tr>
-                <td><code>AUTH_MAX_ATTEMPTS</code></td>
-                <td><code>5</code></td>
-                <td>Failed login attempts before lockout.</td>
-              </tr>
-              <tr>
-                <td><code>AUTH_LOCKOUT_MINUTES</code></td>
-                <td><code>15</code></td>
-                <td>Lockout duration after max failed attempts.</td>
+                <td colspan="3" class="fw-semibold">Rate Limiting</td>
               </tr>
               <tr>
                 <td><code>RATE_LIMIT_DEFAULT</code></td>
-                <td><code>200 per minute</code></td>
-                <td>Default rate limit for S3 and KMS API endpoints.</td>
+                <td><code>5000 per minute</code></td>
+                <td>Default rate limit for S3 and KMS API endpoints. Accepts <code>N per &lt;second/minute/hour/day&gt;</code> or <code>N/&lt;seconds&gt;</code>.</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_LIST_BUCKETS</code></td>
+                <td>inherits <code>RATE_LIMIT_DEFAULT</code></td>
+                <td>Rate limit for <code>GET /</code> (ListBuckets).</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_BUCKET_OPS</code></td>
+                <td>inherits <code>RATE_LIMIT_DEFAULT</code></td>
+                <td>Rate limit for bucket-scoped operations (<code>/bucket</code>).</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_OBJECT_OPS</code></td>
+                <td>inherits <code>RATE_LIMIT_DEFAULT</code></td>
+                <td>Rate limit for object-scoped operations (<code>/bucket/key</code>).</td>
+              </tr>
+              <tr>
+                <td><code>RATE_LIMIT_HEAD_OPS</code></td>
+                <td>inherits <code>RATE_LIMIT_DEFAULT</code></td>
+                <td>Rate limit applied when the request method is HEAD.</td>
               </tr>
               <tr>
                 <td><code>RATE_LIMIT_ADMIN</code></td>
@@ -204,30 +254,7 @@ cargo build --release -p myfsio-server
                 <td>Custom secret key for the admin user on first run or credential reset. Random if unset.</td>
               </tr>
               <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Server Settings</td>
-              </tr>
-              <tr>
-                <td><code>SERVER_THREADS</code></td>
-                <td><code>0</code> (auto)</td>
-                <td>Granian blocking threads (1-64). 0 = auto (CPU cores × 2).</td>
-              </tr>
-              <tr>
-                <td><code>SERVER_CONNECTION_LIMIT</code></td>
-                <td><code>0</code> (auto)</td>
-                <td>Max concurrent connections (10-1000). 0 = auto (RAM-based).</td>
-              </tr>
-              <tr>
-                <td><code>SERVER_BACKLOG</code></td>
-                <td><code>0</code> (auto)</td>
-                <td>TCP listen backlog (64-4096). 0 = auto (conn_limit × 2).</td>
-              </tr>
-              <tr>
-                <td><code>SERVER_CHANNEL_TIMEOUT</code></td>
-                <td><code>120</code></td>
-                <td>Idle connection timeout in seconds (10-300).</td>
-              </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Encryption Settings</td>
+                <td colspan="3" class="fw-semibold">Feature Toggles</td>
               </tr>
               <tr>
                 <td><code>ENCRYPTION_ENABLED</code></td>
@@ -237,20 +264,32 @@ cargo build --release -p myfsio-server
               <tr>
                 <td><code>KMS_ENABLED</code></td>
                 <td><code>false</code></td>
-                <td>Enable KMS key management for encryption.</td>
-              </tr>
-              <tr class="table-secondary">
-                <td colspan="3" class="fw-semibold">Logging Settings</td>
+                <td>Enable built-in KMS key management.</td>
               </tr>
               <tr>
-                <td><code>LOG_LEVEL</code></td>
-                <td><code>INFO</code></td>
-                <td>Log verbosity: DEBUG, INFO, WARNING, ERROR.</td>
+                <td><code>GC_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Start the garbage collector worker.</td>
               </tr>
               <tr>
-                <td><code>LOG_TO_FILE</code></td>
-                <td><code>true</code></td>
-                <td>Enable file logging.</td>
+                <td><code>INTEGRITY_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Start the integrity scanner worker.</td>
+              </tr>
+              <tr>
+                <td><code>LIFECYCLE_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Start the lifecycle worker.</td>
+              </tr>
+              <tr>
+                <td><code>WEBSITE_HOSTING_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable static website hosting and domain mappings.</td>
+              </tr>
+              <tr>
+                <td><code>SITE_SYNC_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Start the bi-directional site sync worker.</td>
               </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Metrics History Settings</td>
@@ -401,16 +440,6 @@ cargo build --release -p myfsio-server
                 <td>Max lifecycle history records per bucket.</td>
               </tr>
               <tr>
-                <td><code>OBJECT_CACHE_TTL</code></td>
-                <td><code>60</code></td>
-                <td>Seconds to cache object metadata.</td>
-              </tr>
-              <tr>
-                <td><code>BULK_DOWNLOAD_MAX_BYTES</code></td>
-                <td><code>1 GB</code></td>
-                <td>Max total size for bulk ZIP downloads.</td>
-              </tr>
-              <tr>
                 <td><code>ENCRYPTION_CHUNK_SIZE_BYTES</code></td>
                 <td><code>65536</code></td>
                 <td>Chunk size for streaming encryption (64 KB).</td>
@@ -429,7 +458,7 @@ cargo build --release -p myfsio-server
           </table>
         </div>
         <div class="alert alert-warning mt-3 mb-0 small">
-          <strong>Production Checklist:</strong> Set <code>SECRET_KEY</code> (also enables IAM config encryption at rest), restrict <code>CORS_ORIGINS</code>, configure <code>API_BASE_URL</code>, enable HTTPS via reverse proxy, use <code>--prod</code> flag, and set credential expiry on non-admin users.
+          <strong>Production Checklist:</strong> Set <code>SECRET_KEY</code> (also enables IAM config encryption at rest), restrict <code>CORS_ORIGINS</code>, configure <code>API_BASE_URL</code>, enable HTTPS via a reverse proxy, run <code>myfsio-server --check-config</code> before starting, and set credential expiry on non-admin users.
         </div>
       </div>
     </article>
@@ -527,7 +556,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
           <div>
             <h3 class="h6 text-uppercase text-muted">Uploads</h3>
             <ul>
-              <li>Drag and drop folders or files into the upload modal. Objects above 16&nbsp;MB switch to multipart automatically.</li>
+              <li>Drag and drop folders or files into the upload modal. Objects above 8&nbsp;MB switch to multipart automatically.</li>
               <li>Progress rows highlight retries, throughput, and completion even if you close the modal.</li>
             </ul>
           </div>
@@ -536,7 +565,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <ul>
               <li>Navigate folder hierarchies using breadcrumbs. Objects with <code>/</code> in keys display as folders.</li>
               <li>Infinite scroll loads more objects automatically. Choose batch size (50–250) from the footer dropdown.</li>
-              <li>Bulk select objects for multi-delete or multi-download (ZIP archive, up to 1 GiB). Filter by name using the search box.</li>
+              <li>Bulk select objects for multi-delete or multi-download (ZIP archive, up to 256&nbsp;MB total). Filter by name using the search box.</li>
               <li>If loading fails, click <strong>Retry</strong> to attempt again—no page refresh needed.</li>
             </ul>
           </div>
@@ -853,46 +882,15 @@ s3.complete_multipart_upload(
             </li>
         </ol>
 
-        <div class="alert alert-light border mb-3 overflow-hidden">
-            <div class="d-flex flex-column flex-sm-row gap-2 mb-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1 flex-shrink-0 d-none d-sm-block" viewBox="0 0 16 16">
+        <div class="alert alert-light border mb-3">
+            <div class="d-flex gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-terminal text-muted mt-1 flex-shrink-0" viewBox="0 0 16 16">
                   <path d="M6 9a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3A.5.5 0 0 1 6 9zM3.854 4.146a.5.5 0 1 0-.708.708L4.793 6.5 3.146 8.146a.5.5 0 1 0 .708.708l2-2a.5.5 0 0 0 0-.708l-2-2z"/>
                   <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2H2zm12 1a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h12z"/>
                 </svg>
-                <div class="flex-grow-1 min-width-0">
+                <div>
                     <strong>Headless Target Setup</strong>
-                    <p class="small text-muted mb-2">If your target server has no UI, create a <code>setup_target.py</code> script to bootstrap credentials:</p>
-<pre class="mb-0 overflow-auto" style="max-width: 100%;"><code class="language-python"># setup_target.py
-from pathlib import Path
-from app.iam import IamService
-from app.storage import ObjectStorage
-
-# Initialize services (paths match default config)
-data_dir = Path("data")
-iam = IamService(data_dir / ".myfsio.sys" / "config" / "iam.json")
-storage = ObjectStorage(data_dir)
-
-# 1. Create the bucket
-bucket_name = "backup-bucket"
-try:
-    storage.create_bucket(bucket_name)
-    print(f"Bucket '{bucket_name}' created.")
-except Exception as e:
-    print(f"Bucket creation skipped: {e}")
-
-# 2. Create the user
-try:
-    creds = iam.create_user(
-        display_name="Replication User",
-        policies=[{"bucket": bucket_name, "actions": ["write", "read", "list"]}]
-    )
-    print("\n--- CREDENTIALS GENERATED ---")
-    print(f"Access Key: {creds['access_key']}")
-    print(f"Secret Key: {creds['secret_key']}")
-    print("-----------------------------")
-except Exception as e:
-    print(f"User creation failed: {e}")</code></pre>
-                    <p class="small text-muted mt-2 mb-0">Save and run: <code>python setup_target.py</code></p>
+                    <p class="small text-muted mb-0">If your target server has no UI, start it with <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> set so the first-run bootstrap installs deterministic credentials, then create the destination bucket via the AWS CLI: <code>aws --endpoint-url &lt;target&gt; s3api create-bucket --bucket backup-bucket</code>. Use the admin API at <code>/admin/iam/users</code> (or <code>--reset-cred</code>) to manage credentials remotely.</p>
                 </div>
             </div>
         </div>
@@ -1052,15 +1050,15 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
             <tbody>
               <tr>
                 <td><strong>Retry Logic</strong></td>
-                <td>boto3 automatically handles 429 (rate limit) errors using exponential backoff with <code>max_attempts=2</code></td>
+                <td>The replication worker retries failed transfers up to <code>REPLICATION_MAX_RETRIES</code> times (default <code>2</code>).</td>
               </tr>
               <tr>
-                <td><strong>Concurrency</strong></td>
-                <td>Uses a ThreadPoolExecutor with 4 parallel workers for replication tasks</td>
+                <td><strong>Failure Budget</strong></td>
+                <td>After <code>REPLICATION_MAX_FAILURES_PER_BUCKET</code> recorded failures (default <code>50</code>), further records for that bucket are dropped until a retry succeeds.</td>
               </tr>
               <tr>
                 <td><strong>Timeouts</strong></td>
-                <td>Connect: 5s, Read: 30s. Large files use streaming transfers</td>
+                <td>Connect: <code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code> (default 5s), Read: <code>REPLICATION_READ_TIMEOUT_SECONDS</code> (default 30s). Objects larger than <code>REPLICATION_STREAMING_THRESHOLD_BYTES</code> (default 10&nbsp;MB) use streaming transfers.</td>
               </tr>
             </tbody>
           </table>
@@ -1470,17 +1468,23 @@ curl -X POST {{ api_base }}/kms/keys \
 curl {{ api_base }}/kms/keys \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
-# Rotate a key (creates new key material)
-curl -X POST {{ api_base }}/kms/keys/{key-id}/rotate \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
-
-# Disable/Enable a key
+# Disable a key
 curl -X POST {{ api_base }}/kms/keys/{key-id}/disable \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
-# Schedule key deletion (30-day waiting period)
-curl -X DELETE "{{ api_base }}/kms/keys/{key-id}?waiting_period_days=30" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+# Re-enable a key
+curl -X POST {{ api_base }}/kms/keys/{key-id}/enable \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Delete a key
+curl -X DELETE "{{ api_base }}/kms/keys/{key-id}" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+
+# Generate a data key (sized between KMS_GENERATE_DATA_KEY_MIN_BYTES and _MAX_BYTES)
+curl -X POST {{ api_base }}/kms/generate-data-key \
+  -H "Content-Type: application/json" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  -d '{"KeyId": "&lt;key-id&gt;", "NumberOfBytes": 32}'</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">How It Works</h3>
         <p class="small text-muted mb-0">
@@ -1744,14 +1748,11 @@ curl "{{ api_base }}/admin/gc/history?limit=10" \
               </tr>
             </thead>
             <tbody>
-              <tr><td><code>INTEGRITY_ENABLED</code></td><td><code>false</code></td><td>Enable background integrity scanning</td></tr>
-              <tr><td><code>INTEGRITY_INTERVAL_HOURS</code></td><td><code>24</code></td><td>Hours between scan cycles</td></tr>
-              <tr><td><code>INTEGRITY_BATCH_SIZE</code></td><td><code>1000</code></td><td>Max objects to scan per cycle</td></tr>
-              <tr><td><code>INTEGRITY_AUTO_HEAL</code></td><td><code>false</code></td><td>Automatically repair detected issues</td></tr>
-              <tr><td><code>INTEGRITY_DRY_RUN</code></td><td><code>false</code></td><td>Log issues without healing</td></tr>
+              <tr><td><code>INTEGRITY_ENABLED</code></td><td><code>false</code></td><td>Enable the background integrity scanner</td></tr>
             </tbody>
           </table>
         </div>
+        <p class="small text-muted mb-3">Other scanner settings (interval, batch size, auto-heal, dry run) currently use hardcoded defaults: 24-hour interval, batch size 10&nbsp;000, auto-heal off, dry run off. Use the admin API below to trigger a one-off scan with <code>auto_heal</code> or <code>dry_run</code> overrides.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">What Gets Checked</h3>
         <div class="table-responsive mb-3">
@@ -1819,7 +1820,7 @@ curl "{{ api_base }}/admin/integrity/history?limit=10" \
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
             <div>
-              <strong>Dry Run:</strong> Use <code>INTEGRITY_DRY_RUN=true</code> or pass <code>{"dry_run": true}</code> to the API to preview detected issues without making any changes. Combine with <code>{"auto_heal": true}</code> to see what would be repaired.
+              <strong>Dry Run:</strong> Pass <code>{"dry_run": true}</code> to <code>/admin/integrity/run</code> to preview detected issues without making any changes. Combine with <code>{"auto_heal": true}</code> to see what would be repaired.
             </div>
           </div>
         </div>
@@ -2048,9 +2049,9 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
                 <td>Update IAM inline policies or remove conflicting deny statements.</td>
               </tr>
               <tr>
-                <td>Large uploads fail instantly</td>
-                <td><code>MAX_UPLOAD_SIZE</code> exceeded</td>
-                <td>Raise the env var or split the object.</td>
+                <td>Large uploads time out mid-stream</td>
+                <td><code>REQUEST_BODY_TIMEOUT_SECONDS</code> exceeded</td>
+                <td>Raise the timeout, use multipart uploads, or upload from a faster network.</td>
               </tr>
               <tr>
                 <td>Requests hit the wrong host</td>
@@ -2059,8 +2060,8 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
               </tr>
               <tr>
                 <td>Large folder uploads hitting rate limits (429)</td>
-                <td><code>RATE_LIMIT_DEFAULT</code> exceeded (200/min)</td>
-                <td>Increase <code>RATE_LIMIT_DEFAULT</code> in env config or upload in smaller batches. Distributed rate-limit storage is not supported yet.</td>
+                <td><code>RATE_LIMIT_DEFAULT</code> exceeded (5000/min by default)</td>
+                <td>Increase <code>RATE_LIMIT_DEFAULT</code> (or the per-route override), or upload in smaller batches. Distributed rate-limit storage is not supported yet.</td>
               </tr>
             </tbody>
           </table>
@@ -2079,7 +2080,7 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
 curl {{ api_base }}/myfsio/health
 
 # Response
-{"status": "ok", "version": "0.1.7"}</code></pre>
+{"status": "ok", "version": "0.5.0"}</code></pre>
 
         <p class="small text-muted mb-3">Use this endpoint for:</p>
         <ul class="small text-muted mb-0">
@@ -2248,7 +2249,7 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
         <p class="text-muted">Query CSV, JSON, or Parquet files directly using SQL without downloading the entire object.</p>
 
         <div class="alert alert-info border small mb-3">
-          <strong>Prerequisite:</strong> Requires DuckDB to be installed (<code>pip install duckdb</code>)
+          <strong>Note:</strong> DuckDB is bundled into the Rust server binary &mdash; no separate install is required.
         </div>
 
 <pre class="mb-3"><code class="language-bash"># Query a CSV file
@@ -2816,20 +2817,36 @@ GET|PUT /admin/site                     # Local site config
 GET     /admin/sites                    # List peers
 POST    /admin/sites                    # Register peer
 GET|PUT|DELETE /admin/sites/&lt;id&gt;        # Manage peer
-GET     /admin/sites/&lt;id&gt;/health        # Peer health
+GET|POST /admin/sites/&lt;id&gt;/health       # Peer health
+GET     /admin/sites/&lt;id&gt;/bidirectional-status  # Bidi sync state
 GET     /admin/topology                 # Cluster topology
-GET|POST|PUT|DELETE /admin/website-domains  # Domain mappings
+GET|POST /admin/website-domains              # List / Create domain mapping
+GET|PUT|DELETE /admin/website-domains/&lt;domain&gt;  # Manage domain mapping
+GET     /admin/iam/users                # List IAM users
+GET     /admin/iam/users/&lt;id&gt;           # Get user
+GET     /admin/iam/users/&lt;id&gt;/policies  # Get user policies
+POST    /admin/iam/users/&lt;id&gt;/access-keys     # Create access key
+DELETE  /admin/iam/users/&lt;id&gt;/access-keys/&lt;ak&gt; # Delete access key
+POST    /admin/iam/users/&lt;id&gt;/disable    # Disable user
+POST    /admin/iam/users/&lt;id&gt;/enable     # Enable user
+GET|POST /admin/gc/status, /admin/gc/run, /admin/gc/history
+GET|POST /admin/integrity/status, /admin/integrity/run, /admin/integrity/history
 
-# KMS API
-GET|POST /kms/keys                      # List / Create keys
-GET|DELETE /kms/keys/&lt;id&gt;               # Get / Delete key
-POST   /kms/keys/&lt;id&gt;/enable            # Enable key
-POST   /kms/keys/&lt;id&gt;/disable           # Disable key
-POST   /kms/keys/&lt;id&gt;/rotate            # Rotate key
-POST   /kms/encrypt                     # Encrypt data
-POST   /kms/decrypt                     # Decrypt data
-POST   /kms/generate-data-key           # Generate data key
-POST   /kms/generate-random             # Generate random bytes</code></pre>
+# KMS API (only mounted when KMS_ENABLED=true)
+GET|POST /kms/keys                            # List / Create keys
+GET|DELETE /kms/keys/&lt;id&gt;                     # Get / Delete key
+POST   /kms/keys/&lt;id&gt;/enable                  # Enable key
+POST   /kms/keys/&lt;id&gt;/disable                 # Disable key
+POST   /kms/encrypt                           # Encrypt data
+POST   /kms/decrypt                           # Decrypt data
+POST   /kms/re-encrypt                        # Re-encrypt under a different key
+POST   /kms/generate-data-key                 # Generate data key
+POST   /kms/generate-data-key-without-plaintext  # Generate wrapped DEK only
+POST   /kms/generate-random                   # Generate random bytes
+POST   /kms/client/generate-key               # Client-side key helper
+POST   /kms/client/encrypt                    # Client-side encrypt helper
+POST   /kms/client/decrypt                    # Client-side decrypt helper
+POST   /kms/materials/&lt;id&gt;                    # Fetch wrapped key materials</code></pre>
       </div>
     </article>
   </div>

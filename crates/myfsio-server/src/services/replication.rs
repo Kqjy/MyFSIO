@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use myfsio_common::types::ListParams;
-use myfsio_storage::fs_backend::FsStorageBackend;
+use myfsio_storage::fs_backend::{metadata_is_corrupted, FsStorageBackend};
 use myfsio_storage::traits::StorageEngine;
 
 use crate::services::s3_client::{build_client, check_endpoint_health, ClientOptions};
@@ -481,6 +481,17 @@ impl ReplicationManager {
                 }
             }
             return;
+        }
+
+        if let Ok(src_meta) = self.storage.get_object_metadata(bucket, object_key).await {
+            if metadata_is_corrupted(&src_meta) {
+                tracing::warn!(
+                    "Replication skipped for {}/{}: source object is poisoned (corrupted)",
+                    bucket,
+                    object_key
+                );
+                return;
+            }
         }
 
         let src_path = match self.storage.get_object_path(bucket, object_key).await {
