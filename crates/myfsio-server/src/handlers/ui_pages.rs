@@ -427,11 +427,17 @@ pub async fn bucket_detail(
     let target_conn = replication_rule
         .as_ref()
         .and_then(|rule| state.connections.get(&rule.target_connection_id));
-    let versioning_enabled = state
+    let versioning_status_enum = state
         .storage
-        .is_versioning_enabled(&bucket_name)
+        .get_versioning_status(&bucket_name)
         .await
-        .unwrap_or(false);
+        .unwrap_or(myfsio_common::types::VersioningStatus::Disabled);
+    let versioning_enabled =
+        matches!(versioning_status_enum, myfsio_common::types::VersioningStatus::Enabled);
+    let versioning_suspended = matches!(
+        versioning_status_enum,
+        myfsio_common::types::VersioningStatus::Suspended
+    );
     let encryption_config = config_encryption_to_ui(bucket_config.encryption.as_ref());
     let website_config = config_website_to_ui(bucket_config.website.as_ref());
     let quota = bucket_config.quota.clone();
@@ -491,12 +497,13 @@ pub async fn bucket_detail(
     );
     ctx.insert("has_quota", &quota.is_some());
     ctx.insert("versioning_enabled", &versioning_enabled);
+    ctx.insert("versioning_suspended", &versioning_suspended);
     ctx.insert(
         "versioning_status",
-        &(if versioning_enabled {
-            "Enabled"
-        } else {
-            "Disabled"
+        &(match versioning_status_enum {
+            myfsio_common::types::VersioningStatus::Enabled => "Enabled",
+            myfsio_common::types::VersioningStatus::Suspended => "Suspended",
+            myfsio_common::types::VersioningStatus::Disabled => "Disabled",
         }),
     );
     ctx.insert("encryption_config", &encryption_config);
@@ -2361,10 +2368,10 @@ pub async fn update_bucket_replication(
         "pause" => {
             let Some(mut rule) = state.replication.get_rule(&bucket_name) else {
                 return respond(
-                    false,
-                    StatusCode::NOT_FOUND,
+                    true,
+                    StatusCode::OK,
                     "No replication configuration to pause.".to_string(),
-                    json!({ "error": "No replication configuration to pause" }),
+                    json!({ "action": "pause", "enabled": false, "no_op": true }),
                 );
             };
             rule.enabled = false;
@@ -2379,10 +2386,10 @@ pub async fn update_bucket_replication(
         "resume" => {
             let Some(mut rule) = state.replication.get_rule(&bucket_name) else {
                 return respond(
-                    false,
-                    StatusCode::NOT_FOUND,
+                    true,
+                    StatusCode::OK,
                     "No replication configuration to resume.".to_string(),
-                    json!({ "error": "No replication configuration to resume" }),
+                    json!({ "action": "resume", "enabled": false, "no_op": true }),
                 );
             };
             rule.enabled = true;

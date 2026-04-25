@@ -155,6 +155,8 @@ pub async fn csrf_layer(
         extract_form_token(&bytes)
     } else if content_type.starts_with("multipart/form-data") {
         extract_multipart_token(&content_type, &bytes)
+    } else if content_type.starts_with("application/json") {
+        extract_json_token(&bytes)
     } else {
         None
     };
@@ -194,7 +196,7 @@ pub async fn csrf_layer(
     let mut resp = (
         StatusCode::FORBIDDEN,
         [(header::CONTENT_TYPE, "application/json")],
-        r#"{"error":"Invalid CSRF token"}"#,
+        r#"{"error":"Invalid CSRF token. Send it via the X-CSRF-Token header or a csrf_token field in the form/JSON body."}"#,
     )
         .into_response();
     *resp.status_mut() = StatusCode::FORBIDDEN;
@@ -236,6 +238,14 @@ fn build_session_cookie(id: &str, secure: bool) -> Cookie<'static> {
     cookie.set_secure(secure);
     cookie.set_path("/");
     cookie
+}
+
+fn extract_json_token(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value
+        .get(CSRF_FIELD_NAME)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn extract_form_token(body: &[u8]) -> Option<String> {

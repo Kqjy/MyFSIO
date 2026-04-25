@@ -19,11 +19,11 @@
         <div>
           <h1 class="h3 fw-bold mb-1">{{ bucket_name }}</h1>
           <div class="d-flex align-items-center gap-2">
-            <span class="badge {% if versioning_enabled %}text-bg-success{% else %}text-bg-secondary{% endif %} rounded-pill">
+            <span class="badge {% if versioning_enabled %}text-bg-success{% elif versioning_suspended %}text-bg-warning{% else %}text-bg-secondary{% endif %} rounded-pill">
               <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                 <path d="M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2zm.995-14.901a1 1 0 1 0-1.99 0A5.002 5.002 0 0 0 3 6c0 1.098-.5 6-2 7h14c-1.5-1-2-5.902-2-7 0-2.42-1.72-4.44-4.005-4.901z"/>
               </svg>
-              {% if versioning_enabled %}Versioning On{% else %}Versioning Off{% endif %}
+              {% if versioning_enabled %}Versioning On{% elif versioning_suspended %}Versioning Suspended{% else %}Versioning Off{% endif %}
             </span>
             <span class="text-muted small" id="object-count-badge">
               <span class="spinner-border spinner-border-sm" role="status" style="width: 0.75rem; height: 0.75rem;"></span>
@@ -626,6 +626,16 @@
                   <p class="mb-0 small">All previous versions of objects are preserved. You can roll back accidental changes or deletions at any time.</p>
                 </div>
               </div>
+              {% elif versioning_suspended %}
+              <div class="alert alert-warning d-flex align-items-start mb-4" role="alert">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
+                  <path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/>
+                </svg>
+                <div>
+                  <strong>Versioning is suspended</strong>
+                  <p class="mb-0 small">New uploads overwrite existing objects, but previously archived versions are still retained. Re-enable versioning to start preserving new versions again.</p>
+                </div>
+              </div>
               {% else %}
               <div class="alert alert-secondary d-flex align-items-start mb-4" role="alert">
                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="me-2 flex-shrink-0" viewBox="0 0 16 16">
@@ -633,8 +643,8 @@
                   <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
                 </svg>
                 <div>
-                  <strong>Versioning is suspended</strong>
-                  <p class="mb-0 small">New object uploads overwrite existing objects. Enable versioning to preserve previous versions.</p>
+                  <strong>Versioning is disabled</strong>
+                  <p class="mb-0 small">This bucket has never had versioning enabled. Enable it to preserve previous versions of every object.</p>
                 </div>
               </div>
               {% endif %}

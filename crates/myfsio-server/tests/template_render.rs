@@ -288,6 +288,7 @@ fn render_bucket_detail() {
     ctx.insert("bytes_pct", &0);
     ctx.insert("has_quota", &false);
     ctx.insert("versioning_enabled", &false);
+    ctx.insert("versioning_suspended", &false);
     ctx.insert("versioning_status", &"Disabled");
     ctx.insert("encryption_config", &json!({"Rules": []}));
     ctx.insert("enc_rules", &Vec::<Value>::new());
@@ -369,6 +370,7 @@ fn render_bucket_detail_without_error_document() {
     ctx.insert("bytes_pct", &0);
     ctx.insert("has_quota", &false);
     ctx.insert("versioning_enabled", &false);
+    ctx.insert("versioning_suspended", &false);
     ctx.insert("versioning_status", &"Disabled");
     ctx.insert("encryption_config", &json!({"Rules": []}));
     ctx.insert("enc_rules", &Vec::<Value>::new());

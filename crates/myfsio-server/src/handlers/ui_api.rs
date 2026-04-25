@@ -1213,6 +1213,8 @@ pub struct SearchObjectsQuery {
     pub prefix: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub start_after: Option<String>,
 }
 
 pub async fn search_bucket_objects(
@@ -1228,14 +1230,18 @@ pub async fn search_bucket_objects(
     let term = q.q.unwrap_or_default().to_lowercase();
     let limit = q.limit.unwrap_or(500).clamp(1, 1000);
     let prefix = q.prefix.clone().unwrap_or_default();
+    let start_after = q.start_after.clone().filter(|s| !s.is_empty());
 
     if term.is_empty() {
-        return Json(json!({ "results": [], "truncated": false })).into_response();
+        return Json(json!({ "results": [], "truncated": false, "next_token": Value::Null }))
+            .into_response();
     }
 
     let mut results: Vec<Value> = Vec::new();
     let mut truncated = false;
+    let mut last_match_key: Option<String> = None;
     let mut token: Option<String> = None;
+    let mut start_after_arg = start_after;
     loop {
         let params = ListParams {
             max_keys: 1000,
@@ -1245,7 +1251,7 @@ pub async fn search_bucket_objects(
             } else {
                 Some(prefix.clone())
             },
-            start_after: None,
+            start_after: start_after_arg.take(),
         };
         match state.storage.list_objects(&bucket_name, &params).await {
             Ok(res) => {
@@ -1255,6 +1261,7 @@ pub async fn search_bucket_objects(
                             truncated = true;
                             break;
                         }
+                        last_match_key = Some(o.key.clone());
                         results.push(object_json(&bucket_name, o));
                     }
                 }
@@ -1270,9 +1277,11 @@ pub async fn search_bucket_objects(
         }
     }
 
+    let next_token = if truncated { last_match_key } else { None };
     Json(json!({
         "results": results,
         "truncated": truncated,
+        "next_token": next_token,
     }))
     .into_response()
 }

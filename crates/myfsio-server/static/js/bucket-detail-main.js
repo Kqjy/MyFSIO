@@ -552,7 +552,13 @@
   let scrollTimeout = null;
   const handleVirtualScroll = () => {
     if (scrollTimeout) cancelAnimationFrame(scrollTimeout);
-    scrollTimeout = requestAnimationFrame(renderVirtualRows);
+    scrollTimeout = requestAnimationFrame(() => {
+      renderVirtualRows();
+      const c = document.querySelector('.objects-table-container');
+      if (c && c.scrollHeight - c.scrollTop - c.clientHeight < 500) {
+        if (typeof loadMoreOnSentinel === 'function') loadMoreOnSentinel();
+      }
+    });
   };
 
   const refreshVirtualList = () => {
@@ -563,6 +569,11 @@
       if (allObjects.length === 0 && streamFolders.length === 0 && !hasMoreObjects) {
         showEmptyState();
       } else {
+        const isFiltering = currentFilterTerm && currentFilterTerm.length > 0;
+        const title = isFiltering ? 'No matches' : 'Empty folder';
+        const body = isFiltering
+          ? `No objects match "${escapeHtml(currentFilterTerm)}".`
+          : `This folder contains no objects${hasMoreObjects ? ' yet. Loading more...' : '.'}`;
         objectsTableBody.innerHTML = `
           <tr>
             <td colspan="4" class="py-5">
@@ -572,8 +583,8 @@
                     <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
                   </svg>
                 </div>
-                <h6 class="mb-2">Empty folder</h6>
-                <p class="text-muted small mb-0">This folder contains no objects${hasMoreObjects ? ' yet. Loading more...' : '.'}</p>
+                <h6 class="mb-2">${title}</h6>
+                <p class="text-muted small mb-0">${body}</p>
               </div>
             </td>
           </tr>
@@ -977,12 +988,32 @@
     scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
   }
 
+  const isSentinelVisible = () => {
+    if (!scrollSentinel) return false;
+    const rect = scrollSentinel.getBoundingClientRect();
+    if (scrollContainer) {
+      const cr = scrollContainer.getBoundingClientRect();
+      return rect.top <= cr.bottom + 500 && rect.bottom >= cr.top - 500;
+    }
+    return rect.top <= window.innerHeight + 500 && rect.bottom >= -500;
+  };
+
+  const loadMoreOnSentinel = () => {
+    if (searchResults !== null) {
+      if (searchNextToken && !searchLoading) {
+        performServerSearch(currentFilterTerm, true);
+      }
+      return;
+    }
+    if (hasMoreObjects && !isLoadingObjects) {
+      loadObjects(true);
+    }
+  };
+
   if (scrollSentinel && scrollContainer) {
     const containerObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
-        if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
-          loadObjects(true);
-        }
+        if (entry.isIntersecting) loadMoreOnSentinel();
       });
     }, {
       root: scrollContainer,
@@ -993,9 +1024,7 @@
 
     const viewportObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
-        if (entry.isIntersecting && hasMoreObjects && !isLoadingObjects) {
-          loadObjects(true);
-        }
+        if (entry.isIntersecting) loadMoreOnSentinel();
       });
     }, {
       root: null,
@@ -1231,6 +1260,11 @@
     });
 
     if (folders.length === 0 && files.length === 0) {
+      const isFiltering = currentFilterTerm && currentFilterTerm.length > 0;
+      const title = isFiltering ? 'No matches' : 'Empty folder';
+      const body = isFiltering
+        ? `No objects match "${escapeHtml(currentFilterTerm)}".`
+        : 'This folder contains no objects.';
       const emptyRow = document.createElement('tr');
       emptyRow.innerHTML = `
         <td colspan="4" class="py-5">
@@ -1240,8 +1274,8 @@
                 <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
               </svg>
             </div>
-            <h6 class="mb-2">Empty folder</h6>
-            <p class="text-muted small mb-0">This folder contains no objects.</p>
+            <h6 class="mb-2">${title}</h6>
+            <p class="text-muted small mb-0">${body}</p>
           </div>
         </td>
       `;
@@ -1421,6 +1455,11 @@
   });
 
   const bulkActionsWrapper = document.getElementById('bulk-actions-wrapper');
+  const bulkDownloadButton = document.querySelector('[data-bulk-download-trigger]');
+  const updateBulkDownloadState = () => {
+    if (!bulkDownloadButton) return;
+    bulkDownloadButton.disabled = selectedRows.size === 0;
+  };
   const updateBulkDeleteState = () => {
     const selectedCount = selectedRows.size;
     if (bulkDeleteButton) {
@@ -1447,6 +1486,7 @@
       selectAllCheckbox.checked = visibleSelectedCount > 0 && visibleSelectedCount === total && total > 0;
       selectAllCheckbox.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < total;
     }
+    updateBulkDownloadState();
   };
 
   function toggleRowSelection(row, shouldSelect) {
@@ -2274,47 +2314,69 @@
   const filterWarningText = document.getElementById('filter-warning-text');
   const folderViewStatus = document.getElementById('folder-view-status');
 
-  const updateFilterWarning = () => {
-    if (!filterWarning) return;
-    const isFiltering = currentFilterTerm.length > 0;
-    if (isFiltering && hasMoreObjects) {
-      filterWarning.classList.remove('d-none');
-    } else {
-      filterWarning.classList.add('d-none');
-    }
-  };
-
   let searchDebounceTimer = null;
   let searchAbortController = null;
   let searchResults = null;
+  let searchNextToken = null;
+  let searchLoading = false;
+  const SEARCH_PAGE_SIZE = 500;
 
-  const performServerSearch = async (term) => {
-    if (searchAbortController) searchAbortController.abort();
-    searchAbortController = new AbortController();
+  const updateFilterWarning = () => {
+    if (!filterWarning) return;
+    filterWarning.classList.add('d-none');
+  };
 
+  const performServerSearch = async (term, append = false) => {
+    if (!append && searchAbortController) searchAbortController.abort();
+    if (append && (searchLoading || !searchNextToken)) return;
+    if (!append) {
+      searchAbortController = new AbortController();
+    }
+    searchLoading = true;
+    if (append && loadMoreSpinner) loadMoreSpinner.classList.remove('d-none');
+
+    let succeeded = false;
     try {
-      const params = new URLSearchParams({ q: term, limit: '500' });
+      const params = new URLSearchParams({ q: term, limit: String(SEARCH_PAGE_SIZE) });
       if (currentPrefix) params.set('prefix', currentPrefix);
+      if (append && searchNextToken) params.set('start_after', searchNextToken);
       const searchUrl = objectsStreamUrl.replace('/stream', '/search');
       const response = await fetch(`${searchUrl}?${params}`, {
-        signal: searchAbortController.signal
+        signal: searchAbortController?.signal
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
-      searchResults = (data.results || []).map(obj => processStreamObject(obj));
+      const newResults = (data.results || []).map(obj => processStreamObject(obj));
+      if (append && Array.isArray(searchResults)) {
+        searchResults = searchResults.concat(newResults);
+      } else {
+        searchResults = newResults;
+      }
+      searchNextToken = data.truncated ? (data.next_token || null) : null;
       memoizedVisibleItems = null;
       memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
       refreshVirtualList();
       if (loadMoreStatus) {
         const countText = searchResults.length.toLocaleString();
-        const truncated = data.truncated ? '+' : '';
-        loadMoreStatus.textContent = `${countText}${truncated} result${searchResults.length !== 1 ? 's' : ''}`;
+        const more = searchNextToken ? '+' : '';
+        const noun = searchResults.length === 1 ? 'result' : 'results';
+        loadMoreStatus.textContent = searchNextToken
+          ? `${countText}${more} ${noun} (scroll to load more)`
+          : `${countText} ${noun}`;
       }
+      succeeded = true;
     } catch (e) {
       if (e.name === 'AbortError') return;
       if (loadMoreStatus) {
-        loadMoreStatus.textContent = 'Search failed';
+        loadMoreStatus.textContent = 'Search failed (scroll to retry)';
       }
+    } finally {
+      searchLoading = false;
+      if (loadMoreSpinner) loadMoreSpinner.classList.add('d-none');
+    }
+
+    if (succeeded && searchNextToken && !searchLoading && isSentinelVisible()) {
+      performServerSearch(currentFilterTerm, true);
     }
   };
 
@@ -2334,6 +2396,7 @@
     if (!isFiltering && wasFiltering) {
       if (searchAbortController) searchAbortController.abort();
       searchResults = null;
+      searchNextToken = null;
       memoizedVisibleItems = null;
       memoizedInputs = { objectCount: -1, folderCount: -1, prefix: null, filterTerm: null };
       if (loadMoreStatus) {
@@ -3311,14 +3374,7 @@
     }
   }
 
-  const bulkDownloadButton = document.querySelector('[data-bulk-download-trigger]');
   const bulkDownloadEndpoint = document.getElementById('objects-drop-zone')?.dataset.bulkDownloadEndpoint;
-
-  const updateBulkDownloadState = () => {
-    if (!bulkDownloadButton) return;
-    const selectedCount = document.querySelectorAll('[data-object-select]:checked').length;
-    bulkDownloadButton.disabled = selectedCount === 0;
-  };
 
   selectAllCheckbox?.addEventListener('change', (event) => {
     const shouldSelect = Boolean(event.target?.checked);
@@ -3354,7 +3410,6 @@
     });
 
     updateBulkDeleteState();
-    setTimeout(updateBulkDownloadState, 0);
   });
 
   bulkDownloadButton?.addEventListener('click', async () => {
@@ -4402,10 +4457,25 @@
   });
 
   if (lifecycleHistoryCard) {
-    loadLifecycleHistory();
-    if (window.pollingManager) {
-      window.pollingManager.start('lifecycle', loadLifecycleHistory);
+    const lifecycleTab = document.getElementById('lifecycle-tab');
+    const lifecyclePane = document.getElementById('lifecycle-pane');
+    const startLifecyclePolling = () => {
+      if (window.pollingManager) {
+        window.pollingManager.start('lifecycle', loadLifecycleHistory);
+      } else {
+        loadLifecycleHistory();
+      }
+    };
+    const stopLifecyclePolling = () => {
+      if (window.pollingManager) {
+        window.pollingManager.stop('lifecycle');
+      }
+    };
+    if (lifecyclePane && lifecyclePane.classList.contains('show') && lifecyclePane.classList.contains('active')) {
+      startLifecyclePolling();
     }
+    lifecycleTab?.addEventListener('shown.bs.tab', startLifecyclePolling);
+    lifecycleTab?.addEventListener('hidden.bs.tab', stopLifecyclePolling);
   }
 
   if (corsCard) loadCorsRules();
