@@ -1,45 +1,50 @@
-FROM python:3.14.3-slim
+FROM rust:1-slim-bookworm AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+WORKDIR /build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+RUN cargo build --release --bin myfsio-server \
+    && strip target/release/myfsio-server
+
+
+FROM debian:bookworm-slim
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/data \
+    && useradd -m -u 1000 myfsio \
+    && chown -R myfsio:myfsio /app
 
-ENV PATH="/root/.cargo/bin:${PATH}"
+COPY --from=builder /build/target/release/myfsio-server /usr/local/bin/myfsio-server
+COPY --from=builder /build/crates/myfsio-server/templates /app/templates
+COPY --from=builder /build/crates/myfsio-server/static /app/static
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-RUN pip install --no-cache-dir maturin \
-    && cd myfsio_core \
-    && maturin build --release \
-    && pip install target/wheels/*.whl \
-    && cd .. \
-    && rm -rf myfsio_core/target \
-    && pip uninstall -y maturin \
-    && rustup self uninstall -y
-
-RUN chmod +x docker-entrypoint.sh
-
-RUN mkdir -p /app/data \
-    && useradd -m -u 1000 myfsio \ 
+RUN chmod +x /app/docker-entrypoint.sh \
     && chown -R myfsio:myfsio /app
 
 USER myfsio
 
-EXPOSE 5000 5100
-ENV APP_HOST=0.0.0.0 \
-    FLASK_ENV=production \
-    FLASK_DEBUG=0
+EXPOSE 5000
+EXPOSE 5100
+ENV HOST=0.0.0.0 \
+    PORT=5000 \
+    UI_PORT=5100 \
+    STORAGE_ROOT=/app/data \
+    TEMPLATES_DIR=/app/templates \
+    STATIC_DIR=/app/static \
+    RUST_LOG=info
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:5000/myfsio/health', timeout=2)"
+    CMD curl -fsS "http://localhost:${PORT}/myfsio/health" || exit 1
 
-CMD ["./docker-entrypoint.sh"]
+CMD ["/app/docker-entrypoint.sh"]
