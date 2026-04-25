@@ -152,7 +152,10 @@ impl VersioningStatus {
     }
 
     pub fn is_active(self) -> bool {
-        matches!(self, VersioningStatus::Enabled | VersioningStatus::Suspended)
+        matches!(
+            self,
+            VersioningStatus::Enabled | VersioningStatus::Suspended
+        )
     }
 }
 

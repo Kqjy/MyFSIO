@@ -391,15 +391,13 @@ async fn heal_corrupted(
         }
     }
 
-    if live_path.exists() {
-        if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
-            tracing::error!(
-                "Heal {}/{}: quarantine rename failed: {}",
-                bucket,
-                key,
-                e
-            );
-            return HealStatus::Failed;
+    {
+        let _guard = storage.lock_object_write(bucket, key);
+        if live_path.exists() {
+            if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
+                tracing::error!("Heal {}/{}: quarantine rename failed: {}", bucket, key, e);
+                return HealStatus::Failed;
+            }
         }
     }
 
@@ -421,14 +419,30 @@ async fn heal_corrupted(
                 .await
             {
                 HealOutcome::Healed { peer_etag, bytes } => {
-                    if let Err(e) = atomic_swap(&temp_path, &live_path) {
+                    let swap_result = {
+                        let _guard = storage.lock_object_write(bucket, key);
+                        if live_path.exists() {
+                            let _ = std::fs::remove_file(&temp_path);
+                            tracing::info!(
+                                "Heal {}/{}: concurrent PUT raced; preserving fresh write",
+                                bucket,
+                                key
+                            );
+                            return HealStatus::Skipped;
+                        }
+                        atomic_swap(&temp_path, &live_path)
+                    };
+                    if let Err(e) = swap_result {
                         tracing::error!(
                             "Heal {}/{}: atomic swap failed: {} (restoring from quarantine)",
                             bucket,
                             key,
                             e
                         );
-                        let _ = std::fs::rename(&quarantine_full, &live_path);
+                        let _guard = storage.lock_object_write(bucket, key);
+                        if !live_path.exists() {
+                            let _ = std::fs::rename(&quarantine_full, &live_path);
+                        }
                         let _ = std::fs::remove_file(&temp_path);
                         return HealStatus::Failed;
                     }
@@ -444,8 +458,7 @@ async fn heal_corrupted(
                 }
                 HealOutcome::PeerMismatch { stored, peer } => {
                     let msg = format!("peer etag {} != stored {}", peer, stored);
-                    let _ =
-                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
                     tracing::warn!("Heal {}/{}: peer mismatch ({}), poisoned", bucket, key, msg);
                     return HealStatus::PeerMismatch;
                 }
@@ -460,14 +473,15 @@ async fn heal_corrupted(
                         "etag mismatch (stored={}, actual={}) — peer unavailable: {}",
                         stored_etag, actual_etag, error
                     );
-                    let _ =
-                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
                     return HealStatus::PeerUnavailable;
                 }
                 HealOutcome::VerifyFailed { expected, actual } => {
-                    let msg = format!("peer download verify failed: expected={} actual={}", expected, actual);
-                    let _ =
-                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    let msg = format!(
+                        "peer download verify failed: expected={} actual={}",
+                        expected, actual
+                    );
+                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
                     tracing::warn!("Heal {}/{}: {}", bucket, key, msg);
                     return HealStatus::VerifyFailed;
                 }
@@ -476,8 +490,7 @@ async fn heal_corrupted(
                         "etag mismatch (stored={}, actual={}); no peer configured",
                         stored_etag, actual_etag
                     );
-                    let _ =
-                        poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
+                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
                     return HealStatus::Poisoned;
                 }
             }
@@ -512,12 +525,22 @@ async fn heal_stale_version(storage_root: &Path, bucket: &str, key: &str) -> Hea
         .join(key);
     if let Some(parent) = dst.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::error!("Stale-version quarantine mkdir failed {}/{}: {}", bucket, key, e);
+            tracing::error!(
+                "Stale-version quarantine mkdir failed {}/{}: {}",
+                bucket,
+                key,
+                e
+            );
             return HealStatus::Failed;
         }
     }
     if let Err(e) = std::fs::rename(&src, &dst) {
-        tracing::error!("Stale-version quarantine rename failed {}/{}: {}", bucket, key, e);
+        tracing::error!(
+            "Stale-version quarantine rename failed {}/{}: {}",
+            bucket,
+            key,
+            e
+        );
         return HealStatus::Failed;
     }
     tracing::info!("Quarantined stale version {}/{}", bucket, key);
@@ -577,11 +600,7 @@ async fn heal_etag_cache(
     }
 }
 
-async fn heal_phantom_metadata(
-    storage: &FsStorageBackend,
-    bucket: &str,
-    key: &str,
-) -> HealStatus {
+async fn heal_phantom_metadata(storage: &FsStorageBackend, bucket: &str, key: &str) -> HealStatus {
     match storage.delete_object_metadata_entry(bucket, key).await {
         Ok(_) => {
             tracing::info!("Dropped phantom metadata for {}/{}", bucket, key);
@@ -1062,6 +1081,9 @@ fn check_stale_versions(
             }
             state.objects_scanned += 1;
             if !bin_stems.contains_key(stem) {
+                if manifest_is_delete_marker(path) {
+                    continue;
+                }
                 state.stale_versions += 1;
                 let key = path
                     .strip_prefix(&versions_root)
@@ -1078,6 +1100,19 @@ fn check_stale_versions(
 
         stack.extend(subdirs);
     }
+}
+
+fn manifest_is_delete_marker(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    value
+        .get("is_delete_marker")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn check_etag_cache(
@@ -1265,7 +1300,58 @@ mod tests {
         .unwrap();
 
         let state = scan_all_buckets(root, 10_000);
-        assert_eq!(state.corrupted_objects, 0, "poisoned entries must not re-flag");
+        assert_eq!(
+            state.corrupted_objects, 0,
+            "poisoned entries must not re-flag"
+        );
+    }
+
+    #[test]
+    fn delete_marker_manifests_are_not_flagged_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "vbucket";
+        fs::create_dir_all(root.join(bucket)).unwrap();
+
+        let versions_dir = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_VERSIONS_DIR)
+            .join("v.txt");
+        fs::create_dir_all(&versions_dir).unwrap();
+
+        let dm = json!({
+            "version_id": "dm-vid-1",
+            "key": "v.txt",
+            "size": 0,
+            "etag": "",
+            "is_delete_marker": true,
+        });
+        fs::write(
+            versions_dir.join("dm-vid-1.json"),
+            serde_json::to_string(&dm).unwrap(),
+        )
+        .unwrap();
+
+        let truly_stale = json!({
+            "version_id": "broken-vid-2",
+            "key": "v.txt",
+            "size": 12,
+            "etag": "abc",
+            "is_delete_marker": false,
+        });
+        fs::write(
+            versions_dir.join("broken-vid-2.json"),
+            serde_json::to_string(&truly_stale).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000);
+        assert_eq!(
+            state.stale_versions, 1,
+            "delete-marker manifest must not be flagged; only the data-bearing orphan should count"
+        );
     }
 
     #[test]
@@ -1332,10 +1418,7 @@ mod tests {
 
         write_index(
             &meta_root,
-            &[(
-                "multi.bin",
-                "deadbeefdeadbeefdeadbeefdeadbeef-3",
-            )],
+            &[("multi.bin", "deadbeefdeadbeefdeadbeefdeadbeef-3")],
         );
 
         let state = scan_all_buckets(root, 10_000);
@@ -1343,6 +1426,10 @@ mod tests {
             state.corrupted_objects, 0,
             "multipart-style ETags must not be checked against whole-body MD5"
         );
-        assert!(state.errors.is_empty(), "unexpected errors: {:?}", state.errors);
+        assert!(
+            state.errors.is_empty(),
+            "unexpected errors: {:?}",
+            state.errors
+        );
     }
 }

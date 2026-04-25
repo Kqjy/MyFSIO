@@ -511,11 +511,20 @@ fn s3_error_response(err: S3Error) -> Response {
     } else {
         err.resource.clone()
     };
+    let code_str = err.code.as_str();
     let body = err
         .with_resource(resource)
         .with_request_id(uuid::Uuid::new_v4().simple().to_string())
         .to_xml();
-    (status, [("content-type", "application/xml")], body).into_response()
+    (
+        status,
+        [
+            ("content-type", "application/xml"),
+            ("x-amz-error-code", code_str),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 fn build_stats_xml(bytes_scanned: usize, bytes_returned: usize) -> String {

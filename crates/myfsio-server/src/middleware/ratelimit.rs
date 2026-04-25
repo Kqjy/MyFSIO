@@ -182,9 +182,7 @@ fn too_many_requests(retry_after: u64, resource: &str) -> Response {
     )
         .into_response();
     if let Ok(value) = request_id.parse() {
-        response
-            .headers_mut()
-            .insert("x-amz-request-id", value);
+        response.headers_mut().insert("x-amz-request-id", value);
     }
     response
 }

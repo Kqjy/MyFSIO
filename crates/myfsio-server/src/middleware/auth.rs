@@ -1449,9 +1449,18 @@ fn error_response(err: S3Error, resource: &str) -> Response {
     let status =
         StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let request_id = uuid::Uuid::new_v4().simple().to_string();
+    let code_str = err.code.as_str();
     let body = err
         .with_resource(resource.to_string())
         .with_request_id(request_id)
         .to_xml();
-    (status, [("content-type", "application/xml")], body).into_response()
+    (
+        status,
+        [
+            ("content-type", "application/xml"),
+            ("x-amz-error-code", code_str),
+        ],
+        body,
+    )
+        .into_response()
 }

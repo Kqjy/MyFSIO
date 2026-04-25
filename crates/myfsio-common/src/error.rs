@@ -69,7 +69,7 @@ impl S3ErrorCode {
             Self::NoSuchUpload => 404,
             Self::NoSuchVersion => 404,
             Self::NoSuchTagSet => 404,
-            Self::ObjectCorrupted => 500,
+            Self::ObjectCorrupted => 422,
             Self::PreconditionFailed => 412,
             Self::NotModified => 304,
             Self::QuotaExceeded => 403,

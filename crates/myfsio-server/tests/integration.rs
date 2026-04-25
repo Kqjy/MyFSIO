@@ -2647,7 +2647,11 @@ async fn test_consecutive_slashes_in_key_round_trip() {
     let (app, _tmp) = test_app();
 
     app.clone()
-        .oneshot(signed_request(Method::PUT, "/slashes-bucket", Body::empty()))
+        .oneshot(signed_request(
+            Method::PUT,
+            "/slashes-bucket",
+            Body::empty(),
+        ))
         .await
         .unwrap();
 
@@ -2750,7 +2754,11 @@ async fn test_delete_live_version_restores_previous_to_live_slot() {
     let (app, _tmp) = test_app();
 
     app.clone()
-        .oneshot(signed_request(Method::PUT, "/restore-bucket", Body::empty()))
+        .oneshot(signed_request(
+            Method::PUT,
+            "/restore-bucket",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     app.clone()
@@ -2952,11 +2960,7 @@ async fn test_versioned_get_on_delete_marker_returns_method_not_allowed() {
         .unwrap();
 
     app.clone()
-        .oneshot(signed_request(
-            Method::PUT,
-            "/dm-bucket/k",
-            Body::from("x"),
-        ))
+        .oneshot(signed_request(Method::PUT, "/dm-bucket/k", Body::from("x")))
         .await
         .unwrap();
 
@@ -4948,7 +4952,9 @@ async fn test_kms_encrypt_decrypt() {
 }
 
 fn deterministic_payload(len: usize) -> Vec<u8> {
-    (0..len).map(|i| ((i * 2654435761usize) >> 16) as u8).collect()
+    (0..len)
+        .map(|i| ((i * 2654435761usize) >> 16) as u8)
+        .collect()
 }
 
 async fn put_sse_s3(
@@ -5000,7 +5006,12 @@ async fn range_get(
 }
 
 async fn body_bytes(resp: axum::http::Response<Body>) -> Vec<u8> {
-    resp.into_body().collect().await.unwrap().to_bytes().to_vec()
+    resp.into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
 }
 
 #[tokio::test]

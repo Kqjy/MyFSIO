@@ -248,12 +248,9 @@ impl ServerConfig {
             parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(5000, 60));
         let ratelimit_list_buckets =
             parse_rate_limit_env("RATE_LIMIT_LIST_BUCKETS", ratelimit_default);
-        let ratelimit_bucket_ops =
-            parse_rate_limit_env("RATE_LIMIT_BUCKET_OPS", ratelimit_default);
-        let ratelimit_object_ops =
-            parse_rate_limit_env("RATE_LIMIT_OBJECT_OPS", ratelimit_default);
-        let ratelimit_head_ops =
-            parse_rate_limit_env("RATE_LIMIT_HEAD_OPS", ratelimit_default);
+        let ratelimit_bucket_ops = parse_rate_limit_env("RATE_LIMIT_BUCKET_OPS", ratelimit_default);
+        let ratelimit_object_ops = parse_rate_limit_env("RATE_LIMIT_OBJECT_OPS", ratelimit_default);
+        let ratelimit_head_ops = parse_rate_limit_env("RATE_LIMIT_HEAD_OPS", ratelimit_default);
         let ratelimit_admin =
             parse_rate_limit_env("RATE_LIMIT_ADMIN", RateLimitSetting::new(60, 60));
         let ratelimit_storage_uri =

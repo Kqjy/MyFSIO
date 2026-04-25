@@ -76,10 +76,7 @@ fn find_matching_rule<'a>(
     request_headers: &[&str],
 ) -> Option<&'a CorsRule> {
     rules.iter().find(|rule| {
-        let origin_match = rule
-            .allowed_origins
-            .iter()
-            .any(|p| match_origin(p, origin));
+        let origin_match = rule.allowed_origins.iter().any(|p| match_origin(p, origin));
         if !origin_match {
             return false;
         }
@@ -104,9 +101,7 @@ fn find_matching_rule_for_actual<'a>(
     method: &str,
 ) -> Option<&'a CorsRule> {
     rules.iter().find(|rule| {
-        rule.allowed_origins
-            .iter()
-            .any(|p| match_origin(p, origin))
+        rule.allowed_origins.iter().any(|p| match_origin(p, origin))
             && rule
                 .allowed_methods
                 .iter()

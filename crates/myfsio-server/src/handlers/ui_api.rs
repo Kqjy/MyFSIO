@@ -129,10 +129,10 @@ fn storage_status(err: &StorageError) -> StatusCode {
         | StorageError::QuotaExceeded(_) => StatusCode::BAD_REQUEST,
         StorageError::BucketAlreadyExists(_) => StatusCode::CONFLICT,
         StorageError::BucketNotEmpty(_) => StatusCode::CONFLICT,
-        StorageError::Io(_)
-        | StorageError::Json(_)
-        | StorageError::Internal(_)
-        | StorageError::ObjectCorrupted { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        StorageError::ObjectCorrupted { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        StorageError::Io(_) | StorageError::Json(_) | StorageError::Internal(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     }
 }
 

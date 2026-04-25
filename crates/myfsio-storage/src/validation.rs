@@ -47,7 +47,6 @@ pub fn validate_object_key(
         normalized.split('/').collect()
     };
 
-
     for part in &parts {
         if part.is_empty() {
             continue;

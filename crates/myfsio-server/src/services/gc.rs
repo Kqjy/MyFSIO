@@ -276,10 +276,7 @@ impl GcService {
                             if !ts_path.is_dir() {
                                 continue;
                             }
-                            let modified = ts_entry
-                                .metadata()
-                                .ok()
-                                .and_then(|m| m.modified().ok());
+                            let modified = ts_entry.metadata().ok().and_then(|m| m.modified().ok());
                             let Some(modified) = modified else {
                                 continue;
                             };

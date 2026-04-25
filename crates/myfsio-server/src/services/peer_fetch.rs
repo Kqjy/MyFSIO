@@ -158,6 +158,12 @@ impl PeerFetcher {
             };
         }
 
+        if is_multipart_etag(expected_etag) {
+            return self
+                .fetch_multipart_for_heal(&client, &target_bucket, key, expected_etag, dest_path)
+                .await;
+        }
+
         let resp = match client
             .get_object()
             .bucket(&target_bucket)
@@ -225,7 +231,7 @@ impl PeerFetcher {
         drop(file);
 
         let actual = format!("{:x}", hasher.finalize());
-        if !is_multipart_etag(expected_etag) && actual != expected_etag {
+        if actual != expected_etag {
             let _ = tokio::fs::remove_file(dest_path).await;
             return HealOutcome::VerifyFailed {
                 expected: expected_etag.to_string(),
@@ -235,6 +241,129 @@ impl PeerFetcher {
 
         HealOutcome::Healed {
             peer_etag,
+            bytes: total,
+        }
+    }
+
+    async fn fetch_multipart_for_heal(
+        &self,
+        client: &Client,
+        target_bucket: &str,
+        key: &str,
+        expected_etag: &str,
+        dest_path: &Path,
+    ) -> HealOutcome {
+        let part_count = match expected_etag
+            .split_once('-')
+            .and_then(|(_, n)| n.parse::<u32>().ok())
+        {
+            Some(n) if n >= 1 => n,
+            _ => {
+                return HealOutcome::VerifyFailed {
+                    expected: expected_etag.to_string(),
+                    actual: format!("unparseable multipart suffix in {}", expected_etag),
+                };
+            }
+        };
+
+        if let Some(parent) = dest_path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                return HealOutcome::PeerUnavailable {
+                    error: format!("mkdir parent: {}", e),
+                };
+            }
+        }
+
+        let mut file = match tokio::fs::File::create(dest_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                return HealOutcome::PeerUnavailable {
+                    error: format!("create temp: {}", e),
+                };
+            }
+        };
+
+        let mut composite = Md5::new();
+        let mut total: u64 = 0;
+        let mut buf = vec![0u8; 64 * 1024];
+
+        for part_no in 1..=part_count {
+            let part_no_i32 = part_no as i32;
+            let resp = match client
+                .get_object()
+                .bucket(target_bucket)
+                .key(key)
+                .part_number(part_no_i32)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(dest_path).await;
+                    return HealOutcome::PeerUnavailable {
+                        error: format!("GetObject part {}: {:?}", part_no, err),
+                    };
+                }
+            };
+
+            let mut reader = resp.body.into_async_read();
+            let mut part_hasher = Md5::new();
+            let mut part_bytes: u64 = 0;
+            loop {
+                let n = match reader.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        drop(file);
+                        let _ = tokio::fs::remove_file(dest_path).await;
+                        return HealOutcome::PeerUnavailable {
+                            error: format!("read part {}: {}", part_no, e),
+                        };
+                    }
+                };
+                if n == 0 {
+                    break;
+                }
+                part_hasher.update(&buf[..n]);
+                if let Err(e) = file.write_all(&buf[..n]).await {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(dest_path).await;
+                    return HealOutcome::PeerUnavailable {
+                        error: format!("write part {}: {}", part_no, e),
+                    };
+                }
+                part_bytes += n as u64;
+            }
+            if part_bytes == 0 {
+                drop(file);
+                let _ = tokio::fs::remove_file(dest_path).await;
+                return HealOutcome::VerifyFailed {
+                    expected: expected_etag.to_string(),
+                    actual: format!("part {} returned zero bytes", part_no),
+                };
+            }
+            composite.update(part_hasher.finalize().as_slice());
+            total += part_bytes;
+        }
+
+        if let Err(e) = file.flush().await {
+            return HealOutcome::PeerUnavailable {
+                error: format!("flush temp: {}", e),
+            };
+        }
+        drop(file);
+
+        let composite_etag = format!("{:x}-{}", composite.finalize(), part_count);
+        if composite_etag != expected_etag {
+            let _ = tokio::fs::remove_file(dest_path).await;
+            return HealOutcome::VerifyFailed {
+                expected: expected_etag.to_string(),
+                actual: composite_etag,
+            };
+        }
+
+        HealOutcome::Healed {
+            peer_etag: expected_etag.to_string(),
             bytes: total,
         }
     }

@@ -432,8 +432,10 @@ pub async fn bucket_detail(
         .get_versioning_status(&bucket_name)
         .await
         .unwrap_or(myfsio_common::types::VersioningStatus::Disabled);
-    let versioning_enabled =
-        matches!(versioning_status_enum, myfsio_common::types::VersioningStatus::Enabled);
+    let versioning_enabled = matches!(
+        versioning_status_enum,
+        myfsio_common::types::VersioningStatus::Enabled
+    );
     let versioning_suspended = matches!(
         versioning_status_enum,
         myfsio_common::types::VersioningStatus::Suspended

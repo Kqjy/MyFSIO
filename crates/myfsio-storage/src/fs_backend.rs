@@ -55,7 +55,11 @@ fn fs_encode_key(key: &str) -> String {
     let trailing = key.ends_with('/');
     let body = if trailing { &key[..key.len() - 1] } else { key };
     if body.is_empty() {
-        return if trailing { "/".to_string() } else { String::new() };
+        return if trailing {
+            "/".to_string()
+        } else {
+            String::new()
+        };
     }
     let encoded: Vec<String> = body
         .split('/')
@@ -463,6 +467,14 @@ impl FsStorageBackend {
         &self.object_lock_stripes[idx]
     }
 
+    pub fn lock_object_write(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.get_object_lock(bucket, key).write()
+    }
+
     fn prune_meta_read_cache(&self) {
         if self.object_cache_max_size == 0 {
             self.meta_read_cache.clear();
@@ -772,11 +784,7 @@ impl FsStorageBackend {
         Ok(())
     }
 
-    pub async fn delete_object_metadata_entry(
-        &self,
-        bucket: &str,
-        key: &str,
-    ) -> StorageResult<()> {
+    pub async fn delete_object_metadata_entry(&self, bucket: &str, key: &str) -> StorageResult<()> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).write();
             self.delete_metadata_sync(bucket, key)
@@ -1123,11 +1131,7 @@ impl FsStorageBackend {
         Ok(Some(version_id))
     }
 
-    fn write_delete_marker_sync(
-        &self,
-        bucket_name: &str,
-        key: &str,
-    ) -> std::io::Result<String> {
+    fn write_delete_marker_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<String> {
         let version_dir = self.version_dir(bucket_name, key);
         std::fs::create_dir_all(&version_dir)?;
         let now = Utc::now();
@@ -1197,7 +1201,9 @@ impl FsStorageBackend {
         self.validate_key(key)?;
         Self::validate_version_id(bucket_name, key, version_id)?;
 
-        if let Some(record_and_path) = self.try_live_version_record_sync(bucket_name, key, version_id) {
+        if let Some(record_and_path) =
+            self.try_live_version_record_sync(bucket_name, key, version_id)
+        {
             return Ok(record_and_path);
         }
 
@@ -1523,9 +1529,7 @@ impl FsStorageBackend {
                         let (etag, version_id) = if is_dir_marker {
                             (None, None)
                         } else {
-                            idx.get(name_str.as_ref())
-                                .cloned()
-                                .unwrap_or((None, None))
+                            idx.get(name_str.as_ref()).cloned().unwrap_or((None, None))
                         };
 
                         let key = fs_decode_key(&fs_rel);
@@ -2190,7 +2194,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         detail: metadata_corruption_detail(&stored_meta),
                     });
                 }
-                if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
+                if self
+                    .read_bucket_config_sync(bucket)
+                    .versioning_status()
+                    .is_active()
+                {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
                             bucket: bucket.to_string(),
@@ -2270,7 +2278,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         detail: metadata_corruption_detail(&stored_meta),
                     });
                 }
-                if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
+                if self
+                    .read_bucket_config_sync(bucket)
+                    .versioning_status()
+                    .is_active()
+                {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
                             bucket: bucket.to_string(),
@@ -2292,7 +2304,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 return Err(StorageError::InvalidRange);
             }
             if start > 0 {
-                file.seek(SeekFrom::Start(start)).map_err(StorageError::Io)?;
+                file.seek(SeekFrom::Start(start))
+                    .map_err(StorageError::Io)?;
             }
 
             let mtime = meta
@@ -2360,7 +2373,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         detail: metadata_corruption_detail(&stored_meta),
                     });
                 }
-                if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
+                if self
+                    .read_bucket_config_sync(bucket)
+                    .versioning_status()
+                    .is_active()
+                {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
                             bucket: bucket.to_string(),
@@ -2460,7 +2477,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         detail: metadata_corruption_detail(&stored_meta),
                     });
                 }
-                if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
+                if self
+                    .read_bucket_config_sync(bucket)
+                    .versioning_status()
+                    .is_active()
+                {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
                             bucket: bucket.to_string(),
@@ -2595,7 +2616,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         detail: metadata_corruption_detail(&stored_meta),
                     });
                 }
-                if self.read_bucket_config_sync(bucket).versioning_status().is_active() {
+                if self
+                    .read_bucket_config_sync(bucket)
+                    .versioning_status()
+                    .is_active()
+                {
                     if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
                         return Err(StorageError::DeleteMarker {
                             bucket: bucket.to_string(),
@@ -2701,7 +2726,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 return Err(StorageError::InvalidRange);
             }
             if start > 0 {
-                file.seek(SeekFrom::Start(start)).map_err(StorageError::Io)?;
+                file.seek(SeekFrom::Start(start))
+                    .map_err(StorageError::Io)?;
             }
             let obj = self.object_meta_from_version_record(key, &record, &data_path)?;
             Ok((obj, file))
@@ -2930,45 +2956,47 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         // guard is released at the end of this block before we take the dst
         // write guard, so even when src == dst (same stripe) there's no
         // upgrade deadlock.
-        let copy_res = run_blocking(|| -> StorageResult<(String, u64, HashMap<String, String>)> {
-            let _src_guard = self.get_object_lock(src_bucket, src_key).read();
-            let src_path = self.object_path(src_bucket, src_key)?;
-            if !src_path.is_file() {
-                return Err(StorageError::ObjectNotFound {
-                    bucket: src_bucket.to_string(),
-                    key: src_key.to_string(),
-                });
-            }
-
-            use std::io::{BufReader, BufWriter, Read, Write};
-            let src_file = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
-            let mut reader = BufReader::with_capacity(chunk_size, src_file);
-            let tmp_file = std::fs::File::create(&tmp_path).map_err(StorageError::Io)?;
-            let mut writer = BufWriter::with_capacity(chunk_size * 4, tmp_file);
-            let mut hasher = Md5::new();
-            let mut buf = vec![0u8; chunk_size];
-            let mut total: u64 = 0;
-            loop {
-                let n = reader.read(&mut buf).map_err(StorageError::Io)?;
-                if n == 0 {
-                    break;
+        let copy_res = run_blocking(
+            || -> StorageResult<(String, u64, HashMap<String, String>)> {
+                let _src_guard = self.get_object_lock(src_bucket, src_key).read();
+                let src_path = self.object_path(src_bucket, src_key)?;
+                if !src_path.is_file() {
+                    return Err(StorageError::ObjectNotFound {
+                        bucket: src_bucket.to_string(),
+                        key: src_key.to_string(),
+                    });
                 }
-                hasher.update(&buf[..n]);
-                writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
-                total += n as u64;
-            }
-            writer.flush().map_err(StorageError::Io)?;
 
-            let src_metadata = self.read_metadata_sync(src_bucket, src_key);
-            if metadata_is_corrupted(&src_metadata) {
-                return Err(StorageError::ObjectCorrupted {
-                    bucket: src_bucket.to_string(),
-                    key: src_key.to_string(),
-                    detail: metadata_corruption_detail(&src_metadata),
-                });
-            }
-            Ok((format!("{:x}", hasher.finalize()), total, src_metadata))
-        });
+                use std::io::{BufReader, BufWriter, Read, Write};
+                let src_file = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
+                let mut reader = BufReader::with_capacity(chunk_size, src_file);
+                let tmp_file = std::fs::File::create(&tmp_path).map_err(StorageError::Io)?;
+                let mut writer = BufWriter::with_capacity(chunk_size * 4, tmp_file);
+                let mut hasher = Md5::new();
+                let mut buf = vec![0u8; chunk_size];
+                let mut total: u64 = 0;
+                loop {
+                    let n = reader.read(&mut buf).map_err(StorageError::Io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                    writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
+                    total += n as u64;
+                }
+                writer.flush().map_err(StorageError::Io)?;
+
+                let src_metadata = self.read_metadata_sync(src_bucket, src_key);
+                if metadata_is_corrupted(&src_metadata) {
+                    return Err(StorageError::ObjectCorrupted {
+                        bucket: src_bucket.to_string(),
+                        key: src_key.to_string(),
+                        detail: metadata_corruption_detail(&src_metadata),
+                    });
+                }
+                Ok((format!("{:x}", hasher.finalize()), total, src_metadata))
+            },
+        );
 
         let (etag, new_size, src_metadata) = match copy_res {
             Ok(v) => v,
@@ -3179,79 +3207,77 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         // between our metadata read and our file open, we'd otherwise record
         // the old size/last_modified in the manifest but copy bytes from the
         // new version.
-        let copy_res = run_blocking(
-            || -> StorageResult<(String, u64, DateTime<Utc>)> {
-                let _guard = self.get_object_lock(src_bucket, src_key).read();
+        let copy_res = run_blocking(|| -> StorageResult<(String, u64, DateTime<Utc>)> {
+            let _guard = self.get_object_lock(src_bucket, src_key).read();
 
-                let src_path = self.object_path(src_bucket, src_key)?;
-                if !src_path.is_file() {
-                    return Err(StorageError::ObjectNotFound {
-                        bucket: src_bucket.to_string(),
-                        key: src_key.to_string(),
-                    });
-                }
+            let src_path = self.object_path(src_bucket, src_key)?;
+            if !src_path.is_file() {
+                return Err(StorageError::ObjectNotFound {
+                    bucket: src_bucket.to_string(),
+                    key: src_key.to_string(),
+                });
+            }
 
-                use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-                // Open first so subsequent metadata/seek/read are all
-                // anchored to the same inode, even if a later rename swaps
-                // the path after we release the guard.
-                let mut src = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
-                let src_meta = src.metadata().map_err(StorageError::Io)?;
-                let src_size = src_meta.len();
-                let src_mtime = src_meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-                let last_modified = Utc
-                    .timestamp_opt(
-                        src_mtime as i64,
-                        ((src_mtime % 1.0) * 1_000_000_000.0) as u32,
-                    )
-                    .single()
-                    .unwrap_or_else(Utc::now);
+            use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+            // Open first so subsequent metadata/seek/read are all
+            // anchored to the same inode, even if a later rename swaps
+            // the path after we release the guard.
+            let mut src = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
+            let src_meta = src.metadata().map_err(StorageError::Io)?;
+            let src_size = src_meta.len();
+            let src_mtime = src_meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let last_modified = Utc
+                .timestamp_opt(
+                    src_mtime as i64,
+                    ((src_mtime % 1.0) * 1_000_000_000.0) as u32,
+                )
+                .single()
+                .unwrap_or_else(Utc::now);
 
-                let (start, end) = match range {
-                    Some((s, e)) => {
-                        if s >= src_size || e >= src_size || s > e {
-                            return Err(StorageError::InvalidRange);
-                        }
-                        (s, e)
+            let (start, end) = match range {
+                Some((s, e)) => {
+                    if s >= src_size || e >= src_size || s > e {
+                        return Err(StorageError::InvalidRange);
                     }
-                    None => {
-                        if src_size == 0 {
-                            (0u64, 0u64)
-                        } else {
-                            (0u64, src_size - 1)
-                        }
+                    (s, e)
+                }
+                None => {
+                    if src_size == 0 {
+                        (0u64, 0u64)
+                    } else {
+                        (0u64, src_size - 1)
                     }
-                };
-                let length = if src_size == 0 { 0 } else { end - start + 1 };
+                }
+            };
+            let length = if src_size == 0 { 0 } else { end - start + 1 };
 
-                if start > 0 {
-                    src.seek(SeekFrom::Start(start)).map_err(StorageError::Io)?;
+            if start > 0 {
+                src.seek(SeekFrom::Start(start)).map_err(StorageError::Io)?;
+            }
+            let mut src = std::io::BufReader::with_capacity(chunk_size, src);
+            let dst = std::fs::File::create(&tmp_file).map_err(StorageError::Io)?;
+            let mut dst = BufWriter::with_capacity(chunk_size * 4, dst);
+            let mut hasher = Md5::new();
+            let mut remaining = length;
+            let mut buf = vec![0u8; chunk_size];
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining as usize, buf.len());
+                let n = src.read(&mut buf[..to_read]).map_err(StorageError::Io)?;
+                if n == 0 {
+                    break;
                 }
-                let mut src = std::io::BufReader::with_capacity(chunk_size, src);
-                let dst = std::fs::File::create(&tmp_file).map_err(StorageError::Io)?;
-                let mut dst = BufWriter::with_capacity(chunk_size * 4, dst);
-                let mut hasher = Md5::new();
-                let mut remaining = length;
-                let mut buf = vec![0u8; chunk_size];
-                while remaining > 0 {
-                    let to_read = std::cmp::min(remaining as usize, buf.len());
-                    let n = src.read(&mut buf[..to_read]).map_err(StorageError::Io)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hasher.update(&buf[..n]);
-                    dst.write_all(&buf[..n]).map_err(StorageError::Io)?;
-                    remaining -= n as u64;
-                }
-                dst.flush().map_err(StorageError::Io)?;
-                Ok((format!("{:x}", hasher.finalize()), length, last_modified))
-            },
-        );
+                hasher.update(&buf[..n]);
+                dst.write_all(&buf[..n]).map_err(StorageError::Io)?;
+                remaining -= n as u64;
+            }
+            dst.flush().map_err(StorageError::Io)?;
+            Ok((format!("{:x}", hasher.finalize()), length, last_modified))
+        });
 
         let (etag, length, last_modified) = match copy_res {
             Ok(v) => v,
@@ -3336,8 +3362,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let mut buf = vec![0u8; chunk_size];
 
             for part_info in &part_infos {
-                let part_file = upload_dir_owned
-                    .join(format!("part-{:05}.part", part_info.part_number));
+                let part_file =
+                    upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
                 if !part_file.exists() {
                     return Err(StorageError::InvalidObjectKey(format!(
                         "Part {} not found",
@@ -4260,9 +4286,11 @@ mod tests {
         std::fs::create_dir_all(&tmp_dir).unwrap();
 
         // Seed with known content.
-        let data: AsyncReadStream =
-            Box::pin(std::io::Cursor::new(vec![b'a'; 4096]));
-        backend.put_object("link-bkt", "hot", data, None).await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'a'; 4096]));
+        backend
+            .put_object("link-bkt", "hot", data, None)
+            .await
+            .unwrap();
 
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
@@ -4343,8 +4371,7 @@ mod tests {
         let backend = StdArc::new(backend);
         backend.create_bucket("snap-bkt").await.unwrap();
 
-        let data: AsyncReadStream =
-            Box::pin(std::io::Cursor::new(vec![b'a'; 1024]));
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'a'; 1024]));
         backend
             .put_object("snap-bkt", "sz", data, None)
             .await
@@ -4424,7 +4451,10 @@ mod tests {
         const SIZE: u64 = 256 * 1024;
         let seed = vec![b'a'; SIZE as usize];
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(seed));
-        backend.put_object("range-bkt", "hot", data, None).await.unwrap();
+        backend
+            .put_object("range-bkt", "hot", data, None)
+            .await
+            .unwrap();
 
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
@@ -4455,8 +4485,9 @@ mod tests {
                 while !stop.load(Ordering::Relaxed) {
                     let start = 1000u64;
                     let len = 4000u64;
-                    if let Ok((meta, mut stream)) =
-                        b.get_object_range("range-bkt", "hot", start, Some(len)).await
+                    if let Ok((meta, mut stream)) = b
+                        .get_object_range("range-bkt", "hot", start, Some(len))
+                        .await
                     {
                         let mut buf = Vec::with_capacity(len as usize);
                         if stream.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
@@ -4466,10 +4497,8 @@ mod tests {
                             // that byte at full object size.
                             let fill = buf[0];
                             let all_match = buf.iter().all(|b| *b == fill);
-                            let expected_etag = format!(
-                                "{:x}",
-                                Md5::digest(&vec![fill; SIZE as usize])
-                            );
+                            let expected_etag =
+                                format!("{:x}", Md5::digest(&vec![fill; SIZE as usize]));
                             let etag_ok = meta.etag.as_deref() == Some(expected_etag.as_str());
                             reads.fetch_add(1, Ordering::Relaxed);
                             if !(all_match && etag_ok) {
@@ -4556,9 +4585,7 @@ mod tests {
                         Err(_) => continue,
                     };
                     let res = b
-                        .upload_part_copy(
-                            "mp-bkt", &upload_id, 1, "mp-bkt", "src", None,
-                        )
+                        .upload_part_copy("mp-bkt", &upload_id, 1, "mp-bkt", "src", None)
                         .await;
                     if let Ok((etag, _lm)) = res {
                         // The part etag is the MD5 of the copied bytes; it
@@ -4583,7 +4610,11 @@ mod tests {
 
         let o = ops.load(Ordering::Relaxed);
         let x = bad.load(Ordering::Relaxed);
-        assert!(o >= 4, "expected at least a few upload_part_copy ops, got {}", o);
+        assert!(
+            o >= 4,
+            "expected at least a few upload_part_copy ops, got {}",
+            o
+        );
         assert_eq!(
             x, 0,
             "observed {} upload_part_copy results with etag unrelated to source content (out of {})",

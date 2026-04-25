@@ -66,11 +66,20 @@ fn s3_error_response(err: S3Error) -> Response {
     } else {
         err.resource.clone()
     };
+    let code_str = err.code.as_str();
     let body = err
         .with_resource(resource)
         .with_request_id(uuid::Uuid::new_v4().simple().to_string())
         .to_xml();
-    (status, [("content-type", "application/xml")], body).into_response()
+    (
+        status,
+        [
+            ("content-type", "application/xml"),
+            ("x-amz-error-code", code_str),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
@@ -91,14 +100,17 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
         let s3_err = S3Error::from_code(S3ErrorCode::NoSuchKey)
             .with_resource(format!("/{}/{}", bucket, key))
             .with_request_id(uuid::Uuid::new_v4().simple().to_string());
-        let status = StatusCode::from_u16(s3_err.http_status())
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(s3_err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let mut resp_headers = HeaderMap::new();
         resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
         if let Ok(vid) = version_id.parse() {
             resp_headers.insert("x-amz-version-id", vid);
         }
         resp_headers.insert("content-type", "application/xml".parse().unwrap());
+        if let Ok(code_hdr) = s3_err.code.as_str().parse() {
+            resp_headers.insert("x-amz-error-code", code_hdr);
+        }
         return (status, resp_headers, s3_err.to_xml()).into_response();
     }
     s3_error_response(S3Error::from(err))
@@ -118,8 +130,8 @@ fn io_error_to_s3_response(err: &std::io::Error) -> Option<Response> {
         || lower.contains("is a directory")
         || lower.contains("file exists")
         || lower.contains("directory not empty");
-    let hit_name_too_long = matches!(err.kind(), ErrorKind::InvalidFilename)
-        || lower.contains("file name too long");
+    let hit_name_too_long =
+        matches!(err.kind(), ErrorKind::InvalidFilename) || lower.contains("file name too long");
     if !hit_collision && !hit_name_too_long {
         return None;
     }
@@ -1118,9 +1130,7 @@ fn has_upload_checksum(headers: &HeaderMap) -> bool {
 }
 
 fn persist_additional_checksums(headers: &HeaderMap, metadata: &mut HashMap<String, String>) {
-    for algo in [
-        "sha256", "sha1", "crc32", "crc32c", "crc64nvme",
-    ] {
+    for algo in ["sha256", "sha1", "crc32", "crc32c", "crc64nvme"] {
         let header_name = format!("x-amz-checksum-{}", algo);
         if let Some(value) = headers.get(&header_name).and_then(|v| v.to_str().ok()) {
             let trimmed = value.trim();
@@ -1141,9 +1151,7 @@ fn persist_additional_checksums(headers: &HeaderMap, metadata: &mut HashMap<Stri
 }
 
 fn apply_stored_checksum_headers(resp_headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
-    for algo in [
-        "sha256", "sha1", "crc32", "crc32c", "crc64nvme",
-    ] {
+    for algo in ["sha256", "sha1", "crc32", "crc32c", "crc64nvme"] {
         if let Some(value) = metadata.get(&format!("__checksum_{}__", algo)) {
             if let Ok(parsed) = value.parse() {
                 resp_headers.insert(
@@ -1644,64 +1652,61 @@ pub async fn get_object(
         return resp;
     }
 
-    let enc_info = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(
-        &snap_meta.internal_metadata,
-    );
+    let enc_info =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&snap_meta.internal_metadata);
 
-    let (file, file_size, enc_header): (tokio::fs::File, u64, Option<&str>) = match (
-        enc_info.as_ref(),
-        state.encryption.as_ref(),
-    ) {
-        (Some(enc_info), Some(enc_svc)) => {
-            let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
-            let customer_key = extract_sse_c_key(&headers);
-            let decrypt_res = enc_svc
-                .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
-                .await;
-            // Hardlink served its purpose; the decrypted plaintext is in
-            // dec_tmp now.
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            if let Err(e) = decrypt_res {
-                let _ = tokio::fs::remove_file(&dec_tmp).await;
+    let (file, file_size, enc_header): (tokio::fs::File, u64, Option<&str>) =
+        match (enc_info.as_ref(), state.encryption.as_ref()) {
+            (Some(enc_info), Some(enc_svc)) => {
+                let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
+                let customer_key = extract_sse_c_key(&headers);
+                let decrypt_res = enc_svc
+                    .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
+                    .await;
+                // Hardlink served its purpose; the decrypted plaintext is in
+                // dec_tmp now.
+                let _ = tokio::fs::remove_file(&snap_link).await;
+                if let Err(e) = decrypt_res {
+                    let _ = tokio::fs::remove_file(&dec_tmp).await;
+                    return s3_error_response(S3Error::new(
+                        myfsio_common::error::S3ErrorCode::InternalError,
+                        format!("Decryption failed: {}", e),
+                    ));
+                }
+                let file = match open_self_deleting(dec_tmp.clone()).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&dec_tmp).await;
+                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                    }
+                };
+                let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+                (file, file_size, Some(enc_info.algorithm.as_str()))
+            }
+            (Some(_), None) => {
+                // Snapshot is encrypted but the server has no encryption
+                // service configured to decrypt it. Serving ciphertext as
+                // plaintext would be actively wrong; refuse explicitly.
+                let _ = tokio::fs::remove_file(&snap_link).await;
                 return s3_error_response(S3Error::new(
                     myfsio_common::error::S3ErrorCode::InternalError,
-                    format!("Decryption failed: {}", e),
+                    "Object is encrypted but encryption service is disabled".to_string(),
                 ));
             }
-            let file = match open_self_deleting(dec_tmp.clone()).await {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&dec_tmp).await;
-                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-                }
-            };
-            let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-            (file, file_size, Some(enc_info.algorithm.as_str()))
-        }
-        (Some(_), None) => {
-            // Snapshot is encrypted but the server has no encryption
-            // service configured to decrypt it. Serving ciphertext as
-            // plaintext would be actively wrong; refuse explicitly.
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InternalError,
-                "Object is encrypted but encryption service is disabled".to_string(),
-            ));
-        }
-        (None, _) => {
-            // Raw path: stream directly from the hardlink, which becomes
-            // self-deleting on open (kernel keeps the inode alive via our
-            // fd).
-            let file = match open_self_deleting(snap_link.clone()).await {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&snap_link).await;
-                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-                }
-            };
-            (file, snap_meta.size, None)
-        }
-    };
+            (None, _) => {
+                // Raw path: stream directly from the hardlink, which becomes
+                // self-deleting on open (kernel keeps the inode alive via our
+                // fd).
+                let file = match open_self_deleting(snap_link.clone()).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&snap_link).await;
+                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                    }
+                };
+                (file, snap_meta.size, None)
+            }
+        };
 
     let stream = ReaderStream::with_capacity(file, stream_cap);
     let body = Body::from_stream(stream);
@@ -2470,86 +2475,72 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
 
     use futures::stream::{self, StreamExt};
 
-    let results: Vec<(String, Option<String>, Result<myfsio_common::types::DeleteOutcome, (String, String)>)> =
-        stream::iter(parsed.objects.iter().cloned())
-            .map(|obj| {
-                let state = state.clone();
-                let bucket = bucket.to_string();
-                async move {
-                    let key = obj.key.clone();
-                    let requested_vid = obj.version_id.clone();
-                    let lock_check: Result<(), (String, String)> = match obj.version_id.as_deref() {
-                        Some(version_id) if version_id != "null" => match state
-                            .storage
-                            .get_object_version_metadata(&bucket, &obj.key, version_id)
-                            .await
-                        {
-                            Ok(metadata) => object_lock::can_delete_object(&metadata, false)
-                                .map_err(|m| {
-                                    (S3ErrorCode::AccessDenied.as_str().to_string(), m)
-                                }),
-                            Err(err) => {
-                                let s3err = S3Error::from(err);
-                                Err((s3err.code.as_str().to_string(), s3err.message))
-                            }
-                        },
-                        _ => match state.storage.head_object(&bucket, &obj.key).await {
-                            Ok(_) => {
-                                match state
-                                    .storage
-                                    .get_object_metadata(&bucket, &obj.key)
-                                    .await
-                                {
-                                    Ok(metadata) => object_lock::can_delete_object(&metadata, false)
-                                        .map_err(|m| {
-                                            (
-                                                S3ErrorCode::AccessDenied.as_str().to_string(),
-                                                m,
-                                            )
-                                        }),
-                                    Err(err) => {
-                                        let s3err = S3Error::from(err);
-                                        Err((s3err.code.as_str().to_string(), s3err.message))
-                                    }
-                                }
-                            }
-                            Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => {
-                                Ok(())
-                            }
-                            Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => {
-                                Ok(())
-                            }
-                            Err(err) => {
-                                let s3err = S3Error::from(err);
-                                Err((s3err.code.as_str().to_string(), s3err.message))
-                            }
-                        },
-                    };
-
-                    let result = match lock_check {
-                        Err(e) => Err(e),
-                        Ok(()) => {
-                            let outcome = match obj.version_id.as_deref() {
-                                Some(version_id) if version_id != "null" => {
-                                    state
-                                        .storage
-                                        .delete_object_version(&bucket, &obj.key, version_id)
-                                        .await
-                                }
-                                _ => state.storage.delete_object(&bucket, &obj.key).await,
-                            };
-                            outcome.map_err(|e| {
-                                let s3err = S3Error::from(e);
-                                (s3err.code.as_str().to_string(), s3err.message)
-                            })
+    let results: Vec<(
+        String,
+        Option<String>,
+        Result<myfsio_common::types::DeleteOutcome, (String, String)>,
+    )> = stream::iter(parsed.objects.iter().cloned())
+        .map(|obj| {
+            let state = state.clone();
+            let bucket = bucket.to_string();
+            async move {
+                let key = obj.key.clone();
+                let requested_vid = obj.version_id.clone();
+                let lock_check: Result<(), (String, String)> = match obj.version_id.as_deref() {
+                    Some(version_id) if version_id != "null" => match state
+                        .storage
+                        .get_object_version_metadata(&bucket, &obj.key, version_id)
+                        .await
+                    {
+                        Ok(metadata) => object_lock::can_delete_object(&metadata, false)
+                            .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m)),
+                        Err(err) => {
+                            let s3err = S3Error::from(err);
+                            Err((s3err.code.as_str().to_string(), s3err.message))
                         }
-                    };
-                    (key, requested_vid, result)
-                }
-            })
-            .buffer_unordered(32)
-            .collect()
-            .await;
+                    },
+                    _ => match state.storage.head_object(&bucket, &obj.key).await {
+                        Ok(_) => match state.storage.get_object_metadata(&bucket, &obj.key).await {
+                            Ok(metadata) => object_lock::can_delete_object(&metadata, false)
+                                .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m)),
+                            Err(err) => {
+                                let s3err = S3Error::from(err);
+                                Err((s3err.code.as_str().to_string(), s3err.message))
+                            }
+                        },
+                        Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => Ok(()),
+                        Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => Ok(()),
+                        Err(err) => {
+                            let s3err = S3Error::from(err);
+                            Err((s3err.code.as_str().to_string(), s3err.message))
+                        }
+                    },
+                };
+
+                let result = match lock_check {
+                    Err(e) => Err(e),
+                    Ok(()) => {
+                        let outcome = match obj.version_id.as_deref() {
+                            Some(version_id) if version_id != "null" => {
+                                state
+                                    .storage
+                                    .delete_object_version(&bucket, &obj.key, version_id)
+                                    .await
+                            }
+                            _ => state.storage.delete_object(&bucket, &obj.key).await,
+                        };
+                        outcome.map_err(|e| {
+                            let s3err = S3Error::from(e);
+                            (s3err.code.as_str().to_string(), s3err.message)
+                        })
+                    }
+                };
+                (key, requested_vid, result)
+            }
+        })
+        .buffer_unordered(32)
+        .collect()
+        .await;
 
     let mut deleted: Vec<myfsio_xml::response::DeletedEntry> = Vec::new();
     let mut errors: Vec<(String, String, String)> = Vec::new();
@@ -2628,8 +2619,8 @@ async fn range_get_handler(
         match (enc_info.as_ref(), state.encryption.as_ref()) {
             (Some(enc_info), Some(enc_svc)) => {
                 let customer_key = extract_sse_c_key(headers);
-                let has_fast_path = enc_info.chunk_size.is_some()
-                    && enc_info.plaintext_size.is_some();
+                let has_fast_path =
+                    enc_info.chunk_size.is_some() && enc_info.plaintext_size.is_some();
 
                 if has_fast_path {
                     let plaintext_size = enc_info.plaintext_size.unwrap();

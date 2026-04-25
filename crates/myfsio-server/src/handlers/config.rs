@@ -1059,7 +1059,16 @@ pub async fn delete_logging(state: &AppState, bucket: &str) -> Response {
 
 fn s3_error_response(code: S3ErrorCode, message: &str, status: StatusCode) -> Response {
     let err = S3Error::new(code, message.to_string());
-    (status, [("content-type", "application/xml")], err.to_xml()).into_response()
+    let code_str = code.as_str();
+    (
+        status,
+        [
+            ("content-type", "application/xml"),
+            ("x-amz-error-code", code_str),
+        ],
+        err.to_xml(),
+    )
+        .into_response()
 }
 
 pub async fn list_object_versions(

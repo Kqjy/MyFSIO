@@ -324,7 +324,9 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             axum::http::header::CACHE_CONTROL,
             axum::http::HeaderValue::from_static("no-cache"),
         ))
-        .service(tower_http::services::ServeDir::new(&state.config.static_dir));
+        .service(tower_http::services::ServeDir::new(
+            &state.config.static_dir,
+        ));
 
     protected
         .merge(public)
