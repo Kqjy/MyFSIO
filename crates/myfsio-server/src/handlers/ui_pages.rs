@@ -1192,6 +1192,7 @@ pub async fn sites_dashboard(
                         "region": p.region,
                         "priority": p.priority,
                         "connection_id": p.connection_id,
+                        "peer_inbound_access_key": p.peer_inbound_access_key,
                         "is_healthy": p.is_healthy,
                         "last_health_check": p.last_health_check,
                     })
@@ -1496,6 +1497,8 @@ pub struct PeerSiteForm {
     #[serde(default)]
     pub connection_id: String,
     #[serde(default)]
+    pub peer_inbound_access_key: String,
+    #[serde(default)]
     pub csrf_token: String,
 }
 
@@ -1657,6 +1660,14 @@ pub async fn add_peer_site(
     }
 
     let has_connection = connection_id.is_some();
+    let peer_inbound_access_key = {
+        let value = form.peer_inbound_access_key.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    };
     let peer = crate::services::site_registry::PeerSite {
         site_id: site_id.clone(),
         endpoint,
@@ -1671,6 +1682,7 @@ pub async fn add_peer_site(
             }
         },
         connection_id: connection_id.clone(),
+        peer_inbound_access_key,
         created_at: None,
         is_healthy: false,
         last_health_check: None,
@@ -1755,6 +1767,14 @@ pub async fn update_peer_site(
         }
     }
 
+    let peer_inbound_access_key = {
+        let value = form.peer_inbound_access_key.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    };
     let peer = crate::services::site_registry::PeerSite {
         site_id: site_id.clone(),
         endpoint: form.endpoint.trim().to_string(),
@@ -1769,6 +1789,7 @@ pub async fn update_peer_site(
             }
         },
         connection_id,
+        peer_inbound_access_key,
         created_at: existing.created_at,
         is_healthy: existing.is_healthy,
         last_health_check: existing.last_health_check,

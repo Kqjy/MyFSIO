@@ -38,6 +38,8 @@ pub struct PeerSite {
     #[serde(default)]
     pub connection_id: Option<String>,
     #[serde(default)]
+    pub peer_inbound_access_key: Option<String>,
+    #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub is_healthy: bool,

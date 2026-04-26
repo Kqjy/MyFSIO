@@ -345,6 +345,12 @@ pub async fn register_peer_site(
             .get("connection_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        peer_inbound_access_key: payload
+            .get("peer_inbound_access_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         created_at: Some(chrono::Utc::now().to_rfc3339()),
         is_healthy: false,
         last_health_check: None,
@@ -467,6 +473,16 @@ pub async fn update_peer_site(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or(existing.connection_id),
+        peer_inbound_access_key: if payload.get("peer_inbound_access_key").is_some() {
+            payload
+                .get("peer_inbound_access_key")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        } else {
+            existing.peer_inbound_access_key
+        },
         created_at: existing.created_at,
         is_healthy: existing.is_healthy,
         last_health_check: existing.last_health_check,
@@ -1428,12 +1444,8 @@ fn require_admin_or_registered_peer(state: &AppState, principal: &Principal) -> 
         }
     };
     for peer in registry.list_peers() {
-        if let Some(conn_id) = peer.connection_id.as_deref() {
-            if let Some(conn) = state.connections.get(conn_id) {
-                if conn.access_key == principal.access_key {
-                    return None;
-                }
-            }
+        if peer.peer_inbound_access_key.as_deref() == Some(principal.access_key.as_str()) {
+            return None;
         }
     }
     Some(json_error(

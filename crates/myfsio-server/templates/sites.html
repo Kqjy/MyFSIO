@@ -142,6 +142,11 @@
                             </select>
                             <div class="form-text">Link to a remote connection for health checks</div>
                         </div>
+                        <div class="mb-3">
+                            <label for="peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
+                            <input type="text" class="form-control" id="peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (optional)" autocomplete="off" spellcheck="false">
+                            <div class="form-text">Access key the peer presents when calling this site (e.g. /admin/cluster/overview). Leave blank to require admin credentials.</div>
+                        </div>
                         <div class="d-grid">
                             <button type="submit" class="btn btn-primary">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -287,6 +292,7 @@
                                             data-priority="{{ peer.priority }}"
                                             data-display-name="{{ peer.display_name }}"
                                             data-connection-id="{{ peer.connection_id | default(value="") }}"
+                                            data-peer-inbound-access-key="{{ peer.peer_inbound_access_key | default(value="") }}"
                                             title="Edit peer">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
                                                 <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
@@ -423,6 +429,11 @@
                             {% endfor %}
                         </select>
                     </div>
+                    <div class="mb-3">
+                        <label for="edit_peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
+                        <input type="text" class="form-control" id="edit_peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (optional)" autocomplete="off" spellcheck="false">
+                        <div class="form-text">Access key the peer presents when calling this site (e.g. /admin/cluster/overview). Leave blank to require admin credentials.</div>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -525,6 +536,7 @@
             document.getElementById('edit_priority').value = button.getAttribute('data-priority');
             document.getElementById('edit_display_name').value = button.getAttribute('data-display-name');
             document.getElementById('edit_connection_id').value = button.getAttribute('data-connection-id');
+            document.getElementById('edit_peer_inbound_access_key').value = button.getAttribute('data-peer-inbound-access-key') || '';
             document.getElementById('editPeerForm').action = '/ui/sites/peers/' + encodeURIComponent(siteId) + '/update';
         });
     }
@@ -868,15 +880,43 @@
             });
         });
     }
-    document.querySelectorAll('.peer-actions-dropdown').forEach(function(dd) {
-        dd.addEventListener('shown.bs.dropdown', function() {
+    document.querySelectorAll('.peer-actions-dropdown').forEach(function(dd, idx) {
+        var menu = dd.querySelector('.dropdown-menu');
+        if (!menu) return;
+        var pairId = 'peer-dd-' + idx;
+        dd.dataset.peerDdPair = pairId;
+        menu.dataset.peerDdPair = pairId;
+        function reposition() {
             var toggle = dd.querySelector('[data-bs-toggle="dropdown"]');
-            var menu = dd.querySelector('.dropdown-menu');
-            if (!toggle || !menu) return;
+            if (!toggle) return;
             var rect = toggle.getBoundingClientRect();
-            menu.style.top = rect.bottom + 'px';
-            menu.style.left = (rect.right - menu.offsetWidth) + 'px';
+            var menuWidth = menu.offsetWidth;
+            var menuHeight = menu.offsetHeight;
+            var pad = 8;
+            var left = rect.right - menuWidth;
+            if (left + menuWidth > window.innerWidth - pad) left = window.innerWidth - pad - menuWidth;
+            if (left < pad) left = pad;
+            var top = rect.bottom;
+            if (top + menuHeight > window.innerHeight - pad) {
+                top = Math.max(pad, rect.top - menuHeight);
+            }
+            menu.style.position = 'fixed';
+            menu.style.top = top + 'px';
+            menu.style.left = left + 'px';
+            menu.style.right = 'auto';
+            menu.style.bottom = 'auto';
+            menu.style.transform = 'none';
+        }
+        dd.addEventListener('show.bs.dropdown', function() {
+            if (menu.parentNode !== document.body) document.body.appendChild(menu);
         });
+        dd.addEventListener('shown.bs.dropdown', reposition);
+        dd.addEventListener('hidden.bs.dropdown', function() {
+            menu.style.cssText = '';
+            if (menu.parentNode !== dd) dd.appendChild(menu);
+        });
+        window.addEventListener('resize', function() { if (menu.classList.contains('show')) reposition(); });
+        window.addEventListener('scroll', function() { if (menu.classList.contains('show')) reposition(); }, true);
     });
 })();
 

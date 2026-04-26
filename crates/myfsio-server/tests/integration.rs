@@ -8252,3 +8252,196 @@ async fn test_suspended_put_purges_stale_archived_null_version() {
         "the surviving null version must be the most recent (suspended) write"
     );
 }
+
+#[tokio::test]
+async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_connection() {
+    const ADMIN_AK: &str = "AKIAADMINADMINADMIN0";
+    const ADMIN_SK: &str = "admin-secret-admin-secret-admin-secret00";
+    const PEER_AK: &str = "AKIAPEERPEERPEERPEER";
+    const PEER_SK: &str = "peer-secret-peer-secret-peer-secret-peer";
+    const OUTBOUND_AK: &str = "AKIAOUTBOUNDOUTBOUND";
+    const OUTBOUND_SK: &str = "outbound-secret-outbound-secret-outbound";
+
+    let iam_json = serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": ADMIN_AK,
+                    "secret_key": ADMIN_SK,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": "*"
+                }]
+            },
+            {
+                "user_id": "u-peer",
+                "display_name": "peer",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": PEER_AK,
+                    "secret_key": PEER_SK,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "peer-bucket",
+                    "actions": ["read"],
+                    "prefix": "*"
+                }]
+            },
+            {
+                "user_id": "u-outbound",
+                "display_name": "outbound",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": OUTBOUND_AK,
+                    "secret_key": OUTBOUND_SK,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "outbound-bucket",
+                    "actions": ["read"],
+                    "prefix": "*"
+                }]
+            }
+        ]
+    });
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+    std::fs::write(iam_path.join("iam.json"), iam_json.to_string()).unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        region: "us-east-1".to_string(),
+        iam_config_path: iam_path.join("iam.json"),
+        sigv4_timestamp_tolerance_secs: 900,
+        presigned_url_min_expiry: 1,
+        presigned_url_max_expiry: 604800,
+        secret_key: None,
+        encryption_enabled: false,
+        kms_enabled: false,
+        gc_enabled: false,
+        integrity_enabled: false,
+        metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
+        lifecycle_enabled: false,
+        website_hosting_enabled: false,
+        replication_connect_timeout_secs: 5,
+        replication_read_timeout_secs: 30,
+        replication_max_retries: 2,
+        replication_streaming_threshold_bytes: 10_485_760,
+        replication_max_failures_per_bucket: 50,
+        site_sync_enabled: false,
+        site_sync_interval_secs: 60,
+        site_sync_batch_size: 100,
+        site_sync_connect_timeout_secs: 10,
+        site_sync_read_timeout_secs: 120,
+        site_sync_max_retries: 2,
+        site_sync_clock_skew_tolerance: 1.0,
+        ui_enabled: false,
+        templates_dir: std::path::PathBuf::from("templates"),
+        static_dir: std::path::PathBuf::from("static"),
+        multipart_min_part_size: 1,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new(config);
+
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-to-peer".to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: OUTBOUND_AK.to_string(),
+            secret_key: OUTBOUND_SK.to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let app = myfsio_server::create_router(state.clone());
+
+    let register_body = serde_json::json!({
+        "site_id": "peer-site",
+        "endpoint": "http://peer.example.com",
+        "region": "us-east-1",
+        "priority": 100,
+        "display_name": "Peer Site",
+        "connection_id": "conn-to-peer",
+        "peer_inbound_access_key": PEER_AK,
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/admin/sites")
+                .header("x-access-key", ADMIN_AK)
+                .header("x-secret-key", ADMIN_SK)
+                .header("content-type", "application/json")
+                .body(Body::from(register_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "admin must be able to register peer with peer_inbound_access_key"
+    );
+    let resp_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let registered: Value = serde_json::from_slice(&resp_bytes).unwrap();
+    assert_eq!(registered["peer_inbound_access_key"], PEER_AK);
+    assert_eq!(registered["connection_id"], "conn-to-peer");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/cluster/overview")
+                .header("x-access-key", PEER_AK)
+                .header("x-secret-key", PEER_SK)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "registered peer's inbound access key must be authorized for cluster overview"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/admin/cluster/overview")
+                .header("x-access-key", OUTBOUND_AK)
+                .header("x-secret-key", OUTBOUND_SK)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "outbound connection access key must NOT grant cluster overview when not configured as the peer's inbound key"
+    );
+}
