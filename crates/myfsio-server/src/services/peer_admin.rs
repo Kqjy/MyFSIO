@@ -3,6 +3,53 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::Value;
 
+fn extract_error_detail(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        let err = value.get("error").unwrap_or(&value);
+        let code = err
+            .get("code")
+            .or_else(|| err.get("Code"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let message = err
+            .get("message")
+            .or_else(|| err.get("Message"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let detail = match (code, message) {
+            (Some(c), Some(m)) => format!("{}: {}", c, m),
+            (Some(c), None) => c.to_string(),
+            (None, Some(m)) => m.to_string(),
+            (None, None) => String::new(),
+        };
+        if !detail.is_empty() {
+            return truncate_chars(&detail, 240);
+        }
+    }
+
+    let collapsed = trimmed
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_chars(&collapsed, 240)
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((boundary, _)) => format!("{}…", &s[..boundary]),
+        None => s.to_string(),
+    }
+}
+
 use myfsio_auth::sigv4::{
     aws_uri_encode, build_string_to_sign, compute_signature, derive_signing_key, sha256_hex,
 };
@@ -117,16 +164,7 @@ impl PeerAdminClient {
         let status = resp.status();
         if !status.is_success() {
             let body_text = resp.text().await.unwrap_or_default();
-            let detail = body_text
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let detail = match detail.char_indices().nth(240) {
-                Some((boundary, _)) => format!("{}…", &detail[..boundary]),
-                None => detail,
-            };
+            let detail = extract_error_detail(&body_text);
             if detail.is_empty() {
                 return Err(format!("peer returned status {}", status.as_u16()));
             }

@@ -721,13 +721,21 @@ pub async fn iam_dashboard(
             .as_array()
             .map(|items| {
                 items.iter().any(|policy| {
+                    let bucket_wildcard = policy
+                        .get("bucket")
+                        .and_then(|v| v.as_str())
+                        .map(|b| b == "*")
+                        .unwrap_or(false);
+                    if !bucket_wildcard {
+                        return false;
+                    }
                     policy
                         .get("actions")
                         .and_then(|value| value.as_array())
                         .map(|actions| {
                             actions
                                 .iter()
-                                .any(|action| matches!(action.as_str(), Some("*") | Some("iam:*")))
+                                .any(|action| action.as_str() == Some("*"))
                         })
                         .unwrap_or(false)
                 })
@@ -1744,6 +1752,20 @@ pub async fn update_peer_site(
         return Redirect::to("/ui/sites").into_response();
     };
 
+    let endpoint = form.endpoint.trim().to_string();
+    if endpoint.is_empty() {
+        let message = "Endpoint is required.".to_string();
+        if wants_json {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response();
+        }
+        session.write(|s| s.push_flash("danger", message));
+        return Redirect::to("/ui/sites").into_response();
+    }
+
     let connection_id = {
         let value = form.connection_id.trim();
         if value.is_empty() {
@@ -1777,7 +1799,7 @@ pub async fn update_peer_site(
     };
     let peer = crate::services::site_registry::PeerSite {
         site_id: site_id.clone(),
-        endpoint: form.endpoint.trim().to_string(),
+        endpoint,
         region: form.region.trim().to_string(),
         priority: form.priority,
         display_name: {

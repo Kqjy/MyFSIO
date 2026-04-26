@@ -529,7 +529,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
         <div class="docs-highlight mb-3">
           <ol class="mb-0">
             <li>Check the console output for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/ui/login</code>.</li>
-            <li>Create additional users with descriptive display names, AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>), and optional credential expiry dates.</li>
+            <li>Create additional users with descriptive display names, AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>), and optional credential expiry dates. Use <code>{"bucket": "*", "actions": ["*"]}</code> to grant full administrator access — this is the only policy shape that satisfies <code>require_admin</code> on routes such as <code>/admin/cluster/overview</code>. <code>iam:*</code> grants only IAM-management actions and is <strong>not</strong> a substitute for <code>"*"</code> on admin routes.</li>
             <li>Set credential expiry on users to grant time-limited access. The UI shows expiry badges and provides preset durations (1h, 24h, 7d, 30d, 90d). Expired credentials are rejected at authentication.</li>
             <li>Rotate secrets when sharing with CI jobs—new secrets display once and persist to <code>data/.myfsio.sys/config/iam.json</code>.</li>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
@@ -1351,7 +1351,7 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
         </div>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Managing Quotas (Admin Only)</h3>
-        <p class="small text-muted">Quota management is restricted to administrators (users with <code>iam:*</code> permissions).</p>
+        <p class="small text-muted">Quota management is restricted to administrators — users whose policy is <code>{"bucket": "*", "actions": ["*"]}</code>.</p>
         <ol class="docs-steps mb-3">
           <li>Navigate to your bucket → <strong>Properties</strong> tab → <strong>Storage Quota</strong> card.</li>
           <li>Enter limits: <strong>Max Size (MB)</strong> and/or <strong>Max Objects</strong>. Leave empty for unlimited.</li>

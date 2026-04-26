@@ -77,14 +77,63 @@ impl RawIamUser {
         let user_id = self.user_id.unwrap_or_else(|| {
             format!("u-{}", display_name.to_ascii_lowercase().replace(' ', "-"))
         });
+        let policies = self
+            .policies
+            .into_iter()
+            .map(normalize_legacy_full_access)
+            .collect();
         IamUser {
             user_id,
             display_name,
             enabled: self.enabled,
             expires_at: self.expires_at,
             access_keys,
-            policies: self.policies,
+            policies,
         }
+    }
+}
+
+const LEGACY_FULL_ACCESS_ACTIONS: &[&str] = &[
+    "list",
+    "read",
+    "write",
+    "delete",
+    "share",
+    "policy",
+    "create_bucket",
+    "delete_bucket",
+    "replication",
+    "lifecycle",
+    "cors",
+    "versioning",
+    "tagging",
+    "encryption",
+    "quota",
+    "object_lock",
+    "notification",
+    "logging",
+    "website",
+];
+
+fn normalize_legacy_full_access(policy: IamPolicy) -> IamPolicy {
+    if policy.bucket != "*"
+        || policy.prefix != "*"
+        || policy.actions.iter().any(|a| a == "*")
+    {
+        return policy;
+    }
+    if !policy.actions.iter().any(|a| a == "iam:*") {
+        return policy;
+    }
+    for required in LEGACY_FULL_ACCESS_ACTIONS {
+        if !policy.actions.iter().any(|a| a == *required) {
+            return policy;
+        }
+    }
+    IamPolicy {
+        bucket: policy.bucket,
+        prefix: policy.prefix,
+        actions: vec!["*".to_string()],
     }
 }
 

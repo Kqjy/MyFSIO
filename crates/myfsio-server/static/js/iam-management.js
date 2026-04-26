@@ -29,7 +29,7 @@ window.IAMManagement = (function() {
   ];
 
   var policyTemplates = {
-    full: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'create_bucket', 'delete_bucket', 'replication', 'lifecycle', 'cors', 'versioning', 'tagging', 'encryption', 'quota', 'object_lock', 'notification', 'logging', 'website', 'iam:*'] }],
+    full: [{ bucket: '*', actions: ['*'] }],
     readonly: [{ bucket: '*', actions: ['list', 'read'] }],
     writer: [{ bucket: '*', actions: ['list', 'read', 'write'] }],
     operator: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'create_bucket', 'delete_bucket'] }],
@@ -39,7 +39,7 @@ window.IAMManagement = (function() {
   function isAdminUser(policies) {
     if (!policies || !policies.length) return false;
     return policies.some(function(p) {
-      return p.actions && (p.actions.indexOf('iam:*') >= 0 || p.actions.indexOf('*') >= 0);
+      return p.bucket === '*' && p.actions && p.actions.indexOf('*') >= 0;
     });
   }
 
