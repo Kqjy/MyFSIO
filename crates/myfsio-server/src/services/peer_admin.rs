@@ -116,7 +116,25 @@ impl PeerAdminClient {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("peer returned status {}", status.as_u16()));
+            let body_text = resp.text().await.unwrap_or_default();
+            let detail = body_text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let detail = match detail.char_indices().nth(240) {
+                Some((boundary, _)) => format!("{}…", &detail[..boundary]),
+                None => detail,
+            };
+            if detail.is_empty() {
+                return Err(format!("peer returned status {}", status.as_u16()));
+            }
+            return Err(format!(
+                "peer returned status {} — {}",
+                status.as_u16(),
+                detail
+            ));
         }
         let body: Value = resp
             .json()
