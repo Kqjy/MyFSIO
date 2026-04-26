@@ -232,6 +232,26 @@ These are read directly by UI pages:
 | `SITE_REGION` | matches `AWS_REGION` | Display region for the local site |
 | `SITE_PRIORITY` | `100` | Routing priority (lower = preferred) |
 
+### Cross-site authentication
+
+The Cluster page on each site fetches `/admin/cluster/overview` from every registered peer to render their cards. That endpoint is gated by `require_admin_or_registered_peer`, which accepts a request when **either**:
+
+1. The signing access key is a full admin on the receiving site (policy `{"bucket":"*","actions":["*"]}`), **or**
+2. The signing access key matches the **Peer Inbound Access Key** field on the receiving site's site-registry entry for that peer.
+
+Option 2 is the least-privilege path and is what the Sites UI exposes per peer. The value goes into the *receiving* peer entry and is **the access key the other site signs with when calling here** — i.e. copied from the *other* site's outbound Connection that targets this site.
+
+Symmetric setup for two sites `us-east-1` and `us-west-1`:
+
+| On site | Peer entry | Peer Inbound Access Key |
+| --- | --- | --- |
+| `us-east-1` | `us-west-1` | the access key in **us-west-1's** outbound Connection that points at us-east-1 |
+| `us-west-1` | `us-east-1` | the access key in **us-east-1's** outbound Connection that points at us-west-1 |
+
+Putting your own admin key into your own peer entry does nothing — the inbound caller is the peer, not you. The whitelisted access key must still exist as an enabled IAM user on the receiving site so SigV4 verification finds a matching secret. Its policy can be empty for cluster-overview alone; for site-sync it needs the S3 verbs the sync workload uses (`list`, `read`, plus `write`/`delete` for replicated/bidirectional buckets). Leave the field blank only if the signing key is a real admin on the receiving site.
+
+The in-app **Documentation → Site Registry** page has a worked example with side-by-side cards.
+
 ## 7. Data Layout
 
 With the default `STORAGE_ROOT=./data`, the Rust server writes:

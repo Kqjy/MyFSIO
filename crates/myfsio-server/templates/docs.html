@@ -1193,6 +1193,56 @@ cargo run -p myfsio-server --</code></pre>
           </div>
         </div>
 
+        <h3 class="h6 text-uppercase text-muted mt-4">Cross-site authentication (Peer Inbound Access Key)</h3>
+        <p class="small text-muted">When the Cluster page asks one site to render a peer card, the local server signs a SigV4 call to <code>/admin/cluster/overview</code> on the peer. The peer needs to know which inbound caller is authorized. There are two ways for that signed call to be accepted:</p>
+        <ol class="small text-muted mb-3">
+          <li>The signing access key resolves to a real admin user on the peer (policy <code>{"bucket":"*","actions":["*"]}</code>), <strong>or</strong></li>
+          <li>The signing access key is whitelisted on the peer's site-registry entry as <strong>Peer Inbound Access Key</strong>. With this set, the peer accepts the call without granting full admin.</li>
+        </ol>
+        <p class="small text-muted">Option 2 is preferred — it follows least-privilege. The mental model is:</p>
+        <div class="alert alert-light border mb-3">
+          <strong class="small">Peer Inbound Access Key on Site&nbsp;X for peer&nbsp;Y</strong>
+          <span class="small">= "the access key Y signs with when calling X."</span>
+          <br>
+          <span class="small text-muted">It is copied from <em>the other site's outbound Connection</em>, never from your own IAM.</span>
+        </div>
+
+        <h4 class="h6 mt-3 mb-2">Worked example (two sites: <code>us-east-1</code> and <code>us-west-1</code>)</h4>
+        <p class="small text-muted">Each site has an outbound Connection it uses to reach the other:</p>
+        <ul class="small text-muted mb-3">
+          <li><code>us-east-1</code>'s "to-west" Connection signs with access key <code>AKIA-EAST-OUT</code></li>
+          <li><code>us-west-1</code>'s "to-east" Connection signs with access key <code>AKIA-WEST-OUT</code></li>
+        </ul>
+        <p class="small text-muted">For the Cluster page on both sides to fetch peer data, register the peer entries with cross-paired inbound keys:</p>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">On us-east-1 → peer "us-west-1"</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Connection: "to-west"</li>
+                  <li><strong>Peer Inbound Access Key:</strong> <code>AKIA-WEST-OUT</code></li>
+                  <li class="text-muted">(the key us-west-1 will sign with when calling us-east-1)</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="card border h-100">
+              <div class="card-header bg-light py-2"><strong class="small">On us-west-1 → peer "us-east-1"</strong></div>
+              <div class="card-body small">
+                <ul class="mb-0 ps-3">
+                  <li>Connection: "to-east"</li>
+                  <li><strong>Peer Inbound Access Key:</strong> <code>AKIA-EAST-OUT</code></li>
+                  <li class="text-muted">(the key us-east-1 will sign with when calling us-west-1)</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="small text-muted">Each side's inbound key matches the <em>other</em> side's outbound key. Putting your own admin key (e.g. <code>localadmin</code>) into your own peer entry does nothing — the inbound caller is the peer, not you.</p>
+        <p class="small text-muted">Each whitelisted access key still has to exist as an enabled IAM user on the receiving site (so SigV4 verification can find a matching secret). Its policy can be empty for cluster-overview alone; for site-sync to work, it needs the S3 verbs the sync workload uses (<code>list</code>, <code>read</code>, plus <code>write</code>/<code>delete</code> for inbound replication / bidirectional sync). Leave the field blank only if the signing key is a full admin on the receiving site.</p>
+
         <h3 class="h6 text-uppercase text-muted mt-4">Admin API Endpoints</h3>
         <p class="small text-muted">The <code>/admin</code> API provides programmatic access to site registry:</p>
 <pre class="mb-3"><code class="language-bash"># Get local site configuration
