@@ -1412,3 +1412,170 @@ pub async fn integrity_history(
         None => json_response(StatusCode::OK, serde_json::json!({"executions": []})),
     }
 }
+
+fn require_admin_or_registered_peer(state: &AppState, principal: &Principal) -> Option<Response> {
+    if principal.is_admin {
+        return None;
+    }
+    let registry = match &state.site_registry {
+        Some(r) => r,
+        None => {
+            return Some(json_error(
+                "AccessDenied",
+                "Admin access required",
+                StatusCode::FORBIDDEN,
+            ))
+        }
+    };
+    for peer in registry.list_peers() {
+        if let Some(conn_id) = peer.connection_id.as_deref() {
+            if let Some(conn) = state.connections.get(conn_id) {
+                if conn.access_key == principal.access_key {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(json_error(
+        "AccessDenied",
+        "Admin or registered peer required",
+        StatusCode::FORBIDDEN,
+    ))
+}
+
+pub async fn build_cluster_overview_public(state: &AppState) -> serde_json::Value {
+    build_cluster_overview(state).await
+}
+
+async fn build_cluster_overview(state: &AppState) -> serde_json::Value {
+    let local_site = state
+        .site_registry
+        .as_ref()
+        .and_then(|r| r.get_local_site());
+
+    let buckets = state.storage.list_buckets().await.unwrap_or_default();
+    let bucket_count = buckets.len() as u64;
+    let mut total_objects: u64 = 0;
+    let mut size_bytes: u64 = 0;
+    for b in &buckets {
+        if let Ok(stats) = state.storage.bucket_stats(&b.name).await {
+            total_objects += stats.total_objects();
+            size_bytes += stats.total_bytes();
+        }
+    }
+
+    let (disk_total, disk_free) =
+        crate::services::system_metrics::sample_disk(&state.config.storage_root);
+
+    let system = match state.system_metrics.as_ref() {
+        Some(svc) => {
+            let history = svc.get_history(Some(1)).await;
+            history
+                .last()
+                .map(|s| {
+                    serde_json::json!({
+                        "cpu_percent": s.cpu_percent,
+                        "memory_percent": s.memory_percent,
+                        "disk_percent": s.disk_percent,
+                        "storage_bytes": s.storage_bytes,
+                    })
+                })
+                .unwrap_or_else(|| serde_json::json!({}))
+        }
+        None => serde_json::json!({}),
+    };
+
+    let sync_snapshot = state
+        .site_sync
+        .as_ref()
+        .map(|w| w.snapshot_stats())
+        .unwrap_or_default();
+    let mut sync_errors: u64 = 0;
+    let mut last_sync_at: Option<f64> = None;
+    for s in sync_snapshot.values() {
+        sync_errors += s.errors;
+        if let Some(ts) = s.last_sync_at {
+            last_sync_at = match last_sync_at {
+                Some(prev) if prev > ts => Some(prev),
+                _ => Some(ts),
+            };
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+    serde_json::json!({
+        "site_id": local_site.as_ref().map(|s| s.site_id.clone()),
+        "display_name": local_site.as_ref().map(|s| s.display_name.clone()),
+        "endpoint": local_site.as_ref().map(|s| s.endpoint.clone()),
+        "region": local_site.as_ref().map(|s| s.region.clone()),
+        "priority": local_site.as_ref().map(|s| s.priority),
+        "capacity": {
+            "total_bytes": disk_total,
+            "available_bytes": disk_free,
+        },
+        "buckets": bucket_count,
+        "objects": total_objects,
+        "size_bytes": size_bytes,
+        "system": system,
+        "sync": {
+            "errors": sync_errors,
+            "last_sync_at": last_sync_at,
+        },
+        "generated_at": now,
+    })
+}
+
+pub async fn get_cluster_overview(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Response {
+    if let Some(err) = require_admin_or_registered_peer(&state, &principal) {
+        return err;
+    }
+    {
+        let guard = state.cluster_overview_cache.lock();
+        if let Some((at, ref value)) = *guard {
+            if at.elapsed() < std::time::Duration::from_secs(10) {
+                return json_response(StatusCode::OK, value.clone());
+            }
+        }
+    }
+    let value = build_cluster_overview(&state).await;
+    *state.cluster_overview_cache.lock() =
+        Some((std::time::Instant::now(), value.clone()));
+    json_response(StatusCode::OK, value)
+}
+
+pub async fn get_sync_stats(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Response {
+    if let Some(err) = require_admin(&principal) {
+        return err;
+    }
+    let snapshot = match state.site_sync.as_ref() {
+        Some(worker) => worker.snapshot_stats(),
+        None => Default::default(),
+    };
+    let stats: Vec<serde_json::Value> = snapshot
+        .into_iter()
+        .map(|(bucket, s)| {
+            serde_json::json!({
+                "bucket": bucket,
+                "last_sync_at": s.last_sync_at,
+                "objects_pulled": s.objects_pulled,
+                "objects_skipped": s.objects_skipped,
+                "conflicts_resolved": s.conflicts_resolved,
+                "deletions_applied": s.deletions_applied,
+                "errors": s.errors,
+            })
+        })
+        .collect();
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "enabled": state.site_sync.is_some(),
+            "stats": stats,
+        }),
+    )
+}

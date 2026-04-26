@@ -220,6 +220,59 @@ fn render_sites() {
 }
 
 #[test]
+fn render_cluster_empty() {
+    let mut ctx = base_ctx();
+    ctx.insert("cluster_sites", &Vec::<Value>::new());
+    ctx.insert("cluster_total_buckets", &0u64);
+    ctx.insert("cluster_total_objects", &0u64);
+    ctx.insert("cluster_total_size_bytes", &0u64);
+    ctx.insert("cluster_online_count", &0usize);
+    ctx.insert("cluster_total_count", &0usize);
+    render_or_panic("cluster.html", &ctx);
+}
+
+#[test]
+fn render_cluster_with_sites() {
+    let mut ctx = base_ctx();
+    let sites = json!([
+        {
+            "site_id": "local-1",
+            "display_name": "Local",
+            "endpoint": "http://127.0.0.1:8000",
+            "region": "us-east-1",
+            "online": true,
+            "stale": false,
+            "is_local": true,
+            "buckets": 3,
+            "objects": 42,
+            "size_bytes": 1048576,
+            "capacity": {"total_bytes": 100000000, "available_bytes": 50000000},
+            "system": {"cpu_percent": 12.5, "memory_percent": 33.0, "disk_percent": 50.0, "storage_bytes": 1048576},
+            "sync": {"errors": 0, "last_sync_at": 1700000000.0},
+            "error": null
+        },
+        {
+            "site_id": "peer-1",
+            "display_name": "Peer",
+            "endpoint": "http://peer.example.com",
+            "online": false,
+            "stale": true,
+            "is_local": false,
+            "registered_region": "us-west-2",
+            "registered_priority": 100,
+            "error": "request failed: timeout"
+        }
+    ]);
+    ctx.insert("cluster_sites", &sites);
+    ctx.insert("cluster_total_buckets", &3u64);
+    ctx.insert("cluster_total_objects", &42u64);
+    ctx.insert("cluster_total_size_bytes", &1048576u64);
+    ctx.insert("cluster_online_count", &1usize);
+    ctx.insert("cluster_total_count", &2usize);
+    render_or_panic("cluster.html", &ctx);
+}
+
+#[test]
 fn render_website_domains() {
     let mut ctx = base_ctx();
     ctx.insert("mappings", &Vec::<Value>::new());

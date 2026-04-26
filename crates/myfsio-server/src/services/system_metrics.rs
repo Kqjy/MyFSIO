@@ -144,7 +144,7 @@ fn normalize_path_for_mount(path: &Path) -> String {
     stripped.to_lowercase()
 }
 
-fn sample_disk(path: &Path) -> (u64, u64) {
+pub fn sample_disk(path: &Path) -> (u64, u64) {
     let disks = Disks::new_with_refreshed_list();
     let path_str = normalize_path_for_mount(path);
     let mut best: Option<(usize, u64, u64)> = None;

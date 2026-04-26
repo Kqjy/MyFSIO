@@ -31,13 +31,13 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
 }
 
-fn aws_uri_encode(input: &str) -> String {
+pub fn aws_uri_encode(input: &str) -> String {
     percent_encode(input.as_bytes(), AWS_ENCODE_SET).to_string()
 }
 

@@ -230,6 +230,8 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             get(ui_api::connection_health),
         )
         .route("/ui/sites", get(ui_pages::sites_dashboard))
+        .route("/ui/cluster", get(ui_pages::cluster_dashboard))
+        .route("/ui/cluster/data", get(ui_pages::cluster_data_json))
         .route("/ui/sites/local", post(ui_pages::update_local_site))
         .route("/ui/sites/peers", post(ui_pages::add_peer_site))
         .route(
@@ -480,6 +482,14 @@ pub fn create_router(state: state::AppState) -> Router {
         .route(
             "/admin/sites/{site_id}/bidirectional-status",
             axum::routing::get(handlers::admin::check_bidirectional_status),
+        )
+        .route(
+            "/admin/sync/stats",
+            axum::routing::get(handlers::admin::get_sync_stats),
+        )
+        .route(
+            "/admin/cluster/overview",
+            axum::routing::get(handlers::admin::get_cluster_overview),
         )
         .route(
             "/admin/topology",

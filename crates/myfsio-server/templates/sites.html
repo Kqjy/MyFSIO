@@ -257,7 +257,16 @@
                                             </svg>
                                         </span>
                                         {% endif %}
+                                        {% if item.errors and item.errors > 0 %}
+                                        <span class="badge bg-danger bg-opacity-10 text-danger" title="Sync errors across bidirectional buckets">{{ item.errors }} err</span>
+                                        {% endif %}
                                     </div>
+                                    {% if item.last_sync_at %}
+                                    <div class="text-muted small mt-1" data-last-sync-at="{{ item.last_sync_at }}">
+                                        last sync: <span class="last-sync-rel">just now</span>
+                                        {% if item.objects_pulled %} · {{ item.objects_pulled }} pulled{% endif %}
+                                    </div>
+                                    {% endif %}
                                     <div class="sync-stats-detail d-none mt-2 small" id="stats-{{ peer.site_id }}">
                                         <span class="spinner-border spinner-border-sm text-muted" style="width: 12px; height: 12px;"></span>
                                     </div>
@@ -869,6 +878,25 @@
             menu.style.left = (rect.right - menu.offsetWidth) + 'px';
         });
     });
+})();
+
+(function () {
+    function fmtRel(ts) {
+        var diff = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+        if (diff < 60) return diff + "s ago";
+        if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+        if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+        return Math.floor(diff / 86400) + "d ago";
+    }
+    function refresh() {
+        document.querySelectorAll("[data-last-sync-at]").forEach(function (el) {
+            var ts = parseFloat(el.getAttribute("data-last-sync-at"));
+            var span = el.querySelector(".last-sync-rel");
+            if (span && !isNaN(ts)) span.textContent = fmtRel(ts);
+        });
+    }
+    refresh();
+    setInterval(refresh, 30000);
 })();
 </script>
 

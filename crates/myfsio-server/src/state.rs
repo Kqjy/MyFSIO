@@ -1,5 +1,8 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
+use serde_json::Value;
 
 use crate::config::ServerConfig;
 use crate::services::access_logging::AccessLoggingService;
@@ -40,6 +43,8 @@ pub struct AppState {
     pub templates: Option<Arc<TemplateEngine>>,
     pub sessions: Arc<SessionStore>,
     pub access_logging: Arc<AccessLoggingService>,
+    pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
+    pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
 }
 
 impl AppState {
@@ -208,6 +213,8 @@ impl AppState {
             templates,
             sessions: Arc::new(SessionStore::new(session_ttl)),
             access_logging,
+            cluster_overview_cache: Arc::new(Mutex::new(None)),
+            cluster_aggregate_cache: Arc::new(Mutex::new(None)),
         }
     }
 

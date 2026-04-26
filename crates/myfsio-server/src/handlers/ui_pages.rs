@@ -123,6 +123,7 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
         ("ui.sites_dashboard", "/ui/sites"),
         ("ui.update_local_site", "/ui/sites/local"),
         ("ui.add_peer_site", "/ui/sites/peers"),
+        ("ui.cluster_dashboard", "/ui/cluster"),
         ("ui.metrics_dashboard", "/ui/metrics"),
         ("ui.system_dashboard", "/ui/system"),
         ("ui.system_gc_status", "/ui/system/gc/status"),
@@ -1199,20 +1200,60 @@ pub async fn sites_dashboard(
         })
         .unwrap_or_default();
 
+    let rules = state.replication.rules_snapshot();
+    let sync_snapshot = state
+        .site_sync
+        .as_ref()
+        .map(|w| w.snapshot_stats())
+        .unwrap_or_default();
+
     let peers_with_stats: Vec<Value> = peers
         .iter()
         .cloned()
         .map(|peer| {
-            let has_connection = peer
+            let connection_id = peer
                 .get("connection_id")
                 .and_then(|value| value.as_str())
-                .map(|value| !value.is_empty())
-                .unwrap_or(false);
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+            let has_connection = connection_id.is_some();
+
+            let mut buckets_syncing: u64 = 0;
+            let mut has_bidirectional = false;
+            let mut last_sync_at: Option<f64> = None;
+            let mut total_pulled: u64 = 0;
+            let mut total_errors: u64 = 0;
+
+            if let Some(ref conn_id) = connection_id {
+                for (bucket, rule) in &rules {
+                    if &rule.target_connection_id != conn_id || !rule.enabled {
+                        continue;
+                    }
+                    if rule.mode == crate::services::replication::MODE_BIDIRECTIONAL {
+                        has_bidirectional = true;
+                        buckets_syncing += 1;
+                        if let Some(stats) = sync_snapshot.get(bucket) {
+                            total_pulled += stats.objects_pulled;
+                            total_errors += stats.errors;
+                            if let Some(ts) = stats.last_sync_at {
+                                last_sync_at = match last_sync_at {
+                                    Some(prev) if prev > ts => Some(prev),
+                                    _ => Some(ts),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+
             json!({
                 "peer": peer,
                 "has_connection": has_connection,
-                "buckets_syncing": 0,
-                "has_bidirectional": false,
+                "buckets_syncing": buckets_syncing,
+                "has_bidirectional": has_bidirectional,
+                "last_sync_at": last_sync_at,
+                "objects_pulled": total_pulled,
+                "errors": total_errors,
             })
         })
         .collect();
@@ -1247,6 +1288,184 @@ pub async fn sites_dashboard(
     ctx.insert("config_site_region", &state.config.site_region);
     ctx.insert("topology", &json!({"sites": [], "connections": []}));
     render(&state, "sites.html", &ctx)
+}
+
+pub async fn cluster_data_json(
+    State(state): State<AppState>,
+    Extension(_session): Extension<SessionHandle>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let force = params
+        .get("force")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if force {
+        *state.cluster_aggregate_cache.lock() = None;
+        *state.cluster_overview_cache.lock() = None;
+    }
+    let sites = build_cluster_sites(&state).await;
+    let totals = cluster_totals(&sites);
+    let body = json!({ "sites": sites, "totals": totals });
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+fn cluster_totals(sites: &[Value]) -> Value {
+    let total_buckets: u64 = sites
+        .iter()
+        .filter_map(|s| s.get("buckets").and_then(|v| v.as_u64()))
+        .sum();
+    let total_objects: u64 = sites
+        .iter()
+        .filter_map(|s| s.get("objects").and_then(|v| v.as_u64()))
+        .sum();
+    let total_size_bytes: u64 = sites
+        .iter()
+        .filter_map(|s| s.get("size_bytes").and_then(|v| v.as_u64()))
+        .sum();
+    let online = sites
+        .iter()
+        .filter(|s| s.get("online").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+    json!({
+        "buckets": total_buckets,
+        "objects": total_objects,
+        "size_bytes": total_size_bytes,
+        "online_count": online,
+        "total_count": sites.len(),
+    })
+}
+
+pub async fn cluster_dashboard(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+) -> Response {
+    let mut ctx = page_context(&state, &session, "ui.cluster_dashboard");
+
+    let sites = build_cluster_sites(&state).await;
+
+    let total_buckets: u64 = sites
+        .iter()
+        .filter_map(|s| s.get("buckets").and_then(|v| v.as_u64()))
+        .sum();
+    let total_objects: u64 = sites
+        .iter()
+        .filter_map(|s| s.get("objects").and_then(|v| v.as_u64()))
+        .sum();
+    let total_size_bytes: u64 = sites
+        .iter()
+        .filter_map(|s| s.get("size_bytes").and_then(|v| v.as_u64()))
+        .sum();
+    let online_count = sites
+        .iter()
+        .filter(|s| s.get("online").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+
+    ctx.insert("cluster_sites", &sites);
+    ctx.insert("cluster_total_buckets", &total_buckets);
+    ctx.insert("cluster_total_objects", &total_objects);
+    ctx.insert("cluster_total_size_bytes", &total_size_bytes);
+    ctx.insert("cluster_online_count", &online_count);
+    ctx.insert("cluster_total_count", &sites.len());
+    render(&state, "cluster.html", &ctx)
+}
+
+async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
+    {
+        let guard = state.cluster_aggregate_cache.lock();
+        if let Some((at, ref value)) = *guard {
+            if at.elapsed() < std::time::Duration::from_secs(10) {
+                if let Some(arr) = value.as_array() {
+                    return arr.clone();
+                }
+            }
+        }
+    }
+
+    let mut sites: Vec<Value> = Vec::new();
+
+    let local = crate::handlers::admin::build_cluster_overview_public(state).await;
+    let mut local_card = decorate_site(local, true, false, None);
+    if local_card.get("site_id").and_then(|v| v.as_str()).is_none() {
+        local_card["site_id"] = json!(state
+            .config
+            .site_id
+            .clone()
+            .unwrap_or_else(|| "local".to_string()));
+    }
+    local_card["is_local"] = json!(true);
+    sites.push(local_card);
+
+    let peers = state
+        .site_registry
+        .as_ref()
+        .map(|r| r.list_peers())
+        .unwrap_or_default();
+
+    let connect_to = std::time::Duration::from_secs(2);
+    let read_to = std::time::Duration::from_secs(3);
+    let client = crate::services::peer_admin::PeerAdminClient::new(connect_to, read_to);
+
+    let mut peer_futures = Vec::new();
+    for peer in peers {
+        let conn = peer
+            .connection_id
+            .as_deref()
+            .and_then(|id| state.connections.get(id));
+        let endpoint = peer.endpoint.clone();
+        let conn_clone = conn.clone();
+        let client_ref = &client;
+        peer_futures.push(async move {
+            let value = match conn_clone {
+                Some(c) => client_ref.fetch_cluster_overview(&endpoint, &c).await,
+                None => Err("no connection configured".to_string()),
+            };
+            (peer, value)
+        });
+    }
+
+    let results = futures::future::join_all(peer_futures).await;
+    for (peer, result) in results {
+        let (overview, online, error) = match result {
+            Ok(value) => (value, true, None),
+            Err(err) => (json!({}), false, Some(err)),
+        };
+        let mut card = decorate_site(overview, online, !online, error);
+        if card.get("site_id").and_then(|v| v.as_str()).is_none() {
+            card["site_id"] = json!(peer.site_id.clone());
+        }
+        if card.get("display_name").and_then(|v| v.as_str()).is_none() {
+            card["display_name"] = json!(peer.display_name.clone());
+        }
+        if card.get("endpoint").and_then(|v| v.as_str()).is_none() {
+            card["endpoint"] = json!(peer.endpoint.clone());
+        }
+        card["is_local"] = json!(false);
+        card["registered_priority"] = json!(peer.priority);
+        card["registered_region"] = json!(peer.region);
+        sites.push(card);
+    }
+
+    *state.cluster_aggregate_cache.lock() =
+        Some((std::time::Instant::now(), Value::Array(sites.clone())));
+    sites
+}
+
+fn decorate_site(mut value: Value, online: bool, stale: bool, error: Option<String>) -> Value {
+    if !value.is_object() {
+        value = json!({});
+    }
+    value["online"] = json!(online);
+    value["stale"] = json!(stale);
+    value["error"] = match error {
+        Some(e) => json!(e),
+        None => Value::Null,
+    };
+    value
 }
 
 #[derive(serde::Deserialize)]

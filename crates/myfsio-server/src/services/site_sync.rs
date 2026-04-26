@@ -32,7 +32,7 @@ pub struct SyncState {
     pub last_full_sync: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SiteSyncStats {
     pub last_sync_at: Option<f64>,
     pub objects_pulled: u64,
@@ -90,6 +90,7 @@ impl SiteSyncWorker {
                 max_attempts: max_retries,
             },
         ));
+        let bucket_stats = Mutex::new(load_stats(&storage_root));
         Self {
             storage,
             connections,
@@ -100,7 +101,7 @@ impl SiteSyncWorker {
             batch_size,
             clock_skew_tolerance,
             client_options,
-            bucket_stats: Mutex::new(HashMap::new()),
+            bucket_stats,
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -115,6 +116,15 @@ impl SiteSyncWorker {
 
     pub fn get_stats(&self, bucket: &str) -> Option<SiteSyncStats> {
         self.bucket_stats.lock().get(bucket).cloned()
+    }
+
+    pub fn snapshot_stats(&self) -> HashMap<String, SiteSyncStats> {
+        self.bucket_stats.lock().clone()
+    }
+
+    fn save_stats(&self) {
+        let snapshot = self.bucket_stats.lock().clone();
+        save_stats(&self.storage_root, &snapshot);
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -136,6 +146,7 @@ impl SiteSyncWorker {
 
     async fn run_cycle(&self) {
         let rules = self.replication.rules_snapshot();
+        let mut mutated = false;
         for (bucket, rule) in rules {
             if rule.mode != MODE_BIDIRECTIONAL || !rule.enabled {
                 continue;
@@ -143,11 +154,15 @@ impl SiteSyncWorker {
             match self.sync_bucket(&rule).await {
                 Ok(stats) => {
                     self.bucket_stats.lock().insert(bucket, stats);
+                    mutated = true;
                 }
                 Err(e) => {
                     tracing::error!("Site sync failed for bucket {}: {}", bucket, e);
                 }
             }
+        }
+        if mutated {
+            self.save_stats();
         }
     }
 
@@ -161,6 +176,7 @@ impl SiteSyncWorker {
                 self.bucket_stats
                     .lock()
                     .insert(bucket.to_string(), stats.clone());
+                self.save_stats();
                 Some(stats)
             }
             Err(e) => {
@@ -452,6 +468,34 @@ fn now_secs() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+fn stats_path(storage_root: &std::path::Path) -> PathBuf {
+    storage_root
+        .join(".myfsio.sys")
+        .join("config")
+        .join("site_sync_stats.json")
+}
+
+fn load_stats(storage_root: &std::path::Path) -> HashMap<String, SiteSyncStats> {
+    let path = stats_path(storage_root);
+    if !path.exists() {
+        return HashMap::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_stats(storage_root: &std::path::Path, stats: &HashMap<String, SiteSyncStats>) {
+    let path = stats_path(storage_root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(stats) {
+        let _ = std::fs::write(&path, text);
+    }
 }
 
 fn is_not_found_error<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
