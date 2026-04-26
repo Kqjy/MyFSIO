@@ -107,6 +107,12 @@ pub trait StorageEngine: Send + Sync {
         version_id: &str,
     ) -> StorageResult<HashMap<String, String>>;
 
+    async fn get_archived_null_version_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<Option<HashMap<String, String>>>;
+
     async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<DeleteOutcome>;
 
     async fn delete_object_version(
@@ -171,6 +177,7 @@ pub trait StorageEngine: Send + Sync {
         part_number: u32,
         src_bucket: &str,
         src_key: &str,
+        src_version_id: Option<&str>,
         range: Option<(u64, u64)>,
     ) -> StorageResult<(String, chrono::DateTime<chrono::Utc>)>;
 

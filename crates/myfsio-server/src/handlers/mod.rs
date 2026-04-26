@@ -197,6 +197,46 @@ async fn ensure_object_lock_allows_write(
     Ok(())
 }
 
+async fn ensure_archived_null_lock_allows_overwrite(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: Option<&HeaderMap>,
+) -> Result<(), Response> {
+    let status = match state.storage.get_versioning_status(bucket).await {
+        Ok(status) => status,
+        Err(myfsio_storage::error::StorageError::BucketNotFound(_)) => return Ok(()),
+        Err(err) => return Err(storage_err_response(err)),
+    };
+    if !matches!(status, myfsio_common::types::VersioningStatus::Suspended) {
+        return Ok(());
+    }
+    let metadata = match state
+        .storage
+        .get_archived_null_version_metadata(bucket, key)
+        .await
+    {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => return Ok(()),
+        Err(err) => return Err(storage_err_response(err)),
+    };
+    let bypass_governance = headers
+        .and_then(|headers| {
+            headers
+                .get("x-amz-bypass-governance-retention")
+                .and_then(|value| value.to_str().ok())
+        })
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            message,
+        )));
+    }
+    Ok(())
+}
+
 async fn ensure_object_version_lock_allows_delete(
     state: &AppState,
     bucket: &str,
@@ -709,7 +749,8 @@ pub async fn post_bucket(
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
         if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
-            return post_object_form_handler(&state, &bucket, ct, body).await;
+            let ct = ct.to_string();
+            return post_object_form_handler(&state, &bucket, &ct, &headers, body).await;
         }
     }
 
@@ -1110,10 +1151,6 @@ fn apply_user_metadata(headers: &mut HeaderMap, metadata: &HashMap<String, Strin
     }
 }
 
-fn is_null_version(version_id: Option<&str>) -> bool {
-    version_id.is_none_or(|value| value == "null")
-}
-
 fn bad_digest_response(message: impl Into<String>) -> Response {
     s3_error_response(S3Error::new(S3ErrorCode::BadDigest, message))
 }
@@ -1387,6 +1424,11 @@ pub async fn put_object(
     {
         return response;
     }
+    if let Err(response) =
+        ensure_archived_null_lock_allows_overwrite(&state, &bucket, &key, Some(&headers)).await
+    {
+        return response;
+    }
     if let Some(response) = evaluate_put_preconditions(&state, &bucket, &key, &headers).await {
         return response;
     }
@@ -1604,10 +1646,7 @@ pub async fn get_object(
         return list_parts_handler(&state, &bucket, &key, upload_id).await;
     }
 
-    let version_id = query
-        .version_id
-        .as_deref()
-        .filter(|value| !is_null_version(Some(*value)));
+    let version_id = query.version_id.as_deref();
 
     let range_header = headers
         .get("range")
@@ -1805,7 +1844,7 @@ pub async fn post_object(
     }
 
     if let Some(ref upload_id) = query.upload_id {
-        return complete_multipart_handler(&state, &bucket, &key, upload_id, body).await;
+        return complete_multipart_handler(&state, &bucket, &key, upload_id, &headers, body).await;
     }
 
     if query.select.is_some() {
@@ -1832,11 +1871,7 @@ pub async fn delete_object(
         return abort_multipart_handler(&state, &bucket, upload_id).await;
     }
 
-    if let Some(version_id) = query
-        .version_id
-        .as_deref()
-        .filter(|value| !is_null_version(Some(*value)))
-    {
+    if let Some(version_id) = query.version_id.as_deref() {
         if let Err(response) =
             ensure_object_version_lock_allows_delete(&state, &bucket, &key, version_id, &headers)
                 .await
@@ -1897,10 +1932,7 @@ pub async fn head_object(
     Query(query): Query<ObjectQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let version_id = query
-        .version_id
-        .as_deref()
-        .filter(|value| !is_null_version(Some(*value)));
+    let version_id = query.version_id.as_deref();
     let result = match version_id {
         Some(version_id) => {
             state
@@ -2145,29 +2177,24 @@ async fn upload_part_copy_handler(
     range_header: Option<&str>,
     headers: &HeaderMap,
 ) -> Response {
-    let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
-    let source = match percent_encoding::percent_decode_str(source).decode_utf8() {
-        Ok(s) => s.into_owned(),
-        Err(_) => {
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InvalidArgument,
-                "Invalid x-amz-copy-source encoding",
-            ));
-        }
-    };
-    let (src_bucket, src_key) = match source.split_once('/') {
-        Some((b, k)) => (b.to_string(), k.to_string()),
-        None => {
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InvalidArgument,
-                "Invalid x-amz-copy-source",
-            ));
-        }
+    let (src_bucket, src_key, src_version_id) = match parse_copy_source(copy_source) {
+        Ok(parts) => parts,
+        Err(response) => return response,
     };
 
-    let source_meta = match state.storage.head_object(&src_bucket, &src_key).await {
-        Ok(m) => m,
-        Err(e) => return storage_err_response(e),
+    let source_meta = match src_version_id.as_deref() {
+        Some(version_id) => match state
+            .storage
+            .head_object_version(&src_bucket, &src_key, version_id)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
+        None => match state.storage.head_object(&src_bucket, &src_key).await {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
     };
     if let Some(resp) = evaluate_copy_preconditions(headers, &source_meta) {
         return resp;
@@ -2194,6 +2221,7 @@ async fn upload_part_copy_handler(
             part_number,
             &src_bucket,
             &src_key,
+            src_version_id.as_deref(),
             range,
         )
         .await
@@ -2224,8 +2252,15 @@ async fn complete_multipart_handler(
     bucket: &str,
     key: &str,
     upload_id: &str,
+    headers: &HeaderMap,
     body: Body,
 ) -> Response {
+    if let Err(response) =
+        ensure_archived_null_lock_allows_overwrite(state, bucket, key, Some(headers)).await
+    {
+        return response;
+    }
+
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
@@ -2463,6 +2498,11 @@ async fn copy_object_handler(
     {
         return response;
     }
+    if let Err(response) =
+        ensure_archived_null_lock_allows_overwrite(state, dst_bucket, dst_key, Some(headers)).await
+    {
+        return response;
+    }
 
     let (src_bucket, src_key, src_version_id) = match parse_copy_source(copy_source) {
         Ok(parts) => parts,
@@ -2470,7 +2510,7 @@ async fn copy_object_handler(
     };
 
     let source_meta = match src_version_id.as_deref() {
-        Some(version_id) if version_id != "null" => match state
+        Some(version_id) => match state
             .storage
             .head_object_version(&src_bucket, &src_key, version_id)
             .await
@@ -2478,7 +2518,7 @@ async fn copy_object_handler(
             Ok(m) => m,
             Err(e) => return storage_err_response(e),
         },
-        _ => match state.storage.head_object(&src_bucket, &src_key).await {
+        None => match state.storage.head_object(&src_bucket, &src_key).await {
             Ok(m) => m,
             Err(e) => return storage_err_response(e),
         },
@@ -2511,7 +2551,7 @@ async fn copy_object_handler(
     }
 
     let source_metadata_existing = match src_version_id.as_deref() {
-        Some(version_id) if version_id != "null" => {
+        Some(version_id) => {
             match state
                 .storage
                 .get_object_version_metadata(&src_bucket, &src_key, version_id)
@@ -2521,7 +2561,7 @@ async fn copy_object_handler(
                 Err(e) => return storage_err_response(e),
             }
         }
-        _ => match state
+        None => match state
             .storage
             .get_object_metadata(&src_bucket, &src_key)
             .await
@@ -2569,7 +2609,7 @@ async fn copy_object_handler(
     };
 
     let (_meta, reader) = match src_version_id.as_deref() {
-        Some(version_id) if version_id != "null" => {
+        Some(version_id) => {
             match state
                 .storage
                 .get_object_version(&src_bucket, &src_key, version_id)
@@ -2579,7 +2619,7 @@ async fn copy_object_handler(
                 Err(e) => return storage_err_response(e),
             }
         }
-        _ => match state.storage.get_object(&src_bucket, &src_key).await {
+        None => match state.storage.get_object(&src_bucket, &src_key).await {
             Ok(result) => result,
             Err(e) => return storage_err_response(e),
         },
@@ -2685,17 +2725,20 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
                             .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m))
                     };
                 let lock_check: Result<(), (String, String)> = match obj.version_id.as_deref() {
-                    Some(version_id) if version_id != "null" => {
+                    Some(version_id) => {
                         match state
                             .storage
                             .get_object_version_metadata(&bucket, &obj.key, version_id)
                             .await
                         {
                             Ok(metadata) => run_can_delete(&metadata),
+                            Err(myfsio_storage::error::StorageError::VersionNotFound {
+                                ..
+                            }) => Ok(()),
                             Err(err) => Err(to_err(err)),
                         }
                     }
-                    _ => match state.storage.head_object(&bucket, &obj.key).await {
+                    None => match state.storage.head_object(&bucket, &obj.key).await {
                         Ok(_)
                         | Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => {
                             match state.storage.get_object_metadata(&bucket, &obj.key).await {
@@ -2713,13 +2756,13 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
                     Err(e) => Err(e),
                     Ok(()) => {
                         let outcome = match obj.version_id.as_deref() {
-                            Some(version_id) if version_id != "null" => {
+                            Some(version_id) => {
                                 state
                                     .storage
                                     .delete_object_version(&bucket, &obj.key, version_id)
                                     .await
                             }
-                            _ => state.storage.delete_object(&bucket, &obj.key).await,
+                            None => state.storage.delete_object(&bucket, &obj.key).await,
                         };
                         outcome.map_err(|e| {
                             let s3err = S3Error::from(e);
@@ -2783,10 +2826,7 @@ async fn range_get_handler_inner(
     headers: &HeaderMap,
     parts_count: Option<u32>,
 ) -> Response {
-    let version_id = query
-        .version_id
-        .as_deref()
-        .filter(|value| !is_null_version(Some(*value)));
+    let version_id = query.version_id.as_deref();
 
     let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
     let _ = tokio::fs::create_dir_all(&tmp_dir).await;
@@ -3318,6 +3358,7 @@ async fn post_object_form_handler(
     state: &AppState,
     bucket: &str,
     content_type: &str,
+    headers: &HeaderMap,
     body: Body,
 ) -> Response {
     use base64::engine::general_purpose::STANDARD as B64;
@@ -3559,6 +3600,12 @@ async fn post_object_form_handler(
         "__content_type__".to_string(),
         guessed_content_type(&object_key, content_type_value.as_deref()),
     );
+
+    if let Err(response) =
+        ensure_archived_null_lock_allows_overwrite(state, bucket, &object_key, Some(headers)).await
+    {
+        return response;
+    }
 
     let cursor = std::io::Cursor::new(file_data.to_vec());
     let boxed: myfsio_storage::traits::AsyncReadStream = Box::pin(cursor);

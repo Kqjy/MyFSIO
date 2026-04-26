@@ -1012,11 +1012,17 @@ impl FsStorageBackend {
 
         let now = Utc::now();
         let metadata = self.read_metadata_sync(bucket_name, key);
-        let version_id = metadata
+        let raw_vid = metadata
             .get("__version_id__")
-            .cloned()
-            .filter(|v| !v.is_empty() && !v.contains('/') && !v.contains('\\') && !v.contains(".."))
-            .unwrap_or_else(Self::new_version_id_sync);
+            .map(String::as_str)
+            .unwrap_or("");
+        let version_id = if raw_vid.is_empty() {
+            "null".to_string()
+        } else if raw_vid.contains('/') || raw_vid.contains('\\') || raw_vid.contains("..") {
+            Self::new_version_id_sync()
+        } else {
+            raw_vid.to_string()
+        };
 
         let data_path = version_dir.join(format!("{}.bin", version_id));
         std::fs::copy(&source, &data_path)?;
@@ -1204,6 +1210,24 @@ impl FsStorageBackend {
         )
     }
 
+    fn purge_archived_null_version_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+    ) -> std::io::Result<()> {
+        let (manifest_path, data_path) = self.version_record_paths(bucket_name, key, "null");
+        if manifest_path.is_file() {
+            Self::safe_unlink(&manifest_path)?;
+        }
+        if data_path.is_file() {
+            Self::safe_unlink(&data_path)?;
+        }
+        let versions_root = self.bucket_versions_root(bucket_name);
+        Self::cleanup_empty_parents(&manifest_path, &versions_root);
+        Ok(())
+    }
+
+
     fn validate_version_id(bucket_name: &str, key: &str, version_id: &str) -> StorageResult<()> {
         if version_id.is_empty()
             || version_id.contains('/')
@@ -1271,10 +1295,16 @@ impl FsStorageBackend {
             return None;
         }
         let metadata = self.read_metadata_sync(bucket_name, key);
-        let live_version = metadata.get("__version_id__")?.clone();
-        if live_version != version_id {
+        let stored_version = metadata.get("__version_id__").map(String::as_str);
+        let matches = if version_id == "null" {
+            stored_version.is_none_or(|v| v.is_empty() || v == "null")
+        } else {
+            stored_version == Some(version_id)
+        };
+        if !matches {
             return None;
         }
+        let live_version = stored_version.unwrap_or("null").to_string();
         let file_meta = std::fs::metadata(&live_path).ok()?;
         let mtime = file_meta
             .modified()
@@ -1978,6 +2008,10 @@ impl FsStorageBackend {
                 }
                 VersioningStatus::Disabled => {}
             }
+        }
+        if matches!(versioning_status, VersioningStatus::Suspended) {
+            self.purge_archived_null_version_sync(bucket_name, key)
+                .map_err(StorageError::Io)?;
         }
 
         std::fs::rename(tmp_path, &destination).map_err(|e| {
@@ -2828,6 +2862,23 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         })
     }
 
+    async fn get_archived_null_version_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<Option<HashMap<String, String>>> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).read();
+            let (manifest_path, _) = self.version_record_paths(bucket, key, "null");
+            if !manifest_path.is_file() {
+                return Ok(None);
+            }
+            let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+            let record: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
+            Ok(Some(Self::version_metadata_from_record(&record)))
+        })
+    }
+
     async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<DeleteOutcome> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).write();
@@ -2919,7 +2970,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let live_path = self.object_live_path(bucket, key);
             if live_path.is_file() {
                 let metadata = self.read_metadata_sync(bucket, key);
-                if metadata.get("__version_id__").map(String::as_str) == Some(version_id) {
+                let stored_version = metadata.get("__version_id__").map(String::as_str);
+                let live_matches = if version_id == "null" {
+                    stored_version.is_none_or(|v| v.is_empty() || v == "null")
+                } else {
+                    stored_version == Some(version_id)
+                };
+                if live_matches {
                     Self::safe_unlink(&live_path).map_err(StorageError::Io)?;
                     self.delete_metadata_sync(bucket, key)
                         .map_err(StorageError::Io)?;
@@ -3234,6 +3291,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         part_number: u32,
         src_bucket: &str,
         src_key: &str,
+        src_version_id: Option<&str>,
         range: Option<(u64, u64)>,
     ) -> StorageResult<(String, DateTime<Utc>)> {
         let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
@@ -3245,17 +3303,29 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
         let tmp_file = upload_dir.join(format!("part-{:05}.part.tmp", part_number));
         let chunk_size = self.stream_chunk_size;
+        let src_version_id = src_version_id.map(str::to_string);
 
-        // Everything that must be consistent with the copied bytes — path
-        // check, size/mtime, range validation, open+seek+read — happens under
-        // one held read guard. If a concurrent PUT renames the source
-        // between our metadata read and our file open, we'd otherwise record
-        // the old size/last_modified in the manifest but copy bytes from the
-        // new version.
         let copy_res = run_blocking(|| -> StorageResult<(String, u64, DateTime<Utc>)> {
             let _guard = self.get_object_lock(src_bucket, src_key).read();
 
-            let src_path = self.object_path(src_bucket, src_key)?;
+            let src_path = match src_version_id.as_deref() {
+                Some(version_id) => {
+                    let (record, data_path) =
+                        self.read_version_record_sync(src_bucket, src_key, version_id)?;
+                    if record
+                        .get("is_delete_marker")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        return Err(StorageError::MethodNotAllowed(
+                            "The specified method is not allowed against a delete marker"
+                                .to_string(),
+                        ));
+                    }
+                    data_path
+                }
+                None => self.object_path(src_bucket, src_key)?,
+            };
             if !src_path.is_file() {
                 return Err(StorageError::ObjectNotFound {
                     bucket: src_bucket.to_string(),
@@ -4749,7 +4819,7 @@ mod tests {
                         Err(_) => continue,
                     };
                     let res = b
-                        .upload_part_copy("mp-bkt", &upload_id, 1, "mp-bkt", "src", None)
+                        .upload_part_copy("mp-bkt", &upload_id, 1, "mp-bkt", "src", None, None)
                         .await;
                     if let Ok((etag, _lm)) = res {
                         // The part etag is the MD5 of the copied bytes; it

@@ -6203,3 +6203,2052 @@ async fn test_zero_length_part_get_evaluates_if_none_match() {
         "zero-length part GET must honor If-None-Match like any other GET"
     );
 }
+
+async fn enable_versioning(app: &axum::Router, bucket: &str) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/{}?versioning", bucket))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+}
+
+async fn suspend_versioning(app: &axum::Router, bucket: &str) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/{}?versioning", bucket))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+}
+
+async fn list_versions_xml(app: &axum::Router, bucket: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/{}?versions", bucket),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_delete_pre_versioning_null_version_single_object() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-del-1", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-del-1/pre.txt",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-del-1").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-del-1/pre.txt?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        resp.headers().get("x-amz-delete-marker").is_none(),
+        "deleting an explicit null version must not produce a delete-marker"
+    );
+
+    let body = list_versions_xml(&app, "null-del-1").await;
+    assert!(
+        !body.contains("<Version>") && !body.contains("<DeleteMarker>"),
+        "no Version or DeleteMarker entries should remain after null delete, got: {}",
+        body
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-del-1",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "DeleteBucket must succeed once the null version is gone"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_pre_versioning_null_version_batch() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-del-batch", Body::empty()))
+        .await
+        .unwrap();
+    for name in ["pre1", "pre2"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/null-del-batch/{}", name),
+                Body::from("legacy"),
+            ))
+            .await
+            .unwrap();
+    }
+
+    enable_versioning(&app, "null-del-batch").await;
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-del-batch/post",
+            Body::from("v1"),
+        ))
+        .await
+        .unwrap();
+
+    let list_body = list_versions_xml(&app, "null-del-batch").await;
+    let post_version_id = list_body
+        .split("<Version>")
+        .skip(1)
+        .find(|block| block.contains("<Key>post</Key>"))
+        .and_then(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id))
+        })
+        .filter(|id| *id != "null")
+        .expect("post object should have a real version id")
+        .to_string();
+
+    let delete_xml = format!(
+        "<Delete>\
+         <Object><Key>pre1</Key><VersionId>null</VersionId></Object>\
+         <Object><Key>pre2</Key><VersionId>null</VersionId></Object>\
+         <Object><Key>post</Key><VersionId>{}</VersionId></Object>\
+         </Delete>",
+        post_version_id
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/null-del-batch?delete")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(delete_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert!(
+        !body.contains("<DeleteMarker>true</DeleteMarker>"),
+        "batch delete of explicit null versions must not produce delete-markers, got: {}",
+        body
+    );
+    assert!(
+        !body.contains("<Error>"),
+        "batch delete should not have errored on null versions, got: {}",
+        body
+    );
+
+    let remaining = list_versions_xml(&app, "null-del-batch").await;
+    assert!(
+        !remaining.contains("<Version>") && !remaining.contains("<DeleteMarker>"),
+        "all entries should be gone after batch null delete, got: {}",
+        remaining
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-del-batch",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_delete_suspended_versioning_null_version() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-del-susp", Body::empty()))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-del-susp").await;
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-del-susp/k",
+            Body::from("v1"),
+        ))
+        .await
+        .unwrap();
+
+    suspend_versioning(&app, "null-del-susp").await;
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-del-susp/k",
+            Body::from("null-overwrite"),
+        ))
+        .await
+        .unwrap();
+
+    let before = list_versions_xml(&app, "null-del-susp").await;
+    assert!(
+        before.contains("<VersionId>null</VersionId>"),
+        "expected a null-version entry while suspended, got: {}",
+        before
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-del-susp/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        resp.headers().get("x-amz-delete-marker").is_none(),
+        "deleting the null version must not create a delete-marker"
+    );
+
+    let after = list_versions_xml(&app, "null-del-susp").await;
+    assert!(
+        !after.contains("<VersionId>null</VersionId>"),
+        "null version should be gone, got: {}",
+        after
+    );
+    assert!(
+        after.contains("<Version>"),
+        "the prior real version should still be listed, got: {}",
+        after
+    );
+}
+
+#[tokio::test]
+async fn test_pre_versioning_object_archived_as_null_on_overwrite() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-archive", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-archive/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-archive").await;
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-archive/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let body = list_versions_xml(&app, "null-archive").await;
+    assert!(
+        body.contains("<VersionId>null</VersionId>"),
+        "pre-versioning data must be archived under VersionId=null after overwrite, got: {}",
+        body
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-archive/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the archived null version must be readable by versionId=null"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-archive/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        resp.headers().get("x-amz-delete-marker").is_none(),
+        "deleting an archived null version must not produce a delete-marker"
+    );
+
+    let after = list_versions_xml(&app, "null-archive").await;
+    assert!(
+        !after.contains("<VersionId>null</VersionId>"),
+        "null version should be gone after delete, got: {}",
+        after
+    );
+    assert!(
+        after.contains("<Version>"),
+        "the real version should still be listed, got: {}",
+        after
+    );
+}
+
+#[tokio::test]
+async fn test_pre_versioning_soft_delete_archives_under_null() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-soft-del", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-soft-del/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-soft-del").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-soft-del/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-delete-marker")
+            .and_then(|v| v.to_str().ok()),
+        Some("true"),
+        "soft-delete on a versioning-enabled bucket must produce a delete-marker"
+    );
+
+    let body = list_versions_xml(&app, "null-soft-del").await;
+    assert!(
+        body.contains("<VersionId>null</VersionId>"),
+        "pre-versioning data should be archived as VersionId=null on soft-delete, got: {}",
+        body
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-soft-del/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+}
+
+#[tokio::test]
+async fn test_delete_null_version_with_real_version_kept() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-del-mix", Body::empty()))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-del-mix").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-del-mix/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    suspend_versioning(&app, "null-del-mix").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-del-mix/k",
+            Body::from("null-on-top"),
+        ))
+        .await
+        .unwrap();
+
+    let list_body = list_versions_xml(&app, "null-del-mix").await;
+    assert!(
+        list_body.contains("<VersionId>null</VersionId>"),
+        "expected coexisting null + real versions, got: {}",
+        list_body
+    );
+    let real_version_id = list_body
+        .split("<Version>")
+        .skip(1)
+        .find(|block| {
+            block.contains("<Key>k</Key>")
+                && !block.contains("<VersionId>null</VersionId>")
+        })
+        .and_then(|block| {
+            block
+                .split("<VersionId>")
+                .nth(1)
+                .and_then(|s| s.split_once("</VersionId>").map(|(id, _)| id))
+        })
+        .expect("expected a real archived version id")
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-del-mix/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        resp.headers().get("x-amz-delete-marker").is_none(),
+        "deleting the explicit null version must not produce a delete-marker"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/null-del-mix/k?versionId={}", real_version_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "real version must remain after null delete"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"real-v1");
+
+    let after = list_versions_xml(&app, "null-del-mix").await;
+    assert!(
+        !after.contains("<VersionId>null</VersionId>"),
+        "null version should be gone, got: {}",
+        after
+    );
+}
+
+#[tokio::test]
+async fn test_batch_delete_null_version_respects_archived_legal_hold() {
+    let (app, tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-locked", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-locked/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-locked").await;
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-locked/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("null-locked")
+        .join("versions")
+        .join("k")
+        .join("null.json");
+    assert!(
+        null_manifest.is_file(),
+        "expected archived null manifest at {:?}",
+        null_manifest
+    );
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&null_manifest).unwrap()).unwrap();
+    record
+        .get_mut("metadata")
+        .and_then(|m| m.as_object_mut())
+        .unwrap()
+        .insert(
+            "__legal_hold__".to_string(),
+            serde_json::Value::String("ON".to_string()),
+        );
+    std::fs::write(&null_manifest, serde_json::to_string(&record).unwrap()).unwrap();
+
+    let delete_xml = "<Delete>\
+         <Object><Key>k</Key><VersionId>null</VersionId></Object>\
+         </Delete>";
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/null-locked?delete")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(delete_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("<Error>") && body.contains("<Code>AccessDenied</Code>"),
+        "batch delete of legal-hold-protected archived null version must be denied, got: {}",
+        body
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-locked/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the protected archived null version must still exist"
+    );
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+}
+
+async fn write_archived_null_lock(
+    tmp: &tempfile::TempDir,
+    bucket: &str,
+    key: &str,
+    lock_metadata: serde_json::Value,
+) -> std::path::PathBuf {
+    let null_manifest = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join(bucket)
+        .join("versions")
+        .join(key)
+        .join("null.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&null_manifest).unwrap()).unwrap();
+    let metadata_obj = record
+        .get_mut("metadata")
+        .and_then(|m| m.as_object_mut())
+        .unwrap();
+    if let Some(obj) = lock_metadata.as_object() {
+        for (k, v) in obj {
+            metadata_obj.insert(k.clone(), v.clone());
+        }
+    }
+    std::fs::write(&null_manifest, serde_json::to_string(&record).unwrap()).unwrap();
+    null_manifest
+}
+
+#[tokio::test]
+async fn test_suspended_put_refuses_to_purge_legal_held_archived_null() {
+    let (app, tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-protected", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-protected/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-protected").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-protected/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = write_archived_null_lock(
+        &tmp,
+        "null-protected",
+        "k",
+        serde_json::json!({ "__legal_hold__": "ON" }),
+    )
+    .await;
+
+    suspend_versioning(&app, "null-protected").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-protected/k",
+            Body::from("would-purge-locked-null"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "suspended PUT must be denied while a legal-held archived null version exists"
+    );
+
+    assert!(
+        null_manifest.is_file(),
+        "the locked archived null manifest must remain intact"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-protected/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+}
+
+#[tokio::test]
+async fn test_suspended_put_governance_bypass_allows_archived_null_purge() {
+    let (app, tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-gov", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-gov/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-gov").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-gov/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let retain_until = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
+    let retention_json = serde_json::json!({
+        "mode": "GOVERNANCE",
+        "retain_until_date": retain_until,
+    })
+    .to_string();
+    write_archived_null_lock(
+        &tmp,
+        "null-gov",
+        "k",
+        serde_json::json!({ "__object_retention__": retention_json }),
+    )
+    .await;
+
+    suspend_versioning(&app, "null-gov").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-gov/k",
+            Body::from("blocked-without-bypass"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "suspended PUT must be denied while GOVERNANCE retention is active without bypass"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/null-gov/k")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-bypass-governance-retention", "true")
+                .body(Body::from("allowed-with-bypass"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "suspended PUT with x-amz-bypass-governance-retention: true must succeed, got {}",
+        resp.status()
+    );
+
+    let after = list_versions_xml(&app, "null-gov").await;
+    assert_eq!(
+        after.matches("<VersionId>null</VersionId>").count(),
+        1,
+        "exactly one null version must remain after governance-bypass purge, got: {}",
+        after
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-gov/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &bytes[..],
+        b"allowed-with-bypass",
+        "the null version must now be the new bypass-governance write"
+    );
+}
+
+#[tokio::test]
+async fn test_multipart_complete_respects_archived_null_legal_hold() {
+    let (app, tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-mp", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-mp/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-mp").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-mp/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = write_archived_null_lock(
+        &tmp,
+        "null-mp",
+        "k",
+        serde_json::json!({ "__legal_hold__": "ON" }),
+    )
+    .await;
+
+    suspend_versioning(&app, "null-mp").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/null-mp/k?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/null-mp/k?uploadId={}&partNumber=1", upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("part1-bytes"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+        etag
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/null-mp/k?uploadId={}", upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(complete_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "CompleteMultipartUpload must be denied while a legal-held archived null version exists"
+    );
+
+    assert!(
+        null_manifest.is_file(),
+        "the locked archived null manifest must remain intact after the blocked complete"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-mp/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+}
+
+#[tokio::test]
+async fn test_form_post_respects_archived_null_legal_hold() {
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (app, tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-form", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-form/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-form").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-form/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = write_archived_null_lock(
+        &tmp,
+        "null-form",
+        "k",
+        serde_json::json!({ "__legal_hold__": "ON" }),
+    )
+    .await;
+
+    suspend_versioning(&app, "null-form").await;
+
+    let policy_json = r#"{"expiration":"2099-01-01T00:00:00Z"}"#;
+    let policy_b64 = B64.encode(policy_json.as_bytes());
+
+    let date_stamp = "20260426";
+    let region = "us-east-1";
+    let service = "s3";
+    let credential = format!(
+        "{}/{}/{}/{}/aws4_request",
+        TEST_ACCESS_KEY, date_stamp, region, service
+    );
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(TEST_SECRET_KEY, date_stamp, region, service);
+    let signature =
+        myfsio_auth::sigv4::compute_post_policy_signature(&signing_key, &policy_b64);
+
+    let boundary = "----TestFormBoundary";
+    let body = format!(
+        "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"key\"\r\n\r\n\
+k\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"policy\"\r\n\r\n\
+{policy}\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"x-amz-credential\"\r\n\r\n\
+{credential}\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"x-amz-algorithm\"\r\n\r\n\
+AWS4-HMAC-SHA256\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"x-amz-date\"\r\n\r\n\
+{date}T000000Z\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"x-amz-signature\"\r\n\r\n\
+{signature}\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"k\"\r\n\
+Content-Type: application/octet-stream\r\n\r\n\
+form-bypass-attempt\r\n\
+--{boundary}--\r\n",
+        boundary = boundary,
+        policy = policy_b64,
+        credential = credential,
+        date = date_stamp,
+        signature = signature,
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/null-form")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", boundary),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "form POST upload must be denied while a legal-held archived null version exists"
+    );
+
+    assert!(
+        null_manifest.is_file(),
+        "the locked archived null manifest must remain intact after the blocked form POST"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-form/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+}
+
+async fn ui_post_json(
+    uri: &str,
+    session_id: &str,
+    csrf: &str,
+    json_body: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(
+            "cookie",
+            format!(
+                "{}={}",
+                myfsio_server::session::SESSION_COOKIE_NAME,
+                session_id
+            ),
+        )
+        .header(myfsio_server::session::CSRF_HEADER_NAME, csrf)
+        .header("content-type", "application/json")
+        .body(Body::from(json_body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_ui_copy_respects_archived_null_legal_hold() {
+    let (s3_app, state, tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/null-ui-cp", Body::empty()))
+        .await
+        .unwrap();
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-cp/dst",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-cp/src",
+            Body::from("source-bytes"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&s3_app, "null-ui-cp").await;
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-cp/dst",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = write_archived_null_lock(
+        &tmp,
+        "null-ui-cp",
+        "dst",
+        serde_json::json!({ "__legal_hold__": "ON" }),
+    )
+    .await;
+
+    suspend_versioning(&s3_app, "null-ui-cp").await;
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let ui_app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = ui_app
+        .oneshot(
+            ui_post_json(
+                "/ui/buckets/null-ui-cp/objects/src/copy",
+                &session_id,
+                &csrf,
+                r#"{"dest_bucket":"null-ui-cp","dest_key":"dst"}"#,
+            )
+            .await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "UI copy onto a key with a legal-held archived null version must be denied"
+    );
+
+    assert!(null_manifest.is_file());
+
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-ui-cp/dst?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+}
+
+#[tokio::test]
+async fn test_ui_move_respects_archived_null_legal_hold() {
+    let (s3_app, state, tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/null-ui-mv", Body::empty()))
+        .await
+        .unwrap();
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-mv/dst",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-mv/src",
+            Body::from("source-bytes"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&s3_app, "null-ui-mv").await;
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-mv/dst",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = write_archived_null_lock(
+        &tmp,
+        "null-ui-mv",
+        "dst",
+        serde_json::json!({ "__legal_hold__": "ON" }),
+    )
+    .await;
+
+    suspend_versioning(&s3_app, "null-ui-mv").await;
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let ui_app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = ui_app
+        .oneshot(
+            ui_post_json(
+                "/ui/buckets/null-ui-mv/objects/src/move",
+                &session_id,
+                &csrf,
+                r#"{"dest_bucket":"null-ui-mv","dest_key":"dst"}"#,
+            )
+            .await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "UI move onto a key with a legal-held archived null version must be denied"
+    );
+
+    assert!(null_manifest.is_file());
+
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/null-ui-mv/src",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the source object must remain since move was rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_ui_complete_multipart_respects_archived_null_legal_hold() {
+    let (s3_app, state, tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/null-ui-mp", Body::empty()))
+        .await
+        .unwrap();
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-mp/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&s3_app, "null-ui-mp").await;
+    s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-ui-mp/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = write_archived_null_lock(
+        &tmp,
+        "null-ui-mp",
+        "k",
+        serde_json::json!({ "__legal_hold__": "ON" }),
+    )
+    .await;
+
+    suspend_versioning(&s3_app, "null-ui-mp").await;
+
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/null-ui-mp/k?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    let resp = s3_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/null-ui-mp/k?uploadId={}&partNumber=1",
+                    upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("part1"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let ui_app = myfsio_server::create_ui_router(state.clone());
+
+    let payload = format!(
+        r#"{{"parts":[{{"part_number":1,"etag":"{}"}}]}}"#,
+        etag
+    );
+    let resp = ui_app
+        .oneshot(
+            ui_post_json(
+                &format!(
+                    "/ui/buckets/null-ui-mp/multipart/{}/complete",
+                    upload_id
+                ),
+                &session_id,
+                &csrf,
+                &payload,
+            )
+            .await,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "UI CompleteMultipartUpload over a legal-held archived null version must be denied"
+    );
+
+    assert!(null_manifest.is_file());
+
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-ui-mp/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy");
+}
+
+#[tokio::test]
+async fn test_copy_object_with_version_id_null_copies_archived_null_not_current() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-cp-src", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-cp-dst", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-cp-src/k",
+            Body::from("legacy-null-bytes"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-cp-src").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-cp-src/k",
+            Body::from("real-v1-bytes"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/null-cp-dst/copy-of-null")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-copy-source", "/null-cp-src/k?versionId=null")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "copy with versionId=null must succeed against the archived null version"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-cp-dst/copy-of-null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &bytes[..],
+        b"legacy-null-bytes",
+        "copy must take the archived null version's bytes, not the current real version"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/null-cp-dst/copy-of-current")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-copy-source", "/null-cp-src/k")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-cp-dst/copy-of-current",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &bytes[..],
+        b"real-v1-bytes",
+        "copy without versionId must take the current (real) version"
+    );
+}
+
+#[tokio::test]
+async fn test_copy_object_with_version_id_null_after_soft_delete() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-cp-dm", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-cp-dm-dst", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-cp-dm/k",
+            Body::from("legacy-null-bytes"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-cp-dm").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-cp-dm/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-delete-marker")
+            .and_then(|v| v.to_str().ok()),
+        Some("true"),
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/null-cp-dm-dst/recovered")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-copy-source", "/null-cp-dm/k?versionId=null")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "copy of versionId=null must reach the archived null even when a delete-marker hides the current key"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-cp-dm-dst/recovered",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"legacy-null-bytes");
+}
+
+#[tokio::test]
+async fn test_archived_null_lock_guard_fails_closed_on_unreadable_manifest() {
+    let (app, tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-failclosed", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-failclosed/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-failclosed").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-failclosed/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let null_manifest = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("null-failclosed")
+        .join("versions")
+        .join("k")
+        .join("null.json");
+    assert!(null_manifest.is_file());
+    std::fs::write(&null_manifest, b"{ this is not valid json").unwrap();
+
+    let null_data = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("null-failclosed")
+        .join("versions")
+        .join("k")
+        .join("null.bin");
+    assert!(null_data.is_file());
+
+    suspend_versioning(&app, "null-failclosed").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-failclosed/k",
+            Body::from("would-purge"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !resp.status().is_success(),
+        "suspended PUT must fail closed when archived null manifest is unreadable, got {}",
+        resp.status()
+    );
+
+    assert!(
+        null_data.is_file(),
+        "the archived null data file must remain since the lock-check failed closed"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_part_copy_with_version_id_null() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-mpcp-src", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-mpcp-dst", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-mpcp-src/k",
+            Body::from("legacy-null-bytes"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-mpcp-src").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-mpcp-src/k",
+            Body::from("real-v1-bytes-different"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/null-mpcp-dst/recovered?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/null-mpcp-dst/recovered?uploadId={}&partNumber=1",
+                    upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header(
+                    "x-amz-copy-source",
+                    "/null-mpcp-src/k?versionId=null",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "UploadPartCopy with versionId=null must resolve to the archived null version"
+    );
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+        // The CopyPartResult ETag is the MD5 of the copied bytes — for "legacy-null-bytes"
+        // we don't need to verify the exact value here; we just need the complete to succeed.
+        // List the parts to get the etag.
+        list_first_part_etag(&app, "null-mpcp-dst", "recovered", &upload_id).await,
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/null-mpcp-dst/recovered?uploadId={}",
+                    upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(complete_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-mpcp-dst/recovered",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &bytes[..],
+        b"legacy-null-bytes",
+        "multipart copy must take the archived null version's bytes, not the current real version"
+    );
+}
+
+async fn list_first_part_etag(
+    app: &axum::Router,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+) -> String {
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/{}/{}?uploadId={}", bucket, key, upload_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    body.split("<ETag>")
+        .nth(1)
+        .unwrap()
+        .split("</ETag>")
+        .next()
+        .unwrap()
+        .trim_matches('"')
+        .to_string()
+}
+
+#[tokio::test]
+async fn test_suspended_put_compliance_retention_blocks_even_with_bypass() {
+    let (app, tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-comp", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-comp/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-comp").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-comp/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let retain_until = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339();
+    let retention_json = serde_json::json!({
+        "mode": "COMPLIANCE",
+        "retain_until_date": retain_until,
+    })
+    .to_string();
+    write_archived_null_lock(
+        &tmp,
+        "null-comp",
+        "k",
+        serde_json::json!({ "__object_retention__": retention_json }),
+    )
+    .await;
+
+    suspend_versioning(&app, "null-comp").await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/null-comp/k")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-bypass-governance-retention", "true")
+                .body(Body::from("still-blocked"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "COMPLIANCE retention must block suspended PUT even with bypass-governance header"
+    );
+}
+
+#[tokio::test]
+async fn test_suspended_put_after_soft_delete_does_not_create_duplicate_null() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-postdm", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-postdm/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-postdm").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-postdm/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/null-postdm/k",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-delete-marker")
+            .and_then(|v| v.to_str().ok()),
+        Some("true"),
+    );
+
+    suspend_versioning(&app, "null-postdm").await;
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-postdm/k",
+            Body::from("post-dm-null"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "suspended PUT after soft-delete should succeed, got {}",
+        resp.status()
+    );
+
+    let after = list_versions_xml(&app, "null-postdm").await;
+    assert_eq!(
+        after.matches("<VersionId>null</VersionId>").count(),
+        1,
+        "exactly one null version must exist after suspended PUT, got: {}",
+        after
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-postdm/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &bytes[..],
+        b"post-dm-null",
+        "GET ?versionId=null must resolve unambiguously to the new suspended write"
+    );
+}
+
+#[tokio::test]
+async fn test_suspended_put_purges_stale_archived_null_version() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/null-purge", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-purge/k",
+            Body::from("legacy"),
+        ))
+        .await
+        .unwrap();
+
+    enable_versioning(&app, "null-purge").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-purge/k",
+            Body::from("real-v1"),
+        ))
+        .await
+        .unwrap();
+
+    let mid = list_versions_xml(&app, "null-purge").await;
+    assert_eq!(
+        mid.matches("<VersionId>null</VersionId>").count(),
+        1,
+        "after enable+overwrite, exactly one null entry should exist (archived legacy), got: {}",
+        mid
+    );
+
+    suspend_versioning(&app, "null-purge").await;
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-purge/k",
+            Body::from("suspended-null"),
+        ))
+        .await
+        .unwrap();
+
+    let after = list_versions_xml(&app, "null-purge").await;
+    assert_eq!(
+        after.matches("<VersionId>null</VersionId>").count(),
+        1,
+        "suspended PUT must not create a duplicate null version, got: {}",
+        after
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/null-purge/k?versionId=null",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        &bytes[..],
+        b"suspended-null",
+        "the surviving null version must be the most recent (suspended) write"
+    );
+}

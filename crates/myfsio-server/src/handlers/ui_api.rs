@@ -2170,6 +2170,7 @@ pub async fn complete_multipart_upload(
     State(state): State<AppState>,
     Extension(_session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     let payload: CompleteMultipartPayload = match parse_json_body(body).await {
@@ -2189,6 +2190,22 @@ pub async fn complete_multipart_upload(
             etag: part.etag.trim_matches('"').to_string(),
         })
         .collect::<Vec<_>>();
+
+    let upload_key = match state.storage.list_multipart_uploads(&bucket_name).await {
+        Ok(uploads) => uploads
+            .into_iter()
+            .find(|u| u.upload_id == upload_id)
+            .map(|u| u.key),
+        Err(err) => return storage_json_error(err),
+    };
+    if let Some(ref key) = upload_key {
+        if let Err(response) =
+            super::ensure_archived_null_lock_allows_overwrite(&state, &bucket_name, key, Some(&headers))
+                .await
+        {
+            return response;
+        }
+    }
 
     match state
         .storage
@@ -2654,7 +2671,13 @@ struct CopyMovePayload {
     dest_key: String,
 }
 
-async fn copy_object_json(state: &AppState, bucket: &str, key: &str, body: Body) -> Response {
+async fn copy_object_json(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
     let payload: CopyMovePayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2666,6 +2689,17 @@ async fn copy_object_json(state: &AppState, bucket: &str, key: &str, body: Body)
             StatusCode::BAD_REQUEST,
             "dest_bucket and dest_key are required",
         );
+    }
+
+    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
+        state,
+        dest_bucket,
+        dest_key,
+        Some(headers),
+    )
+    .await
+    {
+        return response;
     }
 
     match state
@@ -2687,7 +2721,13 @@ async fn copy_object_json(state: &AppState, bucket: &str, key: &str, body: Body)
     }
 }
 
-async fn move_object_json(state: &AppState, bucket: &str, key: &str, body: Body) -> Response {
+async fn move_object_json(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
     let payload: CopyMovePayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2705,6 +2745,17 @@ async fn move_object_json(state: &AppState, bucket: &str, key: &str, body: Body)
             StatusCode::BAD_REQUEST,
             "Cannot move object to the same location",
         );
+    }
+
+    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
+        state,
+        dest_bucket,
+        dest_key,
+        Some(headers),
+    )
+    .await
+    {
+        return response;
     }
 
     match state.storage.copy_object(bucket, key, dest_bucket, dest_key).await {
@@ -2969,8 +3020,12 @@ pub async fn object_post_dispatch(
             object_presign_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Tags => update_object_tags(&state, &bucket_name, &key, body).await,
-        ObjectPostAction::Copy => copy_object_json(&state, &bucket_name, &key, body).await,
-        ObjectPostAction::Move => move_object_json(&state, &bucket_name, &key, body).await,
+        ObjectPostAction::Copy => {
+            copy_object_json(&state, &bucket_name, &key, &headers, body).await
+        }
+        ObjectPostAction::Move => {
+            move_object_json(&state, &bucket_name, &key, &headers, body).await
+        }
         ObjectPostAction::Restore(version_id) => {
             restore_object_version_json(&state, &bucket_name, &key, &version_id).await
         }
