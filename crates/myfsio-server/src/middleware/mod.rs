@@ -9,6 +9,9 @@ pub use bucket_cors::bucket_cors_layer;
 pub use ratelimit::{rate_limit_layer, RateLimitLayerState};
 pub use session::{csrf_layer, session_layer, SessionHandle, SessionLayerState};
 
+#[derive(Clone, Copy, Debug)]
+pub struct ReplicationPeerRequest;
+
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;

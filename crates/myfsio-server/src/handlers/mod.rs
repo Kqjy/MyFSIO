@@ -159,6 +159,19 @@ fn trigger_replication(state: &AppState, bucket: &str, key: &str, action: &str) 
     });
 }
 
+fn trigger_replication_for_request(
+    state: &AppState,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    bucket: &str,
+    key: &str,
+    action: &str,
+) {
+    if peer_marker.is_some() {
+        return;
+    }
+    trigger_replication(state, bucket, key, action);
+}
+
 async fn ensure_object_lock_allows_write(
     state: &AppState,
     bucket: &str,
@@ -302,6 +315,7 @@ pub async fn create_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -311,6 +325,7 @@ pub async fn create_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                peer,
                 headers,
                 body,
             )
@@ -728,15 +743,18 @@ pub async fn post_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
         if host_bucket != bucket {
             return post_object(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                peer,
                 headers,
                 body,
             )
@@ -745,7 +763,7 @@ pub async fn post_bucket(
     }
 
     if query.delete.is_some() {
-        return delete_objects_handler(&state, &bucket, body).await;
+        return delete_objects_handler(&state, &bucket, peer_marker, body).await;
     }
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
@@ -762,6 +780,7 @@ pub async fn delete_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
@@ -770,6 +789,7 @@ pub async fn delete_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                peer,
                 headers,
             )
             .await;
@@ -1365,9 +1385,11 @@ pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
         return config::put_object_tagging(&state, &bucket, &key, body).await;
     }
@@ -1417,7 +1439,15 @@ pub async fn put_object(
         .get("x-amz-copy-source")
         .and_then(|v| v.to_str().ok())
     {
-        return copy_object_handler(&state, copy_source, &bucket, &key, &headers).await;
+        return copy_object_handler(
+            &state,
+            copy_source,
+            &bucket,
+            &key,
+            peer_marker,
+            &headers,
+        )
+        .await;
     }
 
     if let Err(response) =
@@ -1575,7 +1605,13 @@ pub async fn put_object(
                                 "",
                                 "Put",
                             );
-                            trigger_replication(&state, &bucket, &key, "write");
+                            trigger_replication_for_request(
+                                &state,
+                                peer_marker,
+                                &bucket,
+                                &key,
+                                "write",
+                            );
                             return (StatusCode::OK, resp_headers).into_response();
                         }
                         Err(e) => {
@@ -1615,7 +1651,7 @@ pub async fn put_object(
                 "",
                 "Put",
             );
-            trigger_replication(&state, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
             (StatusCode::OK, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -1837,15 +1873,26 @@ pub async fn post_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.uploads.is_some() {
         return initiate_multipart_handler(&state, &bucket, &key).await;
     }
 
     if let Some(ref upload_id) = query.upload_id {
-        return complete_multipart_handler(&state, &bucket, &key, upload_id, &headers, body).await;
+        return complete_multipart_handler(
+            &state,
+            &bucket,
+            &key,
+            upload_id,
+            peer_marker,
+            &headers,
+            body,
+        )
+        .await;
     }
 
     if query.select.is_some() {
@@ -1859,8 +1906,10 @@ pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
         return config::delete_object_tagging(&state, &bucket, &key).await;
     }
@@ -1895,7 +1944,7 @@ pub async fn delete_object(
                     resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
                 }
                 notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
-                trigger_replication(&state, &bucket, &key, "delete");
+                trigger_replication_for_request(&state, peer_marker, &bucket, &key, "delete");
                 (StatusCode::NO_CONTENT, resp_headers).into_response()
             }
             Err(e) => storage_err_response(e),
@@ -1920,7 +1969,7 @@ pub async fn delete_object(
                 resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
             }
             notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
-            trigger_replication(&state, &bucket, &key, "delete");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "delete");
             (StatusCode::NO_CONTENT, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -1979,6 +2028,13 @@ pub async fn head_object(
                     .unwrap(),
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
+            if let Some(enc_info) = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(
+                &meta.internal_metadata,
+            ) {
+                if let Ok(alg) = enc_info.algorithm.as_str().parse() {
+                    headers.insert("x-amz-server-side-encryption", alg);
+                }
+            }
             apply_stored_response_headers(&mut headers, &meta.internal_metadata);
             apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
             if let Some(ref requested_version) = query.version_id {
@@ -2040,6 +2096,13 @@ fn build_part_response_headers(
             .unwrap(),
     );
     headers.insert("accept-ranges", "bytes".parse().unwrap());
+    if let Some(enc_info) =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata)
+    {
+        if let Ok(alg) = enc_info.algorithm.as_str().parse() {
+            headers.insert("x-amz-server-side-encryption", alg);
+        }
+    }
     apply_stored_response_headers(&mut headers, &meta.internal_metadata);
     if let Some(ref requested_version) = query.version_id {
         if let Ok(value) = requested_version.parse() {
@@ -2253,6 +2316,7 @@ async fn complete_multipart_handler(
     bucket: &str,
     key: &str,
     upload_id: &str,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
@@ -2369,7 +2433,7 @@ async fn complete_multipart_handler(
                 etag,
                 &format!("/{}/{}", bucket, key),
             );
-            trigger_replication(state, bucket, key, "write");
+            trigger_replication_for_request(state, peer_marker, bucket, key, "write");
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -2492,6 +2556,7 @@ async fn copy_object_handler(
     copy_source: &str,
     dst_bucket: &str,
     dst_key: &str,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
     headers: &HeaderMap,
 ) -> Response {
     if let Err(response) =
@@ -2667,14 +2732,19 @@ async fn copy_object_handler(
             let etag = meta.etag.as_deref().unwrap_or("");
             let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
             let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
-            trigger_replication(state, dst_bucket, dst_key, "write");
+            trigger_replication_for_request(state, peer_marker, dst_bucket, dst_key, "write");
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
     }
 }
 
-async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> Response {
+async fn delete_objects_handler(
+    state: &AppState,
+    bucket: &str,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    body: Body,
+) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
@@ -2784,7 +2854,7 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
         match result {
             Ok(outcome) => {
                 notifications::emit_object_removed(state, bucket, &key, "", "", "", "Delete");
-                trigger_replication(state, bucket, &key, "delete");
+                trigger_replication_for_request(state, peer_marker, bucket, &key, "delete");
                 let delete_marker_version_id = if outcome.is_delete_marker {
                     outcome.version_id.clone()
                 } else {
@@ -3032,6 +3102,14 @@ async fn stream_partial_content(
         headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
     }
     insert_content_type(&mut headers, key, meta.content_type.as_deref());
+    headers.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
     headers.insert("accept-ranges", "bytes".parse().unwrap());
     if let Some(alg) = enc_header {
         headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
@@ -3050,6 +3128,7 @@ async fn stream_partial_content(
         }
     }
 
+    apply_user_metadata(&mut headers, &meta.metadata);
     apply_response_overrides(&mut headers, query);
 
     if let Some(count) = parts_count {
@@ -3063,15 +3142,16 @@ fn evaluate_get_preconditions(
     headers: &HeaderMap,
     meta: &myfsio_common::types::ObjectMeta,
 ) -> Option<Response> {
-    if let Some(value) = headers.get("if-match").and_then(|v| v.to_str().ok()) {
+    let if_match = headers.get("if-match").and_then(|v| v.to_str().ok());
+    let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
+
+    if let Some(value) = if_match {
         if !etag_condition_matches(value, meta.etag.as_deref()) {
             return Some(s3_error_response(S3Error::from_code(
                 S3ErrorCode::PreconditionFailed,
             )));
         }
-    }
-
-    if let Some(value) = headers
+    } else if let Some(value) = headers
         .get("if-unmodified-since")
         .and_then(|v| v.to_str().ok())
     {
@@ -3084,24 +3164,44 @@ fn evaluate_get_preconditions(
         }
     }
 
-    if let Some(value) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
+    if let Some(value) = if_none_match {
         if etag_condition_matches(value, meta.etag.as_deref()) {
-            return Some(StatusCode::NOT_MODIFIED.into_response());
+            return Some(not_modified_response(meta));
         }
-    }
-
-    if let Some(value) = headers
+    } else if let Some(value) = headers
         .get("if-modified-since")
         .and_then(|v| v.to_str().ok())
     {
         if let Some(t) = parse_http_date(value) {
             if meta.last_modified <= t {
-                return Some(StatusCode::NOT_MODIFIED.into_response());
+                return Some(not_modified_response(meta));
             }
         }
     }
 
     None
+}
+
+fn not_modified_response(meta: &myfsio_common::types::ObjectMeta) -> Response {
+    let mut headers = HeaderMap::new();
+    if let Some(ref etag) = meta.etag {
+        headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+    }
+    headers.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            headers.insert("x-amz-version-id", value);
+        }
+    }
+    apply_stored_response_headers(&mut headers, &meta.internal_metadata);
+    (StatusCode::NOT_MODIFIED, headers).into_response()
 }
 
 async fn evaluate_put_preconditions(
@@ -3152,34 +3252,25 @@ fn evaluate_copy_preconditions(
     headers: &HeaderMap,
     source_meta: &myfsio_common::types::ObjectMeta,
 ) -> Option<Response> {
-    if let Some(value) = headers
+    let if_match = headers
         .get("x-amz-copy-source-if-match")
-        .and_then(|v| v.to_str().ok())
-    {
+        .and_then(|v| v.to_str().ok());
+    let if_none_match = headers
+        .get("x-amz-copy-source-if-none-match")
+        .and_then(|v| v.to_str().ok());
+
+    if let Some(value) = if_match {
         if !etag_condition_matches(value, source_meta.etag.as_deref()) {
             return Some(s3_error_response(S3Error::from_code(
                 S3ErrorCode::PreconditionFailed,
             )));
         }
-    }
-
-    if let Some(value) = headers
-        .get("x-amz-copy-source-if-none-match")
-        .and_then(|v| v.to_str().ok())
-    {
-        if etag_condition_matches(value, source_meta.etag.as_deref()) {
-            return Some(s3_error_response(S3Error::from_code(
-                S3ErrorCode::PreconditionFailed,
-            )));
-        }
-    }
-
-    if let Some(value) = headers
-        .get("x-amz-copy-source-if-modified-since")
+    } else if let Some(value) = headers
+        .get("x-amz-copy-source-if-unmodified-since")
         .and_then(|v| v.to_str().ok())
     {
         if let Some(t) = parse_http_date(value) {
-            if source_meta.last_modified <= t {
+            if source_meta.last_modified > t {
                 return Some(s3_error_response(S3Error::from_code(
                     S3ErrorCode::PreconditionFailed,
                 )));
@@ -3187,12 +3278,18 @@ fn evaluate_copy_preconditions(
         }
     }
 
-    if let Some(value) = headers
-        .get("x-amz-copy-source-if-unmodified-since")
+    if let Some(value) = if_none_match {
+        if etag_condition_matches(value, source_meta.etag.as_deref()) {
+            return Some(s3_error_response(S3Error::from_code(
+                S3ErrorCode::PreconditionFailed,
+            )));
+        }
+    } else if let Some(value) = headers
+        .get("x-amz-copy-source-if-modified-since")
         .and_then(|v| v.to_str().ok())
     {
         if let Some(t) = parse_http_date(value) {
-            if source_meta.last_modified > t {
+            if source_meta.last_modified <= t {
                 return Some(s3_error_response(S3Error::from_code(
                     S3ErrorCode::PreconditionFailed,
                 )));

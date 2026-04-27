@@ -162,6 +162,39 @@ fn parse_website_config(value: &Value) -> Option<(String, Option<String>)> {
     }
 }
 
+fn apply_website_object_headers(
+    headers: &mut HeaderMap,
+    meta: &myfsio_common::types::ObjectMeta,
+) {
+    if let Some(ref etag) = meta.etag {
+        if let Ok(value) = format!("\"{}\"", etag).parse() {
+            headers.insert(header::ETAG, value);
+        }
+    }
+    if let Ok(value) = meta
+        .last_modified
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+        .parse()
+    {
+        headers.insert(header::LAST_MODIFIED, value);
+    }
+    if let Some(enc_info) =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata)
+    {
+        if let Ok(value) = enc_info.algorithm.as_str().parse() {
+            headers.insert("x-amz-server-side-encryption", value);
+        }
+    }
+    for (k, v) in &meta.metadata {
+        if let Ok(header_val) = v.parse() {
+            if let Ok(name) = format!("x-amz-meta-{}", k).parse::<axum::http::HeaderName>() {
+                headers.insert(name, header_val);
+            }
+        }
+    }
+}
+
 async fn serve_website_document(
     state: &AppState,
     bucket: &str,
@@ -182,6 +215,7 @@ async fn serve_website_document(
             meta.size.to_string().parse().unwrap(),
         );
         headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+        apply_website_object_headers(&mut headers, &meta);
         return Some((status, headers).into_response());
     }
 
@@ -193,6 +227,7 @@ async fn serve_website_document(
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    apply_website_object_headers(&mut headers, &meta);
 
     if status == StatusCode::OK {
         if let Some(range_header) = range_header {
@@ -501,6 +536,12 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
                 {
                     error_response(err, &auth_path)
                 } else {
+                    if let Some(registry) = state.site_registry.as_ref() {
+                        if registry.is_peer_inbound_access_key(&principal.access_key) {
+                            req.extensions_mut()
+                                .insert(crate::middleware::ReplicationPeerRequest);
+                        }
+                    }
                     req.extensions_mut().insert(principal);
                     wrap_body_for_sha256_verification(&mut req);
                     next.run(req).await

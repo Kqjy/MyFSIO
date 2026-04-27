@@ -12,7 +12,10 @@ use myfsio_common::types::ListParams;
 use myfsio_storage::fs_backend::{metadata_is_corrupted, FsStorageBackend};
 use myfsio_storage::traits::StorageEngine;
 
-use crate::services::s3_client::{build_client, check_endpoint_health, ClientOptions};
+use crate::services::s3_client::{
+    build_client, build_health_client, check_endpoint_health, check_target_bucket_reachable,
+    ClientOptions,
+};
 use crate::stores::connections::{ConnectionStore, RemoteConnection};
 
 pub const MODE_NEW_ONLY: &str = "new_only";
@@ -347,7 +350,10 @@ impl ReplicationManager {
                 return 0;
             }
         };
-        if !self.check_endpoint(&connection).await {
+        if !self
+            .check_target_bucket(&connection, &rule.target_bucket)
+            .await
+        {
             tracing::warn!(
                 "Cannot replicate existing objects for {}: endpoint {} is unreachable",
                 bucket,
@@ -459,6 +465,7 @@ impl ReplicationManager {
                     self.failures.remove(bucket, object_key);
                 }
                 Err(err) => {
+                    let code = sdk_error_code(&err);
                     let msg = format!("{:?}", err);
                     tracing::error!(
                         "Replication DELETE failed {}/{}: {}",
@@ -475,7 +482,7 @@ impl ReplicationManager {
                             failure_count: 1,
                             bucket_name: bucket.to_string(),
                             action: "delete".to_string(),
-                            last_error_code: None,
+                            last_error_code: code,
                         },
                     );
                 }
@@ -562,6 +569,7 @@ impl ReplicationManager {
                 self.failures.remove(bucket, object_key);
             }
             Err(err) => {
+                let code = upload_error_code(&err);
                 let msg = err.to_string();
                 tracing::error!("Replication failed {}/{}: {}", bucket, object_key, msg);
                 self.failures.add(
@@ -573,7 +581,7 @@ impl ReplicationManager {
                         failure_count: 1,
                         bucket_name: bucket.to_string(),
                         action: action.to_string(),
-                        last_error_code: None,
+                        last_error_code: code,
                     },
                 );
             }
@@ -581,8 +589,13 @@ impl ReplicationManager {
     }
 
     pub async fn check_endpoint(&self, conn: &RemoteConnection) -> bool {
-        let client = build_client(conn, &self.client_options);
+        let client = build_health_client(conn, &self.client_options);
         check_endpoint_health(&client).await
+    }
+
+    pub async fn check_target_bucket(&self, conn: &RemoteConnection, target_bucket: &str) -> bool {
+        let client = build_health_client(conn, &self.client_options);
+        check_target_bucket_reachable(&client, target_bucket).await
     }
 
     pub async fn retry_failed(&self, bucket: &str, object_key: &str) -> bool {
@@ -598,6 +611,15 @@ impl ReplicationManager {
             Some(c) => c,
             None => return false,
         };
+        if !self.check_target_bucket(&conn, &rule.target_bucket).await {
+            tracing::warn!(
+                "Cannot retry {}/{}: endpoint {} is not reachable",
+                bucket,
+                object_key,
+                conn.endpoint_url
+            );
+            return false;
+        }
         self.replicate_task(bucket, object_key, &rule, &conn, &failure.action)
             .await;
         true
@@ -616,6 +638,15 @@ impl ReplicationManager {
             Some(c) => c,
             None => return (0, failures.len()),
         };
+        if !self.check_target_bucket(&conn, &rule.target_bucket).await {
+            tracing::warn!(
+                "Cannot retry {} failure(s) in {}: endpoint {} is not reachable",
+                failures.len(),
+                bucket,
+                conn.endpoint_url
+            );
+            return (0, failures.len());
+        }
         let mut submitted = 0;
         for failure in failures {
             self.replicate_task(bucket, &failure.object_key, &rule, &conn, &failure.action)
@@ -673,6 +704,24 @@ impl ReplicationManager {
 fn is_no_such_bucket<E: std::fmt::Debug>(err: &E) -> bool {
     let text = format!("{:?}", err);
     text.contains("NoSuchBucket")
+}
+
+fn sdk_error_code<E, R>(err: &aws_sdk_s3::error::SdkError<E, R>) -> Option<String>
+where
+    E: aws_sdk_s3::error::ProvideErrorMetadata,
+{
+    if let aws_sdk_s3::error::SdkError::ServiceError(svc) = err {
+        if let Some(code) = svc.err().code() {
+            return Some(code.to_string());
+        }
+    }
+    None
+}
+
+fn upload_error_code(
+    err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
+) -> Option<String> {
+    sdk_error_code(err)
 }
 
 async fn upload_object(
