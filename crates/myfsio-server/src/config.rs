@@ -84,6 +84,7 @@ pub struct ServerConfig {
     pub cors_expose_headers: Vec<String>,
     pub session_lifetime_days: u64,
     pub log_level: String,
+    pub display_timezone: String,
     pub multipart_min_part_size: u64,
     pub bulk_delete_max_keys: usize,
     pub stream_chunk_size: usize,
@@ -240,6 +241,19 @@ impl ServerConfig {
         let cors_expose_headers = parse_list_env("CORS_EXPOSE_HEADERS", "*");
         let session_lifetime_days = parse_u64_env("SESSION_LIFETIME_DAYS", 1);
         let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());
+        let display_timezone = {
+            let raw = std::env::var("DISPLAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string());
+            match raw.parse::<chrono_tz::Tz>() {
+                Ok(_) => raw,
+                Err(_) => {
+                    tracing::warn!(
+                        "Invalid DISPLAY_TIMEZONE '{}', falling back to UTC",
+                        raw
+                    );
+                    "UTC".to_string()
+                }
+            }
+        };
         let multipart_min_part_size = parse_u64_env("MULTIPART_MIN_PART_SIZE", 5_242_880);
         let bulk_delete_max_keys = parse_usize_env("BULK_DELETE_MAX_KEYS", 1000);
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
@@ -331,6 +345,7 @@ impl ServerConfig {
             cors_expose_headers,
             session_lifetime_days,
             log_level,
+            display_timezone,
             multipart_min_part_size,
             bulk_delete_max_keys,
             stream_chunk_size,
@@ -425,6 +440,7 @@ impl Default for ServerConfig {
             cors_expose_headers: vec!["*".to_string()],
             session_lifetime_days: 1,
             log_level: "INFO".to_string(),
+            display_timezone: "UTC".to_string(),
             multipart_min_part_size: 5_242_880,
             bulk_delete_max_keys: 1000,
             stream_chunk_size: 1_048_576,

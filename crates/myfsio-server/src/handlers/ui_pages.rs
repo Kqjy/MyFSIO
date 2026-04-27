@@ -1951,13 +1951,17 @@ pub async fn metrics_dashboard(
     render(&state, "metrics.html", &ctx)
 }
 
-fn format_history_timestamp(timestamp: Option<f64>) -> String {
+fn format_history_timestamp(timestamp: Option<f64>, tz: chrono_tz::Tz) -> String {
     let Some(timestamp) = timestamp else {
         return "-".to_string();
     };
     let millis = (timestamp * 1000.0).round() as i64;
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .map(|dt| {
+            dt.with_timezone(&tz)
+                .format("%Y-%m-%d %H:%M:%S %Z")
+                .to_string()
+        })
         .unwrap_or_else(|| "-".to_string())
 }
 
@@ -1976,7 +1980,7 @@ fn format_byte_count(bytes: u64) -> String {
     }
 }
 
-fn decorate_gc_history(executions: &[Value]) -> Vec<Value> {
+fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
     executions
         .iter()
         .cloned()
@@ -1990,7 +1994,7 @@ fn decorate_gc_history(executions: &[Value]) -> Vec<Value> {
             if let Some(obj) = execution.as_object_mut() {
                 obj.insert(
                     "timestamp_display".to_string(),
-                    Value::String(format_history_timestamp(timestamp)),
+                    Value::String(format_history_timestamp(timestamp, tz)),
                 );
                 obj.insert(
                     "bytes_freed_display".to_string(),
@@ -2002,7 +2006,7 @@ fn decorate_gc_history(executions: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn decorate_integrity_history(executions: &[Value]) -> Vec<Value> {
+fn decorate_integrity_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
     executions
         .iter()
         .cloned()
@@ -2011,7 +2015,7 @@ fn decorate_integrity_history(executions: &[Value]) -> Vec<Value> {
             if let Some(obj) = execution.as_object_mut() {
                 obj.insert(
                     "timestamp_display".to_string(),
-                    Value::String(format_history_timestamp(timestamp)),
+                    Value::String(format_history_timestamp(timestamp, tz)),
                 );
             }
             execution
@@ -2024,6 +2028,11 @@ pub async fn system_dashboard(
     Extension(session): Extension<SessionHandle>,
 ) -> Response {
     let mut ctx = page_context(&state, &session, "ui.system_dashboard");
+    let display_tz: chrono_tz::Tz = state
+        .config
+        .display_timezone
+        .parse()
+        .unwrap_or(chrono_tz::UTC);
 
     let gc_status = match &state.gc {
         Some(gc) => gc.status().await,
@@ -2045,7 +2054,7 @@ pub async fn system_dashboard(
             .await
             .get("executions")
             .and_then(|value| value.as_array())
-            .map(|values| decorate_gc_history(values))
+            .map(|values| decorate_gc_history(values, display_tz))
             .unwrap_or_default(),
         None => Vec::new(),
     };
@@ -2069,7 +2078,7 @@ pub async fn system_dashboard(
             .await
             .get("executions")
             .and_then(|value| value.as_array())
-            .map(|values| decorate_integrity_history(values))
+            .map(|values| decorate_integrity_history(values, display_tz))
             .unwrap_or_default(),
         None => Vec::new(),
     };
@@ -2081,7 +2090,7 @@ pub async fn system_dashboard(
     ctx.insert("gc_status", &gc_status);
     ctx.insert("integrity_status", &integrity_status);
     ctx.insert("app_version", &env!("CARGO_PKG_VERSION"));
-    ctx.insert("display_timezone", &"UTC");
+    ctx.insert("display_timezone", &state.config.display_timezone);
     ctx.insert("platform", &std::env::consts::OS);
     ctx.insert(
         "storage_root",
