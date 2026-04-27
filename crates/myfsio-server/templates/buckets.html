@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h1 class="h3 mb-1 fw-bold">Buckets</h1>
+    <p class="text-muted mb-0">Manage your S3-compatible storage containers.</p>
+  </div>
+  <button class="btn btn-primary shadow-sm" data-bs-toggle="modal" data-bs-target="#createBucketModal">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-plus-lg me-1" viewBox="0 0 16 16">
+      <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+    </svg>
+    Create Bucket
+  </button>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-3 gap-3">
+  <div class="position-relative flex-grow-1" style="max-width: 300px;">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-muted" viewBox="0 0 16 16">
+      <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+    </svg>
+    <input type="search" class="form-control ps-5" id="bucket-search" placeholder="Filter buckets..." aria-label="Search buckets">
+  </div>
+  <div class="btn-group" role="group" aria-label="View toggle">
+    <input type="radio" class="btn-check" name="view-toggle" id="view-grid" autocomplete="off" checked>
+    <label class="btn btn-outline-secondary" for="view-grid" title="Grid view">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-grid-fill" viewBox="0 0 16 16">
+        <path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h3A1.5 1.5 0 0 1 7 2.5v3A1.5 1.5 0 0 1 5.5 7h-3A1.5 1.5 0 0 1 1 5.5v-3zm8 0A1.5 1.5 0 0 1 10.5 1h3A1.5 1.5 0 0 1 15 2.5v3A1.5 1.5 0 0 1 13.5 7h-3A1.5 1.5 0 0 1 9 5.5v-3zm-8 8A1.5 1.5 0 0 1 2.5 9h3A1.5 1.5 0 0 1 7 10.5v3A1.5 1.5 0 0 1 5.5 15h-3A1.5 1.5 0 0 1 1 13.5v-3zm8 0A1.5 1.5 0 0 1 10.5 9h3A1.5 1.5 0 0 1 15 10.5v3A1.5 1.5 0 0 1 13.5 15h-3A1.5 1.5 0 0 1 9 13.5v-3z"/>
+      </svg>
+    </label>
+
+    <input type="radio" class="btn-check" name="view-toggle" id="view-list" autocomplete="off">
+    <label class="btn btn-outline-secondary" for="view-list" title="List view">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-list-ul" viewBox="0 0 16 16">
+        <path fill-rule="evenodd" d="M5 11.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm-3 1a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/>
+      </svg>
+    </label>
+  </div>
+</div>
+
+<div class="row g-3" id="buckets-container">
+  {% for bucket in buckets %}
+  <div class="col-md-6 col-xl-4 bucket-item">
+    <div class="card h-100 shadow-sm bucket-card" data-bucket-row data-href="{{ bucket.detail_url }}">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start mb-2">
+          <div class="d-flex align-items-center gap-3">
+            <div class="bucket-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+              </svg>
+            </div>
+            <div>
+              <h5 class="bucket-name text-break">{{ bucket.meta.name }}</h5>
+              <small class="text-muted">Created {{ bucket.meta.creation_date | format_datetime }}</small>
+            </div>
+          </div>
+          <span class="badge {{ bucket.access_badge }} bucket-access-badge">{{ bucket.access_label }}</span>
+        </div>
+        
+        <div class="bucket-stats">
+          <div class="bucket-stat">
+            <div class="bucket-stat-value">{{ bucket.summary.human_size }}</div>
+            <div class="bucket-stat-label">Storage</div>
+          </div>
+          <div class="bucket-stat">
+            <div class="bucket-stat-value">{{ bucket.summary.objects }}</div>
+            <div class="bucket-stat-label">Objects</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="col-12">
+    <div class="empty-state bg-panel rounded-3 border border-dashed">
+      <div class="empty-state-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" fill="currentColor" viewBox="0 0 16 16">
+          <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+        </svg>
+      </div>
+      <h5 class="mb-2">No buckets yet</h5>
+      <p class="text-muted mb-4">Create your first storage bucket to start organizing your files.</p>
+      <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createBucketModal">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+          <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+        </svg>
+        Create Bucket
+      </button>
+    </div>
+  </div>
+  {% endfor %}
+  <div class="col-12 d-none" id="bucket-no-results">
+    <div class="text-center py-5 text-muted">
+      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" class="mb-3 opacity-50" viewBox="0 0 16 16">
+        <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+      </svg>
+      <p class="mb-0 fw-medium">No buckets match your filter.</p>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="createBucketModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0">
+        <h1 class="modal-title fs-5">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+            <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+          </svg>
+          Create bucket
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="{{ url_for(endpoint="ui.create_bucket") }}" id="createBucketForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+        <div class="modal-body pt-0">
+          <label class="form-label fw-medium">Bucket name</label>
+          <input class="form-control" type="text" name="bucket_name" pattern="[a-z0-9.\-]{3,63}" placeholder="my-bucket-name" required autofocus />
+          <div class="form-text">Use 3-63 characters: lowercase letters, numbers, dots, or hyphens.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+            </svg>
+            Create
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+{{ super() }}
+<script>
+  (function () {
+
+    const searchInput = document.getElementById('bucket-search');
+    const bucketItems = document.querySelectorAll('.bucket-item');
+    const noBucketsMsg = document.querySelector('.text-center.py-5');
+
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        const term = e.target.value.toLowerCase();
+        let visibleCount = 0;
+
+        bucketItems.forEach(item => {
+          const name = item.querySelector('.bucket-name').textContent.toLowerCase();
+          if (name.includes(term)) {
+            item.classList.remove('d-none');
+            visibleCount++;
+          } else {
+            item.classList.add('d-none');
+          }
+        });
+
+        var noResults = document.getElementById('bucket-no-results');
+        if (noResults) {
+          if (term && visibleCount === 0) {
+            noResults.classList.remove('d-none');
+          } else {
+            noResults.classList.add('d-none');
+          }
+        }
+      });
+    }
+
+    const viewGrid = document.getElementById('view-grid');
+    const viewList = document.getElementById('view-list');
+    const container = document.getElementById('buckets-container');
+    const items = document.querySelectorAll('.bucket-item');
+    const cards = document.querySelectorAll('.bucket-card');
+
+    function setView(view) {
+      if (view === 'list') {
+        items.forEach(item => {
+          item.classList.remove('col-md-6', 'col-xl-4');
+          item.classList.add('col-12');
+        });
+        cards.forEach(card => {
+          card.classList.remove('h-100');
+
+        });
+        localStorage.setItem('bucket-view-pref', 'list');
+      } else {
+        items.forEach(item => {
+          item.classList.remove('col-12');
+          item.classList.add('col-md-6', 'col-xl-4');
+        });
+        cards.forEach(card => {
+          card.classList.add('h-100');
+        });
+        localStorage.setItem('bucket-view-pref', 'grid');
+      }
+    }
+
+    if (viewGrid && viewList) {
+      viewGrid.addEventListener('change', () => setView('grid'));
+      viewList.addEventListener('change', () => setView('list'));
+
+      const pref = localStorage.getItem('bucket-view-pref');
+      if (pref === 'list') {
+        viewList.checked = true;
+        setView('list');
+      }
+    }
+
+    const rows = document.querySelectorAll('[data-bucket-row]');
+    rows.forEach((row) => {
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('[data-ignore-row-click]')) {
+          return;
+        }
+        const href = row.dataset.href;
+        if (href) {
+          window.location.href = href;
+        }
+      });
+      row.style.cursor = 'pointer';
+    });
+
+    var createForm = document.getElementById('createBucketForm');
+    if (createForm) {
+      createForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        window.UICore.submitFormAjax(createForm, {
+          successMessage: 'Bucket created',
+          onSuccess: function(data) {
+            var modal = bootstrap.Modal.getInstance(document.getElementById('createBucketModal'));
+            if (modal) modal.hide();
+            if (data.bucket_name) {
+              window.location.href = '{{ url_for(endpoint="ui.bucket_detail", bucket_name="__BUCKET__") }}'.replace('__BUCKET__', data.bucket_name);
+            } else {
+              location.reload();
+            }
+          }
+        });
+      });
+    }
+  })();
+</script>
+{% endblock %}

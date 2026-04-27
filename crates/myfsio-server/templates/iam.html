@@ -1,0 +1,616 @@
+{% extends "base.html" %}
+{% block content %}
+{% if iam_locked %}{% set iam_disabled = "disabled" %}{% else %}{% set iam_disabled = "" %}{% endif %}
+<div class="page-header d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <p class="text-uppercase text-muted small mb-1">Identity & Access Management</p>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+        <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
+      </svg>
+      IAM Configuration
+    </h1>
+    <p class="text-muted mb-0 mt-1">Create and manage users with fine-grained bucket permissions.</p>
+  </div>
+  <div class="d-flex gap-2">
+    {% if not iam_locked %}
+    <button class="btn btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#configPreview" aria-expanded="false" aria-controls="configPreview">
+      View Config JSON
+    </button>
+    {% endif %}
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createUserModal" {{ iam_disabled }}>
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-person-plus me-1" viewBox="0 0 16 16">
+        <path d="M12.5 16a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm.5-5v1h1a.5.5 0 0 1 0 1h-1v1a.5.5 0 0 1-1 0v-1h-1a.5.5 0 0 1 0-1h1v-1a.5.5 0 0 1 1 0Zm-2-6a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM8 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/>
+        <path d="M8.256 14a4.474 4.474 0 0 1-.229-1.004H3c.001-.246.154-.986.832-1.664C4.484 10.68 5.711 10 8 10c.26 0 .507.009.74.025.226-.341.496-.65.804-.918C9.077 9.038 8.564 9 8 9c-5 0-6 3-6 4s1 1 1 1h5.256Z"/>
+      </svg>
+      Create User
+    </button>
+  </div>
+</div>
+
+{% if iam_locked %}
+<div class="alert alert-warning" role="alert">
+  <div class="fw-semibold mb-1">Administrator permissions required</div>
+  <p class="mb-0">You need the <code>iam:list_users</code> action to edit users or policies. {% if locked_reason %}{{ locked_reason }}{% else %}Sign in with an admin identity to continue.{% endif %}</p>
+</div>
+{% endif %}
+
+{% if disclosed_secret %}
+<div class="alert alert-info border-0 shadow-sm mb-4" role="alert">
+  <div class="d-flex align-items-start gap-2 mb-2">
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-key flex-shrink-0 mt-1" viewBox="0 0 16 16">
+      <path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/>
+      <path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+    </svg>
+    <div class="flex-grow-1">
+      <div class="fw-semibold">
+        {% if disclosed_secret.operation == "rotate" %}
+        Secret rotated for <code>{{ disclosed_secret.access_key }}</code>
+        {% else %}
+        New user created: <code>{{ disclosed_secret.access_key }}</code>
+        {% endif %}
+      </div>
+      <p class="mb-2 small">These credentials are only shown once. Copy them now and store them securely.</p>
+    </div>
+  </div>
+  <div class="input-group mb-2">
+    <span class="input-group-text"><strong>Access key</strong></span>
+    <input class="form-control font-monospace" type="text" value="{{ disclosed_secret.access_key }}" readonly id="disclosedAccessKeyValue" />
+    <button class="btn btn-outline-primary" type="button" data-access-key-copy>
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-clipboard" viewBox="0 0 16 16">
+        <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+        <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+      </svg>
+      Copy
+    </button>
+  </div>
+  <div class="input-group">
+    <span class="input-group-text"><strong>Secret key</strong></span>
+    <input class="form-control font-monospace" type="text" value="{{ disclosed_secret.secret_key }}" readonly id="disclosedSecretValue" />
+    <button class="btn btn-outline-primary" type="button" data-secret-copy>
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-clipboard" viewBox="0 0 16 16">
+        <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+        <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+      </svg>
+      Copy
+    </button>
+  </div>
+</div>
+{% endif %}
+
+{% if not iam_locked %}
+<div class="collapse mb-4" id="configPreview">
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <span class="fw-semibold">Configuration Preview</span>
+      <span class="badge text-bg-secondary">{{ config_summary.user_count }} users</span>
+    </div>
+    <div class="card-body">
+      <div class="position-relative">
+        <pre class="policy-preview mb-0" id="iamConfigPreview">{{ config_document }}</pre>
+        <button class="btn btn-outline-light btn-sm config-copy" type="button" data-copy-target="iamConfigPreview">Copy JSON</button>
+      </div>
+      <p class="text-muted small mt-2 mb-0">Secrets are masked above. IAM config is encrypted at rest.</p>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card shadow-sm border-0" style="border-radius: 1rem;">
+  <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4 d-flex justify-content-between align-items-center">
+    <div>
+      <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+          <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022zM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-1.01.377-2.042 1.09-2.904.243-.294.526-.569.846-.816zM4.92 10A5.493 5.493 0 0 0 4 13H1c0-.26.164-1.03.76-1.724.545-.636 1.492-1.256 3.16-1.275zM1.5 5.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0zm3-2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/>
+        </svg>
+        Users
+      </h5>
+      <p class="text-muted small mb-0">{% if not iam_locked %}{{ users|length }}{% else %}{{ "?" }}{% endif %} user{% if not iam_locked and users|length != 1 %}s{% endif %} configured</p>
+    </div>
+    {% if iam_locked %}<span class="badge bg-warning bg-opacity-10 text-warning">View only</span>{% endif %}
+  </div>
+  {% if iam_locked %}
+  <div class="card-body px-4 pb-4">
+    <div class="alert alert-secondary d-flex align-items-center mb-0" role="alert">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+        <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+      </svg>
+      <div>Sign in with an administrator account to list or edit IAM users.</div>
+    </div>
+  </div>
+  {% else %}
+  <div class="card-body px-4 pb-4">
+    {% if users %}
+    {% if users|length > 1 %}
+    <div class="mb-3">
+      <div class="search-input-wrapper">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="search-icon" viewBox="0 0 16 16">
+          <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+        </svg>
+        <input type="text" class="form-control" id="iam-user-search" placeholder="Filter users by name or access key..." autocomplete="off" />
+      </div>
+    </div>
+    {% endif %}
+    <div class="row g-3">
+      {% for user in users %}
+      <div class="col-md-6 col-xl-4 iam-user-item" data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name|lower }}" data-access-key-filter="{{ user.access_key|lower }}" data-update-url="{{ url_for(endpoint="ui.update_iam_user", user_id=user.user_id) }}">
+        <div class="card h-100 iam-user-card{% if user.is_admin %} iam-admin-card{% else %}{% endif %}">
+          <div class="card-body">
+            <div class="d-flex align-items-start justify-content-between mb-3">
+              <div class="d-flex align-items-center gap-3 min-width-0 overflow-hidden">
+                <div class="user-avatar user-avatar-lg flex-shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
+                  </svg>
+                </div>
+                <div class="min-width-0">
+                  <div class="d-flex align-items-center gap-2 mb-0">
+                    <h6 class="fw-semibold mb-0 text-truncate" title="{{ user.display_name }}">{{ user.display_name }}</h6>
+                    {% if user.is_admin %}
+                    <span class="iam-role-badge iam-role-admin" data-role-badge>Admin</span>
+                    {% else %}
+                    <span class="iam-role-badge iam-role-user" data-role-badge>User</span>
+                    {% endif %}
+                    {% if user.is_expired %}
+                    <span class="badge text-bg-danger" style="font-size: .65rem">Expired</span>
+                    {% elif user.is_expiring_soon %}
+                    <span class="badge text-bg-warning" style="font-size: .65rem">Expiring soon</span>
+                    {% endif %}
+                  </div>
+                  <div class="d-flex align-items-center gap-1">
+                    <code class="small text-muted text-truncate" title="{{ user.access_key }}">{{ user.access_key }}</code>
+                    <button type="button" class="iam-copy-key" title="Copy access key" data-copy-access-key="{{ user.access_key }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+                        <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="dropdown flex-shrink-0">
+                <button class="btn btn-sm btn-icon" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+                  </svg>
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                  <li>
+                    <button class="dropdown-item" type="button" data-edit-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-display-name="{{ user.display_name }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                        <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
+                      </svg>
+                      Edit Name
+                    </button>
+                  </li>
+                  <li>
+                    <button class="dropdown-item" type="button" data-expiry-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}" data-expires-at="{{ user.expires_at | default(value="") }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                        <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+                        <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+                      </svg>
+                      Set Expiry
+                    </button>
+                  </li>
+                  <li>
+                    <button class="dropdown-item" type="button" data-rotate-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                        <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41zm-11 2h3.932a.25.25 0 0 0 .192-.41L2.692 6.23a.25.25 0 0 0-.384 0L.342 8.59A.25.25 0 0 0 .534 9z"/>
+                        <path fill-rule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z"/>
+                      </svg>
+                      Rotate Secret
+                    </button>
+                  </li>
+                  <li><hr class="dropdown-divider"></li>
+                  <li>
+                    <button class="dropdown-item text-danger" type="button" data-delete-user data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16">
+                        <path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 .5-.5zm3 .5v6a.5.5 0 0 1-1 0v-6a.5.5 0 0 1 1 0z"/>
+                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                      </svg>
+                      Delete User
+                    </button>
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <div class="mb-3">
+              <div class="small text-muted mb-2">Bucket Permissions</div>
+              <div class="d-flex flex-wrap gap-1" data-policy-badges>
+                {% for policy in user.policies %}
+                  {% if policy.bucket == "*" %}{% set bucket_label = "All Buckets" %}{% else %}{% set bucket_label = policy.bucket %}{% endif %}
+                  {% if "*" in policy.actions %}
+                    {% set perm_label = "Full Access" %}
+                  {% elif policy.actions|length >= 19 %}
+                    {% set perm_label = "Full Access" %}
+                  {% elif "list" in policy.actions and "read" in policy.actions and "write" in policy.actions and "delete" in policy.actions %}
+                    {% set perm_label = "Read + Write + Delete" %}
+                  {% elif "list" in policy.actions and "read" in policy.actions and "write" in policy.actions %}
+                    {% set perm_label = "Read + Write" %}
+                  {% elif "list" in policy.actions and "read" in policy.actions %}
+                    {% set perm_label = "Read Only" %}
+                  {% else %}
+                    {% set policy_actions_count = policy.actions | length %}
+                    {% set perm_label = "Custom (" ~ policy_actions_count ~ ")" %}
+                  {% endif %}
+                  <span class="iam-perm-badge">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                      <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+                    </svg>
+                    {{ bucket_label }} · {{ perm_label }}
+                  </span>
+                {% else %}
+                  <span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>
+                {% endfor %}
+              </div>
+            </div>
+            <button class="btn btn-outline-primary btn-sm w-100" type="button" data-policy-editor data-user-id="{{ user.user_id }}" data-access-key="{{ user.access_key }}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
+                <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319z"/>
+              </svg>
+              Manage Policies
+            </button>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="iam-no-results d-none" id="iam-no-results">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="mb-2" viewBox="0 0 16 16">
+        <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+      </svg>
+      <p class="mb-0">No users match your filter.</p>
+    </div>
+    {% else %}
+    <div class="empty-state text-center py-5">
+      <div class="empty-state-icon mx-auto mb-3">
+        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" viewBox="0 0 16 16">
+          <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022zM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-1.01.377-2.042 1.09-2.904.243-.294.526-.569.846-.816zM4.92 10A5.493 5.493 0 0 0 4 13H1c0-.26.164-1.03.76-1.724.545-.636 1.492-1.256 3.16-1.275zM1.5 5.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0zm3-2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/>
+        </svg>
+      </div>
+      <h5 class="fw-semibold mb-2">No users yet</h5>
+      <p class="text-muted mb-3">Create your first IAM user to manage access to your storage.</p>
+      <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createUserModal">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+          <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+        </svg>
+        Create First User
+      </button>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="modal fade" id="createUserModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M1 14s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H1zm5-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+            <path fill-rule="evenodd" d="M13.5 5a.5.5 0 0 1 .5.5V7h1.5a.5.5 0 0 1 0 1H14v1.5a.5.5 0 0 1-1 0V8h-1.5a.5.5 0 0 1 0-1H13V5.5a.5.5 0 0 1 .5-.5z"/>
+          </svg>
+          Create IAM User
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="{{ url_for(endpoint="ui.create_iam_user") }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label fw-medium">Display Name</label>
+            <input class="form-control" type="text" name="display_name" placeholder="Analytics Team" required autofocus />
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-medium d-flex justify-content-between align-items-center">
+              Access Key <span class="text-muted fw-normal small">optional</span>
+            </label>
+            <div class="input-group">
+              <input class="form-control font-monospace" type="text" name="access_key" id="createUserAccessKey" placeholder="Leave blank to auto-generate" />
+              <button class="btn btn-outline-secondary" type="button" id="generateAccessKeyBtn" title="Generate secure access key">Generate</button>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-medium d-flex justify-content-between align-items-center">
+              Secret Key <span class="text-muted fw-normal small">optional</span>
+            </label>
+            <div class="input-group">
+              <input class="form-control font-monospace" type="text" name="secret_key" id="createUserSecretKey" placeholder="Leave blank to auto-generate" />
+              <button class="btn btn-outline-secondary" type="button" id="generateSecretKeyBtn" title="Generate secure secret key">Generate</button>
+            </div>
+            <div class="form-text">If you set a custom secret key, copy it now. It will be encrypted and cannot be recovered.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-medium d-flex justify-content-between align-items-center">
+              Expiry <span class="text-muted fw-normal small">optional</span>
+            </label>
+            <input class="form-control" type="datetime-local" name="expires_at" id="createUserExpiry" />
+            <div class="form-text">Leave blank for no expiration. Expired users cannot authenticate.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-medium">Initial Policies (JSON)</label>
+            <textarea class="form-control font-monospace" name="policies" id="createUserPolicies" rows="6" spellcheck="false" placeholder='[
+  {"bucket": "*", "actions": ["list", "read"]}
+]'></textarea>
+            <div class="form-text">Leave blank to grant full control (for bootstrap admins only).</div>
+          </div>
+          <div class="d-flex flex-wrap gap-2">
+            <span class="text-muted small me-2 align-self-center">Quick templates:</span>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="full">Full Control</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="readonly">Read-Only</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="writer">Read + Write</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="operator">Operator</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-create-policy-template="bucketadmin">Bucket Admin</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+              <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+            </svg>
+            Create User
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="policyEditorModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
+            <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.377l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115l.094-.319z"/>
+          </svg>
+          Edit Policies
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-3">Editing policies for <code id="policyEditorUserLabel"></code></p>
+        <form
+          id="policyEditorForm"
+          method="post"
+          data-action-template="{{ url_for(endpoint="ui.update_iam_policies", user_id="USER_ID_PLACEHOLDER") }}"
+          class="d-flex flex-column gap-3"
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+          <input type="hidden" id="policyEditorUserId" name="user_id" />
+          
+          <div>
+            <label class="form-label fw-medium">Inline Policies (JSON array)</label>
+            <textarea class="form-control font-monospace" id="policyEditorDocument" name="policies" rows="12" spellcheck="false"></textarea>
+            <div class="form-text">Use standard MyFSIO policy format. Validation happens server-side.</div>
+          </div>
+          <div class="d-flex flex-wrap gap-2">
+            <span class="text-muted small me-2 align-self-center">Quick templates:</span>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="full">Full Control</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="readonly">Read-Only</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="writer">Read + Write</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="operator">Operator</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-policy-template="bucketadmin">Bucket Admin</button>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary" type="submit" form="policyEditorForm">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+          </svg>
+          Save Policies
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="editUserModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
+          </svg>
+          Edit User
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" id="editUserForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label fw-medium">Display Name</label>
+            <input class="form-control" type="text" name="display_name" id="editUserDisplayName" required />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+              <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+            </svg>
+            Save Changes
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="deleteUserModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger" viewBox="0 0 16 16">
+            <path d="M11 5a3 3 0 1 1-6 0 3 3 0 0 1 6 0M8 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4m.256 7a4.5 4.5 0 0 1-.229-1.004H3c.001-.246.154-.986.832-1.664C4.484 10.68 5.711 10 8 10q.39 0 .74.025c.226-.341.496-.65.804-.918Q9.077 9.014 8 9c-5 0-6 3-6 4s1 1 1 1h5.256Z"/>
+            <path d="M12.5 16a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7m-.646-4.854.646.647.646-.647a.5.5 0 0 1 .708.708l-.647.646.647.646a.5.5 0 0 1-.708.708l-.646-.647-.646.647a.5.5 0 0 1-.708-.708l.647-.646-.647-.646a.5.5 0 0 1 .708-.708"/>
+          </svg>
+          Delete User
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to delete user <strong id="deleteUserLabel"></strong>?</p>
+        <div id="deleteSelfWarning" class="alert alert-danger d-flex align-items-start d-none">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+          </svg>
+          <div>
+            <strong>Warning:</strong> You are deleting your own account. You will be logged out immediately.
+          </div>
+        </div>
+        <p class="text-danger small mb-0">This action cannot be undone.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <form method="post" id="deleteUserForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+            <button class="btn btn-danger" type="submit">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+              </svg>
+              Delete User
+            </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="rotateSecretModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+            <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+          </svg>
+          Rotate Secret Key
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="rotateSecretConfirm">
+        <p>Rotate the secret key for <strong id="rotateUserLabel"></strong>?</p>
+        <div class="alert alert-warning d-flex align-items-start mb-0">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2 mt-1" viewBox="0 0 16 16">
+            <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+            <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+          </svg>
+          <div>The old secret key will stop working immediately. Update any applications using it.</div>
+        </div>
+      </div>
+      <div class="modal-body d-none" id="rotateSecretResult">
+        <div class="alert alert-success d-flex align-items-center mb-3">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="flex-shrink-0 me-2" viewBox="0 0 16 16">
+            <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/>
+          </svg>
+          <div>Secret rotated successfully!</div>
+        </div>
+        <label class="form-label fw-medium">New Secret Key</label>
+        <div class="input-group">
+          <input type="text" class="form-control font-monospace bg-body-tertiary" id="newSecretKey" readonly>
+          <button class="btn btn-outline-primary" type="button" id="copyNewSecret">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+              <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+              <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+            </svg>
+          </button>
+        </div>
+        <p class="form-text mb-0">Copy this now. It will not be shown again.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="rotateCancelBtn">Cancel</button>
+        <button type="button" class="btn btn-warning" id="confirmRotateBtn">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+            <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+          </svg>
+          Rotate Key
+        </button>
+        <button type="button" class="btn btn-primary d-none" data-bs-dismiss="modal" id="rotateDoneBtn">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="expiryModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h1 class="modal-title fs-5 fw-semibold">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+          </svg>
+          Set Expiry
+        </h1>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" id="expiryForm">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+        <div class="modal-body">
+          <p class="text-muted small mb-3">Set expiration for <code id="expiryUserLabel"></code></p>
+          <div class="mb-3">
+            <label class="form-label fw-medium">Expires at</label>
+            <input class="form-control" type="datetime-local" name="expires_at" id="expiryDateInput" />
+            <div class="form-text">Leave blank to remove expiration (never expires).</div>
+          </div>
+          <div class="d-flex flex-wrap gap-2">
+            <span class="text-muted small me-2 align-self-center">Quick presets:</span>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-expiry-preset="1h">1 hour</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-expiry-preset="24h">24 hours</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-expiry-preset="7d">7 days</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-expiry-preset="30d">30 days</button>
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-expiry-preset="90d">90 days</button>
+            <button class="btn btn-outline-secondary btn-sm text-danger" type="button" data-expiry-preset="clear">Never</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+              <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+            </svg>
+            Save Expiry
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script id="iamUsersJson" type="application/json">{{ users | json_encode | safe }}</script>
+{% endblock %}
+
+{% block extra_scripts %}
+{{ super() }}
+<script src="{{ url_for(endpoint="static", filename="js/iam-management.js") }}"></script>
+<script>
+  IAMManagement.init({
+    users: JSON.parse(document.getElementById('iamUsersJson').textContent || '[]'),
+    currentUserKey: {{ principal.access_key | json_encode | safe }},
+    iamLocked: {{ iam_locked | json_encode | safe }},
+    csrfToken: "{{ csrf_token_value }}",
+    endpoints: {
+      createUser: "{{ url_for(endpoint="ui.create_iam_user") }}",
+      updateUser: "{{ url_for(endpoint="ui.update_iam_user", user_id="USER_ID") }}",
+      deleteUser: "{{ url_for(endpoint="ui.delete_iam_user", user_id="USER_ID") }}",
+      updatePolicies: "{{ url_for(endpoint="ui.update_iam_policies", user_id="USER_ID") }}",
+      rotateSecret: "{{ url_for(endpoint="ui.rotate_iam_secret", user_id="USER_ID") }}",
+      updateExpiry: "{{ url_for(endpoint="ui.update_iam_expiry", user_id="USER_ID") }}"
+    }
+  });
+</script>
+{% endblock %}

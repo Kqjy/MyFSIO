@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="text-center py-5">
+  <p class="text-uppercase text-muted small mb-2">HTTP 500</p>
+  <h1 class="display-6 mb-3">Internal Server Error</h1>
+  <p class="text-muted mb-4">Something went wrong on our end. Please try again later or contact support.</p>
+  <div class="d-flex flex-wrap justify-content-center gap-3">
+    <a class="btn btn-primary" href="{{ url_for(endpoint="ui.buckets_overview") }}">Return to buckets</a>
+  </div>
+</div>
+{% endblock %}

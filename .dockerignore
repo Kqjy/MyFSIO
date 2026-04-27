@@ -1,13 +1,9 @@
 .git
 .gitignore
-.venv
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache
-.coverage
-htmlcov
 logs
 data
 tmp
+target
+crates/*/tests
+Dockerfile
+.dockerignore

@@ -13,6 +13,7 @@
 #   --data-dir DIR      Data directory (default: /var/lib/myfsio)
 #   --log-dir DIR       Log directory (default: /var/log/myfsio)
 #   --user USER         System user (default: myfsio)
+#   --no-systemd        Skip systemd service teardown
 #   -y, --yes           Skip confirmation prompts
 #
 
@@ -24,46 +25,21 @@ LOG_DIR="/var/log/myfsio"
 SERVICE_USER="myfsio"
 KEEP_DATA=false
 KEEP_LOGS=false
+SKIP_SYSTEMD=false
 AUTO_YES=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --keep-data)
-            KEEP_DATA=true
-            shift
-            ;;
-        --keep-logs)
-            KEEP_LOGS=true
-            shift
-            ;;
-        --install-dir)
-            INSTALL_DIR="$2"
-            shift 2
-            ;;
-        --data-dir)
-            DATA_DIR="$2"
-            shift 2
-            ;;
-        --log-dir)
-            LOG_DIR="$2"
-            shift 2
-            ;;
-        --user)
-            SERVICE_USER="$2"
-            shift 2
-            ;;
-        -y|--yes)
-            AUTO_YES=true
-            shift
-            ;;
-        -h|--help)
-            head -20 "$0" | tail -15
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
+        --keep-data)    KEEP_DATA=true; shift ;;
+        --keep-logs)    KEEP_LOGS=true; shift ;;
+        --install-dir)  INSTALL_DIR="$2"; shift 2 ;;
+        --data-dir)     DATA_DIR="$2"; shift 2 ;;
+        --log-dir)      LOG_DIR="$2"; shift 2 ;;
+        --user)         SERVICE_USER="$2"; shift 2 ;;
+        --no-systemd)   SKIP_SYSTEMD=true; shift ;;
+        -y|--yes)       AUTO_YES=true; shift ;;
+        -h|--help)      head -21 "$0" | tail -16; exit 0 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
@@ -125,42 +101,51 @@ if [[ "$AUTO_YES" != true ]]; then
     fi
 fi
 
-echo ""
-echo "------------------------------------------------------------"
-echo "STEP 2: Stopping Service"
-echo "------------------------------------------------------------"
-echo ""
-if systemctl is-active --quiet myfsio 2>/dev/null; then
-    systemctl stop myfsio
-    echo "  [OK] Stopped myfsio service"
-else
-    echo "  [SKIP] Service not running"
-fi
+if [[ "$SKIP_SYSTEMD" != true ]]; then
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "STEP 2: Stopping Service"
+    echo "------------------------------------------------------------"
+    echo ""
+    if systemctl is-active --quiet myfsio 2>/dev/null; then
+        systemctl stop myfsio
+        echo "  [OK] Stopped myfsio service"
+    else
+        echo "  [SKIP] Service not running"
+    fi
 
-echo ""
-echo "------------------------------------------------------------"
-echo "STEP 3: Disabling Service"
-echo "------------------------------------------------------------"
-echo ""
-if systemctl is-enabled --quiet myfsio 2>/dev/null; then
-    systemctl disable myfsio
-    echo "  [OK] Disabled myfsio service"
-else
-    echo "  [SKIP] Service not enabled"
-fi
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "STEP 3: Disabling Service"
+    echo "------------------------------------------------------------"
+    echo ""
+    if systemctl is-enabled --quiet myfsio 2>/dev/null; then
+        systemctl disable myfsio
+        echo "  [OK] Disabled myfsio service"
+    else
+        echo "  [SKIP] Service not enabled"
+    fi
 
-echo ""
-echo "------------------------------------------------------------"
-echo "STEP 4: Removing Systemd Service File"
-echo "------------------------------------------------------------"
-echo ""
-if [[ -f /etc/systemd/system/myfsio.service ]]; then
-    rm -f /etc/systemd/system/myfsio.service
-    systemctl daemon-reload
-    echo "  [OK] Removed /etc/systemd/system/myfsio.service"
-    echo "  [OK] Reloaded systemd daemon"
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "STEP 4: Removing Systemd Service File"
+    echo "------------------------------------------------------------"
+    echo ""
+    if [[ -f /etc/systemd/system/myfsio.service ]]; then
+        rm -f /etc/systemd/system/myfsio.service
+        systemctl daemon-reload
+        echo "  [OK] Removed /etc/systemd/system/myfsio.service"
+        echo "  [OK] Reloaded systemd daemon"
+    else
+        echo "  [SKIP] Service file not found"
+    fi
 else
-    echo "  [SKIP] Service file not found"
+    echo ""
+    echo "------------------------------------------------------------"
+    echo "STEPS 2-4: Skipping Systemd Teardown (--no-systemd)"
+    echo "------------------------------------------------------------"
+    echo ""
+    echo "  Stop any running myfsio process manually before continuing."
 fi
 
 echo ""
@@ -235,11 +220,11 @@ if [[ "$KEEP_DATA" == true ]]; then
     echo "  - Secret key:        $DATA_DIR/.myfsio.sys/config/.secret"
     echo "  - Encryption keys:   $DATA_DIR/.myfsio.sys/keys/ (if encryption was enabled)"
     echo ""
-    echo "NOTE: The IAM config is encrypted and requires the SECRET_KEY to read."
-    echo "      Keep the .secret file intact for reinstallation."
+    echo "NOTE: The IAM config is encrypted at rest and is unlocked by the .secret"
+    echo "      file in the data directory. Keep that file intact for reinstallation."
     echo ""
     echo "To reinstall MyFSIO with existing data:"
-    echo "  ./install.sh --data-dir $DATA_DIR"
+    echo "  ./install.sh --binary ./myfsio --data-dir $DATA_DIR"
     echo ""
 fi
 

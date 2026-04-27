@@ -1,0 +1,461 @@
+{% extends "base.html" %}
+
+{% block title %}Cluster - S3 Compatible Storage{% endblock %}
+
+{% block content %}
+<div class="page-header d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <p class="text-uppercase text-muted small mb-1">Cluster Overview</p>
+    <h1 class="h3 mb-1 d-flex align-items-center gap-2">
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+        <path d="M7.752.066a.5.5 0 0 1 .496 0l3.75 2.143a.5.5 0 0 1 .252.434v3.995l3.498 2A.5.5 0 0 1 16 9.07v4.286a.5.5 0 0 1-.252.434l-3.75 2.143a.5.5 0 0 1-.496 0l-3.502-2-3.502 2.001a.5.5 0 0 1-.496 0l-3.75-2.143A.5.5 0 0 1 0 13.357V9.071a.5.5 0 0 1 .252-.434L3.75 6.638V2.643a.5.5 0 0 1 .252-.434L7.752.066ZM4.25 7.504 1.508 9.071l2.742 1.567 2.742-1.567L4.25 7.504ZM7.5 9.933l-2.75 1.571v3.134l2.75-1.571V9.933Zm1 3.134 2.75 1.571v-3.134L8.5 9.933v3.134Zm.508-3.996 2.742 1.567 2.742-1.567-2.742-1.567-2.742 1.567Zm2.242-2.433V3.504L8.5 5.076V8.21l2.75-1.572ZM7.5 8.21V5.076L4.75 3.504v3.134L7.5 8.21ZM5.258 2.643 8 4.21l2.742-1.567L8 1.076 5.258 2.643ZM15 9.933l-2.75 1.571v3.134L15 13.067V9.933ZM3.75 14.638v-3.134L1 9.933v3.134l2.75 1.571Z"/>
+      </svg>
+      Cluster
+    </h1>
+    <p class="text-muted mb-0 mt-1">Live view across this site and every registered peer.</p>
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <span class="badge bg-success bg-opacity-10 text-success fs-6 px-3 py-2" id="cluster-online-badge">
+      {{ cluster_online_count }} / {{ cluster_total_count }} online
+    </span>
+    <span class="text-muted small d-none d-md-inline" id="cluster-updated-at" title="Last refresh">just now</span>
+    <button type="button" class="btn btn-outline-secondary btn-sm d-flex align-items-center gap-1" id="cluster-refresh-btn" title="Refresh now (bypass 10s cache)">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" id="cluster-refresh-icon">
+        <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+        <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+      </svg>
+      <span>Refresh</span>
+    </button>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-3 col-sm-6">
+    <div class="card shadow-sm border-0 h-100" style="border-radius: 1rem;">
+      <div class="card-body d-flex align-items-center gap-3">
+        <div class="d-flex align-items-center justify-content-center rounded-3 bg-primary bg-opacity-10 text-primary" style="width:44px;height:44px;flex-shrink:0;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M7.752.066a.5.5 0 0 1 .496 0l3.75 2.143a.5.5 0 0 1 .252.434v3.995l3.498 2A.5.5 0 0 1 16 9.07v4.286a.5.5 0 0 1-.252.434l-3.75 2.143a.5.5 0 0 1-.496 0l-3.502-2-3.502 2.001a.5.5 0 0 1-.496 0l-3.75-2.143A.5.5 0 0 1 0 13.357V9.071a.5.5 0 0 1 .252-.434L3.75 6.638V2.643a.5.5 0 0 1 .252-.434L7.752.066Z"/>
+          </svg>
+        </div>
+        <div class="flex-grow-1">
+          <div class="text-uppercase text-muted small">Sites</div>
+          <div class="h3 mb-0" id="cluster-total-sites">{{ cluster_total_count }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3 col-sm-6">
+    <div class="card shadow-sm border-0 h-100" style="border-radius: 1rem;">
+      <div class="card-body d-flex align-items-center gap-3">
+        <div class="d-flex align-items-center justify-content-center rounded-3 bg-info bg-opacity-10 text-info" style="width:44px;height:44px;flex-shrink:0;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>
+          </svg>
+        </div>
+        <div class="flex-grow-1">
+          <div class="text-uppercase text-muted small">Buckets</div>
+          <div class="h3 mb-0" id="cluster-total-buckets">{{ cluster_total_buckets }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3 col-sm-6">
+    <div class="card shadow-sm border-0 h-100" style="border-radius: 1rem;">
+      <div class="card-body d-flex align-items-center gap-3">
+        <div class="d-flex align-items-center justify-content-center rounded-3 bg-warning bg-opacity-10 text-warning" style="width:44px;height:44px;flex-shrink:0;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2zM9.5 3A1.5 1.5 0 0 0 11 4.5h2V14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5.5z"/>
+          </svg>
+        </div>
+        <div class="flex-grow-1">
+          <div class="text-uppercase text-muted small">Objects</div>
+          <div class="h3 mb-0" id="cluster-total-objects">{{ cluster_total_objects }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3 col-sm-6">
+    <div class="card shadow-sm border-0 h-100" style="border-radius: 1rem;">
+      <div class="card-body d-flex align-items-center gap-3">
+        <div class="d-flex align-items-center justify-content-center rounded-3 bg-success bg-opacity-10 text-success" style="width:44px;height:44px;flex-shrink:0;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M0 10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8H0v2zm1.5 1a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zm2 0a.5.5 0 1 1 0-1 .5.5 0 0 1 0 1zM0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3H0V4z"/>
+            <path d="M1.5 6a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1zm2 0a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1z"/>
+          </svg>
+        </div>
+        <div class="flex-grow-1">
+          <div class="text-uppercase text-muted small">Size</div>
+          <div class="h3 mb-0" id="cluster-total-size" data-bytes="{{ cluster_total_size_bytes }}">{{ cluster_total_size_bytes }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4" id="cluster-sites-row">
+  {% for site in cluster_sites %}
+  <div class="col-xl-6">
+    <div class="card shadow-sm border-0 h-100 site-card" data-site-id="{{ site.site_id }}" style="border-radius: 1rem;">
+      <div class="card-body p-4">
+        <div class="d-flex align-items-start justify-content-between mb-3">
+          <div class="flex-grow-1 min-w-0">
+            <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+              <span class="badge bg-success bg-opacity-10 text-success site-status-online {% if not site.online %}d-none{% endif %}">
+                <span class="d-inline-block rounded-circle bg-success me-1" style="width:6px;height:6px;"></span>online
+              </span>
+              <span class="badge bg-danger bg-opacity-10 text-danger site-status-offline {% if site.online %}d-none{% endif %}">
+                <span class="d-inline-block rounded-circle bg-danger me-1" style="width:6px;height:6px;"></span>offline
+              </span>
+              <span class="badge bg-warning bg-opacity-10 text-warning site-status-stale {% if not site.stale %}d-none{% endif %}" title="Could not reach peer">stale</span>
+              {% if site.is_local %}
+              <span class="badge bg-primary bg-opacity-10 text-primary">this site</span>
+              {% endif %}
+            </div>
+            <h5 class="fw-semibold mb-0 text-truncate">
+              {% if site.display_name and site.display_name != "" %}{{ site.display_name }}{% else %}{{ site.site_id }}{% endif %}
+            </h5>
+            <div class="text-muted small">
+              <span class="font-monospace">{{ site.site_id }}</span>
+              {% if site.region %} · {{ site.region }}{% elif site.registered_region %} · {{ site.registered_region }}{% endif %}
+            </div>
+          </div>
+          {% if site.endpoint %}
+          <code class="small text-muted text-end ms-2" style="word-break:break-all;">{{ site.endpoint }}</code>
+          {% endif %}
+        </div>
+
+        <div class="site-online-content {% if not site.online %}d-none{% endif %}">
+          <div class="row g-3 mb-3">
+            <div class="col-4">
+              <div class="text-uppercase text-muted small mb-1 d-flex align-items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" viewBox="0 0 16 16"><path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/></svg>
+                Buckets
+              </div>
+              <div class="h4 mb-0 site-buckets">{{ site.buckets | default(value=0) }}</div>
+            </div>
+            <div class="col-4">
+              <div class="text-uppercase text-muted small mb-1 d-flex align-items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" viewBox="0 0 16 16"><path d="M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2z"/></svg>
+                Objects
+              </div>
+              <div class="h4 mb-0 site-objects">{{ site.objects | default(value=0) }}</div>
+            </div>
+            <div class="col-4">
+              <div class="text-uppercase text-muted small mb-1 d-flex align-items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" viewBox="0 0 16 16"><path d="M0 10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8H0v2zM0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3H0V4z"/></svg>
+                Size
+              </div>
+              <div class="h4 mb-0 site-size" data-bytes="{{ site.size_bytes | default(value=0) }}">{{ site.size_bytes | default(value=0) }}</div>
+            </div>
+          </div>
+
+          {% if site.capacity %}
+          <div class="mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <span class="text-uppercase text-muted small">Disk Capacity</span>
+              <span class="small text-muted">
+                <span class="site-disk-used" data-bytes="0">0</span> / <span class="site-disk-total" data-bytes="{{ site.capacity.total_bytes | default(value=0) }}">{{ site.capacity.total_bytes | default(value=0) }}</span>
+              </span>
+            </div>
+            <div class="progress" style="height:6px;border-radius:3px;">
+              <div class="progress-bar bg-primary site-disk-bar" role="progressbar" style="width:0%;" data-total="{{ site.capacity.total_bytes | default(value=0) }}" data-available="{{ site.capacity.available_bytes | default(value=0) }}"></div>
+            </div>
+          </div>
+          {% endif %}
+
+          {% if site.system and site.system.cpu_percent is defined %}
+          <div class="mb-3">
+            <div class="text-uppercase text-muted small mb-2">System</div>
+            <div class="d-flex flex-column gap-2">
+              <div>
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">CPU</span>
+                  <span class="site-cpu-label">{{ site.system.cpu_percent | default(value=0) }}%</span>
+                </div>
+                <div class="progress" style="height:4px;border-radius:2px;">
+                  <div class="progress-bar site-cpu-bar" role="progressbar" style="width:{{ site.system.cpu_percent | default(value=0) }}%;"></div>
+                </div>
+              </div>
+              <div>
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">Memory</span>
+                  <span class="site-mem-label">{{ site.system.memory_percent | default(value=0) }}%</span>
+                </div>
+                <div class="progress" style="height:4px;border-radius:2px;">
+                  <div class="progress-bar site-mem-bar" role="progressbar" style="width:{{ site.system.memory_percent | default(value=0) }}%;"></div>
+                </div>
+              </div>
+              <div>
+                <div class="d-flex justify-content-between small mb-1">
+                  <span class="text-muted">Disk</span>
+                  <span class="site-diskpct-label">{{ site.system.disk_percent | default(value=0) }}%</span>
+                </div>
+                <div class="progress" style="height:4px;border-radius:2px;">
+                  <div class="progress-bar site-diskpct-bar" role="progressbar" style="width:{{ site.system.disk_percent | default(value=0) }}%;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          {% endif %}
+
+          {% if site.sync %}
+          <div class="d-flex align-items-center justify-content-between border-top pt-3">
+            <div class="d-flex align-items-center gap-2 small">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+              </svg>
+              <span class="text-muted">Sync</span>
+              <span class="site-sync-label">
+                {% if site.sync.last_sync_at %}
+                <span data-last-sync-at="{{ site.sync.last_sync_at }}">last sync <span class="last-sync-rel">just now</span></span>
+                {% else %}
+                <span class="text-muted">no sync yet</span>
+                {% endif %}
+              </span>
+            </div>
+            <span class="badge bg-danger bg-opacity-10 text-danger site-sync-errors {% if not site.sync.errors or site.sync.errors == 0 %}d-none{% endif %}">
+              <span class="site-sync-errors-count">{{ site.sync.errors | default(value=0) }}</span> err
+            </span>
+          </div>
+          {% endif %}
+        </div>
+
+        <div class="site-offline-content {% if site.online %}d-none{% endif %}">
+          <div class="alert alert-light border-0 mb-0 py-2 px-3 small">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 text-warning" viewBox="0 0 16 16">
+              <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+            </svg>
+            <span class="site-offline-message">{% if site.error %}{{ site.error }}{% else %}Peer unreachable.{% endif %}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+
+  {% if cluster_total_count <= 1 %}
+  <div class="col-xl-6">
+    <a href="{{ url_for(endpoint='ui.sites_dashboard') }}" class="card shadow-sm border-0 h-100 text-decoration-none text-reset" style="border-radius: 1rem; border: 2px dashed var(--bs-border-color) !important;">
+      <div class="card-body d-flex flex-column align-items-center justify-content-center text-center p-5">
+        <div class="d-flex align-items-center justify-content-center rounded-circle bg-primary bg-opacity-10 text-primary mb-3" style="width:64px;height:64px;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+          </svg>
+        </div>
+        <h5 class="fw-semibold mb-1">Add a peer site</h5>
+        <p class="text-muted small mb-0">Register another MyFSIO instance to see it appear here side-by-side.</p>
+      </div>
+    </a>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+(function () {
+    function fmtBytes(n) {
+        if (!n || n < 0) return "0 B";
+        var u = ["B", "KB", "MB", "GB", "TB", "PB"];
+        var i = 0;
+        var v = n;
+        while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+        return v.toFixed(i === 0 ? 0 : (v >= 100 ? 0 : 1)) + " " + u[i];
+    }
+    function fmtRel(ts) {
+        var diff = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+        if (diff < 60) return diff + "s ago";
+        if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+        if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+        return Math.floor(diff / 86400) + "d ago";
+    }
+    function pctColor(p) {
+        if (p >= 80) return "bg-danger";
+        if (p >= 60) return "bg-warning";
+        return "bg-success";
+    }
+    function applyBytesFormat(root) {
+        (root || document).querySelectorAll("[data-bytes]").forEach(function (el) {
+            var n = parseInt(el.getAttribute("data-bytes"), 10);
+            if (!isNaN(n)) el.textContent = fmtBytes(n);
+        });
+    }
+    function applyDiskBars(root) {
+        (root || document).querySelectorAll(".site-disk-bar").forEach(function (bar) {
+            var total = parseFloat(bar.getAttribute("data-total")) || 0;
+            var avail = parseFloat(bar.getAttribute("data-available")) || 0;
+            var used = Math.max(0, total - avail);
+            var pct = total > 0 ? (used / total) * 100 : 0;
+            bar.style.width = pct.toFixed(1) + "%";
+            bar.classList.remove("bg-success", "bg-warning", "bg-danger", "bg-primary");
+            bar.classList.add(pctColor(pct));
+            var card = bar.closest(".site-card");
+            if (card) {
+                var usedEl = card.querySelector(".site-disk-used");
+                if (usedEl) {
+                    usedEl.setAttribute("data-bytes", String(Math.floor(used)));
+                    usedEl.textContent = fmtBytes(used);
+                }
+            }
+        });
+    }
+    function applyPctBars(root) {
+        var pairs = [
+            [".site-cpu-bar", ".site-cpu-label"],
+            [".site-mem-bar", ".site-mem-label"],
+            [".site-diskpct-bar", ".site-diskpct-label"],
+        ];
+        pairs.forEach(function (sel) {
+            (root || document).querySelectorAll(sel[0]).forEach(function (bar) {
+                var label = bar.closest(".site-card").querySelector(sel[1]);
+                var pct = parseFloat(label ? label.textContent : "0") || 0;
+                bar.classList.remove("bg-success", "bg-warning", "bg-danger");
+                bar.classList.add(pctColor(pct));
+            });
+        });
+    }
+    function refreshRel() {
+        document.querySelectorAll("[data-last-sync-at]").forEach(function (el) {
+            var ts = parseFloat(el.getAttribute("data-last-sync-at"));
+            var span = el.querySelector(".last-sync-rel");
+            if (span && !isNaN(ts)) span.textContent = fmtRel(ts);
+        });
+    }
+
+    function updateCard(card, site) {
+        if (!card) return;
+        var online = !!site.online;
+        var stale = !!site.stale;
+
+        function toggle(sel, show) {
+            var el = card.querySelector(sel);
+            if (el) el.classList.toggle("d-none", !show);
+        }
+        toggle(".site-status-online", online);
+        toggle(".site-status-offline", !online);
+        toggle(".site-status-stale", stale);
+        toggle(".site-online-content", online);
+        toggle(".site-offline-content", !online);
+
+        if (online) {
+            var setNum = function (sel, val) {
+                var el = card.querySelector(sel);
+                if (el) el.textContent = String(val == null ? 0 : val);
+            };
+            setNum(".site-buckets", site.buckets);
+            setNum(".site-objects", site.objects);
+            var sizeEl = card.querySelector(".site-size");
+            if (sizeEl) {
+                sizeEl.setAttribute("data-bytes", String(site.size_bytes || 0));
+                sizeEl.textContent = fmtBytes(site.size_bytes || 0);
+            }
+            var capacity = site.capacity || {};
+            var diskBar = card.querySelector(".site-disk-bar");
+            if (diskBar) {
+                diskBar.setAttribute("data-total", String(capacity.total_bytes || 0));
+                diskBar.setAttribute("data-available", String(capacity.available_bytes || 0));
+            }
+            var diskTotalEl = card.querySelector(".site-disk-total");
+            if (diskTotalEl) {
+                diskTotalEl.setAttribute("data-bytes", String(capacity.total_bytes || 0));
+                diskTotalEl.textContent = fmtBytes(capacity.total_bytes || 0);
+            }
+            var sys = site.system || {};
+            var setPct = function (labelSel, val) {
+                var label = card.querySelector(labelSel);
+                if (label) label.textContent = (val == null ? 0 : val) + "%";
+            };
+            setPct(".site-cpu-label", sys.cpu_percent);
+            setPct(".site-mem-label", sys.memory_percent);
+            setPct(".site-diskpct-label", sys.disk_percent);
+            var setBarPct = function (sel, val) {
+                var bar = card.querySelector(sel);
+                if (bar) bar.style.width = (val == null ? 0 : val) + "%";
+            };
+            setBarPct(".site-cpu-bar", sys.cpu_percent);
+            setBarPct(".site-mem-bar", sys.memory_percent);
+            setBarPct(".site-diskpct-bar", sys.disk_percent);
+
+            var sync = site.sync || {};
+            var syncLabel = card.querySelector(".site-sync-label");
+            if (syncLabel) {
+                if (sync.last_sync_at) {
+                    syncLabel.innerHTML = '<span data-last-sync-at="' + sync.last_sync_at + '">last sync <span class="last-sync-rel">' + fmtRel(sync.last_sync_at) + '</span></span>';
+                } else {
+                    syncLabel.innerHTML = '<span class="text-muted">no sync yet</span>';
+                }
+            }
+            var errBadge = card.querySelector(".site-sync-errors");
+            var errCount = sync.errors || 0;
+            if (errBadge) {
+                errBadge.classList.toggle("d-none", errCount === 0);
+                var c = errBadge.querySelector(".site-sync-errors-count");
+                if (c) c.textContent = errCount;
+            }
+        } else {
+            var msg = card.querySelector(".site-offline-message");
+            if (msg) msg.textContent = site.error || "Peer unreachable.";
+        }
+    }
+
+    function poll(force) {
+        var url = "/ui/cluster/data" + (force ? "?force=1" : "");
+        var icon = document.getElementById("cluster-refresh-icon");
+        var btn = document.getElementById("cluster-refresh-btn");
+        if (force && icon) icon.classList.add("spin");
+        if (force && btn) btn.disabled = true;
+        return fetch(url, { credentials: "same-origin", cache: "no-store" })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+                if (!data) return;
+                var totals = data.totals || {};
+                var setTotal = function (id, v) {
+                    var el = document.getElementById(id);
+                    if (el) el.textContent = String(v == null ? 0 : v);
+                };
+                setTotal("cluster-total-sites", totals.total_count);
+                setTotal("cluster-total-buckets", totals.buckets);
+                setTotal("cluster-total-objects", totals.objects);
+                var sizeEl = document.getElementById("cluster-total-size");
+                if (sizeEl) {
+                    sizeEl.setAttribute("data-bytes", String(totals.size_bytes || 0));
+                    sizeEl.textContent = fmtBytes(totals.size_bytes || 0);
+                }
+                var onlineBadge = document.getElementById("cluster-online-badge");
+                if (onlineBadge) onlineBadge.textContent = (totals.online_count || 0) + " / " + (totals.total_count || 0) + " online";
+
+                (data.sites || []).forEach(function (site) {
+                    var card = document.querySelector('.site-card[data-site-id="' + site.site_id + '"]');
+                    if (card) updateCard(card, site);
+                });
+
+                applyDiskBars();
+                applyPctBars();
+                var stamp = document.getElementById("cluster-updated-at");
+                if (stamp) stamp.textContent = "updated " + new Date().toLocaleTimeString();
+            })
+            .catch(function () { /* silent — keep last good state */ })
+            .finally(function () {
+                if (icon) icon.classList.remove("spin");
+                if (btn) btn.disabled = false;
+            });
+    }
+
+    applyBytesFormat();
+    applyDiskBars();
+    applyPctBars();
+    refreshRel();
+    setInterval(refreshRel, 5000);
+    setInterval(function () { poll(false); }, 10000);
+
+    var refreshBtn = document.getElementById("cluster-refresh-btn");
+    if (refreshBtn) {
+        refreshBtn.addEventListener("click", function () { poll(true); });
+    }
+})();
+</script>
+<style>
+@keyframes cluster-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spin { animation: cluster-spin 0.8s linear infinite; transform-origin: 50% 50%; }
+</style>
+{% endblock %}

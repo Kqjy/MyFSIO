@@ -1,0 +1,61 @@
+[package]
+name = "myfsio-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+myfsio-common = { path = "../myfsio-common" }
+myfsio-auth = { path = "../myfsio-auth" }
+myfsio-crypto = { path = "../myfsio-crypto" }
+myfsio-storage = { path = "../myfsio-storage" }
+myfsio-xml = { path = "../myfsio-xml" }
+base64 = { workspace = true }
+md-5 = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = "0.7"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+http-body = "1"
+http-body-util = "0.1"
+percent-encoding = { workspace = true }
+quick-xml = { workspace = true }
+mime_guess = "2"
+crc32fast = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+duckdb = { workspace = true }
+roxmltree = "0.20"
+parking_lot = { workspace = true }
+regex = "1"
+multer = "3"
+reqwest = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-smithy-types = { workspace = true }
+async-trait = { workspace = true }
+rand = "0.8"
+tera = { workspace = true }
+rust-embed = { version = "8", features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+cookie = { workspace = true }
+subtle = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+sysinfo = "0.32"
+aes-gcm = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { workspace = true, features = ["util"] }
