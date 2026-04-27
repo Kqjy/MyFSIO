@@ -48,6 +48,7 @@ aws-smithy-types = { workspace = true }
 async-trait = { workspace = true }
 rand = "0.8"
 tera = { workspace = true }
+rust-embed = { version = "8", features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
 cookie = { workspace = true }
 subtle = { workspace = true }
 clap = { workspace = true }

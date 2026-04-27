@@ -1,4 +1,5 @@
 pub mod config;
+pub mod embedded;
 pub mod handlers;
 pub mod middleware;
 pub mod services;
@@ -321,14 +322,12 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         secure: false,
     };
 
-    let static_service = tower::ServiceBuilder::new()
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            axum::http::header::CACHE_CONTROL,
-            axum::http::HeaderValue::from_static("no-cache"),
-        ))
-        .service(tower_http::services::ServeDir::new(
-            &state.config.static_dir,
-        ));
+    let static_router = Router::new()
+        .route(
+            "/static/{*path}",
+            axum::routing::get(handlers::static_assets::serve),
+        )
+        .with_state(state.clone());
 
     protected
         .merge(public)
@@ -346,7 +345,7 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             middleware::ui_metrics_layer,
         ))
         .with_state(state)
-        .nest_service("/static", static_service)
+        .merge(static_router)
         .layer(axum::middleware::from_fn(middleware::server_header))
         .layer(tower_http::compression::CompressionLayer::new())
 }

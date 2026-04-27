@@ -260,8 +260,16 @@ impl AppState {
 }
 
 fn init_templates(templates_dir: &std::path::Path) -> Option<Arc<TemplateEngine>> {
-    let glob = format!("{}/*.html", templates_dir.display()).replace('\\', "/");
-    match TemplateEngine::new(&glob) {
+    let use_disk = std::env::var("TEMPLATES_DIR").is_ok() && templates_dir.is_dir();
+    let result = if use_disk {
+        let glob = format!("{}/*.html", templates_dir.display()).replace('\\', "/");
+        tracing::info!("Loading templates from disk: {}", templates_dir.display());
+        TemplateEngine::new(&glob)
+    } else {
+        tracing::info!("Loading templates from embedded assets");
+        TemplateEngine::from_embedded()
+    };
+    match result {
         Ok(engine) => {
             crate::handlers::ui_pages::register_ui_endpoints(&engine);
             Some(Arc::new(engine))

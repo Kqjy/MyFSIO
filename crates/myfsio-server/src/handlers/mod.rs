@@ -3,6 +3,7 @@ mod chunked;
 mod config;
 pub mod kms;
 mod select;
+pub mod static_assets;
 pub mod ui;
 pub mod ui_api;
 pub mod ui_pages;

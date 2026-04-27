@@ -31,6 +31,33 @@ impl TemplateEngine {
         })
     }
 
+    pub fn from_embedded() -> Result<Self, TeraError> {
+        let mut tera = Tera::default();
+        tera.set_escape_fn(html_escape);
+        register_filters(&mut tera);
+
+        let names = crate::embedded::template_names();
+        let mut entries: Vec<(String, String)> = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(contents) = crate::embedded::template_contents(&name) {
+                entries.push((name, contents));
+            }
+        }
+        let refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(n, c)| (n.as_str(), c.as_str()))
+            .collect();
+        tera.add_raw_templates(refs)?;
+
+        let endpoints: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(HashMap::new()));
+        register_functions(&mut tera, endpoints.clone());
+
+        Ok(Self {
+            tera: Arc::new(RwLock::new(tera)),
+            endpoints,
+        })
+    }
+
     pub fn register_endpoint(&self, name: &str, path_template: &str) {
         self.endpoints
             .write()
@@ -341,6 +368,24 @@ mod tests {
             "expected 10+ templates, got {}",
             names.len()
         );
+    }
+
+    #[test]
+    fn embedded_templates_parse() {
+        let engine = TemplateEngine::from_embedded().expect("Embedded Tera parse failed");
+        let names: Vec<String> = engine
+            .tera
+            .read()
+            .get_template_names()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            names.len() >= 10,
+            "expected 10+ embedded templates, got {}",
+            names.len()
+        );
+        assert!(names.iter().any(|n| n == "login.html"));
+        assert!(names.iter().any(|n| n == "404.html"));
     }
 
     #[test]
