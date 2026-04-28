@@ -320,6 +320,9 @@ pub fn create_ui_router(state: state::AppState) -> Router {
     let session_state = middleware::SessionLayerState {
         store: state.sessions.clone(),
         secure: false,
+        ttl: std::time::Duration::from_secs(
+            state.config.session_lifetime_days.saturating_mul(86_400),
+        ),
     };
 
     let static_router = Router::new()

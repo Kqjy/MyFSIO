@@ -1,10 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use cookie::{Cookie, SameSite};
+use cookie::{time::Duration as CookieDuration, Cookie, SameSite};
 use parking_lot::Mutex;
 
 use crate::session::{
@@ -16,6 +17,7 @@ use crate::session::{
 pub struct SessionLayerState {
     pub store: Arc<SessionStore>,
     pub secure: bool,
+    pub ttl: Duration,
 }
 
 #[derive(Clone)]
@@ -81,13 +83,10 @@ pub async fn session_layer(
 ) -> Response {
     let cookie_id = extract_session_cookie(&req);
 
-    let (session_id, session_data, is_new) =
+    let (session_id, session_data) =
         match cookie_id.and_then(|id| state.store.get(&id).map(|data| (id.clone(), data))) {
-            Some((id, data)) => (id, data, false),
-            None => {
-                let (id, data) = state.store.create();
-                (id, data, true)
-            }
+            Some((id, data)) => (id, data),
+            None => state.store.create(),
         };
 
     let handle = SessionHandle::new(session_id.clone(), session_data);
@@ -98,7 +97,7 @@ pub async fn session_layer(
     let rotated = handle.take_rotated_id();
     let destroy_old = handle.take_destroy_old();
 
-    let effective_id = rotated.clone().unwrap_or_else(|| handle.id.clone());
+    let effective_id = rotated.unwrap_or_else(|| handle.id.clone());
 
     if handle.is_dirty() {
         state.store.save(&effective_id, handle.snapshot());
@@ -108,11 +107,9 @@ pub async fn session_layer(
         state.store.destroy(&old);
     }
 
-    if is_new || rotated.is_some() {
-        let cookie = build_session_cookie(&effective_id, state.secure);
-        if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
-            resp.headers_mut().append(header::SET_COOKIE, value);
-        }
+    let cookie = build_session_cookie(&effective_id, state.secure, state.ttl);
+    if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
+        resp.headers_mut().append(header::SET_COOKIE, value);
     }
 
     resp
@@ -259,12 +256,14 @@ fn extract_session_cookie(req: &Request) -> Option<String> {
     None
 }
 
-fn build_session_cookie(id: &str, secure: bool) -> Cookie<'static> {
+fn build_session_cookie(id: &str, secure: bool, ttl: Duration) -> Cookie<'static> {
     let mut cookie = Cookie::new(SESSION_COOKIE_NAME, id.to_string());
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Strict);
     cookie.set_secure(secure);
     cookie.set_path("/");
+    let secs = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
+    cookie.set_max_age(CookieDuration::seconds(secs));
     cookie
 }
 
