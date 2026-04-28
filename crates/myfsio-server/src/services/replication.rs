@@ -4,9 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_smithy_types::byte_stream::Length;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use myfsio_common::types::ListParams;
 use myfsio_storage::fs_backend::{metadata_is_corrupted, FsStorageBackend};
@@ -21,6 +24,12 @@ use crate::stores::connections::{ConnectionStore, RemoteConnection};
 pub const MODE_NEW_ONLY: &str = "new_only";
 pub const MODE_ALL: &str = "all";
 pub const MODE_BIDIRECTIONAL: &str = "bidirectional";
+
+pub const REPLICATION_STATUS_KEY: &str = "__replication_status__";
+pub const REPLICATION_STATUS_AT_KEY: &str = "__replication_status_at__";
+pub const REPLICATION_STATUS_PENDING: &str = "PENDING";
+pub const REPLICATION_STATUS_COMPLETED: &str = "COMPLETED";
+pub const REPLICATION_STATUS_FAILED: &str = "FAILED";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReplicationStats {
@@ -287,6 +296,29 @@ impl ReplicationManager {
         }
     }
 
+    async fn set_replication_status(&self, bucket: &str, key: &str, status: &str) {
+        let mut meta = match self.storage.get_object_metadata(bucket, key).await {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        if meta.get(REPLICATION_STATUS_KEY).map(|s| s.as_str()) == Some(status) {
+            return;
+        }
+        meta.insert(REPLICATION_STATUS_KEY.to_string(), status.to_string());
+        meta.insert(
+            REPLICATION_STATUS_AT_KEY.to_string(),
+            format!("{:.3}", now_secs()),
+        );
+        if let Err(e) = self.storage.put_object_metadata(bucket, key, &meta).await {
+            tracing::debug!(
+                "Failed to record replication status for {}/{}: {}",
+                bucket,
+                key,
+                e
+            );
+        }
+    }
+
     fn update_last_sync(&self, bucket: &str, key: &str) {
         {
             let mut guard = self.rules.lock();
@@ -546,6 +578,9 @@ impl ReplicationManager {
             }
         }
 
+        self.set_replication_status(bucket, object_key, REPLICATION_STATUS_PENDING)
+            .await;
+
         let upload_result = upload_object(
             &client,
             &rule.target_bucket,
@@ -558,7 +593,7 @@ impl ReplicationManager {
         .await;
 
         let final_result = match upload_result {
-            Err(err) if is_no_such_bucket(&err) => {
+            Err(err) if err.is_no_such_bucket => {
                 tracing::info!(
                     "Target bucket {} not found, creating it",
                     rule.target_bucket
@@ -597,9 +632,11 @@ impl ReplicationManager {
                 );
                 self.update_last_sync(bucket, object_key);
                 self.failures.remove(bucket, object_key);
+                self.set_replication_status(bucket, object_key, REPLICATION_STATUS_COMPLETED)
+                    .await;
             }
             Err(err) => {
-                let code = upload_error_code(&err);
+                let code = err.code.clone();
                 let msg = err.to_string();
                 tracing::error!("Replication failed {}/{}: {}", bucket, object_key, msg);
                 self.failures.add(
@@ -614,6 +651,8 @@ impl ReplicationManager {
                         last_error_code: code,
                     },
                 );
+                self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
+                    .await;
             }
         }
     }
@@ -729,11 +768,104 @@ impl ReplicationManager {
     pub fn client_options(&self) -> &ClientOptions {
         &self.client_options
     }
+
+    pub fn start_healer(self: Arc<Self>, interval: Duration, max_attempts: u32) {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                self.heal_once(max_attempts).await;
+            }
+        });
+    }
+
+    async fn heal_once(&self, max_attempts: u32) {
+        let buckets: Vec<String> = self
+            .rules
+            .lock()
+            .iter()
+            .filter(|(_, r)| r.enabled)
+            .map(|(b, _)| b.clone())
+            .collect();
+        let now = now_secs();
+        let mut healed = 0usize;
+        let mut skipped = 0usize;
+        for bucket in buckets {
+            let rule = match self.get_rule(&bucket) {
+                Some(r) if r.enabled => r,
+                _ => continue,
+            };
+            let conn = match self.connections.get(&rule.target_connection_id) {
+                Some(c) => c,
+                None => continue,
+            };
+            let failures = self.failures.load(&bucket);
+            if failures.is_empty() {
+                continue;
+            }
+            for f in failures {
+                if f.failure_count as u32 >= max_attempts {
+                    skipped += 1;
+                    continue;
+                }
+                let backoff_secs = healer_backoff_seconds(f.failure_count);
+                if now - f.timestamp < backoff_secs as f64 {
+                    skipped += 1;
+                    continue;
+                }
+                self.replicate_task(&bucket, &f.object_key, &rule, &conn, &f.action)
+                    .await;
+                healed += 1;
+            }
+        }
+        if healed > 0 || skipped > 0 {
+            tracing::debug!(
+                "Replication healer pass complete: attempted={} skipped={}",
+                healed,
+                skipped
+            );
+        }
+    }
 }
 
-fn is_no_such_bucket<E: std::fmt::Debug>(err: &E) -> bool {
-    let text = format!("{:?}", err);
-    text.contains("NoSuchBucket")
+fn healer_backoff_seconds(failure_count: u32) -> u64 {
+    let exp = failure_count.min(6);
+    let secs: u64 = 60u64.saturating_mul(1u64 << exp);
+    secs.min(3600)
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplicationUploadError {
+    pub code: Option<String>,
+    pub message: String,
+    pub is_no_such_bucket: bool,
+}
+
+impl std::fmt::Display for ReplicationUploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+fn map_sdk_err<E, R>(err: aws_sdk_s3::error::SdkError<E, R>) -> ReplicationUploadError
+where
+    E: aws_sdk_s3::error::ProvideErrorMetadata + std::fmt::Debug,
+    R: std::fmt::Debug,
+{
+    let dbg = format!("{:?}", err);
+    let is_no_such_bucket = dbg.contains("NoSuchBucket");
+    let code = if let aws_sdk_s3::error::SdkError::ServiceError(svc) = &err {
+        svc.err().code().map(|c| c.to_string())
+    } else {
+        None
+    };
+    ReplicationUploadError {
+        code,
+        message: dbg,
+        is_no_such_bucket,
+    }
 }
 
 fn sdk_error_code<E, R>(err: &aws_sdk_s3::error::SdkError<E, R>) -> Option<String>
@@ -746,12 +878,6 @@ where
         }
     }
     None
-}
-
-fn upload_error_code(
-    err: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>,
-) -> Option<String> {
-    sdk_error_code(err)
 }
 
 #[derive(Default, Clone)]
@@ -795,6 +921,15 @@ impl ReplicationObjectMeta {
     }
 }
 
+const MULTIPART_MIN_PART_BYTES: u64 = 8 * 1024 * 1024;
+const MULTIPART_MAX_PARTS: u64 = 10_000;
+const MULTIPART_CONCURRENCY: usize = 4;
+
+fn compute_part_size(file_size: u64) -> u64 {
+    let target = file_size.div_ceil(MULTIPART_MAX_PARTS);
+    target.max(MULTIPART_MIN_PART_BYTES)
+}
+
 async fn upload_object(
     client: &aws_sdk_s3::Client,
     bucket: &str,
@@ -803,60 +938,336 @@ async fn upload_object(
     file_size: u64,
     streaming_threshold: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
-) -> Result<(), aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>> {
+) -> Result<(), ReplicationUploadError> {
+    if file_size >= streaming_threshold && file_size > MULTIPART_MIN_PART_BYTES {
+        upload_object_multipart(client, bucket, key, path, file_size, obj_meta).await
+    } else {
+        upload_object_single(client, bucket, key, path, file_size, streaming_threshold, obj_meta)
+            .await
+    }
+}
+
+async fn upload_object_single(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+    file_size: u64,
+    streaming_threshold: u64,
+    obj_meta: Option<&ReplicationObjectMeta>,
+) -> Result<(), ReplicationUploadError> {
     let mut req = client.put_object().bucket(bucket).key(key);
     if let Some(meta) = obj_meta {
-        if let Some(ref ct) = meta.content_type {
-            req = req.content_type(ct);
-        }
-        if let Some(ref v) = meta.content_encoding {
-            req = req.content_encoding(v);
-        }
-        if let Some(ref v) = meta.content_disposition {
-            req = req.content_disposition(v);
-        }
-        if let Some(ref v) = meta.content_language {
-            req = req.content_language(v);
-        }
-        if let Some(ref v) = meta.cache_control {
-            req = req.cache_control(v);
-        }
-        if let Some(ref v) = meta.expires {
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v) {
-                req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
-            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(v) {
-                req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
-            }
-        }
-        if let Some(ref v) = meta.storage_class {
-            req = req.storage_class(aws_sdk_s3::types::StorageClass::from(v.as_str()));
-        }
-        if let Some(ref v) = meta.website_redirect_location {
-            req = req.website_redirect_location(v);
-        }
-        if let Some(ref v) = meta.tagging_header {
-            req = req.tagging(v);
-        }
-        for (k, v) in &meta.user_metadata {
-            req = req.metadata(k, v);
-        }
+        req = apply_meta_to_put_object(req, meta);
     }
 
     let body = if file_size >= streaming_threshold {
-        ByteStream::from_path(path).await.map_err(|e| {
-            aws_sdk_s3::error::SdkError::construction_failure(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e,
-            )))
-        })?
-    } else {
-        let bytes = tokio::fs::read(path)
+        ByteStream::from_path(path)
             .await
-            .map_err(|e| aws_sdk_s3::error::SdkError::construction_failure(Box::new(e)))?;
+            .map_err(|e| ReplicationUploadError {
+                code: None,
+                message: format!("failed to open {} for upload: {}", path.display(), e),
+                is_no_such_bucket: false,
+            })?
+    } else {
+        let bytes = tokio::fs::read(path).await.map_err(|e| ReplicationUploadError {
+            code: None,
+            message: format!("failed to read {}: {}", path.display(), e),
+            is_no_such_bucket: false,
+        })?;
         ByteStream::from(bytes)
     };
 
-    req.body(body).send().await.map(|_| ())
+    req.body(body).send().await.map(|_| ()).map_err(map_sdk_err)
+}
+
+async fn upload_object_multipart(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    path: &Path,
+    file_size: u64,
+    obj_meta: Option<&ReplicationObjectMeta>,
+) -> Result<(), ReplicationUploadError> {
+    let part_size = compute_part_size(file_size);
+    let total_parts = file_size.div_ceil(part_size);
+    if total_parts == 0 || total_parts > MULTIPART_MAX_PARTS {
+        return Err(ReplicationUploadError {
+            code: None,
+            message: format!(
+                "computed invalid part plan for {}: size={} parts={} part_size={}",
+                key, file_size, total_parts, part_size
+            ),
+            is_no_such_bucket: false,
+        });
+    }
+
+    let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
+    if let Some(meta) = obj_meta {
+        create_req = apply_meta_to_create_mpu(create_req, meta);
+    }
+    let create_resp = create_req.send().await.map_err(map_sdk_err)?;
+    let upload_id = match create_resp.upload_id() {
+        Some(s) => s.to_string(),
+        None => {
+            return Err(ReplicationUploadError {
+                code: None,
+                message: "CreateMultipartUpload returned no UploadId".to_string(),
+                is_no_such_bucket: false,
+            })
+        }
+    };
+
+    let parts_result = run_part_uploads(
+        client,
+        bucket,
+        key,
+        &upload_id,
+        path,
+        file_size,
+        part_size,
+        total_parts as i32,
+    )
+    .await;
+
+    let parts = match parts_result {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+            return Err(e);
+        }
+    };
+
+    let completed = CompletedMultipartUpload::builder()
+        .set_parts(Some(parts))
+        .build();
+
+    if let Err(e) = client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(&upload_id)
+        .multipart_upload(completed)
+        .send()
+        .await
+    {
+        let mapped = map_sdk_err(e);
+        let _ = client
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .send()
+            .await;
+        return Err(mapped);
+    }
+
+    Ok(())
+}
+
+const MULTIPART_PART_BUFFER_BYTES: usize = 64 * 1024;
+
+async fn run_part_uploads(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    path: &Path,
+    file_size: u64,
+    part_size: u64,
+    total_parts: i32,
+) -> Result<Vec<CompletedPart>, ReplicationUploadError> {
+    let mut tasks: JoinSet<Result<CompletedPart, ReplicationUploadError>> = JoinSet::new();
+    let mut next_part: i32 = 1;
+    let mut parts: Vec<CompletedPart> = Vec::with_capacity(total_parts as usize);
+
+    loop {
+        while tasks.len() < MULTIPART_CONCURRENCY && next_part <= total_parts {
+            let part_number = next_part;
+            let offset = (part_number as u64 - 1) * part_size;
+            let length = std::cmp::min(part_size, file_size - offset);
+            let client = client.clone();
+            let bucket = bucket.to_string();
+            let key = key.to_string();
+            let upload_id = upload_id.to_string();
+            let path = path.to_path_buf();
+            tasks.spawn(async move {
+                upload_one_part(
+                    &client,
+                    &bucket,
+                    &key,
+                    &upload_id,
+                    &path,
+                    offset,
+                    length,
+                    part_number,
+                )
+                .await
+            });
+            next_part += 1;
+        }
+
+        match tasks.join_next().await {
+            Some(Ok(Ok(part))) => parts.push(part),
+            Some(Ok(Err(e))) => {
+                drain_join_set(&mut tasks).await;
+                return Err(e);
+            }
+            Some(Err(join_err)) => {
+                drain_join_set(&mut tasks).await;
+                return Err(ReplicationUploadError {
+                    code: None,
+                    message: format!("part upload task panicked: {}", join_err),
+                    is_no_such_bucket: false,
+                });
+            }
+            None => break,
+        }
+    }
+
+    parts.sort_by_key(|p| p.part_number().unwrap_or(0));
+    Ok(parts)
+}
+
+async fn drain_join_set(tasks: &mut JoinSet<Result<CompletedPart, ReplicationUploadError>>) {
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+
+async fn upload_one_part(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    path: &Path,
+    offset: u64,
+    length: u64,
+    part_number: i32,
+) -> Result<CompletedPart, ReplicationUploadError> {
+    let body = ByteStream::read_from()
+        .path(path)
+        .offset(offset)
+        .length(Length::Exact(length))
+        .buffer_size(MULTIPART_PART_BUFFER_BYTES)
+        .build()
+        .await
+        .map_err(|e| ReplicationUploadError {
+            code: None,
+            message: format!(
+                "failed to open part {} ({} bytes from offset {} of {}): {}",
+                part_number,
+                length,
+                offset,
+                path.display(),
+                e
+            ),
+            is_no_such_bucket: false,
+        })?;
+
+    let resp = client
+        .upload_part()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .content_length(length as i64)
+        .body(body)
+        .send()
+        .await
+        .map_err(map_sdk_err)?;
+
+    Ok(CompletedPart::builder()
+        .part_number(part_number)
+        .set_e_tag(resp.e_tag().map(|s| s.to_string()))
+        .build())
+}
+
+fn apply_meta_to_put_object(
+    mut req: aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder,
+    meta: &ReplicationObjectMeta,
+) -> aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder {
+    if let Some(ref ct) = meta.content_type {
+        req = req.content_type(ct);
+    }
+    if let Some(ref v) = meta.content_encoding {
+        req = req.content_encoding(v);
+    }
+    if let Some(ref v) = meta.content_disposition {
+        req = req.content_disposition(v);
+    }
+    if let Some(ref v) = meta.content_language {
+        req = req.content_language(v);
+    }
+    if let Some(ref v) = meta.cache_control {
+        req = req.cache_control(v);
+    }
+    if let Some(ref v) = meta.expires {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v) {
+            req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
+        } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(v) {
+            req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
+        }
+    }
+    if let Some(ref v) = meta.storage_class {
+        req = req.storage_class(aws_sdk_s3::types::StorageClass::from(v.as_str()));
+    }
+    if let Some(ref v) = meta.website_redirect_location {
+        req = req.website_redirect_location(v);
+    }
+    if let Some(ref v) = meta.tagging_header {
+        req = req.tagging(v);
+    }
+    for (k, v) in &meta.user_metadata {
+        req = req.metadata(k, v);
+    }
+    req
+}
+
+fn apply_meta_to_create_mpu(
+    mut req: aws_sdk_s3::operation::create_multipart_upload::builders::CreateMultipartUploadFluentBuilder,
+    meta: &ReplicationObjectMeta,
+) -> aws_sdk_s3::operation::create_multipart_upload::builders::CreateMultipartUploadFluentBuilder {
+    if let Some(ref ct) = meta.content_type {
+        req = req.content_type(ct);
+    }
+    if let Some(ref v) = meta.content_encoding {
+        req = req.content_encoding(v);
+    }
+    if let Some(ref v) = meta.content_disposition {
+        req = req.content_disposition(v);
+    }
+    if let Some(ref v) = meta.content_language {
+        req = req.content_language(v);
+    }
+    if let Some(ref v) = meta.cache_control {
+        req = req.cache_control(v);
+    }
+    if let Some(ref v) = meta.expires {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v) {
+            req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
+        } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(v) {
+            req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
+        }
+    }
+    if let Some(ref v) = meta.storage_class {
+        req = req.storage_class(aws_sdk_s3::types::StorageClass::from(v.as_str()));
+    }
+    if let Some(ref v) = meta.website_redirect_location {
+        req = req.website_redirect_location(v);
+    }
+    if let Some(ref v) = meta.tagging_header {
+        req = req.tagging(v);
+    }
+    for (k, v) in &meta.user_metadata {
+        req = req.metadata(k, v);
+    }
+    req
 }
 
 fn load_rules(path: &Path) -> HashMap<String, ReplicationRule> {

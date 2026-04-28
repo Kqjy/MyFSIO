@@ -63,6 +63,9 @@ pub struct ServerConfig {
     pub replication_max_retries: u32,
     pub replication_streaming_threshold_bytes: u64,
     pub replication_max_failures_per_bucket: usize,
+    pub replication_healer_enabled: bool,
+    pub replication_healer_interval_secs: u64,
+    pub replication_healer_max_attempts: u32,
     pub site_sync_enabled: bool,
     pub site_sync_interval_secs: u64,
     pub site_sync_batch_size: usize,
@@ -205,12 +208,17 @@ impl ServerConfig {
 
         let replication_connect_timeout_secs =
             parse_u64_env("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5);
-        let replication_read_timeout_secs = parse_u64_env("REPLICATION_READ_TIMEOUT_SECONDS", 30);
+        let replication_read_timeout_secs = parse_u64_env("REPLICATION_READ_TIMEOUT_SECONDS", 120);
         let replication_max_retries = parse_u64_env("REPLICATION_MAX_RETRIES", 2) as u32;
         let replication_streaming_threshold_bytes =
             parse_u64_env("REPLICATION_STREAMING_THRESHOLD_BYTES", 10_485_760);
         let replication_max_failures_per_bucket =
             parse_u64_env("REPLICATION_MAX_FAILURES_PER_BUCKET", 50) as usize;
+        let replication_healer_enabled = parse_bool_env("REPLICATION_HEALER_ENABLED", true);
+        let replication_healer_interval_secs =
+            parse_u64_env("REPLICATION_HEALER_INTERVAL_SECONDS", 60);
+        let replication_healer_max_attempts =
+            parse_u64_env("REPLICATION_HEALER_MAX_ATTEMPTS", 12) as u32;
 
         let site_sync_enabled = parse_bool_env("SITE_SYNC_ENABLED", false);
         let site_sync_interval_secs = parse_u64_env("SITE_SYNC_INTERVAL_SECONDS", 60);
@@ -324,6 +332,9 @@ impl ServerConfig {
             replication_max_retries,
             replication_streaming_threshold_bytes,
             replication_max_failures_per_bucket,
+            replication_healer_enabled,
+            replication_healer_interval_secs,
+            replication_healer_max_attempts,
             site_sync_enabled,
             site_sync_interval_secs,
             site_sync_batch_size,
@@ -408,10 +419,13 @@ impl Default for ServerConfig {
             object_cache_max_size: 100,
             bucket_config_cache_ttl_seconds: 30.0,
             replication_connect_timeout_secs: 5,
-            replication_read_timeout_secs: 30,
+            replication_read_timeout_secs: 120,
             replication_max_retries: 2,
             replication_streaming_threshold_bytes: 10_485_760,
             replication_max_failures_per_bucket: 50,
+            replication_healer_enabled: true,
+            replication_healer_interval_secs: 60,
+            replication_healer_max_attempts: 12,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,

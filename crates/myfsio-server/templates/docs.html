@@ -357,8 +357,8 @@ cargo build --release -p myfsio-server
               </tr>
               <tr>
                 <td><code>REPLICATION_READ_TIMEOUT_SECONDS</code></td>
-                <td><code>30</code></td>
-                <td>Read timeout for replication (seconds).</td>
+                <td><code>120</code></td>
+                <td>Per-part read timeout for replication (seconds). Applies to each multipart part or single PUT attempt, not the whole transfer.</td>
               </tr>
               <tr>
                 <td><code>REPLICATION_MAX_RETRIES</code></td>
@@ -374,6 +374,21 @@ cargo build --release -p myfsio-server
                 <td><code>REPLICATION_MAX_FAILURES_PER_BUCKET</code></td>
                 <td><code>50</code></td>
                 <td>Max failure records to keep per bucket.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_HEALER_ENABLED</code></td>
+                <td><code>true</code></td>
+                <td>Background worker that auto-retries persisted replication failures with exponential backoff. Set <code>false</code> to disable.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_HEALER_INTERVAL_SECONDS</code></td>
+                <td><code>60</code></td>
+                <td>Interval between healer passes; each pass re-runs eligible failures across all rules.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_HEALER_MAX_ATTEMPTS</code></td>
+                <td><code>12</code></td>
+                <td>Per-object retry cap; failures whose <code>failure_count</code> reaches this value are skipped by the healer (manual <strong>Retry</strong> from the UI still works).</td>
               </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Security & Auth Settings</td>
@@ -1058,7 +1073,7 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
               </tr>
               <tr>
                 <td><strong>Timeouts</strong></td>
-                <td>Connect: <code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code> (default 5s), Read: <code>REPLICATION_READ_TIMEOUT_SECONDS</code> (default 30s). Objects larger than <code>REPLICATION_STREAMING_THRESHOLD_BYTES</code> (default 10&nbsp;MB) use streaming transfers.</td>
+                <td>Connect: <code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code> (default 5s), per-part read: <code>REPLICATION_READ_TIMEOUT_SECONDS</code> (default 120s). Objects larger than <code>REPLICATION_STREAMING_THRESHOLD_BYTES</code> (default 10&nbsp;MB) are uploaded as multipart with adaptive 8&nbsp;MiB+ parts and 4 concurrent part uploads, so the per-part timeout applies independently to each part.</td>
               </tr>
             </tbody>
           </table>

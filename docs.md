@@ -191,10 +191,13 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `REPLICATION_CONNECT_TIMEOUT_SECONDS` | `5` | Replication connect timeout |
-| `REPLICATION_READ_TIMEOUT_SECONDS` | `30` | Replication read timeout |
+| `REPLICATION_READ_TIMEOUT_SECONDS` | `120` | Replication per-part / per-attempt read timeout |
 | `REPLICATION_MAX_RETRIES` | `2` | Replication retry count |
 | `REPLICATION_STREAMING_THRESHOLD_BYTES` | `10485760` | Switch to streaming for large copies |
 | `REPLICATION_MAX_FAILURES_PER_BUCKET` | `50` | Failure budget before a bucket is skipped |
+| `REPLICATION_HEALER_ENABLED` | `true` | Background worker that auto-retries persisted replication failures (set `false` to disable) |
+| `REPLICATION_HEALER_INTERVAL_SECONDS` | `60` | Healer pass interval; each pass re-runs eligible failures |
+| `REPLICATION_HEALER_MAX_ATTEMPTS` | `12` | Per-object retry cap; failures with `failure_count` at or above this are skipped (manual retry still works) |
 | `SITE_SYNC_INTERVAL_SECONDS` | `60` | Poll interval for the site sync worker |
 | `SITE_SYNC_BATCH_SIZE` | `100` | Max objects processed per site sync batch |
 | `SITE_SYNC_CONNECT_TIMEOUT_SECONDS` | `10` | Site sync connect timeout |

@@ -141,6 +141,12 @@ impl AppState {
             config.replication_streaming_threshold_bytes,
             config.replication_max_failures_per_bucket,
         ));
+        if config.replication_healer_enabled {
+            replication.clone().start_healer(
+                Duration::from_secs(config.replication_healer_interval_secs.max(1)),
+                config.replication_healer_max_attempts,
+            );
+        }
 
         let site_sync = if config.site_sync_enabled {
             Some(Arc::new(SiteSyncWorker::new(

@@ -1205,6 +1205,12 @@ fn apply_stored_response_headers(headers: &mut HeaderMap, metadata: &HashMap<Str
     {
         headers.insert("x-amz-storage-class", value);
     }
+    if let Some(value) = metadata
+        .get(crate::services::replication::REPLICATION_STATUS_KEY)
+        .and_then(|value| value.parse().ok())
+    {
+        headers.insert("x-amz-replication-status", value);
+    }
 }
 
 fn apply_stored_encryption_headers(
@@ -4614,6 +4620,9 @@ mod tests {
             replication_max_retries: 1,
             replication_streaming_threshold_bytes: 10_485_760,
             replication_max_failures_per_bucket: 50,
+            replication_healer_enabled: false,
+            replication_healer_interval_secs: 60,
+            replication_healer_max_attempts: 12,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,
