@@ -1326,8 +1326,17 @@ pub async fn list_object_versions(
     xml_response(StatusCode::OK, xml)
 }
 
-pub async fn get_object_tagging(state: &AppState, bucket: &str, key: &str) -> Response {
-    match state.storage.get_object_tags(bucket, key).await {
+pub async fn get_object_tagging(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Response {
+    let lookup = match version_id {
+        Some(v) => state.storage.get_object_version_tags(bucket, key, v).await,
+        None => state.storage.get_object_tags(bucket, key).await,
+    };
+    match lookup {
         Ok(tags) => {
             let mut xml = String::from(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\

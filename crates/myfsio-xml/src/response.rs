@@ -9,12 +9,27 @@ pub fn format_s3_datetime(dt: &DateTime<Utc>) -> String {
 }
 
 pub fn rate_limit_exceeded_xml(resource: &str, request_id: &str) -> String {
+    let host_id = derive_host_id(request_id);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<Error><Code>SlowDown</Code><Message>Please reduce your request rate</Message><Resource>{}</Resource><RequestId>{}</RequestId></Error>",
+<Error><Code>SlowDown</Code><Message>Please reduce your request rate</Message><Resource>{}</Resource><RequestId>{}</RequestId><HostId>{}</HostId></Error>",
         xml_escape(resource),
         xml_escape(request_id),
+        xml_escape(&host_id),
     )
+}
+
+fn derive_host_id(request_id: &str) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    if request_id.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"myfsio-host-id\0");
+    hasher.update(request_id.as_bytes());
+    B64.encode(hasher.finalize())
 }
 
 fn xml_escape(s: &str) -> String {
@@ -25,7 +40,12 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]) -> String {
+pub fn list_buckets_xml(
+    owner_id: &str,
+    owner_name: &str,
+    buckets: &[BucketMeta],
+    region: &str,
+) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
     writer
@@ -58,6 +78,7 @@ pub fn list_buckets_xml(owner_id: &str, owner_name: &str, buckets: &[BucketMeta]
             "CreationDate",
             &format_s3_datetime(&bucket.creation_date),
         );
+        write_text_element(&mut writer, "BucketRegion", region);
         writer
             .write_event(Event::End(BytesEnd::new("Bucket")))
             .unwrap();
@@ -112,6 +133,7 @@ pub fn list_objects_v2_xml(
         next_continuation_token,
         key_count,
         None,
+        false,
     )
 }
 
@@ -127,6 +149,7 @@ pub fn list_objects_v2_xml_with_encoding(
     next_continuation_token: Option<&str>,
     key_count: usize,
     encoding_type: Option<&str>,
+    fetch_owner: bool,
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
@@ -182,6 +205,16 @@ pub fn list_objects_v2_xml_with_encoding(
             "StorageClass",
             obj.storage_class.as_deref().unwrap_or("STANDARD"),
         );
+        if fetch_owner {
+            writer
+                .write_event(Event::Start(BytesStart::new("Owner")))
+                .unwrap();
+            write_text_element(&mut writer, "ID", "myfsio");
+            write_text_element(&mut writer, "DisplayName", "myfsio");
+            writer
+                .write_event(Event::End(BytesEnd::new("Owner")))
+                .unwrap();
+        }
         writer
             .write_event(Event::End(BytesEnd::new("Contents")))
             .unwrap();
@@ -264,10 +297,24 @@ pub fn list_objects_v1_xml_with_encoding(
             &maybe_url_encode(delimiter, encoding_type),
         );
     }
-    if !delimiter.is_empty() && is_truncated {
-        if let Some(nm) = next_marker {
+    if is_truncated {
+        let fallback = next_marker
+            .filter(|nm| !nm.is_empty())
+            .map(|nm| nm.to_string())
+            .or_else(|| {
+                if !delimiter.is_empty() {
+                    common_prefixes.last().cloned()
+                } else {
+                    objects.last().map(|o| o.key.clone())
+                }
+            });
+        if let Some(nm) = fallback {
             if !nm.is_empty() {
-                write_text_element(&mut writer, "NextMarker", &maybe_url_encode(nm, encoding_type));
+                write_text_element(
+                    &mut writer,
+                    "NextMarker",
+                    &maybe_url_encode(&nm, encoding_type),
+                );
             }
         }
     }
@@ -484,10 +531,34 @@ pub fn delete_result_xml(
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
+pub struct ListMultipartUploadsParams<'a> {
+    pub bucket: &'a str,
+    pub key_marker: &'a str,
+    pub upload_id_marker: &'a str,
+    pub next_key_marker: &'a str,
+    pub next_upload_id_marker: &'a str,
+    pub max_uploads: usize,
+    pub is_truncated: bool,
+    pub uploads: &'a [myfsio_common::types::MultipartUploadInfo],
+}
+
 pub fn list_multipart_uploads_xml(
     bucket: &str,
     uploads: &[myfsio_common::types::MultipartUploadInfo],
 ) -> String {
+    list_multipart_uploads_xml_paged(&ListMultipartUploadsParams {
+        bucket,
+        key_marker: "",
+        upload_id_marker: "",
+        next_key_marker: "",
+        next_upload_id_marker: "",
+        max_uploads: 1000,
+        is_truncated: false,
+        uploads,
+    })
+}
+
+pub fn list_multipart_uploads_xml_paged(p: &ListMultipartUploadsParams<'_>) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -496,9 +567,17 @@ pub fn list_multipart_uploads_xml(
     let start = BytesStart::new("ListMultipartUploadsResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
     writer.write_event(Event::Start(start)).unwrap();
-    write_text_element(&mut writer, "Bucket", bucket);
+    write_text_element(&mut writer, "Bucket", p.bucket);
+    write_text_element(&mut writer, "KeyMarker", p.key_marker);
+    write_text_element(&mut writer, "UploadIdMarker", p.upload_id_marker);
+    if p.is_truncated {
+        write_text_element(&mut writer, "NextKeyMarker", p.next_key_marker);
+        write_text_element(&mut writer, "NextUploadIdMarker", p.next_upload_id_marker);
+    }
+    write_text_element(&mut writer, "MaxUploads", &p.max_uploads.to_string());
+    write_text_element(&mut writer, "IsTruncated", &p.is_truncated.to_string());
 
-    for upload in uploads {
+    for upload in p.uploads {
         writer
             .write_event(Event::Start(BytesStart::new("Upload")))
             .unwrap();
@@ -521,12 +600,36 @@ pub fn list_multipart_uploads_xml(
     String::from_utf8(writer.into_inner().into_inner()).unwrap()
 }
 
+pub struct ListPartsParams<'a> {
+    pub bucket: &'a str,
+    pub key: &'a str,
+    pub upload_id: &'a str,
+    pub part_number_marker: u32,
+    pub next_part_number_marker: u32,
+    pub max_parts: usize,
+    pub is_truncated: bool,
+    pub parts: &'a [myfsio_common::types::PartMeta],
+}
+
 pub fn list_parts_xml(
     bucket: &str,
     key: &str,
     upload_id: &str,
     parts: &[myfsio_common::types::PartMeta],
 ) -> String {
+    list_parts_xml_paged(&ListPartsParams {
+        bucket,
+        key,
+        upload_id,
+        part_number_marker: 0,
+        next_part_number_marker: parts.last().map(|p| p.part_number).unwrap_or(0),
+        max_parts: 1000,
+        is_truncated: false,
+        parts,
+    })
+}
+
+pub fn list_parts_xml_paged(p: &ListPartsParams<'_>) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer
         .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
@@ -535,11 +638,23 @@ pub fn list_parts_xml(
     let start = BytesStart::new("ListPartsResult")
         .with_attributes([("xmlns", "http://s3.amazonaws.com/doc/2006-03-01/")]);
     writer.write_event(Event::Start(start)).unwrap();
-    write_text_element(&mut writer, "Bucket", bucket);
-    write_text_element(&mut writer, "Key", key);
-    write_text_element(&mut writer, "UploadId", upload_id);
+    write_text_element(&mut writer, "Bucket", p.bucket);
+    write_text_element(&mut writer, "Key", p.key);
+    write_text_element(&mut writer, "UploadId", p.upload_id);
+    write_text_element(
+        &mut writer,
+        "PartNumberMarker",
+        &p.part_number_marker.to_string(),
+    );
+    write_text_element(
+        &mut writer,
+        "NextPartNumberMarker",
+        &p.next_part_number_marker.to_string(),
+    );
+    write_text_element(&mut writer, "MaxParts", &p.max_parts.to_string());
+    write_text_element(&mut writer, "IsTruncated", &p.is_truncated.to_string());
 
-    for part in parts {
+    for part in p.parts {
         writer
             .write_event(Event::Start(BytesStart::new("Part")))
             .unwrap();
@@ -572,9 +687,10 @@ mod tests {
             name: "test-bucket".to_string(),
             creation_date: Utc::now(),
         }];
-        let xml = list_buckets_xml("owner-id", "owner-name", &buckets);
+        let xml = list_buckets_xml("owner-id", "owner-name", &buckets, "us-east-1");
         assert!(xml.contains("<Name>test-bucket</Name>"));
         assert!(xml.contains("<ID>owner-id</ID>"));
+        assert!(xml.contains("<BucketRegion>us-east-1</BucketRegion>"));
         assert!(xml.contains("ListAllMyBucketsResult"));
     }
 

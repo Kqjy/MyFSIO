@@ -512,9 +512,39 @@ impl ReplicationManager {
             Ok(m) => m.len(),
             Err(_) => 0,
         };
-        let content_type = mime_guess::from_path(&src_path)
-            .first_raw()
-            .map(|s| s.to_string());
+        let stored_meta = self
+            .storage
+            .get_object_metadata(bucket, object_key)
+            .await
+            .unwrap_or_default();
+        let mut obj_meta = ReplicationObjectMeta::from_internal_metadata(&stored_meta);
+        if obj_meta.content_type.is_none() {
+            obj_meta.content_type = mime_guess::from_path(&src_path)
+                .first_raw()
+                .map(|s| s.to_string());
+        }
+        if let Ok(tags) = self.storage.get_object_tags(bucket, object_key).await {
+            if !tags.is_empty() {
+                obj_meta.tagging_header = Some(
+                    tags.iter()
+                        .map(|t| {
+                            format!(
+                                "{}={}",
+                                percent_encoding::utf8_percent_encode(
+                                    &t.key,
+                                    percent_encoding::NON_ALPHANUMERIC,
+                                ),
+                                percent_encoding::utf8_percent_encode(
+                                    &t.value,
+                                    percent_encoding::NON_ALPHANUMERIC,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("&"),
+                );
+            }
+        }
 
         let upload_result = upload_object(
             &client,
@@ -523,7 +553,7 @@ impl ReplicationManager {
             &src_path,
             file_size,
             self.streaming_threshold_bytes,
-            content_type.as_deref(),
+            Some(&obj_meta),
         )
         .await;
 
@@ -547,7 +577,7 @@ impl ReplicationManager {
                             &src_path,
                             file_size,
                             self.streaming_threshold_bytes,
-                            content_type.as_deref(),
+                            Some(&obj_meta),
                         )
                         .await
                     }
@@ -594,7 +624,7 @@ impl ReplicationManager {
     }
 
     pub async fn check_target_bucket(&self, conn: &RemoteConnection, target_bucket: &str) -> bool {
-        let client = build_health_client(conn, &self.client_options);
+        let client = build_client(conn, &self.client_options);
         check_target_bucket_reachable(&client, target_bucket).await
     }
 
@@ -724,6 +754,47 @@ fn upload_error_code(
     sdk_error_code(err)
 }
 
+#[derive(Default, Clone)]
+pub struct ReplicationObjectMeta {
+    pub content_type: Option<String>,
+    pub content_encoding: Option<String>,
+    pub content_disposition: Option<String>,
+    pub content_language: Option<String>,
+    pub cache_control: Option<String>,
+    pub expires: Option<String>,
+    pub storage_class: Option<String>,
+    pub website_redirect_location: Option<String>,
+    pub user_metadata: HashMap<String, String>,
+    pub tagging_header: Option<String>,
+}
+
+impl ReplicationObjectMeta {
+    pub fn from_internal_metadata(meta: &HashMap<String, String>) -> Self {
+        let mut user_metadata = HashMap::new();
+        for (k, v) in meta {
+            if k.starts_with("__") {
+                continue;
+            }
+            if k.starts_with("x-amz-") {
+                continue;
+            }
+            user_metadata.insert(k.clone(), v.clone());
+        }
+        Self {
+            content_type: meta.get("__content_type__").cloned(),
+            content_encoding: meta.get("__content_encoding__").cloned(),
+            content_disposition: meta.get("__content_disposition__").cloned(),
+            content_language: meta.get("__content_language__").cloned(),
+            cache_control: meta.get("__cache_control__").cloned(),
+            expires: meta.get("__expires__").cloned(),
+            storage_class: meta.get("__storage_class__").cloned(),
+            website_redirect_location: meta.get("__website_redirect_location__").cloned(),
+            user_metadata,
+            tagging_header: None,
+        }
+    }
+}
+
 async fn upload_object(
     client: &aws_sdk_s3::Client,
     bucket: &str,
@@ -731,11 +802,44 @@ async fn upload_object(
     path: &Path,
     file_size: u64,
     streaming_threshold: u64,
-    content_type: Option<&str>,
+    obj_meta: Option<&ReplicationObjectMeta>,
 ) -> Result<(), aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>> {
     let mut req = client.put_object().bucket(bucket).key(key);
-    if let Some(ct) = content_type {
-        req = req.content_type(ct);
+    if let Some(meta) = obj_meta {
+        if let Some(ref ct) = meta.content_type {
+            req = req.content_type(ct);
+        }
+        if let Some(ref v) = meta.content_encoding {
+            req = req.content_encoding(v);
+        }
+        if let Some(ref v) = meta.content_disposition {
+            req = req.content_disposition(v);
+        }
+        if let Some(ref v) = meta.content_language {
+            req = req.content_language(v);
+        }
+        if let Some(ref v) = meta.cache_control {
+            req = req.cache_control(v);
+        }
+        if let Some(ref v) = meta.expires {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v) {
+                req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
+            } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(v) {
+                req = req.expires(aws_smithy_types::DateTime::from_secs(dt.timestamp()));
+            }
+        }
+        if let Some(ref v) = meta.storage_class {
+            req = req.storage_class(aws_sdk_s3::types::StorageClass::from(v.as_str()));
+        }
+        if let Some(ref v) = meta.website_redirect_location {
+            req = req.website_redirect_location(v);
+        }
+        if let Some(ref v) = meta.tagging_header {
+            req = req.tagging(v);
+        }
+        for (k, v) in &meta.user_metadata {
+            req = req.metadata(k, v);
+        }
     }
 
     let body = if file_size >= streaming_threshold {

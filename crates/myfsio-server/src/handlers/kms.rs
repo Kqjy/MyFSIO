@@ -14,17 +14,32 @@ use crate::state::AppState;
 fn json_ok(value: Value) -> Response {
     (
         StatusCode::OK,
-        [("content-type", "application/json")],
+        [("content-type", "application/x-amz-json-1.1")],
         value.to_string(),
     )
         .into_response()
 }
 
 fn json_err(status: StatusCode, msg: &str) -> Response {
+    let type_name = match status {
+        StatusCode::BAD_REQUEST => "ValidationException",
+        StatusCode::NOT_FOUND => "NotFoundException",
+        StatusCode::SERVICE_UNAVAILABLE => "KMSInternalException",
+        StatusCode::FORBIDDEN => "AccessDeniedException",
+        _ => "KMSInternalException",
+    };
+    json_err_typed(status, type_name, msg)
+}
+
+fn json_err_typed(status: StatusCode, type_name: &str, msg: &str) -> Response {
     (
         status,
-        [("content-type", "application/json")],
-        json!({"error": msg}).to_string(),
+        [("content-type", "application/x-amz-json-1.1")],
+        json!({
+            "__type": format!("com.amazonaws.kms#{}", type_name),
+            "message": msg,
+        })
+        .to_string(),
     )
         .into_response()
 }

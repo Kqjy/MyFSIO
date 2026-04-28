@@ -65,6 +65,24 @@ pub fn parse_notification_configurations(
     xml: &str,
 ) -> Result<Vec<NotificationConfiguration>, String> {
     let doc = roxmltree::Document::parse(xml).map_err(|err| err.to_string())?;
+
+    for unsupported in [
+        "TopicConfiguration",
+        "QueueConfiguration",
+        "CloudFunctionConfiguration",
+        "LambdaFunctionConfiguration",
+    ] {
+        if doc
+            .descendants()
+            .any(|node| node.is_element() && node.tag_name().name() == unsupported)
+        {
+            return Err(format!(
+                "{} is not supported on this server; only WebhookConfiguration is accepted",
+                unsupported
+            ));
+        }
+    }
+
     let mut configs = Vec::new();
 
     for webhook in doc

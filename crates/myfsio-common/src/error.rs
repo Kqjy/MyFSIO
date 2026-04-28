@@ -206,6 +206,7 @@ impl S3Error {
     }
 
     pub fn to_xml(&self) -> String {
+        let host_id = derive_host_id(&self.request_id);
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
             <Error>\
@@ -213,13 +214,28 @@ impl S3Error {
             <Message>{}</Message>\
             <Resource>{}</Resource>\
             <RequestId>{}</RequestId>\
+            <HostId>{}</HostId>\
             </Error>",
             self.code.as_str(),
             xml_escape(&self.message),
             xml_escape(&self.resource),
             xml_escape(&self.request_id),
+            xml_escape(&host_id),
         )
     }
+}
+
+fn derive_host_id(request_id: &str) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    if request_id.is_empty() {
+        return String::new();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"myfsio-host-id\0");
+    hasher.update(request_id.as_bytes());
+    B64.encode(hasher.finalize())
 }
 
 impl fmt::Display for S3Error {

@@ -67,14 +67,20 @@ pub fn validate_object_key(
             );
         }
 
-        if part.chars().any(|c| (c as u32) < 32) {
-            return Some("Object key contains control characters".to_string());
+        if part.contains('\0') {
+            return Some("Object key must not contain NUL bytes".to_string());
         }
 
         if is_windows {
             if part.chars().any(|c| WINDOWS_ILLEGAL_CHARS.contains(&c)) {
                 return Some(
                     "Object key contains characters not supported on Windows filesystems"
+                        .to_string(),
+                );
+            }
+            if part.chars().any(|c| (c as u32) < 32) {
+                return Some(
+                    "Object key contains control characters not supported on Windows filesystems"
                         .to_string(),
                 );
             }
@@ -144,6 +150,12 @@ pub fn validate_bucket_name(bucket_name: &str) -> Option<String> {
         return Some("Bucket name must not contain consecutive periods".to_string());
     }
 
+    if bucket_name.contains(".-") || bucket_name.contains("-.") {
+        return Some(
+            "Bucket name must not contain a period adjacent to a hyphen".to_string(),
+        );
+    }
+
     if IP_REGEX.is_match(bucket_name) {
         return Some("Bucket name must not be formatted as an IP address".to_string());
     }
@@ -177,6 +189,14 @@ mod tests {
         assert!(validate_bucket_name("bucket-").is_some());
         assert!(validate_bucket_name("my..bucket").is_some());
         assert!(validate_bucket_name("192.168.1.1").is_some());
+    }
+
+    #[test]
+    fn test_bucket_name_period_hyphen_adjacency_rejected() {
+        assert!(validate_bucket_name("my-.bucket").is_some());
+        assert!(validate_bucket_name("my.-bucket").is_some());
+        assert!(validate_bucket_name("a.-b").is_some());
+        assert!(validate_bucket_name("a-.b").is_some());
     }
 
     #[test]
@@ -216,5 +236,19 @@ mod tests {
         assert!(validate_object_key("CON", 1024, true, None).is_some());
         assert!(validate_object_key("file<name", 1024, true, None).is_some());
         assert!(validate_object_key("file.txt ", 1024, true, None).is_some());
+    }
+
+    #[test]
+    fn test_windows_rejects_control_chars() {
+        assert!(validate_object_key("a\u{0001}b", 1024, true, None).is_some());
+        assert!(validate_object_key("a\nb", 1024, true, None).is_some());
+        assert!(validate_object_key("a\u{001f}b", 1024, true, None).is_some());
+    }
+
+    #[test]
+    fn test_non_windows_allows_control_chars_except_nul() {
+        assert!(validate_object_key("a\u{0001}b", 1024, false, None).is_none());
+        assert!(validate_object_key("a\nb", 1024, false, None).is_none());
+        assert!(validate_object_key("a\0b", 1024, false, None).is_some());
     }
 }

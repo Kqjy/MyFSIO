@@ -23,6 +23,8 @@ pub struct SessionHandle {
     pub id: String,
     inner: Arc<Mutex<SessionData>>,
     dirty: Arc<Mutex<bool>>,
+    rotated_id: Arc<Mutex<Option<String>>>,
+    destroy_old: Arc<Mutex<Option<String>>>,
 }
 
 impl SessionHandle {
@@ -31,6 +33,8 @@ impl SessionHandle {
             id,
             inner: Arc::new(Mutex::new(data)),
             dirty: Arc::new(Mutex::new(false)),
+            rotated_id: Arc::new(Mutex::new(None)),
+            destroy_old: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -52,6 +56,21 @@ impl SessionHandle {
 
     pub fn is_dirty(&self) -> bool {
         *self.dirty.lock()
+    }
+
+    pub fn rotate_id(&self) {
+        let new_id = crate::session::generate_token(32);
+        *self.destroy_old.lock() = Some(self.id.clone());
+        *self.rotated_id.lock() = Some(new_id);
+        *self.dirty.lock() = true;
+    }
+
+    pub(crate) fn take_rotated_id(&self) -> Option<String> {
+        self.rotated_id.lock().take()
+    }
+
+    pub(crate) fn take_destroy_old(&self) -> Option<String> {
+        self.destroy_old.lock().take()
     }
 }
 
@@ -76,12 +95,21 @@ pub async fn session_layer(
 
     let mut resp = next.run(req).await;
 
+    let rotated = handle.take_rotated_id();
+    let destroy_old = handle.take_destroy_old();
+
+    let effective_id = rotated.clone().unwrap_or_else(|| handle.id.clone());
+
     if handle.is_dirty() {
-        state.store.save(&handle.id, handle.snapshot());
+        state.store.save(&effective_id, handle.snapshot());
     }
 
-    if is_new {
-        let cookie = build_session_cookie(&session_id, state.secure);
+    if let Some(old) = destroy_old {
+        state.store.destroy(&old);
+    }
+
+    if is_new || rotated.is_some() {
+        let cookie = build_session_cookie(&effective_id, state.secure);
         if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
             resp.headers_mut().append(header::SET_COOKIE, value);
         }
@@ -234,7 +262,7 @@ fn extract_session_cookie(req: &Request) -> Option<String> {
 fn build_session_cookie(id: &str, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new(SESSION_COOKIE_NAME, id.to_string());
     cookie.set_http_only(true);
-    cookie.set_same_site(SameSite::Lax);
+    cookie.set_same_site(SameSite::Strict);
     cookie.set_secure(secure);
     cookie.set_path("/");
     cookie
