@@ -315,7 +315,7 @@ pub fn create_ui_router(state: state::AppState) -> Router {
 
     let public = Router::new()
         .route("/login", get(ui::login_page).post(ui::login_submit))
-        .route("/logout", post(ui::logout).get(ui::logout));
+        .route("/logout", post(ui::logout));
 
     let session_state = middleware::SessionLayerState {
         store: state.sessions.clone(),

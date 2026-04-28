@@ -259,7 +259,7 @@ fn extract_session_cookie(req: &Request) -> Option<String> {
 fn build_session_cookie(id: &str, secure: bool, ttl: Duration) -> Cookie<'static> {
     let mut cookie = Cookie::new(SESSION_COOKIE_NAME, id.to_string());
     cookie.set_http_only(true);
-    cookie.set_same_site(SameSite::Strict);
+    cookie.set_same_site(SameSite::Lax);
     cookie.set_secure(secure);
     cookie.set_path("/");
     let secs = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
