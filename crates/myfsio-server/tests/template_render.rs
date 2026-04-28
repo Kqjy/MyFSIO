@@ -10,7 +10,7 @@ fn engine() -> TemplateEngine {
     path.push("templates");
     path.push("*.html");
     let glob = path.to_string_lossy().replace('\\', "/");
-    let engine = TemplateEngine::new(&glob).expect("template parse");
+    let engine = TemplateEngine::new(&glob, "UTC").expect("template parse");
     myfsio_server::handlers::ui_pages::register_ui_endpoints(&engine);
     engine
 }

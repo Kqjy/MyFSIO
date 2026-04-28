@@ -475,13 +475,17 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         return;
     }
 
-    tracing::info!("============================================================");
-    tracing::info!("MYFSIO - ADMIN CREDENTIALS INITIALIZED");
-    tracing::info!("============================================================");
-    tracing::info!("Access Key: {}", access_key);
-    tracing::info!("Secret Key: {}", secret_key);
-    tracing::info!("Saved to: {}", iam_path.display());
-    tracing::info!("============================================================");
+    println!("============================================================");
+    println!("MYFSIO - ADMIN CREDENTIALS INITIALIZED");
+    println!("============================================================");
+    println!("Access Key: {}", access_key);
+    println!("Secret Key: {}", secret_key);
+    println!("Saved to: {}", iam_path.display());
+    println!("============================================================");
+    tracing::info!(
+        "Admin credentials initialized; access key written to {}",
+        iam_path.display()
+    );
 }
 
 fn reset_admin_credentials(config: &ServerConfig) {

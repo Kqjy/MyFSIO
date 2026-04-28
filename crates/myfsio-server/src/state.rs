@@ -192,7 +192,7 @@ impl AppState {
             None
         };
 
-        let templates = init_templates(&config.templates_dir);
+        let templates = init_templates(&config.templates_dir, &config.display_timezone);
         let access_logging = Arc::new(AccessLoggingService::new(&config.storage_root));
         let session_ttl = Duration::from_secs(config.session_lifetime_days.saturating_mul(86_400));
         Self {
@@ -259,15 +259,18 @@ impl AppState {
     }
 }
 
-fn init_templates(templates_dir: &std::path::Path) -> Option<Arc<TemplateEngine>> {
+fn init_templates(
+    templates_dir: &std::path::Path,
+    display_timezone: &str,
+) -> Option<Arc<TemplateEngine>> {
     let use_disk = std::env::var("TEMPLATES_DIR").is_ok() && templates_dir.is_dir();
     let result = if use_disk {
         let glob = format!("{}/*.html", templates_dir.display()).replace('\\', "/");
         tracing::info!("Loading templates from disk: {}", templates_dir.display());
-        TemplateEngine::new(&glob)
+        TemplateEngine::new(&glob, display_timezone)
     } else {
         tracing::info!("Loading templates from embedded assets");
-        TemplateEngine::from_embedded()
+        TemplateEngine::from_embedded(display_timezone)
     };
     match result {
         Ok(engine) => {

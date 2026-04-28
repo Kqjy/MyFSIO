@@ -16,30 +16,68 @@ use crate::middleware::sha_body::{is_hex_sha256, Sha256VerifyBody};
 use crate::services::acl::acl_from_bucket_config;
 use crate::state::AppState;
 
-fn wrap_body_for_sha256_verification(req: &mut Request) {
+fn wrap_body_for_sha256_verification(req: &mut Request) -> Option<Response> {
     let declared = match req
         .headers()
         .get("x-amz-content-sha256")
         .and_then(|v| v.to_str().ok())
     {
         Some(v) => v.to_string(),
-        None => return,
+        None => return None,
     };
-    if !is_hex_sha256(&declared) {
-        return;
+
+    let upper = declared.to_ascii_uppercase();
+    let is_streaming_signed = upper == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+        || upper == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
+    let is_streaming_unsigned = upper == "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+    let is_streaming = is_streaming_signed || is_streaming_unsigned;
+
+    if is_streaming {
+        if std::env::var("STRICT_STREAMING_SIGV4")
+            .ok()
+            .as_deref()
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                payload_type = %upper,
+                "Rejecting streaming SigV4 request because STRICT_STREAMING_SIGV4 is enabled"
+            );
+            let err = S3Error::new(
+                S3ErrorCode::SignatureDoesNotMatch,
+                "Streaming SigV4 chunk-signature validation is not yet implemented; \
+                 resend with x-amz-content-sha256: UNSIGNED-PAYLOAD or disable STRICT_STREAMING_SIGV4",
+            );
+            let status = StatusCode::from_u16(err.http_status())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code_str = err.code.as_str();
+            return Some(
+                (
+                    status,
+                    [
+                        ("content-type", "application/xml"),
+                        ("x-amz-error-code", code_str),
+                    ],
+                    err.to_xml(),
+                )
+                    .into_response(),
+            );
+        }
+        tracing::warn!(
+            payload_type = %upper,
+            "Accepting streaming SigV4 request without per-chunk signature validation. \
+             Set STRICT_STREAMING_SIGV4=true to reject these requests until full validation lands."
+        );
+        return None;
     }
-    let is_chunked = req
-        .headers()
-        .get("content-encoding")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_ascii_lowercase().contains("aws-chunked"))
-        .unwrap_or(false);
-    if is_chunked {
-        return;
+
+    if !is_hex_sha256(&declared) {
+        return None;
     }
     let body = std::mem::replace(req.body_mut(), axum::body::Body::empty());
     let wrapped = Sha256VerifyBody::new(body, declared);
     *req.body_mut() = axum::body::Body::new(wrapped);
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +200,39 @@ fn parse_website_config(value: &Value) -> Option<(String, Option<String>)> {
     }
 }
 
+fn apply_website_object_headers(
+    headers: &mut HeaderMap,
+    meta: &myfsio_common::types::ObjectMeta,
+) {
+    if let Some(ref etag) = meta.etag {
+        if let Ok(value) = format!("\"{}\"", etag).parse() {
+            headers.insert(header::ETAG, value);
+        }
+    }
+    if let Ok(value) = meta
+        .last_modified
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+        .parse()
+    {
+        headers.insert(header::LAST_MODIFIED, value);
+    }
+    if let Some(enc_info) =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata)
+    {
+        if let Ok(value) = enc_info.algorithm.as_str().parse() {
+            headers.insert("x-amz-server-side-encryption", value);
+        }
+    }
+    for (k, v) in &meta.metadata {
+        if let Ok(header_val) = v.parse() {
+            if let Ok(name) = format!("x-amz-meta-{}", k).parse::<axum::http::HeaderName>() {
+                headers.insert(name, header_val);
+            }
+        }
+    }
+}
+
 async fn serve_website_document(
     state: &AppState,
     bucket: &str,
@@ -182,6 +253,7 @@ async fn serve_website_document(
             meta.size.to_string().parse().unwrap(),
         );
         headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+        apply_website_object_headers(&mut headers, &meta);
         return Some((status, headers).into_response());
     }
 
@@ -193,6 +265,7 @@ async fn serve_website_document(
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    apply_website_object_headers(&mut headers, &meta);
 
     if status == StatusCode::OK {
         if let Some(range_header) = range_header {
@@ -501,9 +574,18 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
                 {
                     error_response(err, &auth_path)
                 } else {
+                    if let Some(registry) = state.site_registry.as_ref() {
+                        if registry.is_peer_inbound_access_key(&principal.access_key) {
+                            req.extensions_mut()
+                                .insert(crate::middleware::ReplicationPeerRequest);
+                        }
+                    }
                     req.extensions_mut().insert(principal);
-                    wrap_body_for_sha256_verification(&mut req);
-                    next.run(req).await
+                    if let Some(rejection) = wrap_body_for_sha256_verification(&mut req) {
+                        rejection
+                    } else {
+                        next.run(req).await
+                    }
                 }
             }
             AuthResult::Denied(err) => error_response(err, &auth_path),

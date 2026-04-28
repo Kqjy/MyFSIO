@@ -48,6 +48,7 @@ struct BucketLifecycleResult {
 struct ParsedLifecycleRule {
     status: String,
     prefix: String,
+    tags: Vec<(String, String)>,
     expiration_days: Option<u64>,
     expiration_date: Option<DateTime<Utc>>,
     noncurrent_days: Option<u64>,
@@ -203,7 +204,9 @@ impl LifecycleService {
         match self.storage.list_objects(bucket, &params).await {
             Ok(objects) => {
                 for object in &objects.objects {
-                    if object.last_modified < cutoff {
+                    if object.last_modified < cutoff
+                        && self.object_matches_tag_filter(bucket, &object.key, rule).await
+                    {
                         if let Err(err) = self.storage.delete_object(bucket, &object.key).await {
                             result
                                 .errors
@@ -216,6 +219,24 @@ impl LifecycleService {
                 None
             }
             Err(err) => Some(format!("Failed to list objects for {}: {}", bucket, err)),
+        }
+    }
+
+    async fn object_matches_tag_filter(
+        &self,
+        bucket: &str,
+        key: &str,
+        rule: &ParsedLifecycleRule,
+    ) -> bool {
+        if rule.tags.is_empty() {
+            return true;
+        }
+        match self.storage.get_object_tags(bucket, key).await {
+            Ok(tags) => rule
+                .tags
+                .iter()
+                .all(|(k, v)| tags.iter().any(|t| t.key == *k && t.value == *v)),
+            Err(_) => false,
         }
     }
 
@@ -274,6 +295,21 @@ impl LifecycleService {
                     .map(|value| value.with_timezone(&Utc));
                 if archived_at.is_none() || archived_at.unwrap() >= cutoff {
                     continue;
+                }
+                if !rule.tags.is_empty() {
+                    let Some(version_tags_value) = manifest.get("tags") else {
+                        continue;
+                    };
+                    let version_tags: Vec<myfsio_common::types::Tag> =
+                        serde_json::from_value(version_tags_value.clone()).unwrap_or_default();
+                    let matched = rule.tags.iter().all(|(k, v)| {
+                        version_tags
+                            .iter()
+                            .any(|t| t.key == *k && t.value == *v)
+                    });
+                    if !matched {
+                        continue;
+                    }
                 }
                 let version_id = manifest
                     .get("version_id")
@@ -440,17 +476,49 @@ fn parse_lifecycle_rules_from_string(raw: &str) -> Vec<ParsedLifecycleRule> {
             status: child_text(&rule, "Status").unwrap_or_else(|| "Enabled".to_string()),
             prefix: child_text(&rule, "Prefix")
                 .or_else(|| {
-                    rule.descendants()
-                        .find(|node| {
-                            node.is_element()
-                                && node.tag_name().name() == "Filter"
-                                && node.children().any(|child| {
-                                    child.is_element() && child.tag_name().name() == "Prefix"
-                                })
-                        })
-                        .and_then(|filter| child_text(&filter, "Prefix"))
+                    let filter = rule.children().find(|node| {
+                        node.is_element() && node.tag_name().name() == "Filter"
+                    })?;
+                    if let Some(prefix) = child_text(&filter, "Prefix") {
+                        return Some(prefix);
+                    }
+                    let and = filter.children().find(|node| {
+                        node.is_element() && node.tag_name().name() == "And"
+                    })?;
+                    child_text(&and, "Prefix")
                 })
                 .unwrap_or_default(),
+            tags: {
+                let mut collected: Vec<(String, String)> = Vec::new();
+                if let Some(filter) = rule
+                    .children()
+                    .find(|node| node.is_element() && node.tag_name().name() == "Filter")
+                {
+                    let direct_tag = filter
+                        .children()
+                        .find(|node| node.is_element() && node.tag_name().name() == "Tag");
+                    if let Some(tag) = direct_tag {
+                        if let Some(key) = child_text(&tag, "Key") {
+                            collected.push((key, child_text(&tag, "Value").unwrap_or_default()));
+                        }
+                    }
+                    if let Some(and) = filter
+                        .children()
+                        .find(|node| node.is_element() && node.tag_name().name() == "And")
+                    {
+                        for tag in and
+                            .children()
+                            .filter(|node| node.is_element() && node.tag_name().name() == "Tag")
+                        {
+                            if let Some(key) = child_text(&tag, "Key") {
+                                collected
+                                    .push((key, child_text(&tag, "Value").unwrap_or_default()));
+                            }
+                        }
+                    }
+                }
+                collected
+            },
             expiration_days: rule
                 .descendants()
                 .find(|node| node.is_element() && node.tag_name().name() == "Expiration")
@@ -482,6 +550,37 @@ fn parse_lifecycle_rules_from_string(raw: &str) -> Vec<ParsedLifecycleRule> {
 
 fn parse_lifecycle_rule(value: &Value) -> Option<ParsedLifecycleRule> {
     let map = value.as_object()?;
+    let mut tags: Vec<(String, String)> = Vec::new();
+    if let Some(filter) = map.get("Filter").and_then(|v| v.as_object()) {
+        if let Some(tag) = filter.get("Tag").and_then(|v| v.as_object()) {
+            if let (Some(k), Some(v)) = (
+                tag.get("Key").and_then(|v| v.as_str()),
+                tag.get("Value").and_then(|v| v.as_str()),
+            ) {
+                tags.push((k.to_string(), v.to_string()));
+            }
+        }
+        if let Some(and) = filter.get("And").and_then(|v| v.as_object()) {
+            if let Some(arr) = and.get("Tags").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    if let (Some(k), Some(v)) = (
+                        entry.get("Key").and_then(|v| v.as_str()),
+                        entry.get("Value").and_then(|v| v.as_str()),
+                    ) {
+                        tags.push((k.to_string(), v.to_string()));
+                    }
+                }
+            }
+            if let Some(tag) = and.get("Tag").and_then(|v| v.as_object()) {
+                if let (Some(k), Some(v)) = (
+                    tag.get("Key").and_then(|v| v.as_str()),
+                    tag.get("Value").and_then(|v| v.as_str()),
+                ) {
+                    tags.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
     Some(ParsedLifecycleRule {
         status: map
             .get("Status")
@@ -496,8 +595,15 @@ fn parse_lifecycle_rule(value: &Value) -> Option<ParsedLifecycleRule> {
                     .and_then(|value| value.get("Prefix"))
                     .and_then(|value| value.as_str())
             })
+            .or_else(|| {
+                map.get("Filter")
+                    .and_then(|value| value.get("And"))
+                    .and_then(|value| value.get("Prefix"))
+                    .and_then(|value| value.as_str())
+            })
             .unwrap_or_default()
             .to_string(),
+        tags,
         expiration_days: map
             .get("Expiration")
             .and_then(|value| value.get("Days"))
@@ -568,6 +674,74 @@ mod tests {
         assert_eq!(rules[0].abort_incomplete_multipart_days, Some(7));
     }
 
+    #[test]
+    fn parses_xml_filter_and_with_prefix_and_tags() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter>
+                  <And>
+                    <Prefix>logs/</Prefix>
+                    <Tag><Key>env</Key><Value>prod</Value></Tag>
+                    <Tag><Key>tier</Key><Value>cold</Value></Tag>
+                  </And>
+                </Filter>
+                <Expiration><Days>10</Days></Expiration>
+              </Rule>
+            </LifecycleConfiguration>"#;
+        let rules = parse_lifecycle_rules(&Value::String(xml.to_string()));
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].prefix, "logs/");
+        assert_eq!(
+            rules[0].tags,
+            vec![
+                ("env".to_string(), "prod".to_string()),
+                ("tier".to_string(), "cold".to_string()),
+            ]
+        );
+        assert_eq!(rules[0].expiration_days, Some(10));
+    }
+
+    #[test]
+    fn parses_xml_filter_with_single_tag() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter><Tag><Key>env</Key><Value>prod</Value></Tag></Filter>
+                <Expiration><Days>5</Days></Expiration>
+              </Rule>
+            </LifecycleConfiguration>"#;
+        let rules = parse_lifecycle_rules(&Value::String(xml.to_string()));
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].prefix, "");
+        assert_eq!(
+            rules[0].tags,
+            vec![("env".to_string(), "prod".to_string())]
+        );
+    }
+
+    #[test]
+    fn xml_tags_outside_filter_are_ignored() {
+        // a stray <Tag> nested under an action must not be picked up as a filter tag
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter><Prefix>logs/</Prefix></Filter>
+                <Expiration>
+                  <Days>10</Days>
+                  <Tag><Key>spurious</Key><Value>nope</Value></Tag>
+                </Expiration>
+              </Rule>
+            </LifecycleConfiguration>"#;
+        let rules = parse_lifecycle_rules(&Value::String(xml.to_string()));
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].tags.is_empty());
+        assert_eq!(rules[0].prefix, "logs/");
+    }
+
     #[tokio::test]
     async fn run_cycle_writes_history_and_deletes_noncurrent_versions() {
         let tmp = tempfile::tempdir().unwrap();
@@ -633,5 +807,157 @@ mod tests {
         let history = read_history(tmp.path(), "docs", 50, 0);
         assert_eq!(history["total"], 1);
         assert_eq!(history["executions"][0]["versions_deleted"], 1);
+    }
+
+    #[tokio::test]
+    async fn noncurrent_tag_filter_uses_version_tags_not_current_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FsStorageBackend::new(tmp.path().to_path_buf()));
+        storage.create_bucket("docs").await.unwrap();
+        storage.set_versioning("docs", true).await.unwrap();
+
+        storage
+            .put_object(
+                "docs",
+                "logs/file.txt",
+                Box::pin(std::io::Cursor::new(b"v1".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .put_object(
+                "docs",
+                "logs/file.txt",
+                Box::pin(std::io::Cursor::new(b"v2".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let live_tags = vec![myfsio_common::types::Tag {
+            key: "env".to_string(),
+            value: "prod".to_string(),
+        }];
+        storage
+            .set_object_tags("docs", "logs/file.txt", &live_tags)
+            .await
+            .unwrap();
+
+        let versions_root = version_root_for_bucket(tmp.path(), "docs")
+            .join("logs")
+            .join("file.txt");
+        let manifest = std::fs::read_dir(&versions_root)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .unwrap()
+            .path();
+        let archived_manifest = json!({
+            "version_id": "ver-untagged",
+            "key": "logs/file.txt",
+            "size": 2,
+            "archived_at": (Utc::now() - Duration::days(45)).to_rfc3339(),
+            "etag": "etag",
+            "tags": [],
+        });
+        std::fs::write(
+            &manifest,
+            serde_json::to_string(&archived_manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(manifest.with_file_name("ver-untagged.bin"), b"v1").unwrap();
+
+        let lifecycle_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter><And><Prefix>logs/</Prefix><Tag><Key>env</Key><Value>prod</Value></Tag></And></Filter>
+                <NoncurrentVersionExpiration><NoncurrentDays>30</NoncurrentDays></NoncurrentVersionExpiration>
+              </Rule>
+            </LifecycleConfiguration>"#;
+        let mut config = storage.get_bucket_config("docs").await.unwrap();
+        config.lifecycle = Some(Value::String(lifecycle_xml.to_string()));
+        storage.set_bucket_config("docs", &config).await.unwrap();
+
+        let service =
+            LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
+        let result = service.run_cycle().await.unwrap();
+        assert_eq!(
+            result["versions_deleted"], 0,
+            "noncurrent expiration must consult the version's own tags, not the current key's"
+        );
+        assert!(
+            manifest.exists(),
+            "the untagged archived version should still be on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn noncurrent_tag_filter_deletes_when_version_tags_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FsStorageBackend::new(tmp.path().to_path_buf()));
+        storage.create_bucket("docs").await.unwrap();
+        storage.set_versioning("docs", true).await.unwrap();
+
+        storage
+            .put_object(
+                "docs",
+                "logs/file.txt",
+                Box::pin(std::io::Cursor::new(b"v1".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .put_object(
+                "docs",
+                "logs/file.txt",
+                Box::pin(std::io::Cursor::new(b"v2".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let versions_root = version_root_for_bucket(tmp.path(), "docs")
+            .join("logs")
+            .join("file.txt");
+        let manifest = std::fs::read_dir(&versions_root)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .unwrap()
+            .path();
+        let archived_manifest = json!({
+            "version_id": "ver-tagged",
+            "key": "logs/file.txt",
+            "size": 2,
+            "archived_at": (Utc::now() - Duration::days(45)).to_rfc3339(),
+            "etag": "etag",
+            "tags": [{ "key": "env", "value": "prod" }],
+        });
+        std::fs::write(
+            &manifest,
+            serde_json::to_string(&archived_manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(manifest.with_file_name("ver-tagged.bin"), b"v1").unwrap();
+
+        let lifecycle_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter><And><Prefix>logs/</Prefix><Tag><Key>env</Key><Value>prod</Value></Tag></And></Filter>
+                <NoncurrentVersionExpiration><NoncurrentDays>30</NoncurrentDays></NoncurrentVersionExpiration>
+              </Rule>
+            </LifecycleConfiguration>"#;
+        let mut config = storage.get_bucket_config("docs").await.unwrap();
+        config.lifecycle = Some(Value::String(lifecycle_xml.to_string()));
+        storage.set_bucket_config("docs", &config).await.unwrap();
+
+        let service =
+            LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
+        let result = service.run_cycle().await.unwrap();
+        assert_eq!(result["versions_deleted"], 1);
     }
 }

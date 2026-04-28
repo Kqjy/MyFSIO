@@ -224,4 +224,11 @@ pub trait StorageEngine: Send + Sync {
     async fn set_object_tags(&self, bucket: &str, key: &str, tags: &[Tag]) -> StorageResult<()>;
 
     async fn delete_object_tags(&self, bucket: &str, key: &str) -> StorageResult<()>;
+
+    async fn get_object_version_tags(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<Vec<Tag>>;
 }

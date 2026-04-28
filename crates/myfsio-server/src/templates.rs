@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use parking_lot::RwLock;
 use serde_json::Value;
 use tera::{Context, Error as TeraError, Tera};
@@ -16,10 +17,10 @@ pub struct TemplateEngine {
 }
 
 impl TemplateEngine {
-    pub fn new(template_glob: &str) -> Result<Self, TeraError> {
+    pub fn new(template_glob: &str, display_timezone: &str) -> Result<Self, TeraError> {
         let mut tera = Tera::new(template_glob)?;
         tera.set_escape_fn(html_escape);
-        register_filters(&mut tera);
+        register_filters(&mut tera, display_timezone);
 
         let endpoints: Arc<RwLock<HashMap<String, String>>> = Arc::new(RwLock::new(HashMap::new()));
 
@@ -31,10 +32,10 @@ impl TemplateEngine {
         })
     }
 
-    pub fn from_embedded() -> Result<Self, TeraError> {
+    pub fn from_embedded(display_timezone: &str) -> Result<Self, TeraError> {
         let mut tera = Tera::default();
         tera.set_escape_fn(html_escape);
-        register_filters(&mut tera);
+        register_filters(&mut tera, display_timezone);
 
         let names = crate::embedded::template_names();
         let mut entries: Vec<(String, String)> = Vec::with_capacity(names.len());
@@ -95,8 +96,14 @@ fn html_escape(input: &str) -> String {
     out
 }
 
-fn register_filters(tera: &mut Tera) {
-    tera.register_filter("format_datetime", format_datetime_filter);
+fn register_filters(tera: &mut Tera, display_timezone: &str) {
+    let tz: Tz = display_timezone.parse().unwrap_or(chrono_tz::UTC);
+    tera.register_filter(
+        "format_datetime",
+        move |value: &Value, args: &HashMap<String, Value>| -> tera::Result<Value> {
+            format_datetime_filter(value, args, tz)
+        },
+    );
     tera.register_filter("filesizeformat", filesizeformat_filter);
     tera.register_filter("slice", slice_filter);
 }
@@ -186,11 +193,15 @@ fn urlencode_query(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, UNRESERVED).to_string()
 }
 
-fn format_datetime_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+fn format_datetime_filter(
+    value: &Value,
+    args: &HashMap<String, Value>,
+    tz: Tz,
+) -> tera::Result<Value> {
     let format = args
         .get("format")
         .and_then(|v| v.as_str())
-        .unwrap_or("%Y-%m-%d %H:%M:%S UTC");
+        .unwrap_or("%Y-%m-%d %H:%M:%S %Z");
 
     let dt: Option<DateTime<Utc>> = match value {
         Value::String(s) => DateTime::parse_from_rfc3339(s)
@@ -210,7 +221,7 @@ fn format_datetime_filter(value: &Value, args: &HashMap<String, Value>) -> tera:
     };
 
     match dt {
-        Some(d) => Ok(Value::String(d.format(format).to_string())),
+        Some(d) => Ok(Value::String(d.with_timezone(&tz).format(format).to_string())),
         None => Ok(value.clone()),
     }
 }
@@ -291,7 +302,7 @@ mod tests {
         let tpl = tmp.path().join("t.html");
         std::fs::write(&tpl, "").unwrap();
         let glob = format!("{}/*.html", tmp.path().display());
-        let engine = TemplateEngine::new(&glob).unwrap();
+        let engine = TemplateEngine::new(&glob, "UTC").unwrap();
         engine.register_endpoints(&[
             ("ui.buckets_overview", "/ui/buckets"),
             ("ui.bucket_detail", "/ui/buckets/{bucket_name}"),
@@ -356,7 +367,7 @@ mod tests {
         path.push("templates");
         path.push("*.html");
         let glob = path.to_string_lossy().replace('\\', "/");
-        let engine = TemplateEngine::new(&glob).expect("Tera parse failed");
+        let engine = TemplateEngine::new(&glob, "UTC").expect("Tera parse failed");
         let names: Vec<String> = engine
             .tera
             .read()
@@ -372,7 +383,7 @@ mod tests {
 
     #[test]
     fn embedded_templates_parse() {
-        let engine = TemplateEngine::from_embedded().expect("Embedded Tera parse failed");
+        let engine = TemplateEngine::from_embedded("UTC").expect("Embedded Tera parse failed");
         let names: Vec<String> = engine
             .tera
             .read()
@@ -393,8 +404,21 @@ mod tests {
         let v = format_datetime_filter(
             &Value::String("2024-06-15T12:34:56Z".into()),
             &HashMap::new(),
+            chrono_tz::UTC,
         )
         .unwrap();
         assert_eq!(v, Value::String("2024-06-15 12:34:56 UTC".into()));
+    }
+
+    #[test]
+    fn format_datetime_custom_timezone() {
+        let tz: Tz = "America/New_York".parse().unwrap();
+        let v = format_datetime_filter(
+            &Value::String("2024-06-15T12:34:56Z".into()),
+            &HashMap::new(),
+            tz,
+        )
+        .unwrap();
+        assert_eq!(v, Value::String("2024-06-15 08:34:56 EDT".into()));
     }
 }

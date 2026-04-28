@@ -319,10 +319,11 @@ impl MetricsService {
             let _ = std::fs::create_dir_all(parent);
         }
         let data = json!({ "snapshots": snapshots });
-        let _ = std::fs::write(
-            &self.snapshots_path,
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        );
+        let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
+        let tmp = self.snapshots_path.with_extension("json.tmp");
+        if std::fs::write(&tmp, serialized).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.snapshots_path);
+        }
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {

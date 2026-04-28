@@ -25,6 +25,7 @@ tracing-subscriber = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 http-body = "1"

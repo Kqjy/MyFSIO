@@ -159,6 +159,19 @@ fn trigger_replication(state: &AppState, bucket: &str, key: &str, action: &str) 
     });
 }
 
+fn trigger_replication_for_request(
+    state: &AppState,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    bucket: &str,
+    key: &str,
+    action: &str,
+) {
+    if peer_marker.is_some() {
+        return;
+    }
+    trigger_replication(state, bucket, key, action);
+}
+
 async fn ensure_object_lock_allows_write(
     state: &AppState,
     bucket: &str,
@@ -278,7 +291,12 @@ pub async fn list_buckets(
 
     match state.storage.list_buckets().await {
         Ok(buckets) => {
-            let xml = myfsio_xml::response::list_buckets_xml("myfsio", "myfsio", &buckets);
+            let xml = myfsio_xml::response::list_buckets_xml(
+                "myfsio",
+                "myfsio",
+                &buckets,
+                &state.config.region,
+            );
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -302,6 +320,7 @@ pub async fn create_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -311,6 +330,7 @@ pub async fn create_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                peer,
                 headers,
                 body,
             )
@@ -384,6 +404,8 @@ pub struct BucketQuery {
     pub start_after: Option<String>,
     #[serde(rename = "encoding-type")]
     pub encoding_type: Option<String>,
+    #[serde(rename = "fetch-owner")]
+    pub fetch_owner: Option<String>,
     pub uploads: Option<String>,
     pub delete: Option<String>,
     pub versioning: Option<String>,
@@ -408,6 +430,10 @@ pub struct BucketQuery {
     pub key_marker: Option<String>,
     #[serde(rename = "version-id-marker")]
     pub version_id_marker: Option<String>,
+    #[serde(rename = "upload-id-marker")]
+    pub upload_id_marker: Option<String>,
+    #[serde(rename = "max-uploads")]
+    pub max_uploads: Option<usize>,
 }
 
 async fn virtual_host_bucket_from_headers(state: &AppState, headers: &HeaderMap) -> Option<String> {
@@ -507,7 +533,7 @@ pub async fn get_bucket(
         .await;
     }
     if query.uploads.is_some() {
-        return list_multipart_uploads_handler(&state, &bucket).await;
+        return list_multipart_uploads_handler(&state, &bucket, &query).await;
     }
 
     let prefix = query.prefix.clone().unwrap_or_default();
@@ -656,6 +682,10 @@ pub async fn get_bucket(
                         next_token.as_deref(),
                         result.objects.len(),
                         encoding_type,
+                        query
+                            .fetch_owner
+                            .as_deref()
+                            .is_some_and(|v| v.eq_ignore_ascii_case("true")),
                     )
                 } else {
                     myfsio_xml::response::list_objects_v1_xml_with_encoding(
@@ -702,6 +732,10 @@ pub async fn get_bucket(
                         next_token.as_deref(),
                         result.objects.len() + result.common_prefixes.len(),
                         encoding_type,
+                        query
+                            .fetch_owner
+                            .as_deref()
+                            .is_some_and(|v| v.eq_ignore_ascii_case("true")),
                     )
                 } else {
                     myfsio_xml::response::list_objects_v1_xml_with_encoding(
@@ -728,15 +762,18 @@ pub async fn post_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
         if host_bucket != bucket {
             return post_object(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                peer,
                 headers,
                 body,
             )
@@ -745,13 +782,14 @@ pub async fn post_bucket(
     }
 
     if query.delete.is_some() {
-        return delete_objects_handler(&state, &bucket, body).await;
+        return delete_objects_handler(&state, &bucket, peer_marker, body).await;
     }
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
         if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
             let ct = ct.to_string();
-            return post_object_form_handler(&state, &bucket, &ct, &headers, body).await;
+            return post_object_form_handler(&state, &bucket, &ct, &headers, peer_marker, body)
+                .await;
         }
     }
 
@@ -762,6 +800,7 @@ pub async fn delete_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
@@ -770,6 +809,7 @@ pub async fn delete_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                peer,
                 headers,
             )
             .await;
@@ -837,6 +877,7 @@ pub async fn head_bucket(
         Ok(true) => {
             let mut headers = HeaderMap::new();
             headers.insert("x-amz-bucket-region", state.config.region.parse().unwrap());
+            headers.insert("x-amz-access-point-alias", "false".parse().unwrap());
             (StatusCode::OK, headers).into_response()
         }
         Ok(false) => {
@@ -855,6 +896,10 @@ pub struct ObjectQuery {
     pub upload_id: Option<String>,
     #[serde(rename = "partNumber")]
     pub part_number: Option<u32>,
+    #[serde(rename = "part-number-marker")]
+    pub part_number_marker: Option<u32>,
+    #[serde(rename = "max-parts")]
+    pub max_parts: Option<usize>,
     #[serde(rename = "versionId")]
     pub version_id: Option<String>,
     pub tagging: Option<String>,
@@ -1010,7 +1055,14 @@ fn insert_standard_object_metadata(
         .get("x-amz-storage-class")
         .and_then(|v| v.to_str().ok())
     {
-        metadata.insert("__storage_class__".to_string(), value.to_ascii_uppercase());
+        let upper = value.to_ascii_uppercase();
+        if !VALID_STORAGE_CLASSES.contains(&upper.as_str()) {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Invalid x-amz-storage-class",
+            )));
+        }
+        metadata.insert("__storage_class__".to_string(), upper);
     }
 
     if let Some(value) = headers
@@ -1058,6 +1110,20 @@ fn insert_standard_object_metadata(
     }
     Ok(())
 }
+
+const VALID_STORAGE_CLASSES: &[&str] = &[
+    "STANDARD",
+    "REDUCED_REDUNDANCY",
+    "STANDARD_IA",
+    "ONEZONE_IA",
+    "INTELLIGENT_TIERING",
+    "GLACIER",
+    "GLACIER_IR",
+    "DEEP_ARCHIVE",
+    "OUTPOSTS",
+    "SNOW",
+    "EXPRESS_ONEZONE",
+];
 
 const CANNED_ACL_VALUES: &[&str] = &[
     "private",
@@ -1138,6 +1204,37 @@ fn apply_stored_response_headers(headers: &mut HeaderMap, metadata: &HashMap<Str
         .and_then(|value| value.parse().ok())
     {
         headers.insert("x-amz-storage-class", value);
+    }
+}
+
+fn apply_stored_encryption_headers(
+    headers: &mut HeaderMap,
+    metadata: &HashMap<String, String>,
+    request_headers: &HeaderMap,
+) {
+    if let Some(alg) = metadata
+        .get("x-amz-server-side-encryption")
+        .and_then(|v| v.parse().ok())
+    {
+        headers.insert("x-amz-server-side-encryption", alg);
+    }
+    if let Some(kid) = metadata
+        .get("x-amz-encryption-key-id")
+        .and_then(|v| v.parse().ok())
+    {
+        headers.insert("x-amz-server-side-encryption-aws-kms-key-id", kid);
+    }
+    if let Some(value) = request_headers
+        .get("x-amz-server-side-encryption-customer-algorithm")
+        .cloned()
+    {
+        headers.insert("x-amz-server-side-encryption-customer-algorithm", value);
+    }
+    if let Some(value) = request_headers
+        .get("x-amz-server-side-encryption-customer-key-MD5")
+        .cloned()
+    {
+        headers.insert("x-amz-server-side-encryption-customer-key-MD5", value);
     }
 }
 
@@ -1365,20 +1462,44 @@ pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
-        return config::put_object_tagging(&state, &bucket, &key, body).await;
+        if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "PUT Object Tagging with versionId is not supported on archived versions",
+            ));
+        }
+        let resp = config::put_object_tagging(&state, &bucket, &key, body).await;
+        if resp.status().is_success() {
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+        }
+        return resp;
     }
     if query.acl.is_some() {
-        return config::put_object_acl(&state, &bucket, &key, &headers, body).await;
+        let resp = config::put_object_acl(&state, &bucket, &key, &headers, body).await;
+        if resp.status().is_success() {
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+        }
+        return resp;
     }
     if query.retention.is_some() {
-        return config::put_object_retention(&state, &bucket, &key, &headers, body).await;
+        let resp = config::put_object_retention(&state, &bucket, &key, &headers, body).await;
+        if resp.status().is_success() {
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+        }
+        return resp;
     }
     if query.legal_hold.is_some() {
-        return config::put_object_legal_hold(&state, &bucket, &key, body).await;
+        let resp = config::put_object_legal_hold(&state, &bucket, &key, body).await;
+        if resp.status().is_success() {
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+        }
+        return resp;
     }
 
     if let Some(ref upload_id) = query.upload_id {
@@ -1417,7 +1538,15 @@ pub async fn put_object(
         .get("x-amz-copy-source")
         .and_then(|v| v.to_str().ok())
     {
-        return copy_object_handler(&state, copy_source, &bucket, &key, &headers).await;
+        return copy_object_handler(
+            &state,
+            copy_source,
+            &bucket,
+            &key,
+            peer_marker,
+            &headers,
+        )
+        .await;
     }
 
     if let Err(response) =
@@ -1450,6 +1579,10 @@ pub async fn put_object(
     if let Err(response) = validate_sse_request(&state, &headers) {
         return response;
     }
+    let resolved_enc_ctx = match resolve_encryption_context(&state, &bucket, &headers).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
 
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
@@ -1511,7 +1644,7 @@ pub async fn put_object(
                     return storage_err_response(e);
                 }
             }
-            if let Some(enc_ctx) = resolve_encryption_context(&state, &bucket, &headers).await {
+            if let Some(enc_ctx) = resolved_enc_ctx {
                 if let Some(ref enc_svc) = state.encryption {
                     let obj_path = match state.storage.get_object_path(&bucket, &key).await {
                         Ok(p) => p,
@@ -1563,7 +1696,13 @@ pub async fn put_object(
                                 "x-amz-server-side-encryption",
                                 enc_ctx.algorithm.as_str().parse().unwrap(),
                             );
+                            apply_stored_response_headers(&mut resp_headers, &enc_metadata);
                             apply_stored_checksum_headers(&mut resp_headers, &enc_metadata);
+                            apply_stored_encryption_headers(
+                                &mut resp_headers,
+                                &enc_metadata,
+                                &headers,
+                            );
                             notifications::emit_object_created(
                                 &state,
                                 &bucket,
@@ -1575,7 +1714,13 @@ pub async fn put_object(
                                 "",
                                 "Put",
                             );
-                            trigger_replication(&state, &bucket, &key, "write");
+                            trigger_replication_for_request(
+                                &state,
+                                peer_marker,
+                                &bucket,
+                                &key,
+                                "write",
+                            );
                             return (StatusCode::OK, resp_headers).into_response();
                         }
                         Err(e) => {
@@ -1603,7 +1748,9 @@ pub async fn put_object(
                 .get_object_metadata(&bucket, &key)
                 .await
                 .unwrap_or_default();
+            apply_stored_response_headers(&mut resp_headers, &stored);
             apply_stored_checksum_headers(&mut resp_headers, &stored);
+            apply_stored_encryption_headers(&mut resp_headers, &stored, &headers);
             notifications::emit_object_created(
                 &state,
                 &bucket,
@@ -1615,7 +1762,7 @@ pub async fn put_object(
                 "",
                 "Put",
             );
-            trigger_replication(&state, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
             (StatusCode::OK, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -1629,7 +1776,13 @@ pub async fn get_object(
     headers: HeaderMap,
 ) -> Response {
     if query.tagging.is_some() {
-        return config::get_object_tagging(&state, &bucket, &key).await;
+        return config::get_object_tagging(
+            &state,
+            &bucket,
+            &key,
+            query.version_id.as_deref(),
+        )
+        .await;
     }
     if query.acl.is_some() {
         return config::get_object_acl(&state, &bucket, &key).await;
@@ -1644,7 +1797,7 @@ pub async fn get_object(
         return object_attributes_handler(&state, &bucket, &key, &headers).await;
     }
     if let Some(ref upload_id) = query.upload_id {
-        return list_parts_handler(&state, &bucket, &key, upload_id).await;
+        return list_parts_handler(&state, &bucket, &key, upload_id, &query).await;
     }
 
     let version_id = query.version_id.as_deref();
@@ -1745,7 +1898,13 @@ pub async fn get_object(
         match (enc_info.as_ref(), state.encryption.as_ref()) {
             (Some(enc_info), Some(enc_svc)) => {
                 let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
-                let customer_key = extract_sse_c_key(&headers);
+                let customer_key = match extract_sse_c_key(&headers) {
+                    Ok(key) => key,
+                    Err(resp) => {
+                        let _ = tokio::fs::remove_file(&snap_link).await;
+                        return resp;
+                    }
+                };
                 let decrypt_res = enc_svc
                     .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
                     .await;
@@ -1837,15 +1996,26 @@ pub async fn post_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.uploads.is_some() {
-        return initiate_multipart_handler(&state, &bucket, &key).await;
+        return initiate_multipart_handler(&state, &bucket, &key, &headers).await;
     }
 
     if let Some(ref upload_id) = query.upload_id {
-        return complete_multipart_handler(&state, &bucket, &key, upload_id, &headers, body).await;
+        return complete_multipart_handler(
+            &state,
+            &bucket,
+            &key,
+            upload_id,
+            peer_marker,
+            &headers,
+            body,
+        )
+        .await;
     }
 
     if query.select.is_some() {
@@ -1859,10 +2029,22 @@ pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
+    let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
-        return config::delete_object_tagging(&state, &bucket, &key).await;
+        if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "DELETE Object Tagging with versionId is not supported on archived versions",
+            ));
+        }
+        let resp = config::delete_object_tagging(&state, &bucket, &key).await;
+        if resp.status().is_success() {
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+        }
+        return resp;
     }
     if query.acl.is_some() {
         return StatusCode::NO_CONTENT.into_response();
@@ -1895,7 +2077,7 @@ pub async fn delete_object(
                     resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
                 }
                 notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
-                trigger_replication(&state, &bucket, &key, "delete");
+                trigger_replication_for_request(&state, peer_marker, &bucket, &key, "delete");
                 (StatusCode::NO_CONTENT, resp_headers).into_response()
             }
             Err(e) => storage_err_response(e),
@@ -1920,7 +2102,7 @@ pub async fn delete_object(
                 resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
             }
             notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
-            trigger_replication(&state, &bucket, &key, "delete");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "delete");
             (StatusCode::NO_CONTENT, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -1979,6 +2161,13 @@ pub async fn head_object(
                     .unwrap(),
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
+            if let Some(enc_info) = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(
+                &meta.internal_metadata,
+            ) {
+                if let Ok(alg) = enc_info.algorithm.as_str().parse() {
+                    headers.insert("x-amz-server-side-encryption", alg);
+                }
+            }
             apply_stored_response_headers(&mut headers, &meta.internal_metadata);
             apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
             if let Some(ref requested_version) = query.version_id {
@@ -2040,6 +2229,13 @@ fn build_part_response_headers(
             .unwrap(),
     );
     headers.insert("accept-ranges", "bytes".parse().unwrap());
+    if let Some(enc_info) =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata)
+    {
+        if let Ok(alg) = enc_info.algorithm.as_str().parse() {
+            headers.insert("x-amz-server-side-encryption", alg);
+        }
+    }
     apply_stored_response_headers(&mut headers, &meta.internal_metadata);
     if let Some(ref requested_version) = query.version_id {
         if let Ok(value) = requested_version.parse() {
@@ -2127,8 +2323,35 @@ fn resolve_part_view(
     })
 }
 
-async fn initiate_multipart_handler(state: &AppState, bucket: &str, key: &str) -> Response {
-    match state.storage.initiate_multipart(bucket, key, None).await {
+async fn initiate_multipart_handler(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: &HeaderMap,
+) -> Response {
+    let mut metadata: HashMap<String, String> = HashMap::new();
+    if let Err(resp) = insert_standard_object_metadata(headers, &mut metadata) {
+        return resp;
+    }
+    if let Some(value) = headers.get("x-amz-tagging").and_then(|v| v.to_str().ok()) {
+        let tags = match parse_tagging_header(value) {
+            Ok(tags) => tags,
+            Err(resp) => return resp,
+        };
+        if tags.len() > state.config.object_tag_limit {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidTag,
+                format!("Maximum {} tags allowed", state.config.object_tag_limit),
+            ));
+        }
+        metadata.insert("__pending_tagging__".to_string(), value.to_string());
+    }
+    let initial = if metadata.is_empty() {
+        None
+    } else {
+        Some(metadata)
+    };
+    match state.storage.initiate_multipart(bucket, key, initial).await {
         Ok(upload_id) => {
             let xml = myfsio_xml::response::initiate_multipart_upload_xml(bucket, key, &upload_id);
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -2253,6 +2476,7 @@ async fn complete_multipart_handler(
     bucket: &str,
     key: &str,
     upload_id: &str,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
@@ -2362,17 +2586,87 @@ async fn complete_multipart_handler(
         .await
     {
         Ok(meta) => {
-            let etag = meta.etag.as_deref().unwrap_or("");
+            let Some(etag) = meta.etag.as_deref() else {
+                tracing::error!(
+                    bucket = bucket,
+                    key = key,
+                    upload_id = upload_id,
+                    "complete_multipart returned meta without etag"
+                );
+                return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
+            };
+            apply_pending_multipart_tagging(state, bucket, key).await;
             let xml = myfsio_xml::response::complete_multipart_upload_xml(
                 bucket,
                 key,
                 etag,
                 &format!("/{}/{}", bucket, key),
             );
-            trigger_replication(state, bucket, key, "write");
+            notifications::emit_object_created(
+                state,
+                bucket,
+                key,
+                meta.size,
+                Some(etag),
+                "",
+                "",
+                "",
+                "CompleteMultipartUpload",
+            );
+            trigger_replication_for_request(state, peer_marker, bucket, key, "write");
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
+    }
+}
+
+async fn apply_pending_multipart_tagging(state: &AppState, bucket: &str, key: &str) {
+    let mut stored = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let raw = match stored.remove("__pending_tagging__") {
+        Some(v) if !v.is_empty() => v,
+        _ => return,
+    };
+    let tags = match parse_tagging_header(&raw) {
+        Ok(tags) => tags,
+        Err(_) => {
+            tracing::warn!(
+                bucket = bucket,
+                key = key,
+                "discarding malformed __pending_tagging__ value from multipart manifest"
+            );
+            let _ = state.storage.put_object_metadata(bucket, key, &stored).await;
+            return;
+        }
+    };
+    if tags.len() > state.config.object_tag_limit {
+        tracing::warn!(
+            bucket = bucket,
+            key = key,
+            "skipping multipart tagging: exceeds object_tag_limit"
+        );
+        let _ = state.storage.put_object_metadata(bucket, key, &stored).await;
+        return;
+    }
+    if !tags.is_empty() {
+        if let Err(e) = state.storage.set_object_tags(bucket, key, &tags).await {
+            tracing::error!(
+                bucket = bucket,
+                key = key,
+                error = %e,
+                "failed to apply pending multipart tagging"
+            );
+        }
+    }
+    if let Err(e) = state.storage.put_object_metadata(bucket, key, &stored).await {
+        tracing::error!(
+            bucket = bucket,
+            key = key,
+            error = %e,
+            "failed to clear __pending_tagging__ marker after applying tags"
+        );
     }
 }
 
@@ -2383,10 +2677,62 @@ async fn abort_multipart_handler(state: &AppState, bucket: &str, upload_id: &str
     }
 }
 
-async fn list_multipart_uploads_handler(state: &AppState, bucket: &str) -> Response {
+async fn list_multipart_uploads_handler(
+    state: &AppState,
+    bucket: &str,
+    query: &BucketQuery,
+) -> Response {
+    if let Some(0) = query.max_uploads {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "max-uploads must be at least 1",
+        ));
+    }
+    let max_uploads = query.max_uploads.unwrap_or(1000).clamp(1, 1000);
+    let key_marker = query.key_marker.as_deref().unwrap_or("");
+    let upload_id_marker_opt = query.upload_id_marker.as_deref();
+    let upload_id_marker = upload_id_marker_opt.unwrap_or("");
     match state.storage.list_multipart_uploads(bucket).await {
-        Ok(uploads) => {
-            let xml = myfsio_xml::response::list_multipart_uploads_xml(bucket, &uploads);
+        Ok(mut uploads) => {
+            uploads.sort_by(|a, b| a.key.cmp(&b.key).then(a.upload_id.cmp(&b.upload_id)));
+
+            let start = if key_marker.is_empty() && upload_id_marker_opt.is_none() {
+                0
+            } else if upload_id_marker_opt.is_some() {
+                uploads
+                    .iter()
+                    .position(|u| {
+                        u.key.as_str() > key_marker
+                            || (u.key == key_marker && u.upload_id.as_str() > upload_id_marker)
+                    })
+                    .unwrap_or(uploads.len())
+            } else {
+                uploads
+                    .iter()
+                    .position(|u| u.key.as_str() > key_marker)
+                    .unwrap_or(uploads.len())
+            };
+            let end = (start + max_uploads).min(uploads.len());
+            let is_truncated = end < uploads.len();
+            let page = &uploads[start..end];
+            let (next_key, next_upload) = if is_truncated {
+                page.last()
+                    .map(|u| (u.key.clone(), u.upload_id.clone()))
+                    .unwrap_or_default()
+            } else {
+                (String::new(), String::new())
+            };
+            let params = myfsio_xml::response::ListMultipartUploadsParams {
+                bucket,
+                key_marker,
+                upload_id_marker,
+                next_key_marker: &next_key,
+                next_upload_id_marker: &next_upload,
+                max_uploads,
+                is_truncated,
+                uploads: page,
+            };
+            let xml = myfsio_xml::response::list_multipart_uploads_xml_paged(&params);
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -2398,10 +2744,41 @@ async fn list_parts_handler(
     bucket: &str,
     key: &str,
     upload_id: &str,
+    query: &ObjectQuery,
 ) -> Response {
+    if let Some(0) = query.max_parts {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "max-parts must be at least 1",
+        ));
+    }
+    let max_parts = query.max_parts.unwrap_or(1000).clamp(1, 1000);
+    let part_number_marker = query.part_number_marker.unwrap_or(0);
     match state.storage.list_parts(bucket, upload_id).await {
-        Ok(parts) => {
-            let xml = myfsio_xml::response::list_parts_xml(bucket, key, upload_id, &parts);
+        Ok(mut parts) => {
+            parts.sort_by_key(|p| p.part_number);
+            let start = parts
+                .iter()
+                .position(|p| p.part_number > part_number_marker)
+                .unwrap_or(parts.len());
+            let end = (start + max_parts).min(parts.len());
+            let is_truncated = end < parts.len();
+            let page = &parts[start..end];
+            let next_part_number_marker = page
+                .last()
+                .map(|p| p.part_number)
+                .unwrap_or(part_number_marker);
+            let params = myfsio_xml::response::ListPartsParams {
+                bucket,
+                key,
+                upload_id,
+                part_number_marker,
+                next_part_number_marker,
+                max_parts,
+                is_truncated,
+                parts: page,
+            };
+            let xml = myfsio_xml::response::list_parts_xml_paged(&params);
             (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -2492,6 +2869,7 @@ async fn copy_object_handler(
     copy_source: &str,
     dst_bucket: &str,
     dst_key: &str,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
     headers: &HeaderMap,
 ) -> Response {
     if let Err(response) =
@@ -2602,11 +2980,54 @@ async fn copy_object_handler(
             .get("x-amz-storage-class")
             .and_then(|v| v.to_str().ok())
         {
-            m.insert("__storage_class__".to_string(), value.to_ascii_uppercase());
+            let upper = value.to_ascii_uppercase();
+            if !VALID_STORAGE_CLASSES.contains(&upper.as_str()) {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Invalid x-amz-storage-class",
+                ));
+            }
+            m.insert("__storage_class__".to_string(), upper);
         }
         m
     } else {
         source_metadata_existing.clone()
+    };
+
+    let resolved_tags: Option<Vec<myfsio_common::types::Tag>> = if replace_tagging {
+        let parsed = match headers
+            .get("x-amz-tagging")
+            .and_then(|value| value.to_str().ok())
+            .map(parse_tagging_header)
+            .transpose()
+        {
+            Ok(tags) => tags,
+            Err(response) => return response,
+        };
+        let tags = parsed.unwrap_or_default();
+        if tags.len() > state.config.object_tag_limit {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidTag,
+                format!("Maximum {} tags allowed", state.config.object_tag_limit),
+            ));
+        }
+        Some(tags)
+    } else {
+        let lookup = match src_version_id.as_deref() {
+            Some(version_id) => {
+                state
+                    .storage
+                    .get_object_version_tags(&src_bucket, &src_key, version_id)
+                    .await
+            }
+            None => state.storage.get_object_tags(&src_bucket, &src_key).await,
+        };
+        match lookup {
+            Ok(tags) => Some(tags),
+            Err(myfsio_storage::error::StorageError::ObjectNotFound { .. }) => None,
+            Err(myfsio_storage::error::StorageError::VersionNotFound { .. }) => None,
+            Err(e) => return storage_err_response(e),
+        }
     };
 
     let (_meta, reader) = match src_version_id.as_deref() {
@@ -2633,48 +3054,62 @@ async fn copy_object_handler(
 
     match copy_result {
         Ok(meta) => {
-            if replace_tagging {
-                let tags = match headers
-                    .get("x-amz-tagging")
-                    .and_then(|value| value.to_str().ok())
-                    .map(parse_tagging_header)
-                    .transpose()
+            if let Some(tags) = resolved_tags.as_deref() {
+                if let Err(e) = state
+                    .storage
+                    .set_object_tags(dst_bucket, dst_key, tags)
+                    .await
                 {
-                    Ok(tags) => tags,
-                    Err(response) => return response,
-                };
-                if let Some(ref tags) = tags {
-                    if tags.len() > state.config.object_tag_limit {
-                        return s3_error_response(S3Error::new(
-                            S3ErrorCode::InvalidTag,
-                            format!("Maximum {} tags allowed", state.config.object_tag_limit),
-                        ));
-                    }
-                    if let Err(e) = state
-                        .storage
-                        .set_object_tags(dst_bucket, dst_key, tags)
-                        .await
-                    {
-                        return storage_err_response(e);
-                    }
-                } else {
-                    let _ = state
-                        .storage
-                        .set_object_tags(dst_bucket, dst_key, &[])
-                        .await;
+                    return storage_err_response(e);
                 }
             }
-            let etag = meta.etag.as_deref().unwrap_or("");
+            let Some(etag) = meta.etag.as_deref() else {
+                tracing::error!(
+                    src_bucket = %src_bucket,
+                    src_key = %src_key,
+                    dst_bucket = dst_bucket,
+                    dst_key = dst_key,
+                    "copy_object stored object without etag"
+                );
+                return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
+            };
             let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
             let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
-            trigger_replication(state, dst_bucket, dst_key, "write");
-            (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+            trigger_replication_for_request(state, peer_marker, dst_bucket, dst_key, "write");
+
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert("content-type", "application/xml".parse().unwrap());
+            if let Some(ref vid) = meta.version_id {
+                if let Ok(value) = vid.parse() {
+                    resp_headers.insert("x-amz-version-id", value);
+                }
+            }
+            if let Some(ref src_vid) = src_version_id {
+                if let Ok(value) = src_vid.parse() {
+                    resp_headers.insert("x-amz-copy-source-version-id", value);
+                }
+            }
+            let stored = state
+                .storage
+                .get_object_metadata(dst_bucket, dst_key)
+                .await
+                .unwrap_or_default();
+            apply_stored_response_headers(&mut resp_headers, &stored);
+            apply_stored_checksum_headers(&mut resp_headers, &stored);
+            apply_stored_encryption_headers(&mut resp_headers, &stored, headers);
+
+            (StatusCode::OK, resp_headers, xml).into_response()
         }
         Err(e) => storage_err_response(e),
     }
 }
 
-async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> Response {
+async fn delete_objects_handler(
+    state: &AppState,
+    bucket: &str,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    body: Body,
+) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
@@ -2784,7 +3219,7 @@ async fn delete_objects_handler(state: &AppState, bucket: &str, body: Body) -> R
         match result {
             Ok(outcome) => {
                 notifications::emit_object_removed(state, bucket, &key, "", "", "", "Delete");
-                trigger_replication(state, bucket, &key, "delete");
+                trigger_replication_for_request(state, peer_marker, bucket, &key, "delete");
                 let delete_marker_version_id = if outcome.is_delete_marker {
                     outcome.version_id.clone()
                 } else {
@@ -2878,7 +3313,13 @@ async fn serve_range_from_snapshot(
     let (body_path, plaintext_size, enc_header): (std::path::PathBuf, u64, Option<&str>) =
         match (enc_info.as_ref(), state.encryption.as_ref()) {
             (Some(enc_info), Some(enc_svc)) => {
-                let customer_key = extract_sse_c_key(headers);
+                let customer_key = match extract_sse_c_key(headers) {
+                    Ok(key) => key,
+                    Err(resp) => {
+                        let _ = tokio::fs::remove_file(&snap_link).await;
+                        return resp;
+                    }
+                };
                 let has_fast_path =
                     enc_info.chunk_size.is_some() && enc_info.plaintext_size.is_some();
 
@@ -3032,6 +3473,14 @@ async fn stream_partial_content(
         headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
     }
     insert_content_type(&mut headers, key, meta.content_type.as_deref());
+    headers.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
     headers.insert("accept-ranges", "bytes".parse().unwrap());
     if let Some(alg) = enc_header {
         headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
@@ -3050,6 +3499,7 @@ async fn stream_partial_content(
         }
     }
 
+    apply_user_metadata(&mut headers, &meta.metadata);
     apply_response_overrides(&mut headers, query);
 
     if let Some(count) = parts_count {
@@ -3063,15 +3513,23 @@ fn evaluate_get_preconditions(
     headers: &HeaderMap,
     meta: &myfsio_common::types::ObjectMeta,
 ) -> Option<Response> {
-    if let Some(value) = headers.get("if-match").and_then(|v| v.to_str().ok()) {
+    let if_match = headers.get("if-match").and_then(|v| v.to_str().ok());
+    let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
+
+    if if_match.is_some() && if_none_match.is_some() {
+        return Some(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "If-Match and If-None-Match must not both be present",
+        )));
+    }
+
+    if let Some(value) = if_match {
         if !etag_condition_matches(value, meta.etag.as_deref()) {
             return Some(s3_error_response(S3Error::from_code(
                 S3ErrorCode::PreconditionFailed,
             )));
         }
-    }
-
-    if let Some(value) = headers
+    } else if let Some(value) = headers
         .get("if-unmodified-since")
         .and_then(|v| v.to_str().ok())
     {
@@ -3084,24 +3542,44 @@ fn evaluate_get_preconditions(
         }
     }
 
-    if let Some(value) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
+    if let Some(value) = if_none_match {
         if etag_condition_matches(value, meta.etag.as_deref()) {
-            return Some(StatusCode::NOT_MODIFIED.into_response());
+            return Some(not_modified_response(meta));
         }
-    }
-
-    if let Some(value) = headers
+    } else if let Some(value) = headers
         .get("if-modified-since")
         .and_then(|v| v.to_str().ok())
     {
         if let Some(t) = parse_http_date(value) {
             if meta.last_modified <= t {
-                return Some(StatusCode::NOT_MODIFIED.into_response());
+                return Some(not_modified_response(meta));
             }
         }
     }
 
     None
+}
+
+fn not_modified_response(meta: &myfsio_common::types::ObjectMeta) -> Response {
+    let mut headers = HeaderMap::new();
+    if let Some(ref etag) = meta.etag {
+        headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+    }
+    headers.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            headers.insert("x-amz-version-id", value);
+        }
+    }
+    apply_stored_response_headers(&mut headers, &meta.internal_metadata);
+    (StatusCode::NOT_MODIFIED, headers).into_response()
 }
 
 async fn evaluate_put_preconditions(
@@ -3112,8 +3590,17 @@ async fn evaluate_put_preconditions(
 ) -> Option<Response> {
     let has_if_match = headers.contains_key("if-match");
     let has_if_none_match = headers.contains_key("if-none-match");
-    if !has_if_match && !has_if_none_match {
+    let has_if_unmodified = headers.contains_key("if-unmodified-since");
+    let has_if_modified = headers.contains_key("if-modified-since");
+    if !has_if_match && !has_if_none_match && !has_if_unmodified && !has_if_modified {
         return None;
+    }
+
+    if has_if_match && has_if_none_match {
+        return Some(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "If-Match and If-None-Match must not both be present",
+        )));
     }
 
     match state.storage.head_object(bucket, key).await {
@@ -3124,6 +3611,17 @@ async fn evaluate_put_preconditions(
                         S3ErrorCode::PreconditionFailed,
                     )));
                 }
+            } else if let Some(value) = headers
+                .get("if-unmodified-since")
+                .and_then(|v| v.to_str().ok())
+            {
+                if let Some(t) = parse_http_date(value) {
+                    if meta.last_modified > t {
+                        return Some(s3_error_response(S3Error::from_code(
+                            S3ErrorCode::PreconditionFailed,
+                        )));
+                    }
+                }
             }
             if let Some(value) = headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
                 if etag_condition_matches(value, meta.etag.as_deref()) {
@@ -3131,12 +3629,23 @@ async fn evaluate_put_preconditions(
                         S3ErrorCode::PreconditionFailed,
                     )));
                 }
+            } else if let Some(value) = headers
+                .get("if-modified-since")
+                .and_then(|v| v.to_str().ok())
+            {
+                if let Some(t) = parse_http_date(value) {
+                    if meta.last_modified <= t {
+                        return Some(s3_error_response(S3Error::from_code(
+                            S3ErrorCode::PreconditionFailed,
+                        )));
+                    }
+                }
             }
             None
         }
         Err(myfsio_storage::error::StorageError::ObjectNotFound { .. })
         | Err(myfsio_storage::error::StorageError::DeleteMarker { .. }) => {
-            if has_if_match {
+            if has_if_match || has_if_unmodified {
                 Some(s3_error_response(S3Error::from_code(
                     S3ErrorCode::PreconditionFailed,
                 )))
@@ -3152,34 +3661,25 @@ fn evaluate_copy_preconditions(
     headers: &HeaderMap,
     source_meta: &myfsio_common::types::ObjectMeta,
 ) -> Option<Response> {
-    if let Some(value) = headers
+    let if_match = headers
         .get("x-amz-copy-source-if-match")
-        .and_then(|v| v.to_str().ok())
-    {
+        .and_then(|v| v.to_str().ok());
+    let if_none_match = headers
+        .get("x-amz-copy-source-if-none-match")
+        .and_then(|v| v.to_str().ok());
+
+    if let Some(value) = if_match {
         if !etag_condition_matches(value, source_meta.etag.as_deref()) {
             return Some(s3_error_response(S3Error::from_code(
                 S3ErrorCode::PreconditionFailed,
             )));
         }
-    }
-
-    if let Some(value) = headers
-        .get("x-amz-copy-source-if-none-match")
-        .and_then(|v| v.to_str().ok())
-    {
-        if etag_condition_matches(value, source_meta.etag.as_deref()) {
-            return Some(s3_error_response(S3Error::from_code(
-                S3ErrorCode::PreconditionFailed,
-            )));
-        }
-    }
-
-    if let Some(value) = headers
-        .get("x-amz-copy-source-if-modified-since")
+    } else if let Some(value) = headers
+        .get("x-amz-copy-source-if-unmodified-since")
         .and_then(|v| v.to_str().ok())
     {
         if let Some(t) = parse_http_date(value) {
-            if source_meta.last_modified <= t {
+            if source_meta.last_modified > t {
                 return Some(s3_error_response(S3Error::from_code(
                     S3ErrorCode::PreconditionFailed,
                 )));
@@ -3187,12 +3687,18 @@ fn evaluate_copy_preconditions(
         }
     }
 
-    if let Some(value) = headers
-        .get("x-amz-copy-source-if-unmodified-since")
+    if let Some(value) = if_none_match {
+        if etag_condition_matches(value, source_meta.etag.as_deref()) {
+            return Some(s3_error_response(S3Error::from_code(
+                S3ErrorCode::PreconditionFailed,
+            )));
+        }
+    } else if let Some(value) = headers
+        .get("x-amz-copy-source-if-modified-since")
         .and_then(|v| v.to_str().ok())
     {
         if let Some(t) = parse_http_date(value) {
-            if source_meta.last_modified > t {
+            if source_meta.last_modified <= t {
                 return Some(s3_error_response(S3Error::from_code(
                     S3ErrorCode::PreconditionFailed,
                 )));
@@ -3282,7 +3788,7 @@ async fn resolve_encryption_context(
     state: &AppState,
     bucket: &str,
     headers: &HeaderMap,
-) -> Option<myfsio_crypto::encryption::EncryptionContext> {
+) -> Result<Option<myfsio_crypto::encryption::EncryptionContext>, Response> {
     if let Some(alg) = headers
         .get("x-amz-server-side-encryption")
         .and_then(|v| v.to_str().ok())
@@ -3290,34 +3796,55 @@ async fn resolve_encryption_context(
         let algorithm = match alg {
             "AES256" => myfsio_crypto::encryption::SseAlgorithm::Aes256,
             "aws:kms" => myfsio_crypto::encryption::SseAlgorithm::AwsKms,
-            _ => return None,
+            _ => {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Unsupported x-amz-server-side-encryption algorithm",
+                )))
+            }
         };
+        if state.encryption.is_none() {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Server-side encryption is not enabled on this server",
+            )));
+        }
         let kms_key_id = headers
             .get("x-amz-server-side-encryption-aws-kms-key-id")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        return Some(myfsio_crypto::encryption::EncryptionContext {
+        return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
             algorithm,
             kms_key_id,
             customer_key: None,
-        });
+        }));
     }
 
-    if let Some(sse_c_alg) = headers
+    let has_any_sse_c_header = headers
         .get("x-amz-server-side-encryption-customer-algorithm")
-        .and_then(|v| v.to_str().ok())
-    {
-        if sse_c_alg == "AES256" {
-            let customer_key = extract_sse_c_key(headers);
-            if let Some(ck) = customer_key {
-                return Some(myfsio_crypto::encryption::EncryptionContext {
-                    algorithm: myfsio_crypto::encryption::SseAlgorithm::CustomerProvided,
-                    kms_key_id: None,
-                    customer_key: Some(ck),
-                });
-            }
+        .is_some()
+        || headers
+            .get("x-amz-server-side-encryption-customer-key")
+            .is_some()
+        || headers
+            .get("x-amz-server-side-encryption-customer-key-MD5")
+            .is_some();
+    if has_any_sse_c_header {
+        if state.encryption.is_none() {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Server-side encryption is not enabled on this server",
+            )));
         }
-        return None;
+        let customer_key = extract_sse_c_key(headers)?;
+        if let Some(ck) = customer_key {
+            return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
+                algorithm: myfsio_crypto::encryption::SseAlgorithm::CustomerProvided,
+                kms_key_id: None,
+                customer_key: Some(ck),
+            }));
+        }
+        return Ok(None);
     }
 
     if state.encryption.is_some() {
@@ -3325,34 +3852,89 @@ async fn resolve_encryption_context(
             if let Some(enc_val) = &config.encryption {
                 let enc_str = enc_val.to_string();
                 if enc_str.contains("AES256") {
-                    return Some(myfsio_crypto::encryption::EncryptionContext {
+                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
                         algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
                         kms_key_id: None,
                         customer_key: None,
-                    });
+                    }));
                 }
                 if enc_str.contains("aws:kms") {
-                    return Some(myfsio_crypto::encryption::EncryptionContext {
+                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
                         algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
                         kms_key_id: None,
                         customer_key: None,
-                    });
+                    }));
                 }
             }
         }
     }
 
-    None
+    Ok(None)
 }
 
-fn extract_sse_c_key(headers: &HeaderMap) -> Option<Vec<u8>> {
+fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
+    use md5::{Digest, Md5};
 
+    let algo = headers
+        .get("x-amz-server-side-encryption-customer-algorithm")
+        .and_then(|v| v.to_str().ok());
     let key_b64 = headers
         .get("x-amz-server-side-encryption-customer-key")
-        .and_then(|v| v.to_str().ok())?;
-    B64.decode(key_b64).ok()
+        .and_then(|v| v.to_str().ok());
+    let md5_header = headers
+        .get("x-amz-server-side-encryption-customer-key-MD5")
+        .and_then(|v| v.to_str().ok());
+
+    match (algo, key_b64, md5_header) {
+        (None, None, None) => Ok(None),
+        (Some(a), Some(k), Some(m)) => {
+            if !a.eq_ignore_ascii_case("AES256") {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "x-amz-server-side-encryption-customer-algorithm must be AES256",
+                )));
+            }
+            let decoded = B64.decode(k).map_err(|_| {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Invalid x-amz-server-side-encryption-customer-key",
+                ))
+            })?;
+            if decoded.len() != 32 {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "SSE-C customer key must decode to 32 bytes",
+                )));
+            }
+            let mut hasher = Md5::new();
+            hasher.update(&decoded);
+            let computed_md5 = B64.encode(hasher.finalize());
+            if !constant_time_eq(computed_md5.as_bytes(), m.as_bytes()) {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "x-amz-server-side-encryption-customer-key-MD5 mismatch",
+                )));
+            }
+            Ok(Some(decoded))
+        }
+        _ => Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "SSE-C requires algorithm, key, and key-MD5 headers together",
+        ))),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 async fn post_object_form_handler(
@@ -3360,6 +3942,7 @@ async fn post_object_form_handler(
     bucket: &str,
     content_type: &str,
     headers: &HeaderMap,
+    peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
     body: Body,
 ) -> Response {
     use base64::engine::general_purpose::STANDARD as B64;
@@ -3620,7 +4203,15 @@ async fn post_object_form_handler(
         Err(e) => return storage_err_response(e),
     };
 
-    let etag = meta.etag.as_deref().unwrap_or("");
+    let Some(etag) = meta.etag.as_deref() else {
+        tracing::error!(
+            bucket = bucket,
+            key = %object_key,
+            "post-form put_object stored object without etag"
+        );
+        return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
+    };
+    trigger_replication_for_request(state, peer_marker, bucket, &object_key, "write");
     let success_status = fields
         .get("success_action_status")
         .cloned()

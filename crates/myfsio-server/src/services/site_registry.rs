@@ -147,4 +147,15 @@ impl SiteRegistry {
         drop(data);
         self.save();
     }
+
+    pub fn is_peer_inbound_access_key(&self, access_key: &str) -> bool {
+        if access_key.is_empty() {
+            return false;
+        }
+        self.data
+            .read()
+            .peers
+            .iter()
+            .any(|p| p.peer_inbound_access_key.as_deref() == Some(access_key))
+    }
 }

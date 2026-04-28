@@ -56,6 +56,7 @@ pub async fn login_submit(
                 })
                 .unwrap_or_else(|| access_key.to_string());
 
+            session.rotate_id();
             session.write(|s| {
                 s.user_id = Some(access_key.to_string());
                 s.display_name = Some(display);

@@ -1053,6 +1053,11 @@ impl FsStorageBackend {
             })
             .unwrap_or(now);
 
+        let live_tags = self
+            .read_index_entry_sync(bucket_name, key)
+            .and_then(|entry| entry.get("tags").cloned())
+            .unwrap_or(Value::Array(Vec::new()));
+
         let record = serde_json::json!({
             "version_id": version_id,
             "key": key,
@@ -1061,6 +1066,7 @@ impl FsStorageBackend {
             "last_modified": live_last_modified.to_rfc3339(),
             "etag": etag,
             "metadata": metadata,
+            "tags": live_tags,
             "reason": reason,
         });
 
@@ -1321,6 +1327,10 @@ impl FsStorageBackend {
         for (k, v) in &metadata {
             meta_json.insert(k.clone(), Value::String(v.clone()));
         }
+        let tags = self
+            .read_index_entry_sync(bucket_name, key)
+            .and_then(|entry| entry.get("tags").cloned())
+            .unwrap_or(Value::Null);
         let record = serde_json::json!({
             "version_id": live_version,
             "key": key,
@@ -1328,6 +1338,7 @@ impl FsStorageBackend {
             "archived_at": archived_at.to_rfc3339(),
             "etag": etag,
             "metadata": Value::Object(meta_json),
+            "tags": tags,
             "reason": "current",
             "is_delete_marker": false,
         });
@@ -3837,6 +3848,32 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
     async fn delete_object_tags(&self, bucket: &str, key: &str) -> StorageResult<()> {
         self.set_object_tags(bucket, key, &[]).await
+    }
+
+    async fn get_object_version_tags(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<Vec<Tag>> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).read();
+            let (record, _data_path) = self.read_version_record_sync(bucket, key, version_id)?;
+            if record
+                .get("is_delete_marker")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(StorageError::MethodNotAllowed(
+                    "The specified method is not allowed against a delete marker".to_string(),
+                ));
+            }
+            let tags = record
+                .get("tags")
+                .and_then(|v| serde_json::from_value::<Vec<Tag>>(v.clone()).ok())
+                .unwrap_or_default();
+            Ok(tags)
+        })
     }
 }
 
