@@ -1488,14 +1488,29 @@ pub async fn put_object(
         return resp;
     }
     if query.retention.is_some() {
-        let resp = config::put_object_retention(&state, &bucket, &key, &headers, body).await;
+        let resp = config::put_object_retention(
+            &state,
+            &bucket,
+            &key,
+            query.version_id.as_deref(),
+            &headers,
+            body,
+        )
+        .await;
         if resp.status().is_success() {
             trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
         }
         return resp;
     }
     if query.legal_hold.is_some() {
-        let resp = config::put_object_legal_hold(&state, &bucket, &key, body).await;
+        let resp = config::put_object_legal_hold(
+            &state,
+            &bucket,
+            &key,
+            query.version_id.as_deref(),
+            body,
+        )
+        .await;
         if resp.status().is_success() {
             trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
         }
@@ -1788,10 +1803,22 @@ pub async fn get_object(
         return config::get_object_acl(&state, &bucket, &key).await;
     }
     if query.retention.is_some() {
-        return config::get_object_retention(&state, &bucket, &key).await;
+        return config::get_object_retention(
+            &state,
+            &bucket,
+            &key,
+            query.version_id.as_deref(),
+        )
+        .await;
     }
     if query.legal_hold.is_some() {
-        return config::get_object_legal_hold(&state, &bucket, &key).await;
+        return config::get_object_legal_hold(
+            &state,
+            &bucket,
+            &key,
+            query.version_id.as_deref(),
+        )
+        .await;
     }
     if query.attributes.is_some() {
         return object_attributes_handler(&state, &bucket, &key, &headers).await;
@@ -2929,71 +2956,6 @@ async fn copy_object_handler(
         ));
     }
 
-    let source_metadata_existing = match src_version_id.as_deref() {
-        Some(version_id) => {
-            match state
-                .storage
-                .get_object_version_metadata(&src_bucket, &src_key, version_id)
-                .await
-            {
-                Ok(metadata) => metadata,
-                Err(e) => return storage_err_response(e),
-            }
-        }
-        None => match state
-            .storage
-            .get_object_metadata(&src_bucket, &src_key)
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => return storage_err_response(e),
-        },
-    };
-
-    let dst_metadata = if replace_metadata {
-        let mut m: HashMap<String, String> = HashMap::new();
-        for (request_header, metadata_key, _) in internal_header_pairs() {
-            if let Some(value) = headers.get(*request_header).and_then(|v| v.to_str().ok()) {
-                if *request_header == "content-encoding" {
-                    if let Some(decoded_encoding) = decoded_content_encoding(value) {
-                        m.insert((*metadata_key).to_string(), decoded_encoding);
-                    }
-                } else {
-                    m.insert((*metadata_key).to_string(), value.to_string());
-                }
-            }
-        }
-        let content_type = guessed_content_type(
-            dst_key,
-            headers.get("content-type").and_then(|v| v.to_str().ok()),
-        );
-        m.insert("__content_type__".to_string(), content_type);
-        for (name, value) in headers.iter() {
-            let name_str = name.as_str();
-            if let Some(meta_key) = name_str.strip_prefix("x-amz-meta-") {
-                if let Ok(val) = value.to_str() {
-                    m.insert(meta_key.to_string(), val.to_string());
-                }
-            }
-        }
-        if let Some(value) = headers
-            .get("x-amz-storage-class")
-            .and_then(|v| v.to_str().ok())
-        {
-            let upper = value.to_ascii_uppercase();
-            if !VALID_STORAGE_CLASSES.contains(&upper.as_str()) {
-                return s3_error_response(S3Error::new(
-                    S3ErrorCode::InvalidArgument,
-                    "Invalid x-amz-storage-class",
-                ));
-            }
-            m.insert("__storage_class__".to_string(), upper);
-        }
-        m
-    } else {
-        source_metadata_existing.clone()
-    };
-
     let resolved_tags: Option<Vec<myfsio_common::types::Tag>> = if replace_tagging {
         let parsed = match headers
             .get("x-amz-tagging")
@@ -3030,78 +2992,247 @@ async fn copy_object_handler(
         }
     };
 
-    let (_meta, reader) = match src_version_id.as_deref() {
+    let dst_enc_ctx = match resolve_encryption_context(state, dst_bucket, headers).await {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+
+    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
+    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
+        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+    }
+
+    let src_snap = tmp_dir.join(format!("copy-src-{}", uuid::Uuid::new_v4()));
+    let snap_meta = match src_version_id.as_deref() {
         Some(version_id) => {
-            match state
+            state
                 .storage
-                .get_object_version(&src_bucket, &src_key, version_id)
+                .snapshot_object_version_to_link(&src_bucket, &src_key, version_id, &src_snap)
                 .await
-            {
-                Ok(result) => result,
-                Err(e) => return storage_err_response(e),
+        }
+        None => {
+            state
+                .storage
+                .snapshot_object_to_link(&src_bucket, &src_key, &src_snap)
+                .await
+        }
+    };
+    let snap_meta = match snap_meta {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&src_snap).await;
+            return storage_err_response(e);
+        }
+    };
+
+    let snap_internal = &snap_meta.internal_metadata;
+
+    let dst_metadata = if replace_metadata {
+        let mut m: HashMap<String, String> = HashMap::new();
+        for (request_header, metadata_key, _) in internal_header_pairs() {
+            if let Some(value) = headers.get(*request_header).and_then(|v| v.to_str().ok()) {
+                if *request_header == "content-encoding" {
+                    if let Some(decoded_encoding) = decoded_content_encoding(value) {
+                        m.insert((*metadata_key).to_string(), decoded_encoding);
+                    }
+                } else {
+                    m.insert((*metadata_key).to_string(), value.to_string());
+                }
             }
         }
-        None => match state.storage.get_object(&src_bucket, &src_key).await {
-            Ok(result) => result,
-            Err(e) => return storage_err_response(e),
-        },
+        let content_type = guessed_content_type(
+            dst_key,
+            headers.get("content-type").and_then(|v| v.to_str().ok()),
+        );
+        m.insert("__content_type__".to_string(), content_type);
+        for (name, value) in headers.iter() {
+            let name_str = name.as_str();
+            if let Some(meta_key) = name_str.strip_prefix("x-amz-meta-") {
+                if let Ok(val) = value.to_str() {
+                    m.insert(meta_key.to_string(), val.to_string());
+                }
+            }
+        }
+        if let Some(value) = headers
+            .get("x-amz-storage-class")
+            .and_then(|v| v.to_str().ok())
+        {
+            let upper = value.to_ascii_uppercase();
+            if !VALID_STORAGE_CLASSES.contains(&upper.as_str()) {
+                let _ = tokio::fs::remove_file(&src_snap).await;
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Invalid x-amz-storage-class",
+                ));
+            }
+            m.insert("__storage_class__".to_string(), upper);
+        }
+        m
+    } else {
+        let mut m = snap_internal.clone();
+        myfsio_crypto::encryption::EncryptionMetadata::clean_metadata(&mut m);
+        m
     };
+
+    let src_enc_info =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(snap_internal);
+
+    let plaintext_path = if let Some(enc_info) = src_enc_info.as_ref() {
+        let Some(enc_svc) = state.encryption.as_ref() else {
+            let _ = tokio::fs::remove_file(&src_snap).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "Source object is encrypted but encryption service is disabled",
+            ));
+        };
+        let customer_key = match extract_copy_source_sse_c_key(headers) {
+            Ok(k) => k,
+            Err(resp) => {
+                let _ = tokio::fs::remove_file(&src_snap).await;
+                return resp;
+            }
+        };
+        let dec_tmp = tmp_dir.join(format!("copy-dec-{}", uuid::Uuid::new_v4()));
+        if let Err(e) = enc_svc
+            .decrypt_object(&src_snap, &dec_tmp, enc_info, customer_key.as_deref())
+            .await
+        {
+            let _ = tokio::fs::remove_file(&src_snap).await;
+            let _ = tokio::fs::remove_file(&dec_tmp).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                format!("Source decryption failed: {}", e),
+            ));
+        }
+        let _ = tokio::fs::remove_file(&src_snap).await;
+        dec_tmp
+    } else {
+        src_snap
+    };
+
+    let mut dst_metadata = dst_metadata;
+    strip_storage_managed_keys(&mut dst_metadata);
+
+    let (publish_path, publish_metadata, plaintext_etag_override) =
+        if let Some(enc_ctx) = dst_enc_ctx {
+            let Some(enc_svc) = state.encryption.as_ref() else {
+                let _ = tokio::fs::remove_file(&plaintext_path).await;
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InternalError,
+                    "Encryption requested but encryption service is disabled",
+                ));
+            };
+            let plaintext_md5 = if enc_ctx.algorithm
+                == myfsio_crypto::encryption::SseAlgorithm::Aes256
+            {
+                match compute_plaintext_md5(&plaintext_path).await {
+                    Ok(md5) => Some(md5),
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&plaintext_path).await;
+                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                    }
+                }
+            } else {
+                None
+            };
+            let enc_tmp = tmp_dir.join(format!("copy-enc-{}", uuid::Uuid::new_v4()));
+            let enc_meta = match enc_svc
+                .encrypt_object(&plaintext_path, &enc_tmp, &enc_ctx)
+                .await
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&plaintext_path).await;
+                    let _ = tokio::fs::remove_file(&enc_tmp).await;
+                    return s3_error_response(S3Error::new(
+                        S3ErrorCode::InternalError,
+                        format!("Destination encryption failed: {}", e),
+                    ));
+                }
+            };
+            let _ = tokio::fs::remove_file(&plaintext_path).await;
+            let mut merged = dst_metadata;
+            for (k, v) in enc_meta.to_metadata_map() {
+                merged.insert(k, v);
+            }
+            (enc_tmp, merged, plaintext_md5)
+        } else {
+            (plaintext_path, dst_metadata, None)
+        };
+
+    let publish_file = match tokio::fs::File::open(&publish_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&publish_path).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    };
+    let reader: myfsio_storage::traits::AsyncReadStream = Box::pin(publish_file);
 
     let copy_result = state
         .storage
-        .put_object(dst_bucket, dst_key, reader, Some(dst_metadata))
+        .put_object_with_etag_override(
+            dst_bucket,
+            dst_key,
+            reader,
+            Some(publish_metadata),
+            plaintext_etag_override,
+        )
         .await;
 
-    match copy_result {
-        Ok(meta) => {
-            if let Some(tags) = resolved_tags.as_deref() {
-                if let Err(e) = state
-                    .storage
-                    .set_object_tags(dst_bucket, dst_key, tags)
-                    .await
-                {
-                    return storage_err_response(e);
-                }
-            }
-            let Some(etag) = meta.etag.as_deref() else {
-                tracing::error!(
-                    src_bucket = %src_bucket,
-                    src_key = %src_key,
-                    dst_bucket = dst_bucket,
-                    dst_key = dst_key,
-                    "copy_object stored object without etag"
-                );
-                return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
-            };
-            let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
-            let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
-            trigger_replication_for_request(state, peer_marker, dst_bucket, dst_key, "write");
+    let _ = tokio::fs::remove_file(&publish_path).await;
 
-            let mut resp_headers = HeaderMap::new();
-            resp_headers.insert("content-type", "application/xml".parse().unwrap());
-            if let Some(ref vid) = meta.version_id {
-                if let Ok(value) = vid.parse() {
-                    resp_headers.insert("x-amz-version-id", value);
-                }
-            }
-            if let Some(ref src_vid) = src_version_id {
-                if let Ok(value) = src_vid.parse() {
-                    resp_headers.insert("x-amz-copy-source-version-id", value);
-                }
-            }
-            let stored = state
-                .storage
-                .get_object_metadata(dst_bucket, dst_key)
-                .await
-                .unwrap_or_default();
-            apply_stored_response_headers(&mut resp_headers, &stored);
-            apply_stored_checksum_headers(&mut resp_headers, &stored);
-            apply_stored_encryption_headers(&mut resp_headers, &stored, headers);
+    let meta = match copy_result {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
+    };
 
-            (StatusCode::OK, resp_headers, xml).into_response()
+    if let Some(tags) = resolved_tags.as_deref() {
+        if let Err(e) = state
+            .storage
+            .set_object_tags(dst_bucket, dst_key, tags)
+            .await
+        {
+            return storage_err_response(e);
         }
-        Err(e) => storage_err_response(e),
     }
+
+    let Some(etag) = meta.etag.as_deref() else {
+        tracing::error!(
+            src_bucket = %src_bucket,
+            src_key = %src_key,
+            dst_bucket = dst_bucket,
+            dst_key = dst_key,
+            "copy_object stored object without etag"
+        );
+        return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
+    };
+    let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
+    let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
+    trigger_replication_for_request(state, peer_marker, dst_bucket, dst_key, "write");
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert("content-type", "application/xml".parse().unwrap());
+    if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            resp_headers.insert("x-amz-version-id", value);
+        }
+    }
+    if let Some(ref src_vid) = src_version_id {
+        if let Ok(value) = src_vid.parse() {
+            resp_headers.insert("x-amz-copy-source-version-id", value);
+        }
+    }
+    let stored = state
+        .storage
+        .get_object_metadata(dst_bucket, dst_key)
+        .await
+        .unwrap_or_default();
+    apply_stored_response_headers(&mut resp_headers, &stored);
+    apply_stored_checksum_headers(&mut resp_headers, &stored);
+    apply_stored_encryption_headers(&mut resp_headers, &stored, headers);
+
+    (StatusCode::OK, resp_headers, xml).into_response()
 }
 
 async fn delete_objects_handler(
@@ -3755,6 +3886,10 @@ fn xml_escape(value: &str) -> String {
 fn parse_range(range_str: &str, total_size: u64) -> Option<(u64, u64)> {
     let range_spec = range_str.strip_prefix("bytes=")?;
 
+    if total_size == 0 {
+        return None;
+    }
+
     if let Some(suffix) = range_spec.strip_prefix('-') {
         let suffix_len: u64 = suffix.parse().ok()?;
         if suffix_len == 0 || suffix_len > total_size {
@@ -3922,6 +4057,94 @@ fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
         _ => Err(s3_error_response(S3Error::new(
             S3ErrorCode::InvalidArgument,
             "SSE-C requires algorithm, key, and key-MD5 headers together",
+        ))),
+    }
+}
+
+async fn compute_plaintext_md5(path: &std::path::Path) -> std::io::Result<String> {
+    use md5::{Digest, Md5};
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(&path)?;
+        let mut hasher = Md5::new();
+        let mut buf = [0u8; 65_536];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    })
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+}
+
+const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
+    "__etag__",
+    "__size__",
+    "__last_modified__",
+    "__version_id__",
+];
+
+fn strip_storage_managed_keys(metadata: &mut HashMap<String, String>) {
+    for k in STORAGE_MANAGED_METADATA_KEYS {
+        metadata.remove(*k);
+    }
+}
+
+fn extract_copy_source_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use md5::{Digest, Md5};
+
+    let algo = headers
+        .get("x-amz-copy-source-server-side-encryption-customer-algorithm")
+        .and_then(|v| v.to_str().ok());
+    let key_b64 = headers
+        .get("x-amz-copy-source-server-side-encryption-customer-key")
+        .and_then(|v| v.to_str().ok());
+    let md5_header = headers
+        .get("x-amz-copy-source-server-side-encryption-customer-key-MD5")
+        .and_then(|v| v.to_str().ok());
+
+    match (algo, key_b64, md5_header) {
+        (None, None, None) => Ok(None),
+        (Some(a), Some(k), Some(m)) => {
+            if !a.eq_ignore_ascii_case("AES256") {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "x-amz-copy-source-server-side-encryption-customer-algorithm must be AES256",
+                )));
+            }
+            let decoded = B64.decode(k).map_err(|_| {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Invalid x-amz-copy-source-server-side-encryption-customer-key",
+                ))
+            })?;
+            if decoded.len() != 32 {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Copy-source SSE-C customer key must decode to 32 bytes",
+                )));
+            }
+            let mut hasher = Md5::new();
+            hasher.update(&decoded);
+            let computed_md5 = B64.encode(hasher.finalize());
+            if !constant_time_eq(computed_md5.as_bytes(), m.as_bytes()) {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "x-amz-copy-source-server-side-encryption-customer-key-MD5 mismatch",
+                )));
+            }
+            Ok(Some(decoded))
+        }
+        _ => Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Copy-source SSE-C requires algorithm, key, and key-MD5 headers together",
         ))),
     }
 }

@@ -23,6 +23,13 @@ pub const META_KEY_CORRUPTION_DETAIL: &str = "__corruption_detail__";
 pub const META_KEY_QUARANTINE_PATH: &str = "__quarantine_path__";
 pub const META_KEY_PART_SIZES: &str = "__part_sizes__";
 
+const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
+    "__etag__",
+    "__size__",
+    "__last_modified__",
+    "__version_id__",
+];
+
 pub fn encode_part_sizes(sizes: &[u64]) -> String {
     let mut out = String::with_capacity(sizes.len() * 8);
     for (i, s) in sizes.iter().enumerate() {
@@ -820,6 +827,81 @@ impl FsStorageBackend {
         })
     }
 
+    pub async fn put_object_with_etag_override(
+        &self,
+        bucket: &str,
+        key: &str,
+        stream: crate::traits::AsyncReadStream,
+        metadata: Option<HashMap<String, String>>,
+        etag_override: Option<String>,
+    ) -> StorageResult<ObjectMeta> {
+        self.validate_key(key)?;
+
+        let tmp_dir = self.tmp_dir();
+        tokio::fs::create_dir_all(&tmp_dir)
+            .await
+            .map_err(StorageError::Io)?;
+        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+
+        let chunk_size = self.stream_chunk_size;
+        let drain_tmp = tmp_path.clone();
+
+        let drain_result = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
+            use std::io::{BufWriter, Read, Write};
+            let mut reader = tokio_util::io::SyncIoBridge::new(stream);
+            let file = std::fs::File::create(&drain_tmp).map_err(StorageError::Io)?;
+            let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
+            let mut hasher = Md5::new();
+            let mut total: u64 = 0;
+            let mut buf = vec![0u8; chunk_size];
+            loop {
+                let n = reader.read(&mut buf).map_err(StorageError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
+                total += n as u64;
+            }
+            writer.flush().map_err(StorageError::Io)?;
+            Ok((format!("{:x}", hasher.finalize()), total))
+        })
+        .await;
+
+        let (etag, total_size) = match drain_result {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(e);
+            }
+            Err(join_err) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    join_err,
+                )));
+            }
+        };
+
+        let result = run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.finalize_put_sync(
+                bucket,
+                key,
+                &tmp_path,
+                etag,
+                total_size,
+                metadata,
+                etag_override,
+            )
+        });
+
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+        }
+        result
+    }
+
     fn compute_etag_sync(path: &Path) -> std::io::Result<String> {
         myfsio_crypto::hashing::md5_file(path)
     }
@@ -1235,11 +1317,15 @@ impl FsStorageBackend {
 
 
     fn validate_version_id(bucket_name: &str, key: &str, version_id: &str) -> StorageResult<()> {
-        if version_id.is_empty()
-            || version_id.contains('/')
-            || version_id.contains('\\')
-            || version_id.contains("..")
-        {
+        const MAX_VERSION_ID_LEN: usize = 128;
+        let invalid = version_id.is_empty()
+            || version_id.len() > MAX_VERSION_ID_LEN
+            || version_id == "."
+            || version_id == ".."
+            || !version_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+        if invalid {
             return Err(StorageError::VersionNotFound {
                 bucket: bucket_name.to_string(),
                 key: key.to_string(),
@@ -1952,7 +2038,9 @@ impl FsStorageBackend {
         etag: String,
         new_size: u64,
         metadata: Option<HashMap<String, String>>,
+        etag_override: Option<String>,
     ) -> StorageResult<ObjectMeta> {
+        let etag = etag_override.unwrap_or(etag);
         self.require_bucket(bucket_name)?;
         let destination = self.object_live_path(bucket_name, key);
         if let Some(parent) = destination.parent() {
@@ -2047,17 +2135,19 @@ impl FsStorageBackend {
         };
 
         let mut internal_meta = HashMap::new();
+        if let Some(ref user_meta) = metadata {
+            for (k, v) in user_meta {
+                if STORAGE_MANAGED_METADATA_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
+                internal_meta.insert(k.clone(), v.clone());
+            }
+        }
         internal_meta.insert("__etag__".to_string(), etag.clone());
         internal_meta.insert("__size__".to_string(), new_size.to_string());
         internal_meta.insert("__last_modified__".to_string(), mtime.to_string());
         if let Some(ref vid) = new_version_id {
             internal_meta.insert("__version_id__".to_string(), vid.clone());
-        }
-
-        if let Some(ref user_meta) = metadata {
-            for (k, v) in user_meta {
-                internal_meta.insert(k.clone(), v.clone());
-            }
         }
 
         self.write_metadata_sync(bucket_name, key, &internal_meta)
@@ -2183,70 +2273,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         stream: AsyncReadStream,
         metadata: Option<HashMap<String, String>>,
     ) -> StorageResult<ObjectMeta> {
-        self.validate_key(key)?;
-
-        let tmp_dir = self.tmp_dir();
-        tokio::fs::create_dir_all(&tmp_dir)
+        self.put_object_with_etag_override(bucket, key, stream, metadata, None)
             .await
-            .map_err(StorageError::Io)?;
-        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
-
-        let chunk_size = self.stream_chunk_size;
-        let drain_tmp = tmp_path.clone();
-
-        // Drain request body + MD5 on a blocking thread: one runtime crossing
-        // for the whole transfer, not one per 256 KiB chunk.
-        let drain_result = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
-            use std::io::{BufWriter, Read, Write};
-            let mut reader = tokio_util::io::SyncIoBridge::new(stream);
-            let file = std::fs::File::create(&drain_tmp).map_err(StorageError::Io)?;
-            let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
-            let mut hasher = Md5::new();
-            let mut total: u64 = 0;
-            let mut buf = vec![0u8; chunk_size];
-            loop {
-                let n = reader.read(&mut buf).map_err(StorageError::Io)?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
-                total += n as u64;
-            }
-            writer.flush().map_err(StorageError::Io)?;
-            Ok((format!("{:x}", hasher.finalize()), total))
-        })
-        .await;
-
-        let (etag, total_size) = match drain_result {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(e);
-            }
-            Err(join_err) => {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    join_err,
-                )));
-            }
-        };
-
-        // Commit body+metadata atomically under the per-key write lock. The
-        // lock is acquired *inside* run_blocking so the wait happens under
-        // block_in_place — if a long-running GET holds the read side, the
-        // runtime can migrate other async tasks off this worker instead of
-        // parking it.
-        let result = run_blocking(|| {
-            let _guard = self.get_object_lock(bucket, key).write();
-            self.finalize_put_sync(bucket, key, &tmp_path, etag, total_size, metadata)
-        });
-
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-        }
-        result
     }
 
     async fn get_object(
@@ -3128,6 +3156,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 etag,
                 new_size,
                 Some(src_metadata),
+                None,
             )
         });
 
@@ -3164,6 +3193,70 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             entry.insert("metadata".to_string(), Value::Object(meta_map));
             self.write_index_entry_sync(bucket, key, &entry)
                 .map_err(StorageError::Io)?;
+            self.invalidate_bucket_caches(bucket);
+            Ok(())
+        })
+    }
+
+    async fn put_object_version_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        metadata: &HashMap<String, String>,
+    ) -> StorageResult<()> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.require_bucket(bucket)?;
+            self.validate_key(key)?;
+            Self::validate_version_id(bucket, key, version_id)?;
+
+            if self
+                .try_live_version_record_sync(bucket, key, version_id)
+                .is_some()
+            {
+                let mut entry = self.read_index_entry_sync(bucket, key).unwrap_or_default();
+                let meta_map: serde_json::Map<String, Value> = metadata
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                entry.insert("metadata".to_string(), Value::Object(meta_map));
+                self.write_index_entry_sync(bucket, key, &entry)
+                    .map_err(StorageError::Io)?;
+                self.invalidate_bucket_caches(bucket);
+                return Ok(());
+            }
+
+            let (manifest_path, _data_path) =
+                self.version_record_paths(bucket, key, version_id);
+            if !manifest_path.is_file() {
+                return Err(StorageError::VersionNotFound {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    version_id: version_id.to_string(),
+                });
+            }
+            let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+            let mut record: Value =
+                serde_json::from_str(&content).map_err(StorageError::Json)?;
+            let meta_map: serde_json::Map<String, Value> = metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            match record {
+                Value::Object(ref mut map) => {
+                    map.insert("metadata".to_string(), Value::Object(meta_map));
+                }
+                _ => {
+                    return Err(StorageError::Internal(
+                        "Invalid version manifest".to_string(),
+                    ));
+                }
+            }
+            let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
+            let tmp = manifest_path.with_extension("json.tmp");
+            std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
+            std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
             self.invalidate_bucket_caches(bucket);
             Ok(())
         })
@@ -3554,6 +3647,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 etag,
                 total_size,
                 Some(metadata),
+                None,
             )
         });
 

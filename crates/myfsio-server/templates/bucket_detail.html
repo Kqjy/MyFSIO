@@ -1024,7 +1024,8 @@
                   <strong>Website hosting is enabled</strong>
                   <p class="mb-0 small">
                     Index: <code>{{ website_config.index_document }}</code>
-                    {% if website_config.error_document %}<br>Error: <code>{{ website_config.error_document }}</code>{% endif %}
+                    {% set error_doc = website_config.error_document | default(value="") %}
+                    {% if error_doc %}<br>Error: <code>{{ error_doc }}</code>{% endif %}
                   </p>
                 </div>
               </div>
@@ -1079,7 +1080,7 @@
                 <div class="mb-4">
                   <label for="error_document" class="form-label fw-medium">Error Document</label>
                   <input type="text" class="form-control" id="error_document" name="error_document"
-                         value="{% if website_config %}{{ website_config.error_document }}{% else %}{{ "" }}{% endif %}"
+                         value="{% if website_config %}{{ website_config.error_document | default(value="") }}{% else %}{{ "" }}{% endif %}"
                          placeholder="error.html">
                   <div class="form-text">Optional. The page served for 404 errors.</div>
                 </div>

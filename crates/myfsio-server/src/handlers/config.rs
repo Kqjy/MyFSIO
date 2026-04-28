@@ -1120,6 +1120,7 @@ pub async fn list_object_versions(
         size: u64,
         storage_class: String,
         is_delete_marker: bool,
+        is_live: bool,
     }
 
     let mut entries: Vec<Entry> = Vec::with_capacity(live_objects.len() + archived_versions.len());
@@ -1135,6 +1136,7 @@ pub async fn list_object_versions(
                 .clone()
                 .unwrap_or_else(|| "STANDARD".to_string()),
             is_delete_marker: false,
+            is_live: true,
         });
     }
     for version in &archived_versions {
@@ -1146,12 +1148,14 @@ pub async fn list_object_versions(
             size: version.size,
             storage_class: "STANDARD".to_string(),
             is_delete_marker: version.is_delete_marker,
+            is_live: false,
         });
     }
 
     entries.sort_by(|a, b| {
         a.key
             .cmp(&b.key)
+            .then_with(|| b.is_live.cmp(&a.is_live))
             .then_with(|| b.last_modified.cmp(&a.last_modified))
             .then_with(|| a.version_id.cmp(&b.version_id))
     });
@@ -1447,34 +1451,50 @@ pub async fn put_object_acl(
     }
 }
 
-pub async fn get_object_retention(state: &AppState, bucket: &str, key: &str) -> Response {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            let metadata = match state.storage.get_object_metadata(bucket, key).await {
-                Ok(metadata) => metadata,
-                Err(err) => return storage_err(err),
-            };
-            if let Some(retention) = retention_from_metadata(&metadata) {
-                let xml = format!(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                     <Retention xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                     <Mode>{}</Mode><RetainUntilDate>{}</RetainUntilDate></Retention>",
-                    match retention.mode {
-                        RetentionMode::GOVERNANCE => "GOVERNANCE",
-                        RetentionMode::COMPLIANCE => "COMPLIANCE",
-                    },
-                    retention.retain_until_date.format("%Y-%m-%dT%H:%M:%S.000Z"),
-                );
-                xml_response(StatusCode::OK, xml)
-            } else {
-                custom_xml_error(
-                    StatusCode::NOT_FOUND,
-                    "NoSuchObjectLockConfiguration",
-                    "No retention policy",
-                )
-            }
+pub async fn get_object_retention(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Response {
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
+    }
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
         }
-        Err(e) => storage_err(e),
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let metadata = match metadata_res {
+        Ok(m) => m,
+        Err(err) => return storage_err(err),
+    };
+    if let Some(retention) = retention_from_metadata(&metadata) {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <Retention xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Mode>{}</Mode><RetainUntilDate>{}</RetainUntilDate></Retention>",
+            match retention.mode {
+                RetentionMode::GOVERNANCE => "GOVERNANCE",
+                RetentionMode::COMPLIANCE => "COMPLIANCE",
+            },
+            retention.retain_until_date.format("%Y-%m-%dT%H:%M:%S.000Z"),
+        );
+        xml_response(StatusCode::OK, xml)
+    } else {
+        custom_xml_error(
+            StatusCode::NOT_FOUND,
+            "NoSuchObjectLockConfiguration",
+            "No retention policy",
+        )
     }
 }
 
@@ -1482,12 +1502,16 @@ pub async fn put_object_retention(
     state: &AppState,
     bucket: &str,
     key: &str,
+    version_id: Option<&str>,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {}
-        Err(e) => return storage_err(e),
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
     }
 
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
@@ -1547,8 +1571,17 @@ pub async fn put_object_retention(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
-        Ok(metadata) => metadata,
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
+        }
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let mut metadata = match metadata_res {
+        Ok(m) => m,
         Err(err) => return storage_err(err),
     };
     if let Err(message) = ensure_retention_mutable(&metadata, bypass_governance) {
@@ -1563,49 +1596,79 @@ pub async fn put_object_retention(
     ) {
         return custom_xml_error(StatusCode::BAD_REQUEST, "InvalidArgument", &message);
     }
-    match state
-        .storage
-        .put_object_metadata(bucket, key, &metadata)
-        .await
-    {
+    let put_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .put_object_version_metadata(bucket, key, vid, &metadata)
+                .await
+        }
+        None => {
+            state
+                .storage
+                .put_object_metadata(bucket, key, &metadata)
+                .await
+        }
+    };
+    match put_res {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => storage_err(err),
     }
 }
 
-pub async fn get_object_legal_hold(state: &AppState, bucket: &str, key: &str) -> Response {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {
-            let metadata = match state.storage.get_object_metadata(bucket, key).await {
-                Ok(metadata) => metadata,
-                Err(err) => return storage_err(err),
-            };
-            let status = if get_legal_hold(&metadata) {
-                "ON"
-            } else {
-                "OFF"
-            };
-            let xml = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                 <LegalHold xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                 <Status>{}</Status></LegalHold>",
-                status
-            );
-            xml_response(StatusCode::OK, xml)
-        }
-        Err(e) => storage_err(e),
+pub async fn get_object_legal_hold(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+) -> Response {
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
     }
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
+        }
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let metadata = match metadata_res {
+        Ok(m) => m,
+        Err(err) => return storage_err(err),
+    };
+    let status = if get_legal_hold(&metadata) {
+        "ON"
+    } else {
+        "OFF"
+    };
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <LegalHold xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Status>{}</Status></LegalHold>",
+        status
+    );
+    xml_response(StatusCode::OK, xml)
 }
 
 pub async fn put_object_legal_hold(
     state: &AppState,
     bucket: &str,
     key: &str,
+    version_id: Option<&str>,
     body: Body,
 ) -> Response {
-    match state.storage.head_object(bucket, key).await {
-        Ok(_) => {}
-        Err(e) => return storage_err(e),
+    let head_res = match version_id {
+        Some(vid) => state.storage.head_object_version(bucket, key, vid).await,
+        None => state.storage.head_object(bucket, key).await,
+    };
+    if let Err(e) = head_res {
+        return storage_err(e);
     }
 
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
@@ -1641,16 +1704,35 @@ pub async fn put_object_legal_hold(
             )
         }
     };
-    let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
-        Ok(metadata) => metadata,
+    let metadata_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .get_object_version_metadata(bucket, key, vid)
+                .await
+        }
+        None => state.storage.get_object_metadata(bucket, key).await,
+    };
+    let mut metadata = match metadata_res {
+        Ok(m) => m,
         Err(err) => return storage_err(err),
     };
     set_legal_hold(&mut metadata, enabled);
-    match state
-        .storage
-        .put_object_metadata(bucket, key, &metadata)
-        .await
-    {
+    let put_res = match version_id {
+        Some(vid) => {
+            state
+                .storage
+                .put_object_version_metadata(bucket, key, vid, &metadata)
+                .await
+        }
+        None => {
+            state
+                .storage
+                .put_object_metadata(bucket, key, &metadata)
+                .await
+        }
+    };
+    match put_res {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => storage_err(err),
     }

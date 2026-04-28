@@ -1295,6 +1295,22 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
         .unwrap_or("UNSIGNED-PAYLOAD");
 
     let signed_headers: Vec<&str> = signed_headers_str.split(';').collect();
+    let signed_lc: Vec<String> = signed_headers
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    if !signed_lc.iter().any(|h| h == "host") {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "SignedHeaders must include host",
+        ));
+    }
+    if !signed_lc.iter().any(|h| h == "x-amz-date" || h == "date") {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "SignedHeaders must include x-amz-date or date",
+        ));
+    }
     let header_values: Vec<(String, String)> = signed_headers
         .iter()
         .map(|&name| {
@@ -1451,6 +1467,16 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     let payload_hash = "UNSIGNED-PAYLOAD";
 
     let signed_headers: Vec<&str> = signed_headers_str.split(';').collect();
+    let signed_lc: Vec<String> = signed_headers
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    if !signed_lc.iter().any(|h| h == "host") {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "X-Amz-SignedHeaders must include host",
+        ));
+    }
     let header_values: Vec<(String, String)> = signed_headers
         .iter()
         .map(|&name| {
