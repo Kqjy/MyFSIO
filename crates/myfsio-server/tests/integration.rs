@@ -59,6 +59,7 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
         multipart_min_part_size: 1,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -140,6 +141,7 @@ fn test_app_and_state() -> (
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
         multipart_min_part_size: 1,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -211,6 +213,7 @@ fn test_app_with_rate_limits(
         ratelimit_head_ops: default,
         ratelimit_admin: admin,
         ui_enabled: false,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -356,6 +359,7 @@ fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         ui_enabled: true,
         templates_dir: manifest_dir.join("templates"),
         static_dir: manifest_dir.join("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     (myfsio_server::state::AppState::new(config), tmp)
@@ -516,6 +520,7 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     (myfsio_server::state::AppState::new(config), tmp)
@@ -1348,6 +1353,7 @@ async fn test_ui_metrics_history_endpoint_reads_system_history() {
         ui_enabled: true,
         templates_dir: manifest_dir.join("templates"),
         static_dir: manifest_dir.join("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -4796,6 +4802,7 @@ async fn test_non_admin_authorization_enforced() {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -4881,6 +4888,7 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new_with_encryption(config).await;
@@ -8381,6 +8389,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         static_dir: std::path::PathBuf::from("static"),
         multipart_min_part_size: 1,
         allow_internal_endpoints: true,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -8432,17 +8441,57 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
     assert_eq!(registered["peer_inbound_access_key"], PEER_AK);
     assert_eq!(registered["connection_id"], "conn-to-peer");
 
+    state
+        .iam
+        .mark_access_key_as_peer(PEER_AK, "peer-site")
+        .expect("mark PEER_AK as peer credential");
+
+    fn sigv4_get(uri: &str, ak: &str, sk: &str) -> Request<Body> {
+        use myfsio_auth::sigv4::{
+            build_string_to_sign, compute_signature, derive_signing_key, sha256_hex,
+        };
+        let now = chrono::Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let region = "us-east-1";
+        let service = "s3";
+        let payload_hash = sha256_hex(b"");
+        let host = "127.0.0.1";
+        let (path, query) = match uri.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (uri, ""),
+        };
+        let canonical_headers = format!(
+            "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+            host, payload_hash, amz_date
+        );
+        let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+        let canonical_request = format!(
+            "GET\n{}\n{}\n{}\n{}\n{}",
+            path, query, canonical_headers, signed_headers, payload_hash
+        );
+        let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
+        let sts = build_string_to_sign(&amz_date, &credential_scope, &canonical_request);
+        let signing_key = derive_signing_key(sk, &date_stamp, region, service);
+        let signature = compute_signature(&signing_key, &sts);
+        let authorization = format!(
+            "AWS4-HMAC-SHA256 Credential={}/{},SignedHeaders={},Signature={}",
+            ak, credential_scope, signed_headers, signature
+        );
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("host", host)
+            .header("x-amz-content-sha256", payload_hash)
+            .header("x-amz-date", amz_date)
+            .header("authorization", authorization)
+            .body(Body::empty())
+            .unwrap()
+    }
+
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/admin/cluster/overview")
-                .header("x-access-key", PEER_AK)
-                .header("x-secret-key", PEER_SK)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(sigv4_get("/admin/cluster/overview", PEER_AK, PEER_SK))
         .await
         .unwrap();
     assert_eq!(

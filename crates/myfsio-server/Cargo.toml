@@ -39,6 +39,7 @@ hex = { workspace = true }
 duckdb = { workspace = true }
 roxmltree = "0.20"
 parking_lot = { workspace = true }
+lru = { workspace = true }
 regex = "1"
 multer = "3"
 reqwest = { workspace = true }

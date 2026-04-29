@@ -1,11 +1,17 @@
 use chrono::{DateTime, Utc};
-use myfsio_common::types::Principal;
+use myfsio_common::types::{Principal, PrincipalKind};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerMigrationOutcome {
+    Migrated,
+    AlreadyPeer,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IamConfig {
@@ -31,6 +37,8 @@ pub struct IamUser {
     pub access_keys: Vec<AccessKey>,
     #[serde(default)]
     pub policies: Vec<IamPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_site_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +61,8 @@ struct RawIamUser {
     pub access_keys: Vec<AccessKey>,
     #[serde(default)]
     pub policies: Vec<IamPolicy>,
+    #[serde(default)]
+    pub peer_site_id: Option<String>,
 }
 
 impl RawIamUser {
@@ -89,6 +99,7 @@ impl RawIamUser {
             expires_at: self.expires_at,
             access_keys,
             policies,
+            peer_site_id: self.peer_site_id,
         }
     }
 }
@@ -373,16 +384,143 @@ impl IamService {
             }
         }
 
+        if let Some(site_id) = user.peer_site_id.as_deref() {
+            return Some(Principal::peer(
+                access_key.to_string(),
+                user.user_id.clone(),
+                user.display_name.clone(),
+                site_id.to_string(),
+            ));
+        }
+
         let is_admin = user
             .policies
             .iter()
             .any(|p| p.bucket == "*" && p.actions.iter().any(|a| a == "*"));
 
-        Some(Principal::new(
-            access_key.to_string(),
-            user.user_id.clone(),
-            user.display_name.clone(),
+        Some(Principal {
+            access_key: access_key.to_string(),
+            user_id: user.user_id.clone(),
+            display_name: user.display_name.clone(),
             is_admin,
+            kind: PrincipalKind::User,
+        })
+    }
+
+    pub fn is_peer_credential(&self, access_key: &str) -> bool {
+        self.reload_if_needed();
+        let state = self.state.read();
+        state
+            .key_index
+            .get(access_key)
+            .and_then(|uid| state.user_records.get(uid))
+            .and_then(|user| user.peer_site_id.as_deref())
+            .is_some()
+    }
+
+    pub fn create_peer_credential(
+        &self,
+        site_id: &str,
+        display_name: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut config = self.load_config()?;
+        let new_ak = format!("PEERAK{}", uuid::Uuid::new_v4().simple());
+        let new_sk = format!("PEERSK{}", uuid::Uuid::new_v4().simple());
+        let user_id = format!("peer-{}", uuid::Uuid::new_v4().simple());
+        let display = display_name
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("peer:{}", site_id));
+
+        let user = IamUser {
+            user_id: user_id.clone(),
+            display_name: display,
+            enabled: true,
+            expires_at: None,
+            access_keys: vec![AccessKey {
+                access_key: new_ak.clone(),
+                secret_key: new_sk.clone(),
+                status: "active".to_string(),
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
+            }],
+            policies: Vec::new(),
+            peer_site_id: Some(site_id.to_string()),
+        };
+        config.users.push(user);
+        self.save_config(&config)?;
+        Ok(serde_json::json!({
+            "user_id": user_id,
+            "access_key": new_ak,
+            "secret_key": new_sk,
+            "site_id": site_id,
+        }))
+    }
+
+    pub fn list_peer_credentials(&self) -> Vec<serde_json::Value> {
+        self.reload_if_needed();
+        let state = self.state.read();
+        state
+            .user_records
+            .values()
+            .filter(|u| u.peer_site_id.is_some())
+            .map(|u| {
+                serde_json::json!({
+                    "user_id": u.user_id,
+                    "site_id": u.peer_site_id.clone(),
+                    "display_name": u.display_name,
+                    "enabled": u.enabled,
+                    "access_keys": u.access_keys.iter().map(|k| serde_json::json!({
+                        "access_key": k.access_key,
+                        "status": k.status,
+                        "created_at": k.created_at,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn mark_access_key_as_peer(
+        &self,
+        access_key: &str,
+        site_id: &str,
+    ) -> Result<PeerMigrationOutcome, String> {
+        let mut config = self.load_config()?;
+        for user in &mut config.users {
+            if user.access_keys.iter().any(|k| k.access_key == access_key) {
+                if let Some(existing_site) = user.peer_site_id.as_deref() {
+                    if existing_site == site_id {
+                        return Ok(PeerMigrationOutcome::AlreadyPeer);
+                    }
+                    return Err(format!(
+                        "Access key '{}' is already a peer credential for site '{}'; refusing to retag for '{}'",
+                        access_key, existing_site, site_id
+                    ));
+                }
+                if user.access_keys.len() > 1 {
+                    let others: Vec<String> = user
+                        .access_keys
+                        .iter()
+                        .map(|k| k.access_key.clone())
+                        .filter(|k| k != access_key)
+                        .collect();
+                    return Err(format!(
+                        "Access key '{}' shares user '{}' with {} other access key(s) ({}). \
+                         Migrating would clear that user's policies and convert all of its keys to peer credentials. \
+                         Move this access key to a dedicated user (or delete the other keys) before running --migrate-peer-creds.",
+                        access_key,
+                        user.user_id,
+                        others.len(),
+                        others.join(", ")
+                    ));
+                }
+                user.peer_site_id = Some(site_id.to_string());
+                user.policies.clear();
+                self.save_config(&config)?;
+                return Ok(PeerMigrationOutcome::Migrated);
+            }
+        }
+        Err(format!(
+            "Access key '{}' not found in IAM config",
+            access_key
         ))
     }
 
@@ -492,6 +630,7 @@ impl IamService {
         state
             .user_records
             .values()
+            .filter(|u| u.peer_site_id.is_none())
             .map(|u| {
                 serde_json::json!({
                     "user_id": u.user_id,
@@ -520,6 +659,9 @@ impl IamService {
                 .get(identifier)
                 .and_then(|uid| state.user_records.get(uid))
         })?;
+        if user.peer_site_id.is_some() {
+            return None;
+        }
 
         Some(serde_json::json!({
             "user_id": user.user_id,
@@ -555,6 +697,9 @@ impl IamService {
                 u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
             })
             .ok_or_else(|| "User not found".to_string())?;
+        if user.peer_site_id.is_some() {
+            return Err("Peer credentials cannot be modified via user-management".to_string());
+        }
 
         user.enabled = enabled;
 
@@ -601,6 +746,9 @@ impl IamService {
                 u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
             })
             .ok_or_else(|| format!("User '{}' not found", identifier))?;
+        if user.peer_site_id.is_some() {
+            return Err("Peer credentials cannot be modified via user-management".to_string());
+        }
 
         let new_ak = format!("AK{}", uuid::Uuid::new_v4().simple());
         let new_sk = format!("SK{}", uuid::Uuid::new_v4().simple());
@@ -638,6 +786,11 @@ impl IamService {
         let mut found = false;
         for user in &mut config.users {
             if user.access_keys.iter().any(|k| k.access_key == access_key) {
+                if user.peer_site_id.is_some() {
+                    return Err(
+                        "Peer credentials cannot be modified via user-management".to_string(),
+                    );
+                }
                 if user.access_keys.len() <= 1 {
                     return Err("Cannot delete the last access key".to_string());
                 }
@@ -738,6 +891,7 @@ impl IamService {
                 created_at: Some(chrono::Utc::now().to_rfc3339()),
             }],
             policies: resolved_policies,
+            peer_site_id: None,
         };
         config.users.push(user);
 
@@ -752,12 +906,31 @@ impl IamService {
 
     pub fn delete_user(&self, identifier: &str) -> Result<(), String> {
         let mut config = self.load_config()?;
+        if config.users.iter().any(|u| {
+            (u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier))
+                && u.peer_site_id.is_some()
+        }) {
+            return Err("Peer credentials cannot be modified via user-management".to_string());
+        }
         let before = config.users.len();
         config.users.retain(|u| {
             u.user_id != identifier && !u.access_keys.iter().any(|k| k.access_key == identifier)
         });
         if config.users.len() == before {
             return Err(format!("User '{}' not found", identifier));
+        }
+        self.save_config(&config)
+    }
+
+    pub fn delete_peer_credential(&self, access_key: &str) -> Result<(), String> {
+        let mut config = self.load_config()?;
+        let before = config.users.len();
+        config.users.retain(|u| {
+            !(u.peer_site_id.is_some()
+                && u.access_keys.iter().any(|k| k.access_key == access_key))
+        });
+        if config.users.len() == before {
+            return Err(format!("Peer credential '{}' not found", access_key));
         }
         self.save_config(&config)
     }
@@ -776,6 +949,9 @@ impl IamService {
                 u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
             })
             .ok_or_else(|| format!("User '{}' not found", identifier))?;
+        if user.peer_site_id.is_some() {
+            return Err("Peer credentials cannot be modified via user-management".to_string());
+        }
         if let Some(name) = display_name {
             user.display_name = name;
         }
@@ -798,6 +974,9 @@ impl IamService {
                 u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
             })
             .ok_or_else(|| format!("User '{}' not found", identifier))?;
+        if user.peer_site_id.is_some() {
+            return Err("Peer credentials cannot be modified via user-management".to_string());
+        }
         user.policies = policies;
         self.save_config(&config)
     }
@@ -811,6 +990,9 @@ impl IamService {
                 u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
             })
             .ok_or_else(|| format!("User '{}' not found", identifier))?;
+        if user.peer_site_id.is_some() {
+            return Err("Peer credentials cannot be modified via user-management".to_string());
+        }
         let key = user
             .access_keys
             .first_mut()

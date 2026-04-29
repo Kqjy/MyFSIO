@@ -1,8 +1,9 @@
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
+use std::collections::HashMap;
 use myfsio_common::types::Principal;
 use myfsio_storage::traits::StorageEngine;
 
@@ -85,6 +86,18 @@ fn validate_site_id(site_id: &str) -> Option<String> {
 fn validate_endpoint(endpoint: &str) -> Option<String> {
     if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
         return Some("Endpoint must be http or https URL".to_string());
+    }
+    None
+}
+
+fn validate_peer_endpoint(state: &AppState, endpoint: &str) -> Option<String> {
+    if let Some(err) = validate_endpoint(endpoint) {
+        return Some(err);
+    }
+    if state.config.peer_require_https && !endpoint.starts_with("https://") {
+        return Some(
+            "Endpoint must be https when PEER_REQUIRE_HTTPS=true".to_string(),
+        );
     }
     None
 }
@@ -315,7 +328,7 @@ pub async fn register_peer_site(
             )
         }
     };
-    if let Some(err) = validate_endpoint(&endpoint) {
+    if let Some(err) = validate_peer_endpoint(&state, &endpoint) {
         return json_error("ValidationError", &err, StatusCode::BAD_REQUEST);
     }
     if let Some(err) = enforce_outbound_endpoint(&state, &endpoint).await {
@@ -448,7 +461,7 @@ pub async fn update_peer_site(
     };
 
     if let Some(ep) = payload.get("endpoint").and_then(|v| v.as_str()) {
-        if let Some(err) = validate_endpoint(ep) {
+        if let Some(err) = validate_peer_endpoint(&state, ep) {
             return json_error("ValidationError", &err, StatusCode::BAD_REQUEST);
         }
         if let Some(err) = enforce_outbound_endpoint(&state, ep).await {
@@ -810,102 +823,75 @@ pub async fn check_bidirectional_status(
         return json_response(StatusCode::OK, result);
     }
 
-    let admin_url = format!(
-        "{}/admin/sites",
-        connection.endpoint_url.trim_end_matches('/')
-    );
-    match reqwest::Client::new()
-        .get(&admin_url)
-        .header("accept", "application/json")
-        .header("x-access-key", &connection.access_key)
-        .header("x-secret-key", &connection.secret_key)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
+    match state
+        .peer_admin
+        .fetch_admin_status(&connection.endpoint_url, "/admin/sites", &connection)
         .await
     {
-        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(remote_data) => {
-                let remote_local = remote_data
-                    .get("local")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let remote_peers = remote_data
-                    .get("peers")
-                    .and_then(|value| value.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut has_peer_for_us = false;
-                let mut peer_connection_configured = false;
+        crate::services::peer_admin::PeerAdminStatus::Ok(remote_data) => {
+            let remote_local = remote_data
+                .get("local")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let remote_peers = remote_data
+                .get("peers")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut has_peer_for_us = false;
+            let mut peer_connection_configured = false;
 
-                for remote_peer in &remote_peers {
-                    let matches_site = local
-                        .as_ref()
-                        .map(|site| {
-                            remote_peer.get("site_id").and_then(|v| v.as_str())
-                                == Some(site.site_id.as_str())
-                                || remote_peer.get("endpoint").and_then(|v| v.as_str())
-                                    == Some(site.endpoint.as_str())
-                        })
+            for remote_peer in &remote_peers {
+                let matches_site = local
+                    .as_ref()
+                    .map(|site| {
+                        remote_peer.get("site_id").and_then(|v| v.as_str())
+                            == Some(site.site_id.as_str())
+                            || remote_peer.get("endpoint").and_then(|v| v.as_str())
+                                == Some(site.endpoint.as_str())
+                    })
+                    .unwrap_or(false);
+                if matches_site {
+                    has_peer_for_us = true;
+                    peer_connection_configured = remote_peer
+                        .get("connection_id")
+                        .and_then(|v| v.as_str())
+                        .map(|v| !v.trim().is_empty())
                         .unwrap_or(false);
-                    if matches_site {
-                        has_peer_for_us = true;
-                        peer_connection_configured = remote_peer
-                            .get("connection_id")
-                            .and_then(|v| v.as_str())
-                            .map(|v| !v.trim().is_empty())
-                            .unwrap_or(false);
-                        break;
-                    }
-                }
-
-                result["remote_status"] = serde_json::json!({
-                    "reachable": true,
-                    "local_site": remote_local,
-                    "site_sync_enabled": serde_json::Value::Null,
-                    "has_peer_for_us": has_peer_for_us,
-                    "peer_connection_configured": peer_connection_configured,
-                    "has_bidirectional_rules_for_us": serde_json::Value::Null,
-                });
-
-                if !has_peer_for_us {
-                    push_issue(
-                        &mut result,
-                        serde_json::json!({
-                            "code": "REMOTE_NO_PEER_FOR_US",
-                            "message": "Remote site does not have this site registered as a peer",
-                            "severity": "error",
-                        }),
-                    );
-                } else if !peer_connection_configured {
-                    push_issue(
-                        &mut result,
-                        serde_json::json!({
-                            "code": "REMOTE_NO_CONNECTION_FOR_US",
-                            "message": "Remote site has us as peer but no connection configured (cannot push back)",
-                            "severity": "error",
-                        }),
-                    );
+                    break;
                 }
             }
-            Err(_) => {
-                result["remote_status"] = serde_json::json!({
-                    "reachable": true,
-                    "invalid_response": true,
-                });
+
+            result["remote_status"] = serde_json::json!({
+                "reachable": true,
+                "local_site": remote_local,
+                "site_sync_enabled": serde_json::Value::Null,
+                "has_peer_for_us": has_peer_for_us,
+                "peer_connection_configured": peer_connection_configured,
+                "has_bidirectional_rules_for_us": serde_json::Value::Null,
+            });
+
+            if !has_peer_for_us {
                 push_issue(
                     &mut result,
                     serde_json::json!({
-                        "code": "REMOTE_INVALID_RESPONSE",
-                        "message": "Remote admin API returned invalid JSON",
-                        "severity": "warning",
+                        "code": "REMOTE_NO_PEER_FOR_US",
+                        "message": "Remote site does not have this site registered as a peer",
+                        "severity": "error",
+                    }),
+                );
+            } else if !peer_connection_configured {
+                push_issue(
+                    &mut result,
+                    serde_json::json!({
+                        "code": "REMOTE_NO_CONNECTION_FOR_US",
+                        "message": "Remote site has us as peer but no connection configured (cannot push back)",
+                        "severity": "error",
                     }),
                 );
             }
-        },
-        Ok(resp)
-            if resp.status() == StatusCode::UNAUTHORIZED
-                || resp.status() == StatusCode::FORBIDDEN =>
-        {
+        }
+        crate::services::peer_admin::PeerAdminStatus::Unauthorized(_detail) => {
             result["remote_status"] = serde_json::json!({
                 "reachable": true,
                 "admin_access_denied": true,
@@ -919,24 +905,38 @@ pub async fn check_bidirectional_status(
                 }),
             );
         }
-        Ok(resp) => {
+        crate::services::peer_admin::PeerAdminStatus::HttpError { status, .. } => {
             result["remote_status"] = serde_json::json!({
                 "reachable": true,
-                "admin_api_error": resp.status().as_u16(),
+                "admin_api_error": status,
             });
             push_issue(
                 &mut result,
                 serde_json::json!({
                     "code": "REMOTE_ADMIN_API_ERROR",
-                    "message": format!("Remote admin API returned status {}", resp.status().as_u16()),
+                    "message": format!("Remote admin API returned status {}", status),
                     "severity": "warning",
                 }),
             );
         }
-        Err(_) => {
+        crate::services::peer_admin::PeerAdminStatus::InvalidJson(_detail) => {
+            result["remote_status"] = serde_json::json!({
+                "reachable": true,
+                "invalid_response": true,
+            });
+            push_issue(
+                &mut result,
+                serde_json::json!({
+                    "code": "REMOTE_INVALID_RESPONSE",
+                    "message": "Remote admin API returned invalid JSON",
+                    "severity": "warning",
+                }),
+            );
+        }
+        crate::services::peer_admin::PeerAdminStatus::Unreachable(detail) => {
             result["remote_status"] = serde_json::json!({
                 "reachable": false,
-                "error": "Connection failed",
+                "error": detail,
             });
             push_issue(
                 &mut result,
@@ -1448,30 +1448,80 @@ pub async fn integrity_history(
     }
 }
 
-fn require_admin_or_registered_peer(state: &AppState, principal: &Principal) -> Option<Response> {
-    if principal.is_admin {
+fn require_admin_or_registered_peer(_state: &AppState, principal: &Principal) -> Option<Response> {
+    if principal.is_admin || principal.is_peer() {
         return None;
-    }
-    let registry = match &state.site_registry {
-        Some(r) => r,
-        None => {
-            return Some(json_error(
-                "AccessDenied",
-                "Admin access required",
-                StatusCode::FORBIDDEN,
-            ))
-        }
-    };
-    for peer in registry.list_peers() {
-        if peer.peer_inbound_access_key.as_deref() == Some(principal.access_key.as_str()) {
-            return None;
-        }
     }
     Some(json_error(
         "AccessDenied",
-        "Admin or registered peer required",
+        "Admin or peer principal required",
         StatusCode::FORBIDDEN,
     ))
+}
+
+pub async fn list_peer_credentials(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Response {
+    if let Some(err) = require_admin(&principal) {
+        return err;
+    }
+    let entries = state.iam.list_peer_credentials();
+    json_response(StatusCode::OK, serde_json::json!({ "credentials": entries }))
+}
+
+pub async fn create_peer_credential(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    body: Body,
+) -> Response {
+    if let Some(err) = require_admin(&principal) {
+        return err;
+    }
+    let payload = match read_json_body(body).await {
+        Some(v) => v,
+        None => return json_error("InvalidArgument", "Invalid JSON body", StatusCode::BAD_REQUEST),
+    };
+    let site_id = match payload
+        .get("site_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return json_error(
+                "InvalidArgument",
+                "site_id is required",
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    if let Some(err) = validate_site_id(&site_id) {
+        return json_error("InvalidArgument", &err, StatusCode::BAD_REQUEST);
+    }
+    let display_name = payload
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match state.iam.create_peer_credential(&site_id, display_name) {
+        Ok(value) => json_response(StatusCode::CREATED, value),
+        Err(err) => json_error("InternalError", &err, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+pub async fn delete_peer_credential(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(access_key): Path<String>,
+) -> Response {
+    if let Some(err) = require_admin(&principal) {
+        return err;
+    }
+    match state.iam.delete_peer_credential(&access_key) {
+        Ok(()) => json_response(StatusCode::OK, serde_json::json!({ "deleted": true })),
+        Err(err) => json_error("NotFound", &err, StatusCode::NOT_FOUND),
+    }
 }
 
 pub async fn build_cluster_overview_public(state: &AppState) -> serde_json::Value {
@@ -1559,9 +1609,19 @@ async fn build_cluster_overview(state: &AppState) -> serde_json::Value {
 pub async fn get_cluster_overview(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if let Some(err) = require_admin_or_registered_peer(&state, &principal) {
         return err;
+    }
+    let local_only_param = params
+        .get("local_only")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let force_local_only = !principal.is_admin;
+    if local_only_param || force_local_only {
+        let value = build_cluster_overview(&state).await;
+        return json_response(StatusCode::OK, value);
     }
     {
         let guard = state.cluster_overview_cache.lock();
@@ -1571,10 +1631,89 @@ pub async fn get_cluster_overview(
             }
         }
     }
-    let value = build_cluster_overview(&state).await;
+    let mut value = build_cluster_overview(&state).await;
+    let peers_array = collect_peer_overviews(&state).await;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("peers".to_string(), serde_json::Value::Array(peers_array));
+    }
     *state.cluster_overview_cache.lock() =
         Some((std::time::Instant::now(), value.clone()));
     json_response(StatusCode::OK, value)
+}
+
+async fn collect_peer_overviews(state: &AppState) -> Vec<serde_json::Value> {
+    let peers = match state.site_registry.as_ref() {
+        Some(r) => r.list_peers(),
+        None => return Vec::new(),
+    };
+    if peers.is_empty() {
+        return Vec::new();
+    }
+    let client = state.peer_admin.clone();
+    let mut futs = Vec::with_capacity(peers.len());
+    for peer in peers {
+        let conn = peer
+            .connection_id
+            .as_deref()
+            .and_then(|id| state.connections.get(id));
+        let client_ref = client.clone();
+        futs.push(async move {
+            let (status, data, error) = match conn {
+                Some(c) => match client_ref
+                    .fetch_admin_status(
+                        &c.endpoint_url,
+                        "/admin/cluster/overview?local_only=1",
+                        &c,
+                    )
+                    .await
+                {
+                    crate::services::peer_admin::PeerAdminStatus::Ok(v) => {
+                        ("ok", v, serde_json::Value::Null)
+                    }
+                    crate::services::peer_admin::PeerAdminStatus::Unauthorized(detail) => (
+                        "unauthorized",
+                        serde_json::Value::Null,
+                        serde_json::Value::String(detail),
+                    ),
+                    crate::services::peer_admin::PeerAdminStatus::HttpError { status, detail } => (
+                        "error",
+                        serde_json::Value::Null,
+                        serde_json::Value::String(if detail.is_empty() {
+                            format!("peer returned status {}", status)
+                        } else {
+                            format!("peer returned status {} — {}", status, detail)
+                        }),
+                    ),
+                    crate::services::peer_admin::PeerAdminStatus::InvalidJson(detail) => (
+                        "error",
+                        serde_json::Value::Null,
+                        serde_json::Value::String(detail),
+                    ),
+                    crate::services::peer_admin::PeerAdminStatus::Unreachable(detail) => (
+                        "unreachable",
+                        serde_json::Value::Null,
+                        serde_json::Value::String(detail),
+                    ),
+                },
+                None => (
+                    "unreachable",
+                    serde_json::Value::Null,
+                    serde_json::Value::String("no connection configured".to_string()),
+                ),
+            };
+            serde_json::json!({
+                "site_id": peer.site_id,
+                "endpoint": peer.endpoint,
+                "display_name": peer.display_name,
+                "region": peer.region,
+                "priority": peer.priority,
+                "status": status,
+                "data": data,
+                "error": error,
+            })
+        });
+    }
+    futures::future::join_all(futs).await
 }
 
 pub async fn get_sync_stats(

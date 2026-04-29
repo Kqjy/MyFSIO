@@ -4633,6 +4633,7 @@ mod tests {
             ui_enabled: false,
             templates_dir: manifest_dir.join("templates"),
             static_dir: manifest_dir.join("static"),
+            allow_legacy_header_auth: true,
             ..ServerConfig::default()
         };
         (AppState::new(config), tmp)

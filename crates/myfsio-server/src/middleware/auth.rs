@@ -707,6 +707,14 @@ async fn authorize_request(
     if path == "/myfsio/health" {
         return Ok(());
     }
+    if let Some(p) = principal {
+        if p.is_peer() && !is_path_allowed_for_peer(path) {
+            return Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Peer credentials are restricted to cluster admin endpoints",
+            ));
+        }
+    }
     if path == "/" {
         if let Some(principal) = principal {
             if state.iam.authorize(principal, None, "list", None) {
@@ -1191,18 +1199,44 @@ fn try_auth(state: &AppState, req: &Request) -> AuthResult {
         return verify_sigv4_query(state, req);
     }
 
-    if let (Some(ak), Some(sk)) = (
-        req.headers()
-            .get("x-access-key")
-            .and_then(|v| v.to_str().ok()),
-        req.headers()
-            .get("x-secret-key")
-            .and_then(|v| v.to_str().ok()),
-    ) {
-        return match state.iam.authenticate(ak, sk) {
-            Some(principal) => AuthResult::Ok(principal),
-            None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch)),
-        };
+    let has_legacy_headers = req.headers().get("x-access-key").is_some()
+        || req.headers().get("x-secret-key").is_some();
+    if has_legacy_headers && !state.config.allow_legacy_header_auth {
+        tracing::warn!(
+            "Rejecting x-access-key/x-secret-key auth (set ALLOW_LEGACY_HEADER_AUTH=true to re-enable; SigV4 is preferred)"
+        );
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Legacy header authentication is disabled (set ALLOW_LEGACY_HEADER_AUTH=true to re-enable)",
+        ));
+    }
+
+    if state.config.allow_legacy_header_auth {
+        if let (Some(ak), Some(sk)) = (
+            req.headers()
+                .get("x-access-key")
+                .and_then(|v| v.to_str().ok()),
+            req.headers()
+                .get("x-secret-key")
+                .and_then(|v| v.to_str().ok()),
+        ) {
+            return match state.iam.authenticate(ak, sk) {
+                Some(principal) => {
+                    if principal.is_peer() {
+                        tracing::warn!(
+                            "Peer credential '{}' attempted x-access-key/x-secret-key auth; peer credentials are SigV4-only",
+                            principal.access_key
+                        );
+                        return AuthResult::Denied(S3Error::new(
+                            S3ErrorCode::AccessDenied,
+                            "Peer credentials must use SigV4 authentication",
+                        ));
+                    }
+                    AuthResult::Ok(principal)
+                }
+                None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch)),
+            };
+        }
     }
 
     AuthResult::NoAuth
@@ -1343,7 +1377,14 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
     }
 
     match state.iam.get_principal(access_key) {
-        Some(p) => AuthResult::Ok(p),
+        Some(p) => {
+            if let Some(err) =
+                enforce_peer_freshness_and_nonce(state, &p, amz_date, provided_signature)
+            {
+                return AuthResult::Denied(err);
+            }
+            AuthResult::Ok(p)
+        }
         None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }
 }
@@ -1509,9 +1550,45 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     }
 
     match state.iam.get_principal(access_key) {
-        Some(p) => AuthResult::Ok(p),
+        Some(p) => {
+            if let Some(err) =
+                enforce_peer_freshness_and_nonce(state, &p, amz_date, provided_signature)
+            {
+                return AuthResult::Denied(err);
+            }
+            AuthResult::Ok(p)
+        }
         None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }
+}
+
+fn is_path_allowed_for_peer(path: &str) -> bool {
+    path == "/admin/cluster/overview"
+}
+
+fn enforce_peer_freshness_and_nonce(
+    state: &AppState,
+    principal: &Principal,
+    amz_date: &str,
+    signature: &str,
+) -> Option<S3Error> {
+    if !principal.is_peer() {
+        return None;
+    }
+    if let Some(err) =
+        check_timestamp_freshness(amz_date, state.config.peer_sigv4_timestamp_tolerance_secs)
+    {
+        return Some(err);
+    }
+    let key = format!("{}:{}", principal.access_key, signature);
+    let mut cache = state.peer_request_nonces.lock();
+    if cache.put(key, Instant::now()).is_some() {
+        return Some(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "Peer request signature replay detected",
+        ));
+    }
+    None
 }
 
 fn check_timestamp_freshness(amz_date: &str, tolerance_secs: u64) -> Option<S3Error> {

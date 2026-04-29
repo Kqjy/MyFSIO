@@ -64,6 +64,14 @@ pub struct PeerAdminClient {
     allow_internal_endpoints: bool,
 }
 
+pub enum PeerAdminStatus {
+    Ok(Value),
+    Unauthorized(String),
+    HttpError { status: u16, detail: String },
+    InvalidJson(String),
+    Unreachable(String),
+}
+
 impl PeerAdminClient {
     pub fn new(
         connect_timeout: Duration,
@@ -83,24 +91,20 @@ impl PeerAdminClient {
         }
     }
 
-    pub async fn fetch_cluster_overview(
+    fn sign_get(
         &self,
         endpoint: &str,
+        path_and_query: &str,
         connection: &RemoteConnection,
-    ) -> Result<Value, String> {
-        if !self.allow_internal_endpoints {
-            crate::handlers::ui_api::guard_external_endpoint_async(endpoint)
-                .await
-                .map_err(|reason| {
-                    format!(
-                        "endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
-                        reason
-                    )
-                })?;
-        }
+    ) -> Result<reqwest::RequestBuilder, String> {
         let url = format!(
-            "{}/admin/cluster/overview",
-            endpoint.trim_end_matches('/')
+            "{}{}",
+            endpoint.trim_end_matches('/'),
+            if path_and_query.starts_with('/') {
+                path_and_query.to_string()
+            } else {
+                format!("/{}", path_and_query)
+            }
         );
         let parsed = reqwest::Url::parse(&url).map_err(|e| format!("invalid url: {}", e))?;
         let host = parsed
@@ -128,12 +132,13 @@ impl PeerAdminClient {
         };
         let service = "s3";
         let payload_hash = sha256_hex(b"");
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
 
         let canonical_headers = format!(
-            "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-            host_with_port, payload_hash, amz_date
+            "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\nx-myfsio-nonce:{}\n",
+            host_with_port, payload_hash, amz_date, nonce
         );
-        let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+        let signed_headers = "host;x-amz-content-sha256;x-amz-date;x-myfsio-nonce";
 
         let canonical_query = parsed
             .query()
@@ -173,34 +178,96 @@ impl PeerAdminClient {
             connection.access_key, credential_scope, signed_headers, signature
         );
 
-        let resp = self
+        Ok(self
             .client
             .get(&url)
             .header("host", &host_with_port)
             .header("x-amz-content-sha256", &payload_hash)
             .header("x-amz-date", &amz_date)
-            .header("authorization", &authorization)
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {}", e))?;
+            .header("x-myfsio-nonce", &nonce)
+            .header("authorization", &authorization))
+    }
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body_text = resp.text().await.unwrap_or_default();
-            let detail = extract_error_detail(&body_text);
-            if detail.is_empty() {
-                return Err(format!("peer returned status {}", status.as_u16()));
-            }
-            return Err(format!(
-                "peer returned status {} — {}",
-                status.as_u16(),
-                detail
-            ));
+    async fn guard_endpoint(&self, endpoint: &str) -> Result<(), String> {
+        if self.allow_internal_endpoints {
+            return Ok(());
         }
-        let body: Value = resp
-            .json()
+        crate::handlers::ui_api::guard_external_endpoint_async(endpoint)
             .await
-            .map_err(|e| format!("invalid json: {}", e))?;
-        Ok(body)
+            .map_err(|reason| {
+                format!(
+                    "endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                    reason
+                )
+            })
+    }
+
+    pub async fn fetch_admin_json(
+        &self,
+        endpoint: &str,
+        path_and_query: &str,
+        connection: &RemoteConnection,
+    ) -> Result<Value, String> {
+        match self.fetch_admin_status(endpoint, path_and_query, connection).await {
+            PeerAdminStatus::Ok(v) => Ok(v),
+            PeerAdminStatus::Unauthorized(detail) => Err(detail),
+            PeerAdminStatus::HttpError { status, detail } => {
+                Err(format!("peer returned status {} — {}", status, detail))
+            }
+            PeerAdminStatus::InvalidJson(detail) => Err(detail),
+            PeerAdminStatus::Unreachable(detail) => Err(detail),
+        }
+    }
+
+    pub async fn fetch_admin_status(
+        &self,
+        endpoint: &str,
+        path_and_query: &str,
+        connection: &RemoteConnection,
+    ) -> PeerAdminStatus {
+        if let Err(e) = self.guard_endpoint(endpoint).await {
+            return PeerAdminStatus::Unreachable(e);
+        }
+        let req = match self.sign_get(endpoint, path_and_query, connection) {
+            Ok(r) => r,
+            Err(e) => return PeerAdminStatus::Unreachable(e),
+        };
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return PeerAdminStatus::Unreachable(format!("request failed: {}", e))
+            }
+        };
+        let status = resp.status();
+        if status.is_success() {
+            return match resp.json::<Value>().await {
+                Ok(v) => PeerAdminStatus::Ok(v),
+                Err(e) => PeerAdminStatus::InvalidJson(format!("invalid json: {}", e)),
+            };
+        }
+        let body_text = resp.text().await.unwrap_or_default();
+        let detail = extract_error_detail(&body_text);
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            let message = if detail.is_empty() {
+                format!("peer returned status {}", status.as_u16())
+            } else {
+                format!("peer returned status {} — {}", status.as_u16(), detail)
+            };
+            PeerAdminStatus::Unauthorized(message)
+        } else {
+            PeerAdminStatus::HttpError {
+                status: status.as_u16(),
+                detail,
+            }
+        }
+    }
+
+    pub async fn fetch_cluster_overview(
+        &self,
+        endpoint: &str,
+        connection: &RemoteConnection,
+    ) -> Result<Value, String> {
+        self.fetch_admin_json(endpoint, "/admin/cluster/overview?local_only=1", connection)
+            .await
     }
 }

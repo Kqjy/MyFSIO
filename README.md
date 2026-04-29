@@ -91,7 +91,11 @@ Core settings:
 | `IAM_CONFIG` | `<STORAGE_ROOT>/.myfsio.sys/config/iam.json` | IAM config path |
 | `API_BASE_URL` | unset | Public API base used by the UI and presigned URL generation |
 | `AWS_REGION` | `us-east-1` | Region used in SigV4 scope |
-| `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew |
+| `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew (regular SigV4) |
+| `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter skew enforced for peer-credential SigV4 requests |
+| `PEER_NONCE_CACHE_SIZE` | `10000` | Replay-detection LRU capacity for peer requests |
+| `ALLOW_LEGACY_HEADER_AUTH` | `false` | Accept legacy `x-access-key`/`x-secret-key` headers (peer creds are SigV4-only regardless) |
+| `PEER_REQUIRE_HTTPS` | `false` | Reject non-https peer endpoint registrations |
 | `PRESIGNED_URL_MIN_EXPIRY_SECONDS` | `1` | Minimum presigned URL expiry |
 | `PRESIGNED_URL_MAX_EXPIRY_SECONDS` | `604800` | Maximum presigned URL expiry |
 | `SECRET_KEY` | loaded from `.myfsio.sys/config/.secret` if present | Session signing key and IAM-at-rest encryption key |

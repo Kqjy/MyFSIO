@@ -81,6 +81,10 @@ pub struct ServerConfig {
     pub num_trusted_proxies: usize,
     pub allowed_redirect_hosts: Vec<String>,
     pub allow_internal_endpoints: bool,
+    pub allow_legacy_header_auth: bool,
+    pub peer_require_https: bool,
+    pub peer_sigv4_timestamp_tolerance_secs: u64,
+    pub peer_nonce_cache_size: usize,
     pub cors_origins: Vec<String>,
     pub cors_methods: Vec<String>,
     pub cors_allow_headers: Vec<String>,
@@ -243,6 +247,11 @@ impl ServerConfig {
         let num_trusted_proxies = parse_usize_env("NUM_TRUSTED_PROXIES", 0);
         let allowed_redirect_hosts = parse_list_env("ALLOWED_REDIRECT_HOSTS", "");
         let allow_internal_endpoints = parse_bool_env("ALLOW_INTERNAL_ENDPOINTS", false);
+        let allow_legacy_header_auth = parse_bool_env("ALLOW_LEGACY_HEADER_AUTH", false);
+        let peer_require_https = parse_bool_env("PEER_REQUIRE_HTTPS", false);
+        let peer_sigv4_timestamp_tolerance_secs =
+            parse_u64_env("PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 60);
+        let peer_nonce_cache_size = parse_usize_env("PEER_NONCE_CACHE_SIZE", 10_000);
         let cors_origins = parse_list_env("CORS_ORIGINS", "*");
         let cors_methods = parse_list_env("CORS_METHODS", "GET,PUT,POST,DELETE,OPTIONS,HEAD");
         let cors_allow_headers = parse_list_env("CORS_ALLOW_HEADERS", "*");
@@ -350,6 +359,10 @@ impl ServerConfig {
             num_trusted_proxies,
             allowed_redirect_hosts,
             allow_internal_endpoints,
+            allow_legacy_header_auth,
+            peer_require_https,
+            peer_sigv4_timestamp_tolerance_secs,
+            peer_nonce_cache_size,
             cors_origins,
             cors_methods,
             cors_allow_headers,
@@ -441,6 +454,10 @@ impl Default for ServerConfig {
             num_trusted_proxies: 0,
             allowed_redirect_hosts: Vec::new(),
             allow_internal_endpoints: false,
+            allow_legacy_header_auth: false,
+            peer_require_https: false,
+            peer_sigv4_timestamp_tolerance_secs: 60,
+            peer_nonce_cache_size: 10_000,
             cors_origins: vec!["*".to_string()],
             cors_methods: vec![
                 "GET".to_string(),

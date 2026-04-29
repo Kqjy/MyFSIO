@@ -1429,12 +1429,11 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
             .connection_id
             .as_deref()
             .and_then(|id| state.connections.get(id));
-        let endpoint = peer.endpoint.clone();
         let conn_clone = conn.clone();
         let client_ref = &client;
         peer_futures.push(async move {
             let value = match conn_clone {
-                Some(c) => client_ref.fetch_cluster_overview(&endpoint, &c).await,
+                Some(c) => client_ref.fetch_cluster_overview(&c.endpoint_url, &c).await,
                 None => Err("no connection configured".to_string()),
             };
             (peer, value)

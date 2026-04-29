@@ -1,6 +1,8 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use parking_lot::Mutex;
 use serde_json::Value;
 
@@ -9,6 +11,7 @@ use crate::services::access_logging::AccessLoggingService;
 use crate::services::gc::GcService;
 use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
+use crate::services::peer_admin::PeerAdminClient;
 use crate::services::peer_fetch::PeerFetcher;
 use crate::services::replication::ReplicationManager;
 use crate::services::s3_client::ClientOptions;
@@ -36,6 +39,7 @@ pub struct AppState {
     pub metrics: Option<Arc<MetricsService>>,
     pub system_metrics: Option<Arc<SystemMetricsService>>,
     pub site_registry: Option<Arc<SiteRegistry>>,
+    pub peer_admin: Arc<PeerAdminClient>,
     pub website_domains: Option<Arc<WebsiteDomainStore>>,
     pub connections: Arc<ConnectionStore>,
     pub replication: Arc<ReplicationManager>,
@@ -45,6 +49,7 @@ pub struct AppState {
     pub access_logging: Arc<AccessLoggingService>,
     pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
+    pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
 }
 
 impl AppState {
@@ -202,6 +207,13 @@ impl AppState {
         let templates = init_templates(&config.templates_dir, &config.display_timezone);
         let access_logging = Arc::new(AccessLoggingService::new(&config.storage_root));
         let session_ttl = Duration::from_secs(config.session_lifetime_days.saturating_mul(86_400));
+        let peer_admin = Arc::new(PeerAdminClient::new(
+            Duration::from_secs(3),
+            Duration::from_secs(5),
+            config.allow_internal_endpoints,
+        ));
+        let nonce_cap = NonZeroUsize::new(config.peer_nonce_cache_size.max(1))
+            .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
         Self {
             config,
             storage,
@@ -213,6 +225,7 @@ impl AppState {
             metrics,
             system_metrics,
             site_registry,
+            peer_admin,
             website_domains,
             connections,
             replication,
@@ -222,6 +235,7 @@ impl AppState {
             access_logging,
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
+            peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
         }
     }
 

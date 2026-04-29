@@ -529,6 +529,15 @@ pub fn create_router(state: state::AppState) -> Router {
             axum::routing::get(handlers::admin::check_bidirectional_status),
         )
         .route(
+            "/admin/peer-credentials",
+            axum::routing::get(handlers::admin::list_peer_credentials)
+                .post(handlers::admin::create_peer_credential),
+        )
+        .route(
+            "/admin/peer-credentials/{access_key}",
+            axum::routing::delete(handlers::admin::delete_peer_credential),
+        )
+        .route(
             "/admin/iam/users",
             axum::routing::get(handlers::admin::iam_list_users),
         )
