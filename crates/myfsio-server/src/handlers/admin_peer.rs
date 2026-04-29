@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -8,12 +10,30 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use http_body_util::BodyExt;
 use myfsio_common::types::{Principal, PrincipalKind};
+use parking_lot::Mutex as ParkingMutex;
 use sha2::{Digest, Sha256};
 
 use crate::handlers::RelayContext;
 use crate::services::audit_log::{AuditEntry, AuditTarget};
 use crate::services::cluster_attest::{verify_admin_attest, verify_cluster_attest};
 use crate::state::{AppState, RelayIdempotencyEntry};
+
+struct InflightHandle {
+    inflight_map: Arc<ParkingMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    key: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for InflightHandle {
+    fn drop(&mut self) {
+        let mut guard = self.inflight_map.lock();
+        if let Some(existing) = guard.get(&self.key) {
+            if Arc::ptr_eq(existing, &self.lock) && Arc::strong_count(&self.lock) <= 2 {
+                guard.remove(&self.key);
+            }
+        }
+    }
+}
 
 fn json_error(code: &str, message: &str, status: StatusCode) -> Response {
     let body = serde_json::json!({"error": {"code": code, "message": message}}).to_string();
@@ -152,6 +172,21 @@ pub async fn relay_inbound_layer(
 
     let idemp_cache_key = format!("{}:{}", origin_site, idempotency_key);
     let ttl = Duration::from_secs(state.config.relay_idempotency_ttl_secs);
+
+    let inflight_arc = {
+        let mut guard = state.relay_idempotency_inflight.lock();
+        guard
+            .entry(idemp_cache_key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let inflight_handle = InflightHandle {
+        inflight_map: state.relay_idempotency_inflight.clone(),
+        key: idemp_cache_key.clone(),
+        lock: inflight_arc,
+    };
+    let _inflight_guard = inflight_handle.lock.lock().await;
+
     {
         let mut cache = state.relay_idempotency_cache.lock();
         if let Some(entry) = cache.get(&idemp_cache_key) {
@@ -214,7 +249,7 @@ pub async fn relay_inbound_layer(
     {
         let mut cache = state.relay_idempotency_cache.lock();
         cache.put(
-            idemp_cache_key,
+            idemp_cache_key.clone(),
             RelayIdempotencyEntry {
                 stored_at: Instant::now(),
                 status: status_code,

@@ -152,7 +152,12 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
 
 fn page_context(state: &AppState, session: &SessionHandle, endpoint: &str) -> Context {
     let mut ctx = base_context(session, Some(endpoint));
-    let principal = session.read(|s| {
+    let live_principal = crate::handlers::ui::current_principal(state, session);
+    let is_admin = live_principal
+        .as_ref()
+        .map(|p| p.is_admin)
+        .unwrap_or(false);
+    let principal_value = session.read(|s| {
         s.user_id.as_ref().map(|uid| {
             json!({
                 "access_key": uid,
@@ -161,21 +166,25 @@ fn page_context(state: &AppState, session: &SessionHandle, endpoint: &str) -> Co
                     .display_name
                     .clone()
                     .unwrap_or_else(|| uid.clone()),
-                "is_admin": true,
+                "is_admin": is_admin,
             })
         })
     });
-    match principal {
+    match principal_value {
         Some(p) => ctx.insert("principal", &p),
         None => ctx.insert("principal", &Value::Null),
     }
-    ctx.insert("can_manage_iam", &true);
-    ctx.insert("can_manage_replication", &true);
-    ctx.insert("can_manage_sites", &true);
-    ctx.insert("can_manage_encryption", &state.config.encryption_enabled);
+    ctx.insert("can_manage_iam", &is_admin);
+    ctx.insert("can_manage_replication", &is_admin);
+    ctx.insert("can_manage_sites", &is_admin);
+    ctx.insert(
+        "can_manage_encryption",
+        &(is_admin && state.config.encryption_enabled),
+    );
     ctx.insert("website_hosting_nav", &state.config.website_hosting_enabled);
     ctx.insert("encryption_enabled", &state.config.encryption_enabled);
     ctx.insert("kms_enabled", &state.config.kms_enabled);
+    ctx.insert("is_admin", &is_admin);
 
     let flashed = session.write(|s| s.take_flash());
     inject_flash(&mut ctx, flashed);
@@ -589,14 +598,17 @@ pub async fn bucket_detail(
             .map(|conn| conn.name.clone())
             .unwrap_or_default(),
     );
+    let viewer_is_admin = crate::handlers::ui::current_principal(&state, &session)
+        .map(|p| p.is_admin)
+        .unwrap_or(false);
     ctx.insert("default_policy", &default_policy);
-    ctx.insert("can_manage_cors", &true);
-    ctx.insert("can_manage_lifecycle", &true);
-    ctx.insert("can_manage_quota", &true);
-    ctx.insert("can_manage_versioning", &true);
-    ctx.insert("can_manage_website", &true);
-    ctx.insert("can_edit_policy", &true);
-    ctx.insert("is_replication_admin", &true);
+    ctx.insert("can_manage_cors", &viewer_is_admin);
+    ctx.insert("can_manage_lifecycle", &viewer_is_admin);
+    ctx.insert("can_manage_quota", &viewer_is_admin);
+    ctx.insert("can_manage_versioning", &viewer_is_admin);
+    ctx.insert("can_manage_website", &viewer_is_admin);
+    ctx.insert("can_edit_policy", &viewer_is_admin);
+    ctx.insert("is_replication_admin", &viewer_is_admin);
     ctx.insert("lifecycle_enabled", &state.config.lifecycle_enabled);
     ctx.insert("site_sync_enabled", &state.config.site_sync_enabled);
     ctx.insert(
@@ -2612,6 +2624,9 @@ pub async fn create_bucket(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let wants_json = wants_json(&headers);
     let form = match parse_form_any(&headers, body).await {
         Ok(fields) => CreateBucketForm {

@@ -10,6 +10,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use myfsio_storage::fs_backend::{is_multipart_etag, FsStorageBackend};
 use myfsio_storage::traits::StorageEngine;
 
+fn looks_like_md5_etag(etag: &str) -> bool {
+    !etag.is_empty()
+        && !is_multipart_etag(etag)
+        && etag.len() == 32
+        && etag.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 use crate::services::replication::ReplicationManager;
 use crate::services::s3_client::{build_client, ClientOptions};
 use crate::stores::connections::ConnectionStore;
@@ -85,32 +92,120 @@ impl PeerFetcher {
             }
         };
 
-        let head = match client
-            .head_object()
-            .bucket(remote_bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(r) => r,
+        let expected_etag = resp
+            .e_tag()
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string();
+        let metadata: Option<HashMap<String, String>> = resp
+            .metadata()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+
+        let tmp_dir = self.storage.system_tmp_dir();
+        if let Err(err) = tokio::fs::create_dir_all(&tmp_dir).await {
+            tracing::error!(
+                "Failed to create temp dir for peer fetch {}/{}: {}",
+                local_bucket,
+                key,
+                err
+            );
+            return false;
+        }
+        let tmp_path = tmp_dir.join(format!("peer_fetch_{}.tmp", uuid::Uuid::new_v4()));
+
+        let mut tmp_file = match tokio::fs::File::create(&tmp_path).await {
+            Ok(f) => f,
             Err(err) => {
-                tracing::error!("Pull HeadObject failed {}/{}: {:?}", local_bucket, key, err);
+                tracing::error!(
+                    "Failed to create temp file for peer fetch {}/{}: {}",
+                    local_bucket,
+                    key,
+                    err
+                );
                 return false;
             }
         };
 
-        let metadata: Option<HashMap<String, String>> = head
-            .metadata()
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        let mut reader = resp.body.into_async_read();
+        let mut hasher = Md5::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&buf[..n]);
+                    if let Err(err) = tmp_file.write_all(&buf[..n]).await {
+                        tracing::error!(
+                            "Failed to spool peer fetch {}/{}: {}",
+                            local_bucket,
+                            key,
+                            err
+                        );
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        return false;
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "Pull body read failed {}/{}: {}",
+                        local_bucket,
+                        key,
+                        err
+                    );
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return false;
+                }
+            }
+        }
+        if let Err(err) = tmp_file.flush().await {
+            tracing::error!(
+                "Failed to flush peer fetch temp {}/{}: {}",
+                local_bucket,
+                key,
+                err
+            );
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return false;
+        }
+        drop(tmp_file);
 
-        let stream = resp.body.into_async_read();
-        let boxed: Pin<Box<dyn AsyncRead + Send>> = Box::pin(stream);
+        if looks_like_md5_etag(&expected_etag) {
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != expected_etag {
+                tracing::error!(
+                    "Pull ETag mismatch for {}/{}: expected {}, got {}",
+                    local_bucket,
+                    key,
+                    expected_etag,
+                    actual
+                );
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return false;
+            }
+        }
 
-        match self
+        let opened = match tokio::fs::File::open(&tmp_path).await {
+            Ok(f) => f,
+            Err(err) => {
+                tracing::error!(
+                    "Failed to reopen peer fetch temp {}/{}: {}",
+                    local_bucket,
+                    key,
+                    err
+                );
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return false;
+            }
+        };
+        let boxed: Pin<Box<dyn AsyncRead + Send>> = Box::pin(opened);
+
+        let result = self
             .storage
             .put_object(local_bucket, key, boxed, metadata)
-            .await
-        {
+            .await;
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+
+        match result {
             Ok(_) => {
                 tracing::debug!("Pulled object {}/{} from remote", local_bucket, key);
                 true

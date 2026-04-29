@@ -210,6 +210,25 @@ impl ReplicationFailureStore {
     }
 }
 
+type StatusLocksMap = Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
+
+struct StatusLockHandle {
+    map: StatusLocksMap,
+    key: String,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for StatusLockHandle {
+    fn drop(&mut self) {
+        let mut guard = self.map.lock();
+        if let Some(existing) = guard.get(&self.key) {
+            if Arc::ptr_eq(existing, &self.lock) && Arc::strong_count(&self.lock) <= 2 {
+                guard.remove(&self.key);
+            }
+        }
+    }
+}
+
 pub struct ReplicationManager {
     storage: Arc<FsStorageBackend>,
     connections: Arc<ConnectionStore>,
@@ -221,6 +240,7 @@ pub struct ReplicationManager {
     semaphore: Arc<Semaphore>,
     allow_internal_endpoints: bool,
     http_client: aws_smithy_runtime_api::client::http::SharedHttpClient,
+    status_locks_handle: StatusLocksMap,
 }
 
 impl ReplicationManager {
@@ -261,6 +281,7 @@ impl ReplicationManager {
             semaphore: Arc::new(Semaphore::new(4)),
             allow_internal_endpoints,
             http_client,
+            status_locks_handle: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -313,7 +334,25 @@ impl ReplicationManager {
         }
     }
 
+    fn status_lock_for(&self, lock_key: &str) -> StatusLockHandle {
+        let lock = {
+            let mut guard = self.status_locks_handle.lock();
+            guard
+                .entry(lock_key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        StatusLockHandle {
+            map: self.status_locks_handle.clone(),
+            key: lock_key.to_string(),
+            lock,
+        }
+    }
+
     async fn set_replication_status(&self, bucket: &str, key: &str, status: &str) {
+        let lock_key = format!("{}/{}", bucket, key);
+        let handle = self.status_lock_for(&lock_key);
+        let _guard = handle.lock.lock().await;
         let mut meta = match self.storage.get_object_metadata(bucket, key).await {
             Ok(m) => m,
             Err(_) => return,
@@ -486,8 +525,7 @@ impl ReplicationManager {
         conn: &RemoteConnection,
         action: &str,
     ) {
-        if object_key.contains("..") || object_key.starts_with('/') || object_key.starts_with('\\')
-        {
+        if object_key.starts_with('/') || object_key.starts_with('\\') {
             tracing::error!("Invalid object key (path traversal): {}", object_key);
             return;
         }

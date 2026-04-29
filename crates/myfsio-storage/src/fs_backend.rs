@@ -313,6 +313,10 @@ impl FsStorageBackend {
         self.root.join(bucket_name)
     }
 
+    pub fn system_tmp_dir(&self) -> PathBuf {
+        self.root.join(SYSTEM_ROOT).join("tmp")
+    }
+
     fn system_root_path(&self) -> PathBuf {
         self.root.join(SYSTEM_ROOT)
     }

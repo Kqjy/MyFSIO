@@ -62,6 +62,51 @@ pub async fn request_log_layer(req: Request, next: Next) -> Response {
     response
 }
 
+pub async fn admin_audit_layer(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let should_audit = matches!(
+        method,
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::PATCH
+            | axum::http::Method::DELETE
+    );
+    let path = req.uri().path().to_string();
+    let admin_user = req
+        .extensions()
+        .get::<myfsio_common::types::Principal>()
+        .map(|p| p.user_id.clone());
+
+    let response = next.run(req).await;
+
+    if should_audit && state.audit_log.enabled() {
+        let status_code = response.status().as_u16();
+        let result = if (200..400).contains(&status_code) {
+            "ok".to_string()
+        } else {
+            "error".to_string()
+        };
+        state
+            .audit_log
+            .record(crate::services::audit_log::AuditEntry {
+                ts: chrono::Utc::now().to_rfc3339(),
+                correlation_id: uuid::Uuid::new_v4().to_string(),
+                origin_site_id: None,
+                admin_user_id: admin_user,
+                action: format!("admin:{} {}", method, path),
+                method: method.to_string(),
+                path,
+                target: crate::services::audit_log::AuditTarget::Local,
+                result,
+                status_code,
+                peer_ip: None,
+                idempotency_key: None,
+                error: None,
+            });
+    }
+    response
+}
+
 pub async fn ui_metrics_layer(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let metrics = match state.metrics.clone() {
         Some(m) => m,

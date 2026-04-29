@@ -728,7 +728,7 @@ async fn authorize_request(
         ));
     }
 
-    if path.starts_with("/admin/") || path.starts_with("/kms/") {
+    if path.starts_with("/admin/") {
         return if principal.is_some() {
             Ok(())
         } else {
@@ -736,6 +736,20 @@ async fn authorize_request(
                 S3ErrorCode::AccessDenied,
                 "Missing credentials",
             ))
+        };
+    }
+
+    if path.starts_with("/kms/") {
+        return match principal {
+            Some(p) if p.is_admin => Ok(()),
+            Some(_) => Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "KMS access requires admin privileges",
+            )),
+            None => Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Missing credentials",
+            )),
         };
     }
 

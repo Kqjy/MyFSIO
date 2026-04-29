@@ -572,15 +572,16 @@ pub async fn check_peer_health(
         }
     };
 
-    if registry.get_peer(&site_id).is_none() {
-        return json_error(
-            "NotFound",
-            &format!("Peer site '{}' not found", site_id),
-            StatusCode::NOT_FOUND,
-        );
-    }
-
-    let peer = registry.get_peer(&site_id).unwrap();
+    let peer = match registry.get_peer(&site_id) {
+        Some(p) => p,
+        None => {
+            return json_error(
+                "NotFound",
+                &format!("Peer site '{}' not found", site_id),
+                StatusCode::NOT_FOUND,
+            );
+        }
+    };
     let checked_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
     let mut is_healthy = false;
     let mut error: Option<String> = None;
@@ -693,16 +694,18 @@ pub async fn check_bidirectional_status(
         }
     };
 
-    if registry.get_peer(&site_id).is_none() {
-        return json_error(
-            "NotFound",
-            &format!("Peer site '{}' not found", site_id),
-            StatusCode::NOT_FOUND,
-        );
-    }
+    let peer = match registry.get_peer(&site_id) {
+        Some(p) => p,
+        None => {
+            return json_error(
+                "NotFound",
+                &format!("Peer site '{}' not found", site_id),
+                StatusCode::NOT_FOUND,
+            );
+        }
+    };
 
     let local = registry.get_local_site();
-    let peer = registry.get_peer(&site_id).unwrap();
     let local_bidirectional_rules: Vec<serde_json::Value> = state
         .replication
         .list_rules()

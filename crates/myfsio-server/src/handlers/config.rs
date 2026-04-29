@@ -101,19 +101,44 @@ pub async fn put_versioning(state: &AppState, bucket: &str, body: Body) -> Respo
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
-    let status = if xml_str.contains("<Status>Enabled</Status>") {
-        myfsio_common::types::VersioningStatus::Enabled
-    } else if xml_str.contains("<Status>Suspended</Status>") {
-        myfsio_common::types::VersioningStatus::Suspended
-    } else {
+    let doc = match roxmltree::Document::parse(&xml_str) {
+        Ok(d) => d,
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
+            );
+        }
+    };
+    let root = doc.root_element();
+    if root.tag_name().name() != "VersioningConfiguration" {
         return xml_response(
             StatusCode::BAD_REQUEST,
             S3Error::new(
                 S3ErrorCode::MalformedXML,
-                "VersioningConfiguration Status must be Enabled or Suspended",
+                "Expected <VersioningConfiguration> root element",
             )
             .to_xml(),
         );
+    }
+    let status_text = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Status")
+        .and_then(|n| n.text())
+        .map(|s| s.trim().to_string());
+    let status = match status_text.as_deref() {
+        Some("Enabled") => myfsio_common::types::VersioningStatus::Enabled,
+        Some("Suspended") => myfsio_common::types::VersioningStatus::Suspended,
+        _ => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::new(
+                    S3ErrorCode::MalformedXML,
+                    "VersioningConfiguration Status must be Enabled or Suspended",
+                )
+                .to_xml(),
+            );
+        }
     };
 
     match state.storage.set_versioning_status(bucket, status).await {

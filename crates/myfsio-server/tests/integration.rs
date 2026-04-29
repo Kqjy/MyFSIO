@@ -960,6 +960,7 @@ async fn test_ui_iam_user_actions_use_real_user_ids() {
     assert_eq!(update_body["display_name"], "Updated Admin");
 
     let policies_json = serde_json::json!([
+        {"bucket": "*", "actions": ["*"], "prefix": "*"},
         {"bucket": "reports", "actions": ["list", "read"], "prefix": "*"}
     ]);
     let policies_encoded = percent_encoding::utf8_percent_encode(
@@ -988,7 +989,13 @@ async fn test_ui_iam_user_actions_use_real_user_ids() {
             .to_bytes(),
     )
     .unwrap();
-    assert_eq!(policies_body["policies"][0]["bucket"], "reports");
+    let bucket_set: std::collections::HashSet<String> = policies_body["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["bucket"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(bucket_set.contains("reports"));
 
     let create_resp = app
         .clone()

@@ -26,36 +26,7 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/buckets",
             get(ui_pages::buckets_overview).post(ui_pages::create_bucket),
         )
-        .route("/ui/buckets/create", post(ui_pages::create_bucket))
         .route("/ui/buckets/{bucket_name}", get(ui_pages::bucket_detail))
-        .route(
-            "/ui/buckets/{bucket_name}/delete",
-            post(ui_pages::delete_bucket),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/versioning",
-            post(ui_pages::update_bucket_versioning),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/quota",
-            post(ui_pages::update_bucket_quota),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/encryption",
-            post(ui_pages::update_bucket_encryption),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/policy",
-            post(ui_pages::update_bucket_policy),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/replication",
-            post(ui_pages::update_bucket_replication),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/website",
-            post(ui_pages::update_bucket_website),
-        )
         .route(
             "/ui/buckets/{bucket_name}/upload",
             post(ui_api::upload_object),
@@ -185,6 +156,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/buckets/{bucket_name}/archived/{*rest}",
             post(ui_api::archived_post_dispatch),
         )
+        .route("/ui/docs", get(ui_pages::docs_page))
+        .layer(axum::middleware::from_fn(ui::require_login));
+
+    let admin_only = Router::new()
         .route("/ui/iam", get(ui_pages::iam_dashboard))
         .route("/ui/iam/users", post(ui_pages::create_iam_user))
         .route("/ui/iam/users/{user_id}", post(ui_pages::update_iam_user))
@@ -317,11 +292,49 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             post(ui_pages::create_peer_replication_rules_from_query),
         )
         .route(
+            "/ui/buckets/{bucket_name}/replication",
+            post(ui_pages::update_bucket_replication),
+        )
+        .route("/ui/buckets/create", post(ui_pages::create_bucket))
+        .route(
+            "/ui/buckets/{bucket_name}/delete",
+            post(ui_pages::delete_bucket),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/versioning",
+            post(ui_pages::update_bucket_versioning),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/quota",
+            post(ui_pages::update_bucket_quota),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/encryption",
+            post(ui_pages::update_bucket_encryption),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/policy",
+            post(ui_pages::update_bucket_policy),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/website",
+            post(ui_pages::update_bucket_website),
+        )
+        .route(
             "/ui/sites/peers/{site_id}/replication-rules",
             post(ui_pages::create_peer_replication_rules),
         )
-        .route("/ui/docs", get(ui_pages::docs_page))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ui::ui_admin_audit_layer,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ui::require_admin,
+        ))
         .layer(axum::middleware::from_fn(ui::require_login));
+
+    let protected = protected.merge(admin_only);
 
     let public = Router::new()
         .route("/login", get(ui::login_page).post(ui::login_submit))
@@ -329,7 +342,7 @@ pub fn create_ui_router(state: state::AppState) -> Router {
 
     let session_state = middleware::SessionLayerState {
         store: state.sessions.clone(),
-        secure: false,
+        secure: state.config.session_cookie_secure,
         ttl: std::time::Duration::from_secs(
             state.config.session_lifetime_days.saturating_mul(86_400),
         ),
@@ -626,6 +639,10 @@ pub fn create_router(state: state::AppState) -> Router {
             "/admin/integrity/history",
             axum::routing::get(handlers::admin::integrity_history),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::admin_audit_layer,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_layer,

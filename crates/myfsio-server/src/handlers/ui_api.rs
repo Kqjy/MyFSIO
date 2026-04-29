@@ -2630,8 +2630,12 @@ pub async fn update_bucket_acl(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let payload: BucketAclPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2682,10 +2686,14 @@ struct BucketCorsPayload {
 
 pub async fn update_bucket_cors(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let payload: BucketCorsPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2730,10 +2738,14 @@ struct BucketLifecyclePayload {
 
 pub async fn update_bucket_lifecycle(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let payload: BucketLifecyclePayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,

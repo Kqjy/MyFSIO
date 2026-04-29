@@ -250,7 +250,22 @@ fn emit_notifications(
             }),
         };
         let payload = json!({ "Records": [record] });
-        let client = reqwest::Client::new();
+        let resolver = crate::services::safe_resolver::shared(state.config.allow_internal_endpoints);
+        let client = match reqwest::Client::builder()
+            .dns_resolver(resolver)
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to build SSRF-safe webhook client for {}: {}",
+                    bucket,
+                    err
+                );
+                return;
+            }
+        };
 
         for config in configs {
             if !config.matches_event(&event_name, &key) {

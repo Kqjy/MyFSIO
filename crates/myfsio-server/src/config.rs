@@ -94,6 +94,7 @@ pub struct ServerConfig {
     pub cors_allow_headers: Vec<String>,
     pub cors_expose_headers: Vec<String>,
     pub session_lifetime_days: u64,
+    pub session_cookie_secure: bool,
     pub log_level: String,
     pub display_timezone: String,
     pub multipart_min_part_size: u64,
@@ -269,6 +270,7 @@ impl ServerConfig {
         let cors_allow_headers = parse_list_env("CORS_ALLOW_HEADERS", "*");
         let cors_expose_headers = parse_list_env("CORS_EXPOSE_HEADERS", "*");
         let session_lifetime_days = parse_u64_env("SESSION_LIFETIME_DAYS", 1);
+        let session_cookie_secure = parse_bool_env("SESSION_COOKIE_SECURE", false);
         let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());
         let display_timezone = {
             let raw = std::env::var("DISPLAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string());
@@ -384,6 +386,7 @@ impl ServerConfig {
             cors_allow_headers,
             cors_expose_headers,
             session_lifetime_days,
+            session_cookie_secure,
             log_level,
             display_timezone,
             multipart_min_part_size,
@@ -490,6 +493,7 @@ impl Default for ServerConfig {
             cors_allow_headers: vec!["*".to_string()],
             cors_expose_headers: vec!["*".to_string()],
             session_lifetime_days: 1,
+            session_cookie_secure: false,
             log_level: "INFO".to_string(),
             display_timezone: "UTC".to_string(),
             multipart_min_part_size: 5_242_880,

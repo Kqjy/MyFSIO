@@ -52,6 +52,8 @@ pub struct AppState {
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
     pub relay_idempotency_cache: Arc<Mutex<LruCache<String, RelayIdempotencyEntry>>>,
+    pub relay_idempotency_inflight:
+        Arc<Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     pub audit_log: Arc<AuditLog>,
 }
 
@@ -251,6 +253,9 @@ impl AppState {
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
             relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),
+            relay_idempotency_inflight: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             audit_log,
         }
     }

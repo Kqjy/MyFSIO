@@ -858,6 +858,26 @@ pub async fn delete_bucket(
     if query.logging.is_some() {
         return config::delete_logging(&state, &bucket).await;
     }
+    if query.acl.is_some()
+        || query.versioning.is_some()
+        || query.versions.is_some()
+        || query.uploads.is_some()
+        || query.delete.is_some()
+        || query.location.is_some()
+        || query.policy_status.is_some()
+    {
+        let body = S3Error::new(
+            S3ErrorCode::MethodNotAllowed,
+            "DELETE is not supported on this bucket subresource",
+        )
+        .to_xml();
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [("content-type", "application/xml")],
+            body,
+        )
+            .into_response();
+    }
 
     match state.storage.delete_bucket(&bucket).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
