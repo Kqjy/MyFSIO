@@ -1286,10 +1286,17 @@ pub async fn sites_dashboard(
         })
         .collect();
 
+    let credentials = state.iam.list_peer_credentials();
+    let issued_payload = session
+        .write(|s| s.extra.remove("peer_cred_issued"))
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
     ctx.insert("local_site", &local_site);
     ctx.insert("peers", &peers);
     ctx.insert("peers_with_stats", &peers_with_stats);
     ctx.insert("connections", &conns);
+    ctx.insert("peer_credentials", &credentials);
+    ctx.insert("peer_credential_issued", &issued_payload);
     ctx.insert(
         "config_site_id",
         &state.config.site_id.clone().unwrap_or_default(),
@@ -1374,6 +1381,21 @@ pub struct PeerCredentialForm {
     pub site_id: String,
     #[serde(default)]
     pub display_name: String,
+    #[serde(default)]
+    pub return_to: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PeerCredentialDeleteForm {
+    #[serde(default)]
+    pub return_to: String,
+}
+
+fn resolve_peer_credential_return(raw: &str) -> &'static str {
+    match raw.trim() {
+        "/ui/sites" => "/ui/sites",
+        _ => "/ui/peer-credentials",
+    }
 }
 
 pub async fn ui_create_peer_credential(
@@ -1381,10 +1403,11 @@ pub async fn ui_create_peer_credential(
     Extension(session): Extension<SessionHandle>,
     axum::Form(form): axum::Form<PeerCredentialForm>,
 ) -> Response {
+    let target = resolve_peer_credential_return(&form.return_to);
     let site_id = form.site_id.trim();
     if site_id.is_empty() {
         session.write(|s| s.push_flash("danger", "Site ID is required."));
-        return axum::response::Redirect::to("/ui/peer-credentials").into_response();
+        return axum::response::Redirect::to(target).into_response();
     }
     let display_name_opt = if form.display_name.trim().is_empty() {
         None
@@ -1408,14 +1431,16 @@ pub async fn ui_create_peer_credential(
             session.write(|s| s.push_flash("danger", format!("Create failed: {}", e)));
         }
     }
-    axum::response::Redirect::to("/ui/peer-credentials").into_response()
+    axum::response::Redirect::to(target).into_response()
 }
 
 pub async fn ui_delete_peer_credential(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     axum::extract::Path(access_key): axum::extract::Path<String>,
+    axum::Form(form): axum::Form<PeerCredentialDeleteForm>,
 ) -> Response {
+    let target = resolve_peer_credential_return(&form.return_to);
     match state.iam.delete_peer_credential(&access_key) {
         Ok(()) => {
             session.write(|s| s.push_flash("success", "Peer credential revoked."));
@@ -1424,7 +1449,7 @@ pub async fn ui_delete_peer_credential(
             session.write(|s| s.push_flash("danger", format!("Revoke failed: {}", e)));
         }
     }
-    axum::response::Redirect::to("/ui/peer-credentials").into_response()
+    axum::response::Redirect::to(target).into_response()
 }
 
 pub async fn audit_log_page(
@@ -1465,12 +1490,15 @@ pub async fn cluster_dashboard(
         .filter(|s| s.get("online").and_then(|v| v.as_bool()).unwrap_or(false))
         .count();
 
+    let audit_entries = state.audit_log.read_recent(10);
     ctx.insert("cluster_sites", &sites);
     ctx.insert("cluster_total_buckets", &total_buckets);
     ctx.insert("cluster_total_objects", &total_objects);
     ctx.insert("cluster_total_size_bytes", &total_size_bytes);
     ctx.insert("cluster_online_count", &online_count);
     ctx.insert("cluster_total_count", &sites.len());
+    ctx.insert("audit_entries", &audit_entries);
+    ctx.insert("audit_enabled", &state.audit_log.enabled());
     render(&state, "cluster.html", &ctx)
 }
 
