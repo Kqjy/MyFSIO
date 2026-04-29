@@ -85,6 +85,10 @@ pub struct ServerConfig {
     pub peer_require_https: bool,
     pub peer_sigv4_timestamp_tolerance_secs: u64,
     pub peer_nonce_cache_size: usize,
+    pub cluster_psk: Option<String>,
+    pub relay_idempotency_cache_size: usize,
+    pub relay_idempotency_ttl_secs: u64,
+    pub audit_log_enabled: bool,
     pub cors_origins: Vec<String>,
     pub cors_methods: Vec<String>,
     pub cors_allow_headers: Vec<String>,
@@ -252,6 +256,14 @@ impl ServerConfig {
         let peer_sigv4_timestamp_tolerance_secs =
             parse_u64_env("PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 60);
         let peer_nonce_cache_size = parse_usize_env("PEER_NONCE_CACHE_SIZE", 10_000);
+        let cluster_psk = std::env::var("MYFSIO_CLUSTER_PSK")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let relay_idempotency_cache_size =
+            parse_usize_env("RELAY_IDEMPOTENCY_CACHE_SIZE", 10_000);
+        let relay_idempotency_ttl_secs = parse_u64_env("RELAY_IDEMPOTENCY_TTL_SECONDS", 3_600);
+        let audit_log_enabled = parse_bool_env("AUDIT_LOG_ENABLED", false);
         let cors_origins = parse_list_env("CORS_ORIGINS", "*");
         let cors_methods = parse_list_env("CORS_METHODS", "GET,PUT,POST,DELETE,OPTIONS,HEAD");
         let cors_allow_headers = parse_list_env("CORS_ALLOW_HEADERS", "*");
@@ -363,6 +375,10 @@ impl ServerConfig {
             peer_require_https,
             peer_sigv4_timestamp_tolerance_secs,
             peer_nonce_cache_size,
+            cluster_psk,
+            relay_idempotency_cache_size,
+            relay_idempotency_ttl_secs,
+            audit_log_enabled,
             cors_origins,
             cors_methods,
             cors_allow_headers,
@@ -458,6 +474,10 @@ impl Default for ServerConfig {
             peer_require_https: false,
             peer_sigv4_timestamp_tolerance_secs: 60,
             peer_nonce_cache_size: 10_000,
+            cluster_psk: None,
+            relay_idempotency_cache_size: 10_000,
+            relay_idempotency_ttl_secs: 3_600,
+            audit_log_enabled: false,
             cors_origins: vec!["*".to_string()],
             cors_methods: vec![
                 "GET".to_string(),

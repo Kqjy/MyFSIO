@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::config::ServerConfig;
 use crate::services::access_logging::AccessLoggingService;
+use crate::services::audit_log::AuditLog;
 use crate::services::gc::GcService;
 use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
@@ -50,6 +51,16 @@ pub struct AppState {
     pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
+    pub relay_idempotency_cache: Arc<Mutex<LruCache<String, RelayIdempotencyEntry>>>,
+    pub audit_log: Arc<AuditLog>,
+}
+
+#[derive(Clone)]
+pub struct RelayIdempotencyEntry {
+    pub stored_at: Instant,
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub request_fingerprint: String,
 }
 
 impl AppState {
@@ -214,6 +225,9 @@ impl AppState {
         ));
         let nonce_cap = NonZeroUsize::new(config.peer_nonce_cache_size.max(1))
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
+        let idemp_cap = NonZeroUsize::new(config.relay_idempotency_cache_size.max(1))
+            .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
+        let audit_log = Arc::new(AuditLog::new(&config.storage_root, config.audit_log_enabled));
         Self {
             config,
             storage,
@@ -236,6 +250,8 @@ impl AppState {
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
+            relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),
+            audit_log,
         }
     }
 

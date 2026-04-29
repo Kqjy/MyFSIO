@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_peer;
 mod chunked;
 mod config;
 pub mod kms;
@@ -170,6 +171,14 @@ fn trigger_replication_for_request(
         return;
     }
     trigger_replication(state, bucket, key, action);
+}
+
+#[derive(Debug, Clone)]
+pub struct RelayContext {
+    pub origin_site_id: String,
+    pub admin_user_id: String,
+    pub idempotency_key: String,
+    pub correlation_id: String,
 }
 
 async fn ensure_object_lock_allows_write(

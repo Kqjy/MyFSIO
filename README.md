@@ -96,6 +96,10 @@ Core settings:
 | `PEER_NONCE_CACHE_SIZE` | `10000` | Replay-detection LRU capacity for peer requests |
 | `ALLOW_LEGACY_HEADER_AUTH` | `false` | Accept legacy `x-access-key`/`x-secret-key` headers (peer creds are SigV4-only regardless) |
 | `PEER_REQUIRE_HTTPS` | `false` | Reject non-https peer endpoint registrations |
+| `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling cross-site admin federation (`/admin/peer/*` + `/admin/relay/*`). Same value on every node |
+| `RELAY_IDEMPOTENCY_CACHE_SIZE` | `10000` | LRU capacity for relay idempotency keys |
+| `RELAY_IDEMPOTENCY_TTL_SECONDS` | `3600` | TTL for cached relay responses |
+| `AUDIT_LOG_ENABLED` | `false` | Write JSONL audit lines for relayed admin actions |
 | `PRESIGNED_URL_MIN_EXPIRY_SECONDS` | `1` | Minimum presigned URL expiry |
 | `PRESIGNED_URL_MAX_EXPIRY_SECONDS` | `604800` | Maximum presigned URL expiry |
 | `SECRET_KEY` | loaded from `.myfsio.sys/config/.secret` if present | Session signing key and IAM-at-rest encryption key |

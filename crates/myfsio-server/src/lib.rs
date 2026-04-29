@@ -233,6 +233,16 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         .route("/ui/sites", get(ui_pages::sites_dashboard))
         .route("/ui/cluster", get(ui_pages::cluster_dashboard))
         .route("/ui/cluster/data", get(ui_pages::cluster_data_json))
+        .route("/ui/peer-credentials", get(ui_pages::peer_credentials_page))
+        .route(
+            "/ui/peer-credentials/create",
+            post(ui_pages::ui_create_peer_credential),
+        )
+        .route(
+            "/ui/peer-credentials/{access_key}/delete",
+            post(ui_pages::ui_delete_peer_credential),
+        )
+        .route("/ui/audit-log", get(ui_pages::audit_log_page))
         .route("/ui/sites/local", post(ui_pages::update_local_site))
         .route("/ui/sites/peers", post(ui_pages::add_peer_site))
         .route(
@@ -538,6 +548,14 @@ pub fn create_router(state: state::AppState) -> Router {
             axum::routing::delete(handlers::admin::delete_peer_credential),
         )
         .route(
+            "/admin/relay/{site_id}/{*sub_path}",
+            axum::routing::any(handlers::admin_peer::relay_outbound),
+        )
+        .route(
+            "/admin/audit-log",
+            axum::routing::get(handlers::admin::audit_log_recent),
+        )
+        .route(
             "/admin/iam/users",
             axum::routing::get(handlers::admin::iam_list_users),
         )
@@ -613,6 +631,82 @@ pub fn create_router(state: state::AppState) -> Router {
             middleware::auth_layer,
         ))
         .layer(axum::middleware::from_fn_with_state(
+            admin_rate_limit.clone(),
+            middleware::rate_limit_layer,
+        ));
+
+    let admin_peer_router = Router::new()
+        .route(
+            "/admin/peer/sites",
+            axum::routing::get(handlers::admin::list_all_sites)
+                .post(handlers::admin::register_peer_site),
+        )
+        .route(
+            "/admin/peer/sites/{site_id}",
+            axum::routing::get(handlers::admin::get_peer_site)
+                .put(handlers::admin::update_peer_site)
+                .delete(handlers::admin::delete_peer_site),
+        )
+        .route(
+            "/admin/peer/sites/{site_id}/health",
+            axum::routing::post(handlers::admin::check_peer_health),
+        )
+        .route(
+            "/admin/peer/iam/users",
+            axum::routing::get(handlers::admin::iam_list_users),
+        )
+        .route(
+            "/admin/peer/iam/users/{identifier}",
+            axum::routing::get(handlers::admin::iam_get_user),
+        )
+        .route(
+            "/admin/peer/iam/users/{identifier}/policies",
+            axum::routing::get(handlers::admin::iam_get_user_policies),
+        )
+        .route(
+            "/admin/peer/iam/users/{identifier}/access-keys",
+            axum::routing::post(handlers::admin::iam_create_access_key),
+        )
+        .route(
+            "/admin/peer/iam/users/{identifier}/access-keys/{access_key}",
+            axum::routing::delete(handlers::admin::iam_delete_access_key),
+        )
+        .route(
+            "/admin/peer/iam/users/{identifier}/disable",
+            axum::routing::post(handlers::admin::iam_disable_user),
+        )
+        .route(
+            "/admin/peer/iam/users/{identifier}/enable",
+            axum::routing::post(handlers::admin::iam_enable_user),
+        )
+        .route(
+            "/admin/peer/website-domains",
+            axum::routing::get(handlers::admin::list_website_domains)
+                .post(handlers::admin::create_website_domain),
+        )
+        .route(
+            "/admin/peer/website-domains/{domain}",
+            axum::routing::get(handlers::admin::get_website_domain)
+                .put(handlers::admin::update_website_domain)
+                .delete(handlers::admin::delete_website_domain),
+        )
+        .route(
+            "/admin/peer/gc/run",
+            axum::routing::post(handlers::admin::gc_run),
+        )
+        .route(
+            "/admin/peer/integrity/run",
+            axum::routing::post(handlers::admin::integrity_run),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            handlers::admin_peer::relay_inbound_layer,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_layer,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
             admin_rate_limit,
             middleware::rate_limit_layer,
         ));
@@ -622,6 +716,7 @@ pub fn create_router(state: state::AppState) -> Router {
 
     api_router
         .merge(admin_router)
+        .merge(admin_peer_router)
         .layer(axum::middleware::from_fn(middleware::server_header))
         .layer(cors_layer(&state.config))
         .layer(axum::middleware::from_fn_with_state(

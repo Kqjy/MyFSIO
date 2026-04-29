@@ -1563,7 +1563,7 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
 }
 
 fn is_path_allowed_for_peer(path: &str) -> bool {
-    path == "/admin/cluster/overview"
+    path == "/admin/cluster/overview" || path.starts_with("/admin/peer/")
 }
 
 fn enforce_peer_freshness_and_nonce(

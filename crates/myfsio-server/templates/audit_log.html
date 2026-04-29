@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Audit Log{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-column gap-3">
+  <div class="d-flex justify-content-between align-items-end">
+    <div>
+      <small class="text-uppercase text-muted">Cluster admin</small>
+      <h1 class="h3 mb-1">Audit Log</h1>
+      <p class="text-muted mb-0 small">Append-only log of cross-site relayed admin actions. Each entry links origin and target by <code>correlation_id</code>.</p>
+    </div>
+    <a href="/ui/audit-log" class="btn btn-outline-secondary btn-sm">Refresh</a>
+  </div>
+
+  {% if not audit_enabled %}
+  <div class="alert alert-warning">
+    Audit log is disabled. Set <code>AUDIT_LOG_ENABLED=true</code> to start recording cluster-relayed actions.
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th class="ps-3">When</th>
+              <th>Origin</th>
+              <th>Admin</th>
+              <th>Action</th>
+              <th>Direction</th>
+              <th>Status</th>
+              <th class="pe-3">Correlation ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if entries | length == 0 %}
+              <tr><td colspan="7" class="text-center text-muted py-4">No entries.</td></tr>
+            {% else %}
+              {% for e in entries %}
+                <tr>
+                  <td class="ps-3 small text-muted">{{ e.ts }}</td>
+                  <td><code class="small">{{ e.origin_site_id | default(value="") }}</code></td>
+                  <td class="small">{{ e.admin_user_id | default(value="") }}</td>
+                  <td class="small"><code>{{ e.method }}</code> {{ e.path }}</td>
+                  <td>
+                    {% if e.target == "outbound" %}
+                      <span class="badge bg-info-subtle text-info">→ outbound</span>
+                    {% else %}
+                      <span class="badge bg-primary-subtle text-primary">← inbound</span>
+                    {% endif %}
+                  </td>
+                  <td class="small {% if e.result == 'ok' %}text-success{% else %}text-danger{% endif %}">{{ e.status_code }} {{ e.result }}</td>
+                  <td class="pe-3 small text-muted"><code>{{ e.correlation_id }}</code></td>
+                </tr>
+              {% endfor %}
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

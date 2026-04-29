@@ -125,6 +125,10 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `PEER_NONCE_CACHE_SIZE` | `10000` | Capacity of the in-memory replay-detection LRU for peer requests |
 | `ALLOW_LEGACY_HEADER_AUTH` | `false` | When `true`, accepts the legacy `x-access-key`/`x-secret-key` header pair. Default is off; SigV4 is preferred. Peer credentials are SigV4-only regardless of this flag |
 | `PEER_REQUIRE_HTTPS` | `false` | When `true`, peer endpoint registration rejects non-`https://` URLs. The server logs a startup warning if any registered peer uses `http://` and this flag is unset |
+| `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling `/admin/peer/*` (inbound relay) and `/admin/relay/*` (outbound dispatch). Same value required on every node. When unset, Phase 3 federation is disabled |
+| `RELAY_IDEMPOTENCY_CACHE_SIZE` | `10000` | LRU capacity for relay idempotency dedup |
+| `RELAY_IDEMPOTENCY_TTL_SECONDS` | `3600` | How long a cached relay response is replayable for the same idempotency key |
+| `AUDIT_LOG_ENABLED` | `false` | When `true`, append-only JSONL log of relayed admin actions at `<STORAGE_ROOT>/.myfsio.sys/audit/YYYYMMDD.jsonl` |
 | `PRESIGNED_URL_MIN_EXPIRY_SECONDS` | `1` | Minimum presigned URL lifetime |
 | `PRESIGNED_URL_MAX_EXPIRY_SECONDS` | `604800` | Maximum presigned URL lifetime |
 | `SECRET_KEY` | unset, then fallback to `.myfsio.sys/config/.secret` if present | Session signing and IAM config encryption key |
@@ -291,6 +295,60 @@ once on each site to retag those access keys. The migration:
 - Clears the migrated user's policies. **If you used the same AK as a site-sync credential, you must reissue separate IAM users for site-sync** before relying on the data plane again — the migrated AK is now restricted to `/admin/cluster/overview`.
 
 The in-app **Documentation → Site Registry** page has a worked example with side-by-side cards.
+
+### Cross-site admin actions (federated writes)
+
+Once peer credentials are issued and `MYFSIO_CLUSTER_PSK` is set on every node, an admin can apply most write actions on a peer site through their local node. The local node signs a SigV4 request with the peer credential it holds for the target site and attaches three HMACs over the cluster PSK:
+
+- `x-myfsio-cluster-attest` = `HMAC-SHA256(PSK, amz_date || origin_site_id || idempotency_key)` — proves the call comes from a cluster member
+- `x-myfsio-admin-attest` = `HMAC-SHA256(PSK, amz_date || admin_user_id)` — proves a real admin authorised it
+- `x-myfsio-origin-site` must equal the peer principal's site_id on the target node
+
+Plus a unique `x-myfsio-idempotency-key` (UUIDv4) for safe retry, a `x-myfsio-correlation-id` so origin and target audit entries can be joined, and `x-myfsio-nonce` to prevent same-second signature collisions.
+
+#### Outbound (origin) — `/admin/relay/{site_id}/{*path}`
+
+Operators don't construct these signatures themselves. The local node exposes an outbound relay dispatcher: take any inbound `/admin/peer/{...}` path, prefix it with `/admin/relay/{target_site_id}/`, and the local node signs and forwards.
+
+```bash
+# Disable a user on us-west-1 from us-east-1's UI/API
+curl -X POST https://us-east-1.example.com/admin/relay/us-west-1/iam/users/u-someone/disable \
+     -H 'authorization: AWS4-HMAC-SHA256 …'   # signed by us-east-1's local admin key
+```
+
+The response is the target site's response (status, headers, body) with `x-myfsio-correlation-id` and `x-myfsio-idempotency-key` echoed for audit/log lookup.
+
+#### Inbound (target) — `/admin/peer/{*}`
+
+The target site mounts a parallel route set under `/admin/peer/`:
+
+| Outbound path | Underlying action |
+| --- | --- |
+| `POST /admin/peer/sites` | Register peer site |
+| `PUT/DELETE /admin/peer/sites/{site_id}` | Update / delete peer site entry |
+| `POST /admin/peer/sites/{site_id}/health` | Re-check peer reachability |
+| `POST /admin/peer/iam/users/{id}/access-keys` | Issue access key for an existing user |
+| `DELETE /admin/peer/iam/users/{id}/access-keys/{ak}` | Revoke an access key |
+| `POST /admin/peer/iam/users/{id}/disable` and `/enable` | Toggle user enable flag |
+| `POST/PUT/DELETE /admin/peer/website-domains[/{domain}]` | Manage website domain mappings |
+| `POST /admin/peer/gc/run` | Trigger garbage collection |
+| `POST /admin/peer/integrity/run` | Trigger integrity scan |
+| `GET /admin/peer/{...}` | Read counterparts of the above (cluster-wide introspection) |
+
+These accept **only** peer principals carrying valid attestation. Each request is dedup'd by `(origin_site_id, idempotency_key)` for `RELAY_IDEMPOTENCY_TTL_SECONDS`; replays return the cached response with header `x-myfsio-idempotent-replay: true`. Attestation failure is `403`; `MYFSIO_CLUSTER_PSK` not configured returns `503`.
+
+#### Audit log
+
+When `AUDIT_LOG_ENABLED=true`, every relayed action writes one JSONL line on both the origin (target=`outbound`) and target (target=`local`) nodes, sharing the same `correlation_id`. The UI surfaces this at `/ui/audit-log`.
+
+#### Threat model summary
+
+A successful federated write requires three independent secrets:
+1. A SigV4-valid peer credential issued on the target site
+2. The cluster PSK (shared cluster-wide; rotate by rolling restart)
+3. The HMAC over the admin's `user_id` (also keyed by PSK; proves a human admin authorized the call)
+
+Compromise of any one of the three is insufficient. The narrow `/admin/peer/*` URL prefix and the explicit allowlist of relayable paths give a second layer of defense beyond the attestation check.
 
 ## 7. Data Layout
 

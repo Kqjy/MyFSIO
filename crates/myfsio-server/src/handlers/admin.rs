@@ -1459,6 +1459,29 @@ fn require_admin_or_registered_peer(_state: &AppState, principal: &Principal) ->
     ))
 }
 
+pub async fn audit_log_recent(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(err) = require_admin(&principal) {
+        return err;
+    }
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let entries = state.audit_log.read_recent(limit);
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "enabled": state.audit_log.enabled(),
+            "entries": entries,
+        }),
+    )
+}
+
 pub async fn list_peer_credentials(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,

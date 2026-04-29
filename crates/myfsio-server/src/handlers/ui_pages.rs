@@ -124,6 +124,10 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
         ("ui.update_local_site", "/ui/sites/local"),
         ("ui.add_peer_site", "/ui/sites/peers"),
         ("ui.cluster_dashboard", "/ui/cluster"),
+        ("ui.peer_credentials", "/ui/peer-credentials"),
+        ("ui.create_peer_credential", "/ui/peer-credentials/create"),
+        ("ui.delete_peer_credential", "/ui/peer-credentials/{access_key}/delete"),
+        ("ui.audit_log", "/ui/audit-log"),
         ("ui.metrics_dashboard", "/ui/metrics"),
         ("ui.system_dashboard", "/ui/system"),
         ("ui.system_gc_status", "/ui/system/gc/status"),
@@ -1347,6 +1351,93 @@ fn cluster_totals(sites: &[Value]) -> Value {
         "online_count": online,
         "total_count": sites.len(),
     })
+}
+
+pub async fn peer_credentials_page(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+) -> Response {
+    let mut ctx = page_context(&state, &session, "ui.peer_credentials");
+    let (api_base, _) = parse_api_base(&state);
+    ctx.insert("api_base", &api_base);
+    let credentials = state.iam.list_peer_credentials();
+    ctx.insert("credentials", &credentials);
+    let issued_payload = session
+        .write(|s| s.extra.remove("peer_cred_issued"))
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    ctx.insert("issued_payload", &issued_payload);
+    render(&state, "peer_credentials.html", &ctx)
+}
+
+#[derive(serde::Deserialize)]
+pub struct PeerCredentialForm {
+    pub site_id: String,
+    #[serde(default)]
+    pub display_name: String,
+}
+
+pub async fn ui_create_peer_credential(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+    axum::Form(form): axum::Form<PeerCredentialForm>,
+) -> Response {
+    let site_id = form.site_id.trim();
+    if site_id.is_empty() {
+        session.write(|s| s.push_flash("danger", "Site ID is required."));
+        return axum::response::Redirect::to("/ui/peer-credentials").into_response();
+    }
+    let display_name_opt = if form.display_name.trim().is_empty() {
+        None
+    } else {
+        Some(form.display_name.trim())
+    };
+    match state.iam.create_peer_credential(site_id, display_name_opt) {
+        Ok(value) => {
+            let payload = serde_json::json!({
+                "site_id": value.get("site_id").cloned().unwrap_or_default(),
+                "access_key": value.get("access_key").cloned().unwrap_or_default(),
+                "secret_key": value.get("secret_key").cloned().unwrap_or_default(),
+            });
+            session.write(|s| {
+                s.extra
+                    .insert("peer_cred_issued".to_string(), payload.to_string());
+                s.push_flash("success", "Peer credential issued. Copy the secret now.");
+            });
+        }
+        Err(e) => {
+            session.write(|s| s.push_flash("danger", format!("Create failed: {}", e)));
+        }
+    }
+    axum::response::Redirect::to("/ui/peer-credentials").into_response()
+}
+
+pub async fn ui_delete_peer_credential(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+    axum::extract::Path(access_key): axum::extract::Path<String>,
+) -> Response {
+    match state.iam.delete_peer_credential(&access_key) {
+        Ok(()) => {
+            session.write(|s| s.push_flash("success", "Peer credential revoked."));
+        }
+        Err(e) => {
+            session.write(|s| s.push_flash("danger", format!("Revoke failed: {}", e)));
+        }
+    }
+    axum::response::Redirect::to("/ui/peer-credentials").into_response()
+}
+
+pub async fn audit_log_page(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+) -> Response {
+    let mut ctx = page_context(&state, &session, "ui.audit_log");
+    let (api_base, _) = parse_api_base(&state);
+    ctx.insert("api_base", &api_base);
+    let entries = state.audit_log.read_recent(200);
+    ctx.insert("entries", &entries);
+    ctx.insert("audit_enabled", &state.audit_log.enabled());
+    render(&state, "audit_log.html", &ctx)
 }
 
 pub async fn cluster_dashboard(
