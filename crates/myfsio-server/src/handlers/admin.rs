@@ -89,6 +89,19 @@ fn validate_endpoint(endpoint: &str) -> Option<String> {
     None
 }
 
+async fn enforce_outbound_endpoint(state: &AppState, endpoint: &str) -> Option<String> {
+    if state.config.allow_internal_endpoints {
+        return None;
+    }
+    match crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+        Ok(()) => None,
+        Err(reason) => Some(format!(
+            "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+            reason
+        )),
+    }
+}
+
 fn validate_region(region: &str) -> Option<String> {
     let re = regex::Regex::new(r"^[a-z]{2,}-[a-z]+-\d+$").unwrap();
     if !re.is_match(region) {
@@ -305,6 +318,9 @@ pub async fn register_peer_site(
     if let Some(err) = validate_endpoint(&endpoint) {
         return json_error("ValidationError", &err, StatusCode::BAD_REQUEST);
     }
+    if let Some(err) = enforce_outbound_endpoint(&state, &endpoint).await {
+        return json_error("Forbidden", &err, StatusCode::FORBIDDEN);
+    }
 
     let region = payload
         .get("region")
@@ -434,6 +450,9 @@ pub async fn update_peer_site(
     if let Some(ep) = payload.get("endpoint").and_then(|v| v.as_str()) {
         if let Some(err) = validate_endpoint(ep) {
             return json_error("ValidationError", &err, StatusCode::BAD_REQUEST);
+        }
+        if let Some(err) = enforce_outbound_endpoint(&state, ep).await {
+            return json_error("Forbidden", &err, StatusCode::FORBIDDEN);
         }
     }
     if let Some(p) = payload.get("priority").and_then(|v| v.as_i64()) {

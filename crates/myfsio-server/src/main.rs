@@ -140,6 +140,19 @@ async fn main() {
         tracing::info!("Site sync worker started");
     }
 
+    if config.ui_enabled {
+        bg_handles.push(
+            state
+                .sessions
+                .clone()
+                .spawn_sweeper(std::time::Duration::from_secs(300)),
+        );
+        tracing::info!(
+            "Session sweeper started (capacity={}, interval=300s)",
+            state.sessions.capacity()
+        );
+    }
+
     let ui_enabled = config.ui_enabled;
     let api_app = myfsio_server::create_router(state.clone());
     let ui_app = if ui_enabled {

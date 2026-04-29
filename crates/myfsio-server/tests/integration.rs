@@ -8380,6 +8380,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
         multipart_min_part_size: 1,
+        allow_internal_endpoints: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);

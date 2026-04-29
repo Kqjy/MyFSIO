@@ -140,6 +140,7 @@ impl AppState {
             config.replication_max_retries,
             config.replication_streaming_threshold_bytes,
             config.replication_max_failures_per_bucket,
+            config.allow_internal_endpoints,
         ));
         if config.replication_healer_enabled {
             replication.clone().start_healer(

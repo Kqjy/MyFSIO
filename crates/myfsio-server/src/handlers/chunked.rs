@@ -4,6 +4,9 @@ use std::task::{Context, Poll};
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, ReadBuf};
 
+const MAX_CHUNK_HEADER_LINE: usize = 1024;
+const MAX_TRAILER_BYTES: usize = 16_384;
+
 enum State {
     ReadSize,
     ReadData(u64),
@@ -17,6 +20,7 @@ pub struct AwsChunkedStream<S> {
     state: State,
     pending: BytesMut,
     eof: bool,
+    trailer_bytes_read: usize,
 }
 
 impl<S> AwsChunkedStream<S> {
@@ -27,6 +31,7 @@ impl<S> AwsChunkedStream<S> {
             state: State::ReadSize,
             pending: BytesMut::new(),
             eof: false,
+            trailer_bytes_read: 0,
         }
     }
 
@@ -73,13 +78,28 @@ impl<S> AwsChunkedStream<S> {
                 State::ReadSize => {
                     let idx = match self.find_crlf() {
                         Some(i) => i,
-                        None => return Ok(false),
+                        None => {
+                            if self.buffer.len() > MAX_CHUNK_HEADER_LINE {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "aws-chunked size line exceeds maximum length",
+                                ));
+                            }
+                            return Ok(false);
+                        }
                     };
+                    if idx > MAX_CHUNK_HEADER_LINE {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "aws-chunked size line exceeds maximum length",
+                        ));
+                    }
                     let line = self.buffer.split_to(idx);
                     self.buffer.advance(2);
                     let size = Self::parse_chunk_size(&line)?;
                     if size == 0 {
                         self.state = State::ReadTrailer;
+                        self.trailer_bytes_read = 0;
                     } else {
                         self.state = State::ReadData(size);
                     }
@@ -113,8 +133,35 @@ impl<S> AwsChunkedStream<S> {
                 State::ReadTrailer => {
                     let idx = match self.find_crlf() {
                         Some(i) => i,
-                        None => return Ok(false),
+                        None => {
+                            if self.buffer.len() > MAX_CHUNK_HEADER_LINE {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "aws-chunked trailer line exceeds maximum length",
+                                ));
+                            }
+                            if self.trailer_bytes_read + self.buffer.len() > MAX_TRAILER_BYTES {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "aws-chunked trailer section exceeds maximum size",
+                                ));
+                            }
+                            return Ok(false);
+                        }
                     };
+                    if idx > MAX_CHUNK_HEADER_LINE {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "aws-chunked trailer line exceeds maximum length",
+                        ));
+                    }
+                    self.trailer_bytes_read = self.trailer_bytes_read.saturating_add(idx + 2);
+                    if self.trailer_bytes_read > MAX_TRAILER_BYTES {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "aws-chunked trailer section exceeds maximum size",
+                        ));
+                    }
                     if idx == 0 {
                         self.buffer.advance(2);
                         self.state = State::Finished;
@@ -181,4 +228,42 @@ pub fn decode_body(body: axum::body::Body) -> impl AsyncRead + Send + Unpin {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
     );
     AwsChunkedStream::new(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AwsChunkedStream, MAX_CHUNK_HEADER_LINE};
+    use std::io::Cursor;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn rejects_oversized_chunk_size_line() {
+        let huge: Vec<u8> = std::iter::repeat(b'A').take(MAX_CHUNK_HEADER_LINE + 16).collect();
+        let cursor = Cursor::new(huge);
+        let mut stream = AwsChunkedStream::new(cursor);
+        let mut buf = Vec::new();
+        let err = stream.read_to_end(&mut buf).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn decodes_normal_chunked_body() {
+        let payload = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let cursor = Cursor::new(payload.to_vec());
+        let mut stream = AwsChunkedStream::new(cursor);
+        let mut out = Vec::new();
+        stream.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_trailer_line() {
+        let mut payload = Vec::from(&b"0\r\n"[..]);
+        payload.extend(std::iter::repeat(b'X').take(MAX_CHUNK_HEADER_LINE + 16));
+        let cursor = Cursor::new(payload);
+        let mut stream = AwsChunkedStream::new(cursor);
+        let mut buf = Vec::new();
+        let err = stream.read_to_end(&mut buf).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 }

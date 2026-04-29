@@ -1,7 +1,10 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::Value;
+
+use crate::services::safe_resolver::SafeResolver;
 
 fn extract_error_detail(body: &str) -> String {
     let trimmed = body.trim();
@@ -58,16 +61,26 @@ use crate::stores::connections::RemoteConnection;
 
 pub struct PeerAdminClient {
     client: reqwest::Client,
+    allow_internal_endpoints: bool,
 }
 
 impl PeerAdminClient {
-    pub fn new(connect_timeout: Duration, read_timeout: Duration) -> Self {
+    pub fn new(
+        connect_timeout: Duration,
+        read_timeout: Duration,
+        allow_internal_endpoints: bool,
+    ) -> Self {
+        let resolver: Arc<SafeResolver> = Arc::new(SafeResolver::new(allow_internal_endpoints));
         let client = reqwest::Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(read_timeout)
+            .dns_resolver(resolver)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        Self {
+            client,
+            allow_internal_endpoints,
+        }
     }
 
     pub async fn fetch_cluster_overview(
@@ -75,6 +88,16 @@ impl PeerAdminClient {
         endpoint: &str,
         connection: &RemoteConnection,
     ) -> Result<Value, String> {
+        if !self.allow_internal_endpoints {
+            crate::handlers::ui_api::guard_external_endpoint_async(endpoint)
+                .await
+                .map_err(|reason| {
+                    format!(
+                        "endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                        reason
+                    )
+                })?;
+        }
         let url = format!(
             "{}/admin/cluster/overview",
             endpoint.trim_end_matches('/')

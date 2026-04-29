@@ -23,7 +23,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sysinfo::{Disks, System};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::handlers::{self, ObjectQuery};
 use crate::middleware::session::SessionHandle;
@@ -954,8 +954,13 @@ pub async fn list_bucket_objects(
         .is_versioning_enabled(&bucket_name)
         .await
         .unwrap_or(false);
-    let stats = state.storage.bucket_stats(&bucket_name).await.ok();
-    let total_count = stats.as_ref().map(|s| s.objects).unwrap_or(0);
+    let bucket_stats = state.storage.bucket_stats(&bucket_name).await.ok();
+    let bucket_total = bucket_stats.as_ref().map(|s| s.objects).unwrap_or(0);
+    let prefix_active = q
+        .prefix
+        .as_deref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
 
     let use_shallow = q.delimiter.as_deref() == Some("/");
 
@@ -977,9 +982,15 @@ pub async fn list_bucket_objects(
                     .iter()
                     .map(|o| object_json(&bucket_name, o))
                     .collect();
+                let view_count: u64 = if prefix_active {
+                    (objects.len() + res.common_prefixes.len()) as u64
+                } else {
+                    bucket_total
+                };
                 Json(json!({
                     "versioning_enabled": versioning_enabled,
-                    "total_count": total_count,
+                    "total_count": view_count,
+                    "bucket_total": bucket_total,
                     "is_truncated": res.is_truncated,
                     "next_continuation_token": res.next_continuation_token,
                     "url_templates": url_templates_for(&bucket_name),
@@ -1006,10 +1017,16 @@ pub async fn list_bucket_objects(
                 .iter()
                 .map(|o| object_json(&bucket_name, o))
                 .collect();
+            let view_count: u64 = if prefix_active {
+                objects.len() as u64
+            } else {
+                bucket_total
+            };
 
             Json(json!({
                 "versioning_enabled": versioning_enabled,
-                "total_count": total_count,
+                "total_count": view_count,
+                "bucket_total": bucket_total,
                 "is_truncated": res.is_truncated,
                 "next_continuation_token": res.next_continuation_token,
                 "url_templates": url_templates_for(&bucket_name),
@@ -1367,6 +1384,244 @@ fn default_region() -> String {
     "us-east-1".to_string()
 }
 
+pub(crate) async fn guard_external_endpoint_async(endpoint: &str) -> Result<(), String> {
+    if let Err(reason) = guard_external_endpoint(endpoint) {
+        return Err(reason.to_string());
+    }
+    let (host, port) = match parse_endpoint_authority(endpoint) {
+        Some(v) => v,
+        None => return Err("could not parse endpoint authority".to_string()),
+    };
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let lookup = format!("{}:{}", host, port);
+    let resolved = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::lookup_host(lookup),
+    )
+    .await
+    {
+        Ok(Ok(it)) => it.collect::<Vec<_>>(),
+        Ok(Err(e)) => {
+            return Err(format!("DNS resolution failed for '{}': {}", host, e));
+        }
+        Err(_) => {
+            return Err(format!("DNS resolution timed out for '{}'", host));
+        }
+    };
+    if resolved.is_empty() {
+        return Err(format!("hostname '{}' resolved to no addresses", host));
+    }
+    for sa in &resolved {
+        if let Err(reason) = reject_internal_ip(sa.ip()) {
+            return Err(format!(
+                "hostname '{}' resolves to internal address {} ({})",
+                host,
+                sa.ip(),
+                reason
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_endpoint_authority(endpoint: &str) -> Option<(String, u16)> {
+    let trimmed = endpoint.trim();
+    let scheme_idx = trimmed.find("://")?;
+    let scheme = &trimmed[..scheme_idx];
+    let after_scheme = &trimmed[scheme_idx + 3..];
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else {
+        80
+    };
+    if let Some(stripped) = authority.strip_prefix('[') {
+        let end = stripped.find(']')?;
+        let host = &stripped[..end];
+        let rest = &stripped[end + 1..];
+        let port = if let Some(p) = rest.strip_prefix(':') {
+            p.parse::<u16>().ok().unwrap_or(default_port)
+        } else {
+            default_port
+        };
+        return Some((host.to_string(), port));
+    }
+    if let Some((h, p)) = authority.rsplit_once(':') {
+        if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(port) = p.parse::<u16>() {
+                return Some((h.to_string(), port));
+            }
+        }
+    }
+    Some((authority.to_string(), default_port))
+}
+
+pub(crate) fn guard_external_endpoint(endpoint: &str) -> Result<(), &'static str> {
+    use std::net::IpAddr;
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() {
+        return Err("empty endpoint");
+    }
+    let scheme_idx = trimmed.find("://").ok_or("missing scheme (use http:// or https://)")?;
+    let scheme = &trimmed[..scheme_idx];
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err("only http and https schemes are allowed");
+    }
+    let after_scheme = &trimmed[scheme_idx + 3..];
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host_part = if let Some(stripped) = authority.strip_prefix('[') {
+        let end = stripped.find(']').ok_or("malformed IPv6 host")?;
+        &stripped[..end]
+    } else {
+        authority
+            .rsplit_once('@')
+            .map(|(_, h)| h)
+            .unwrap_or(authority)
+            .split(':')
+            .next()
+            .unwrap_or(authority)
+    };
+    if host_part.is_empty() {
+        return Err("missing host");
+    }
+    let lowered = host_part.to_ascii_lowercase();
+    if matches!(lowered.as_str(), "localhost" | "ip6-localhost" | "ip6-loopback") {
+        return Err("loopback hostnames are not allowed");
+    }
+    if lowered.ends_with(".localhost") || lowered.ends_with(".local") {
+        return Err("loopback or mDNS hostnames are not allowed");
+    }
+    if let Ok(ip) = host_part.parse::<IpAddr>() {
+        return reject_internal_ip(ip);
+    }
+    Ok(())
+}
+
+pub(crate) fn reject_internal_ip(ip: std::net::IpAddr) -> Result<(), &'static str> {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                return Err("loopback addresses are not allowed");
+            }
+            if v4.is_link_local() {
+                return Err("link-local addresses are not allowed");
+            }
+            if v4.is_unspecified() {
+                return Err("unspecified addresses are not allowed");
+            }
+            if v4.is_broadcast() || v4.is_multicast() {
+                return Err("broadcast/multicast addresses are not allowed");
+            }
+            if v4.is_private() {
+                return Err("RFC1918 private addresses are not allowed");
+            }
+            let octets = v4.octets();
+            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                return Err("CGNAT (100.64.0.0/10) addresses are not allowed");
+            }
+            if octets[0] == 0 {
+                return Err("0.0.0.0/8 addresses are not allowed");
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return Err("loopback addresses are not allowed");
+            }
+            if v6.is_unspecified() {
+                return Err("unspecified addresses are not allowed");
+            }
+            if v6.is_multicast() {
+                return Err("multicast addresses are not allowed");
+            }
+            let segs = v6.segments();
+            if segs[0] & 0xffc0 == 0xfe80 {
+                return Err("link-local addresses are not allowed");
+            }
+            if (segs[0] & 0xfe00) == 0xfc00 {
+                return Err("unique-local (fc00::/7) addresses are not allowed");
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return reject_internal_ip(IpAddr::V4(v4));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ssrf_guard_tests {
+    use super::guard_external_endpoint;
+
+    #[test]
+    fn rejects_loopback() {
+        assert!(guard_external_endpoint("http://127.0.0.1:9000").is_err());
+        assert!(guard_external_endpoint("http://localhost:9000").is_err());
+        assert!(guard_external_endpoint("http://[::1]:9000").is_err());
+    }
+
+    #[test]
+    fn rejects_link_local_and_metadata() {
+        assert!(guard_external_endpoint("http://169.254.169.254/").is_err());
+        assert!(guard_external_endpoint("http://[fe80::1]/").is_err());
+    }
+
+    #[test]
+    fn rejects_rfc1918() {
+        assert!(guard_external_endpoint("http://10.0.0.5").is_err());
+        assert!(guard_external_endpoint("http://10.255.255.255:9000").is_err());
+        assert!(guard_external_endpoint("http://172.16.0.1").is_err());
+        assert!(guard_external_endpoint("http://172.31.255.255:9000").is_err());
+        assert!(guard_external_endpoint("http://192.168.1.10").is_err());
+        assert!(guard_external_endpoint("http://192.168.255.1:9000").is_err());
+    }
+
+    #[test]
+    fn rejects_cgnat() {
+        assert!(guard_external_endpoint("http://100.64.0.1").is_err());
+        assert!(guard_external_endpoint("http://100.127.255.255").is_err());
+    }
+
+    #[test]
+    fn rejects_unique_local_v6() {
+        assert!(guard_external_endpoint("http://[fc00::1]").is_err());
+        assert!(guard_external_endpoint("http://[fdff::1]").is_err());
+    }
+
+    #[test]
+    fn rejects_v4_mapped_internal_v6() {
+        assert!(guard_external_endpoint("http://[::ffff:127.0.0.1]").is_err());
+        assert!(guard_external_endpoint("http://[::ffff:10.0.0.1]").is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_scheme() {
+        assert!(guard_external_endpoint("file:///etc/passwd").is_err());
+        assert!(guard_external_endpoint("gopher://x").is_err());
+    }
+
+    #[test]
+    fn allows_normal_remote() {
+        assert!(guard_external_endpoint("https://s3.example.com").is_ok());
+        assert!(guard_external_endpoint("http://192.0.2.10:9000").is_ok());
+        assert!(guard_external_endpoint("http://172.32.0.1").is_ok());
+        assert!(guard_external_endpoint("http://100.63.255.255").is_ok());
+        assert!(guard_external_endpoint("http://100.128.0.1").is_ok());
+    }
+}
+
 pub async fn test_connection(
     State(state): State<AppState>,
     Extension(_session): Extension<SessionHandle>,
@@ -1400,10 +1655,27 @@ pub async fn test_connection(
             .into_response();
     }
 
+    let endpoint_trimmed = payload.endpoint_url.trim().to_string();
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = guard_external_endpoint_async(&endpoint_trimmed).await {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "status": "error",
+                    "message": format!(
+                        "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                        reason
+                    ),
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let connection = RemoteConnection {
         id: "test".to_string(),
         name: "Test".to_string(),
-        endpoint_url: payload.endpoint_url.trim().to_string(),
+        endpoint_url: endpoint_trimmed,
         access_key: payload.access_key.trim().to_string(),
         secret_key: payload.secret_key.trim().to_string(),
         region: payload.region.trim().to_string(),
@@ -1885,16 +2157,39 @@ fn metrics_settings_snapshot(state: &AppState) -> MetricsSettingsSnapshot {
 
 pub async fn metrics_settings(State(state): State<AppState>) -> Response {
     let settings = metrics_settings_snapshot(&state);
+    let history_active = state.system_metrics.is_some();
+    let operation_active = state.metrics.is_some();
     Json(json!({
-        "enabled": settings.enabled,
+        "enabled": settings.enabled && history_active,
         "retention_hours": settings.retention_hours,
         "interval_minutes": settings.interval_minutes,
+        "history_active": history_active,
+        "operation_metrics_active": operation_active,
+        "requires_restart_for_enable": !history_active,
+        "requires_restart_for_operations": !operation_active,
     }))
     .into_response()
 }
 
 pub async fn update_metrics_settings(State(state): State<AppState>, body: Body) -> Response {
     let payload: Value = parse_json_body(body).await.unwrap_or_else(|_| json!({}));
+    let history_active = state.system_metrics.is_some();
+    let operation_active = state.metrics.is_some();
+
+    let requested_enabled = payload.get("enabled").and_then(|value| value.as_bool());
+    if matches!(requested_enabled, Some(true)) && !history_active {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "Metrics history collection is disabled at boot. Set METRICS_HISTORY_ENABLED=true and restart the server to enable it.",
+                "history_active": false,
+                "operation_metrics_active": operation_active,
+                "requires_restart_for_enable": true,
+            })),
+        )
+            .into_response();
+    }
+
     let mut settings = METRICS_SETTINGS
         .get_or_init(|| {
             Mutex::new(MetricsSettingsSnapshot {
@@ -1905,10 +2200,7 @@ pub async fn update_metrics_settings(State(state): State<AppState>, body: Body) 
         })
         .lock()
         .unwrap();
-    let enabled = payload
-        .get("enabled")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(settings.enabled);
+    let enabled = requested_enabled.unwrap_or(settings.enabled) && history_active;
     let retention_hours = payload
         .get("retention_hours")
         .and_then(|value| value.as_u64())
@@ -1929,6 +2221,10 @@ pub async fn update_metrics_settings(State(state): State<AppState>, body: Body) 
         "enabled": enabled,
         "retention_hours": retention_hours,
         "interval_minutes": interval_minutes,
+        "history_active": history_active,
+        "operation_metrics_active": operation_active,
+        "requires_restart_for_enable": !history_active,
+        "requires_restart_for_operations": !operation_active,
     }))
     .into_response()
 }
@@ -1976,9 +2272,9 @@ pub async fn upload_object(
     let mut metadata_raw: Option<String> = None;
     let mut file_name: Option<String> = None;
     let mut file_content_type: Option<String> = None;
-    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut spooled: Option<(tempfile::NamedTempFile, u64)> = None;
 
-    while let Some(field) = match multipart.next_field().await {
+    while let Some(mut field) = match multipart.next_field().await {
         Ok(field) => field,
         Err(e) => {
             return json_error(
@@ -2002,15 +2298,60 @@ pub async fn upload_object(
             "object" => {
                 file_name = field.file_name().map(|s| s.to_string());
                 file_content_type = field.content_type().map(|mime| mime.to_string());
-                match field.bytes().await {
-                    Ok(bytes) => file_bytes = Some(bytes.to_vec()),
+
+                let temp = match tempfile::NamedTempFile::new() {
+                    Ok(t) => t,
                     Err(e) => {
                         return json_error(
-                            StatusCode::BAD_REQUEST,
-                            format!("Failed to read upload: {}", e),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to create upload spool: {}", e),
                         )
                     }
+                };
+                let path = temp.path().to_path_buf();
+                let mut file = match tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&path)
+                    .await
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return json_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to open upload spool: {}", e),
+                        )
+                    }
+                };
+                let mut total: u64 = 0;
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            total = total.saturating_add(chunk.len() as u64);
+                            if let Err(e) = file.write_all(&chunk).await {
+                                return json_error(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    format!("Failed writing upload spool: {}", e),
+                                );
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            return json_error(
+                                StatusCode::BAD_REQUEST,
+                                format!("Failed to read upload: {}", e),
+                            )
+                        }
+                    }
                 }
+                if let Err(e) = file.flush().await {
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to flush upload spool: {}", e),
+                    );
+                }
+                drop(file);
+                spooled = Some((temp, total));
             }
             _ => {
                 let _ = field.bytes().await;
@@ -2018,8 +2359,8 @@ pub async fn upload_object(
         }
     }
 
-    let bytes = match file_bytes {
-        Some(bytes) if !bytes.is_empty() => bytes,
+    let (temp_file, total_size) = match spooled {
+        Some((t, n)) if n > 0 => (t, n),
         _ => return json_error(StatusCode::BAD_REQUEST, "Choose a file to upload"),
     };
 
@@ -2052,6 +2393,9 @@ pub async fn upload_object(
             upload_headers.insert(header::CONTENT_TYPE, value);
         }
     }
+    if let Ok(value) = total_size.to_string().parse() {
+        upload_headers.insert(header::CONTENT_LENGTH, value);
+    }
     if let Some(metadata) = &metadata {
         for (key, value) in metadata {
             let header_name = format!("x-amz-meta-{}", key);
@@ -2063,15 +2407,28 @@ pub async fn upload_object(
         }
     }
 
+    let read_handle = match tokio::fs::File::open(temp_file.path()).await {
+        Ok(f) => f,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to open upload spool for read: {}", e),
+            )
+        }
+    };
+    let reader_stream = tokio_util::io::ReaderStream::new(read_handle);
+    let upload_body = Body::from_stream(reader_stream);
+
     let response = handlers::put_object(
         State(state),
         Path((bucket_name.clone(), key.clone())),
         Query(ObjectQuery::default()),
         None,
         upload_headers,
-        Body::from(bytes),
+        upload_body,
     )
     .await;
+    drop(temp_file);
 
     if !response.status().is_success() {
         return response;
@@ -2948,20 +3305,6 @@ fn parse_object_get_action(rest: &str) -> Option<(String, ObjectGetAction)> {
 }
 
 fn parse_object_post_action(rest: &str) -> Option<(String, ObjectPostAction)> {
-    if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
-        return Some((
-            key.to_string(),
-            ObjectPostAction::Restore(version_id.to_string()),
-        ));
-    }
-    if let Some(key_with_version) = rest.strip_suffix("/restore") {
-        if let Some((key, version_id)) = key_with_version.rsplit_once("/versions/") {
-            return Some((
-                key.to_string(),
-                ObjectPostAction::Restore(version_id.to_string()),
-            ));
-        }
-    }
     for (suffix, action) in [
         ("/delete", ObjectPostAction::Delete),
         ("/presign", ObjectPostAction::Presign),
@@ -2973,7 +3316,69 @@ fn parse_object_post_action(rest: &str) -> Option<(String, ObjectPostAction)> {
             return Some((key.to_string(), action));
         }
     }
+    if let Some(key_with_version) = rest.strip_suffix("/restore") {
+        if let Some((key, version_id)) = key_with_version.rsplit_once("/versions/") {
+            return Some((
+                key.to_string(),
+                ObjectPostAction::Restore(version_id.to_string()),
+            ));
+        }
+    }
+    if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
+        return Some((
+            key.to_string(),
+            ObjectPostAction::Restore(version_id.to_string()),
+        ));
+    }
     None
+}
+
+#[cfg(test)]
+mod object_action_tests {
+    use super::{parse_object_post_action, ObjectPostAction};
+
+    #[test]
+    fn parses_delete_for_key_containing_restore() {
+        let (key, action) =
+            parse_object_post_action("foo/restore/bar.txt/delete").expect("parsed");
+        assert_eq!(key, "foo/restore/bar.txt");
+        assert!(matches!(action, ObjectPostAction::Delete));
+    }
+
+    #[test]
+    fn parses_copy_for_key_containing_restore() {
+        let (key, action) = parse_object_post_action("a/restore/b/copy").expect("parsed");
+        assert_eq!(key, "a/restore/b");
+        assert!(matches!(action, ObjectPostAction::Copy));
+    }
+
+    #[test]
+    fn parses_move_for_key_containing_restore() {
+        let (key, action) = parse_object_post_action("a/restore/b/move").expect("parsed");
+        assert_eq!(key, "a/restore/b");
+        assert!(matches!(action, ObjectPostAction::Move));
+    }
+
+    #[test]
+    fn parses_versioned_restore() {
+        let (key, action) =
+            parse_object_post_action("foo/bar/versions/v1/restore").expect("parsed");
+        assert_eq!(key, "foo/bar");
+        match action {
+            ObjectPostAction::Restore(v) => assert_eq!(v, "v1"),
+            _ => panic!("expected Restore"),
+        }
+    }
+
+    #[test]
+    fn parses_inline_restore() {
+        let (key, action) = parse_object_post_action("foo/bar/restore/v2").expect("parsed");
+        assert_eq!(key, "foo/bar");
+        match action {
+            ObjectPostAction::Restore(v) => assert_eq!(v, "v2"),
+            _ => panic!("expected Restore"),
+        }
+    }
 }
 
 pub async fn object_get_dispatch(

@@ -219,6 +219,8 @@ pub struct ReplicationManager {
     streaming_threshold_bytes: u64,
     pub failures: Arc<ReplicationFailureStore>,
     semaphore: Arc<Semaphore>,
+    allow_internal_endpoints: bool,
+    http_client: aws_smithy_runtime_api::client::http::SharedHttpClient,
 }
 
 impl ReplicationManager {
@@ -231,6 +233,7 @@ impl ReplicationManager {
         max_retries: u32,
         streaming_threshold_bytes: u64,
         max_failures_per_bucket: usize,
+        allow_internal_endpoints: bool,
     ) -> Self {
         let rules_path = storage_root
             .join(".myfsio.sys")
@@ -246,6 +249,7 @@ impl ReplicationManager {
             read_timeout,
             max_attempts: max_retries,
         };
+        let http_client = crate::services::safe_http_client::build(allow_internal_endpoints);
         Self {
             storage,
             connections,
@@ -255,7 +259,20 @@ impl ReplicationManager {
             streaming_threshold_bytes,
             failures,
             semaphore: Arc::new(Semaphore::new(4)),
+            allow_internal_endpoints,
+            http_client,
         }
+    }
+
+    pub(crate) async fn endpoint_allowed(&self, endpoint: &str) -> Result<(), String> {
+        if self.allow_internal_endpoints {
+            return Ok(());
+        }
+        crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await
+    }
+
+    pub(crate) fn http_client(&self) -> aws_smithy_runtime_api::client::http::SharedHttpClient {
+        self.http_client.clone()
     }
 
     pub fn reload_rules(&self) {
@@ -475,7 +492,32 @@ impl ReplicationManager {
             return;
         }
 
-        let client = build_client(conn, &self.client_options);
+        if let Err(reason) = self.endpoint_allowed(&conn.endpoint_url).await {
+            tracing::warn!(
+                "Replication blocked for {}/{}: connection '{}' endpoint rejected ({}). Set ALLOW_INTERNAL_ENDPOINTS=true to allow.",
+                bucket,
+                object_key,
+                conn.name,
+                reason
+            );
+            self.failures.add(
+                bucket,
+                ReplicationFailure {
+                    object_key: object_key.to_string(),
+                    error_message: format!("endpoint rejected: {}", reason),
+                    timestamp: now_secs(),
+                    failure_count: 1,
+                    bucket_name: bucket.to_string(),
+                    action: action.to_string(),
+                    last_error_code: Some("InternalEndpointBlocked".to_string()),
+                },
+            );
+            self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
+                .await;
+            return;
+        }
+
+        let client = build_client(conn, &self.client_options, self.http_client.clone());
 
         if action == "delete" {
             match client
@@ -658,12 +700,28 @@ impl ReplicationManager {
     }
 
     pub async fn check_endpoint(&self, conn: &RemoteConnection) -> bool {
-        let client = build_health_client(conn, &self.client_options);
+        if let Err(reason) = self.endpoint_allowed(&conn.endpoint_url).await {
+            tracing::warn!(
+                "Endpoint health check blocked for connection '{}': {}",
+                conn.name,
+                reason
+            );
+            return false;
+        }
+        let client = build_health_client(conn, &self.client_options, self.http_client.clone());
         check_endpoint_health(&client).await
     }
 
     pub async fn check_target_bucket(&self, conn: &RemoteConnection, target_bucket: &str) -> bool {
-        let client = build_client(conn, &self.client_options);
+        if let Err(reason) = self.endpoint_allowed(&conn.endpoint_url).await {
+            tracing::warn!(
+                "Target-bucket reachability check blocked for connection '{}': {}",
+                conn.name,
+                reason
+            );
+            return false;
+        }
+        let client = build_client(conn, &self.client_options, self.http_client.clone());
         check_target_bucket_reachable(&client, target_bucket).await
     }
 

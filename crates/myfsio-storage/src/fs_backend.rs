@@ -2222,10 +2222,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::InvalidBucketName(err));
         }
         let bucket_path = self.bucket_path(name);
-        if bucket_path.exists() {
-            return Err(StorageError::BucketAlreadyExists(name.to_string()));
+        if let Some(parent) = bucket_path.parent() {
+            std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
-        std::fs::create_dir_all(&bucket_path).map_err(StorageError::Io)?;
+        match std::fs::create_dir(&bucket_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(StorageError::BucketAlreadyExists(name.to_string()));
+            }
+            Err(err) => return Err(StorageError::Io(err)),
+        }
         std::fs::create_dir_all(self.system_bucket_root(name)).map_err(StorageError::Io)?;
         Ok(())
     }

@@ -724,13 +724,7 @@ impl IamService {
         }
 
         let user_id = format!("u-{}", uuid::Uuid::new_v4().simple());
-        let resolved_policies = policies.unwrap_or_else(|| {
-            vec![IamPolicy {
-                bucket: "*".to_string(),
-                actions: vec!["*".to_string()],
-                prefix: "*".to_string(),
-            }]
-        });
+        let resolved_policies = policies.unwrap_or_default();
 
         let user = IamUser {
             user_id: user_id.clone(),

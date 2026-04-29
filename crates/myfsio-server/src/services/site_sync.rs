@@ -63,6 +63,12 @@ pub struct SiteSyncWorker {
 }
 
 impl SiteSyncWorker {
+    pub(crate) async fn endpoint_allowed(&self, endpoint: &str) -> Result<(), String> {
+        self.replication.endpoint_allowed(endpoint).await
+    }
+}
+
+impl SiteSyncWorker {
     pub fn new(
         storage: Arc<FsStorageBackend>,
         connections: Arc<ConnectionStore>,
@@ -193,12 +199,23 @@ impl SiteSyncWorker {
             .get(&rule.target_connection_id)
             .ok_or_else(|| format!("connection {} not found", rule.target_connection_id))?;
 
+        if let Err(reason) = self.endpoint_allowed(&connection.endpoint_url).await {
+            return Err(format!(
+                "endpoint rejected for connection '{}': {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow.",
+                connection.name, reason
+            ));
+        }
+
         let local_objects = self
             .list_local_objects(&rule.bucket_name)
             .await
             .map_err(|e| format!("list local failed: {}", e))?;
 
-        let client = build_client(&connection, &self.client_options);
+        let client = build_client(
+            &connection,
+            &self.client_options,
+            self.replication.http_client(),
+        );
         let remote_objects = self
             .list_remote_objects(&client, &rule.target_bucket)
             .await

@@ -1417,7 +1417,11 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
 
     let connect_to = std::time::Duration::from_secs(2);
     let read_to = std::time::Duration::from_secs(3);
-    let client = crate::services::peer_admin::PeerAdminClient::new(connect_to, read_to);
+    let client = crate::services::peer_admin::PeerAdminClient::new(
+        connect_to,
+        read_to,
+        state.config.allow_internal_endpoints,
+    );
 
     let mut peer_futures = Vec::new();
     for peer in peers {
@@ -1618,6 +1622,24 @@ pub async fn add_peer_site(
         return Redirect::to("/ui/sites").into_response();
     }
 
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/sites").into_response();
+        }
+    }
+
     let Some(registry) = &state.site_registry else {
         let message = "Site registry is not available.".to_string();
         if wants_json {
@@ -1764,6 +1786,24 @@ pub async fn update_peer_site(
         }
         session.write(|s| s.push_flash("danger", message));
         return Redirect::to("/ui/sites").into_response();
+    }
+
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/sites").into_response();
+        }
     }
 
     let connection_id = {
@@ -2811,6 +2851,24 @@ pub async fn create_connection(
         return Redirect::to("/ui/connections").into_response();
     }
 
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/connections").into_response();
+        }
+    }
+
     let connection = crate::stores::connections::RemoteConnection {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.to_string(),
@@ -2899,6 +2957,24 @@ pub async fn update_connection(
         }
         session.write(|s| s.push_flash("danger", message));
         return Redirect::to("/ui/connections").into_response();
+    }
+
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/connections").into_response();
+        }
     }
 
     connection.name = name.to_string();

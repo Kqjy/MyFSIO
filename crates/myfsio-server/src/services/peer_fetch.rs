@@ -45,13 +45,22 @@ impl PeerFetcher {
         }
     }
 
-    fn build_client_for_bucket(&self, bucket: &str) -> Option<(Client, String)> {
+    async fn build_client_for_bucket(&self, bucket: &str) -> Option<(Client, String)> {
         let rule = self.replication.get_rule(bucket)?;
         if !rule.enabled {
             return None;
         }
         let conn = self.connections.get(&rule.target_connection_id)?;
-        let client = build_client(&conn, &self.client_options);
+        if let Err(reason) = self.replication.endpoint_allowed(&conn.endpoint_url).await {
+            tracing::warn!(
+                "Peer fetch blocked for bucket '{}': connection '{}' endpoint rejected ({}). Set ALLOW_INTERNAL_ENDPOINTS=true to allow.",
+                bucket,
+                conn.name,
+                reason
+            );
+            return None;
+        }
+        let client = build_client(&conn, &self.client_options, self.replication.http_client());
         Some((client, rule.target_bucket))
     }
 
@@ -125,7 +134,7 @@ impl PeerFetcher {
         expected_etag: &str,
         dest_path: &Path,
     ) -> HealOutcome {
-        let (client, target_bucket) = match self.build_client_for_bucket(local_bucket) {
+        let (client, target_bucket) = match self.build_client_for_bucket(local_bucket).await {
             Some(v) => v,
             None => return HealOutcome::NotConfigured,
         };

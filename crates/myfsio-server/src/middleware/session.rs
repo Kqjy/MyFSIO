@@ -170,17 +170,138 @@ pub async fn csrf_layer(
         .unwrap_or("")
         .to_string();
 
+    const NON_MULTIPART_BODY_LIMIT: usize = 1 << 20;
+    const MULTIPART_PREFIX_LIMIT: usize = 256 * 1024;
+
+    let is_multipart = content_type.starts_with("multipart/form-data");
+    let is_form = content_type.starts_with("application/x-www-form-urlencoded");
+    let is_json = content_type.starts_with("application/json");
+
     let (parts, body) = req.into_parts();
-    let bytes = match axum::body::to_bytes(body, usize::MAX).await {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::BAD_REQUEST, "Body read failed").into_response(),
+
+    let mismatch_response = |parts: &axum::http::request::Parts,
+                             handle: SessionHandle,
+                             state: crate::state::AppState,
+                             content_type: &str,
+                             expected_len: usize,
+                             header_present: bool|
+     -> Response {
+        tracing::warn!(
+            path = %parts.uri.path(),
+            content_type = %content_type,
+            expected_len = expected_len,
+            header_present = header_present,
+            "CSRF token mismatch"
+        );
+        let accept = parts
+            .headers
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let is_form_submit = content_type.starts_with("application/x-www-form-urlencoded")
+            || content_type.starts_with("multipart/form-data");
+        let wants_json =
+            accept.contains("application/json") || content_type.starts_with("application/json");
+        if is_form_submit && !wants_json {
+            let ctx = crate::handlers::ui::base_context(&handle, None);
+            let mut resp = crate::handlers::ui::render(&state, "csrf_error.html", &ctx);
+            *resp.status_mut() = StatusCode::FORBIDDEN;
+            return resp;
+        }
+        let mut resp = (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"error":"Invalid CSRF token. Send it via the X-CSRF-Token header or a csrf_token field in the form/JSON body."}"#,
+        )
+            .into_response();
+        *resp.status_mut() = StatusCode::FORBIDDEN;
+        resp
     };
 
-    let form_token = if content_type.starts_with("application/x-www-form-urlencoded") {
+    if is_multipart {
+        use futures::StreamExt;
+        use http_body_util::BodyStream;
+
+        let mut frames = BodyStream::new(body);
+        let mut prefix_chunks: Vec<bytes::Bytes> = Vec::new();
+        let mut prefix_buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut found_token: Option<String> = None;
+        let mut prefix_eof = false;
+
+        while prefix_buf.len() < MULTIPART_PREFIX_LIMIT {
+            match frames.next().await {
+                Some(Ok(frame)) => {
+                    let data = frame.into_data().unwrap_or_default();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    prefix_buf.extend_from_slice(&data);
+                    prefix_chunks.push(data);
+                    if let Some(token) = extract_multipart_token(&content_type, &prefix_buf) {
+                        found_token = Some(token);
+                        break;
+                    }
+                }
+                Some(Err(_)) => {
+                    return (StatusCode::BAD_REQUEST, "Body read failed").into_response();
+                }
+                None => {
+                    prefix_eof = true;
+                    break;
+                }
+            }
+        }
+
+        let valid = found_token
+            .as_deref()
+            .map(|t| csrf_tokens_match(&expected, t))
+            .unwrap_or(false);
+
+        if !valid {
+            return mismatch_response(
+                &parts,
+                handle.clone(),
+                state.clone(),
+                &content_type,
+                expected.len(),
+                header_token.is_some(),
+            );
+        }
+
+        let prefix_stream = futures::stream::iter(
+            prefix_chunks
+                .into_iter()
+                .map(Ok::<bytes::Bytes, std::io::Error>),
+        );
+        let new_body = if prefix_eof {
+            axum::body::Body::from_stream(prefix_stream)
+        } else {
+            let rest_stream = frames
+                .map(|res| {
+                    res.map(|frame| frame.into_data().unwrap_or_default())
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                });
+            axum::body::Body::from_stream(prefix_stream.chain(rest_stream))
+        };
+        let req = Request::from_parts(parts, new_body);
+        return next.run(req).await;
+    }
+
+    let bytes = match axum::body::to_bytes(body, NON_MULTIPART_BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"error":"CSRF token must be sent in the X-CSRF-Token header for large requests."}"#,
+            )
+                .into_response();
+        }
+    };
+
+    let form_token = if is_form {
         extract_form_token(&bytes)
-    } else if content_type.starts_with("multipart/form-data") {
-        extract_multipart_token(&content_type, &bytes)
-    } else if content_type.starts_with("application/json") {
+    } else if is_json {
         extract_json_token(&bytes)
     } else {
         None
@@ -193,39 +314,14 @@ pub async fn csrf_layer(
         }
     }
 
-    tracing::warn!(
-        path = %parts.uri.path(),
-        content_type = %content_type,
-        expected_len = expected.len(),
-        header_present = header_token.is_some(),
-        "CSRF token mismatch"
-    );
-
-    let accept = parts
-        .headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let is_form_submit = content_type.starts_with("application/x-www-form-urlencoded")
-        || content_type.starts_with("multipart/form-data");
-    let wants_json =
-        accept.contains("application/json") || content_type.starts_with("application/json");
-
-    if is_form_submit && !wants_json {
-        let ctx = crate::handlers::ui::base_context(&handle, None);
-        let mut resp = crate::handlers::ui::render(&state, "csrf_error.html", &ctx);
-        *resp.status_mut() = StatusCode::FORBIDDEN;
-        return resp;
-    }
-
-    let mut resp = (
-        StatusCode::FORBIDDEN,
-        [(header::CONTENT_TYPE, "application/json")],
-        r#"{"error":"Invalid CSRF token. Send it via the X-CSRF-Token header or a csrf_token field in the form/JSON body."}"#,
+    mismatch_response(
+        &parts,
+        handle,
+        state,
+        &content_type,
+        expected.len(),
+        header_token.is_some(),
     )
-        .into_response();
-    *resp.status_mut() = StatusCode::FORBIDDEN;
-    resp
 }
 
 fn extract_multipart_token(content_type: &str, body: &[u8]) -> Option<String> {

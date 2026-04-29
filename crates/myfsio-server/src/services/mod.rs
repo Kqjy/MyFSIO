@@ -10,6 +10,8 @@ pub mod peer_admin;
 pub mod peer_fetch;
 pub mod replication;
 pub mod s3_client;
+pub mod safe_http_client;
+pub mod safe_resolver;
 pub mod site_registry;
 pub mod site_sync;
 pub mod system_metrics;
