@@ -4020,20 +4020,26 @@ async fn resolve_encryption_context(
     if state.encryption.is_some() {
         if let Ok(config) = state.storage.get_bucket_config(bucket).await {
             if let Some(enc_val) = &config.encryption {
-                let enc_str = enc_val.to_string();
-                if enc_str.contains("AES256") {
-                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
-                        algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
-                        kms_key_id: None,
-                        customer_key: None,
-                    }));
-                }
-                if enc_str.contains("aws:kms") {
-                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
-                        algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
-                        kms_key_id: None,
-                        customer_key: None,
-                    }));
+                if let Some((algorithm, kms_key_id)) =
+                    crate::handlers::config::parse_encryption_config(enc_val)
+                {
+                    match algorithm.as_str() {
+                        "AES256" => {
+                            return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
+                                algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
+                                kms_key_id: None,
+                                customer_key: None,
+                            }));
+                        }
+                        "aws:kms" => {
+                            return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
+                                algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
+                                kms_key_id,
+                                customer_key: None,
+                            }));
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

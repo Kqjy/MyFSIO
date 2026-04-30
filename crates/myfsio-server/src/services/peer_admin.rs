@@ -271,6 +271,30 @@ impl PeerAdminClient {
             .await
     }
 
+    pub async fn check_peer_endpoint_health(
+        &self,
+        endpoint: &str,
+        connection: &RemoteConnection,
+    ) -> Result<(), String> {
+        match self
+            .fetch_admin_status(endpoint, "/admin/cluster/overview?local_only=1", connection)
+            .await
+        {
+            PeerAdminStatus::Ok(_) => Ok(()),
+            PeerAdminStatus::InvalidJson(detail) => Err(format!(
+                "peer responded but body was not valid JSON: {}",
+                detail
+            )),
+            PeerAdminStatus::Unauthorized(detail) => {
+                Err(format!("peer credentials rejected: {}", detail))
+            }
+            PeerAdminStatus::HttpError { status, detail } => {
+                Err(format!("peer returned status {} — {}", status, detail))
+            }
+            PeerAdminStatus::Unreachable(detail) => Err(detail),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn relay_request(
         &self,
@@ -328,8 +352,15 @@ impl PeerAdminClient {
 
         let cluster_attest =
             crate::services::cluster_attest::cluster_attest(cluster_psk, &amz_date, origin_site_id, idempotency_key);
-        let admin_attest_value =
-            crate::services::cluster_attest::admin_attest(cluster_psk, &amz_date, admin_user_id);
+        let admin_attest_value = crate::services::cluster_attest::admin_attest(
+            cluster_psk,
+            &amz_date,
+            admin_user_id,
+            method,
+            &canonical_uri,
+            &payload_hash,
+            idempotency_key,
+        );
 
         let ct_header = content_type.unwrap_or("application/json");
         let mut header_pairs: Vec<(String, String)> = vec![
@@ -423,6 +454,14 @@ impl PeerAdminClient {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        let mut peer_headers: Vec<(String, String)> = Vec::new();
+        for (name, value) in resp.headers().iter() {
+            if name.as_str().starts_with("x-myfsio-") {
+                if let Ok(v) = value.to_str() {
+                    peer_headers.push((name.as_str().to_string(), v.to_string()));
+                }
+            }
+        }
         let resp_body = resp
             .bytes()
             .await
@@ -432,6 +471,7 @@ impl PeerAdminClient {
             status,
             content_type: resp_content_type,
             body: resp_body,
+            peer_headers,
         })
     }
 }
@@ -440,4 +480,5 @@ pub struct RelayResponse {
     pub status: u16,
     pub content_type: Option<String>,
     pub body: Vec<u8>,
+    pub peer_headers: Vec<(String, String)>,
 }

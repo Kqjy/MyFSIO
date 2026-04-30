@@ -588,12 +588,20 @@ pub async fn check_peer_health(
 
     if let Some(connection_id) = peer.connection_id.as_deref() {
         if let Some(connection) = state.connections.get(connection_id) {
-            is_healthy = state.replication.check_endpoint(&connection).await;
-            if !is_healthy {
-                error = Some(format!(
-                    "Cannot reach endpoint: {}",
-                    connection.endpoint_url
-                ));
+            match state
+                .peer_admin
+                .check_peer_endpoint_health(&connection.endpoint_url, &connection)
+                .await
+            {
+                Ok(()) => {
+                    is_healthy = true;
+                }
+                Err(detail) => {
+                    error = Some(format!(
+                        "Peer health probe to {} failed: {}",
+                        connection.endpoint_url, detail
+                    ));
+                }
             }
         } else {
             error = Some(format!("Connection '{}' not found", connection_id));
@@ -814,18 +822,6 @@ pub async fn check_bidirectional_status(
             }),
         );
     }
-    if !state.replication.check_endpoint(&connection).await {
-        push_issue(
-            &mut result,
-            serde_json::json!({
-                "code": "REMOTE_UNREACHABLE",
-                "message": "Remote endpoint is not reachable",
-                "severity": "error",
-            }),
-        );
-        return json_response(StatusCode::OK, result);
-    }
-
     match state
         .peer_admin
         .fetch_admin_status(&connection.endpoint_url, "/admin/sites", &connection)

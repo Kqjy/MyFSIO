@@ -92,6 +92,9 @@ Core settings:
 | `API_BASE_URL` | unset | Public API base used by the UI and presigned URL generation |
 | `AWS_REGION` | `us-east-1` | Region used in SigV4 scope |
 | `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew (regular SigV4) |
+| `STRICT_STREAMING_SIGV4` | `false` | When `true`, reject streaming SigV4 (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD*`) requests because per-chunk signature validation is not yet implemented. When `false` (default) the server logs a warning and accepts the request without validating chunk signatures — leave it `false` only if you need AWS CLI/SDK compatibility for large uploads and trust the network |
+| `ALLOW_INTERNAL_ENDPOINTS` | `false` | Permit relay/replication targets to resolve to loopback / RFC1918 / link-local / CGNAT addresses. Required for local cluster testing; leave disabled in production unless you intentionally federate over private networks |
+| `RATE_LIMIT_STORAGE_URI` | `memory://` | Rate-limit backend. Only `memory://` is supported today; any other value logs a warning and falls back to in-memory limits |
 | `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter skew enforced for peer-credential SigV4 requests |
 | `PEER_NONCE_CACHE_SIZE` | `10000` | Replay-detection LRU capacity for peer requests |
 | `ALLOW_LEGACY_HEADER_AUTH` | `false` | Accept legacy `x-access-key`/`x-secret-key` headers (peer creds are SigV4-only regardless) |
@@ -152,6 +155,15 @@ UI asset overrides:
 
 See [docs.md](./docs.md) for the full Rust-side operations guide.
 
+## Cluster Connections — Peer Creds vs S3 Creds
+
+A connection record (`POST /admin/connections`) holds the credentials used to talk to another MyFSIO site. There are two distinct credential types and they are NOT interchangeable:
+
+- **Peer credentials** (`PEERAK…`/`PEERSK…`, created via `POST /admin/peer-credentials`). SigV4-only, scoped to `/admin/cluster/overview` and `/admin/peer/*`. Use these in connections referenced by site-registry peers (`peer.connection_id`) for cluster federation, the federated cluster overview, peer health checks, and the relay path. Peer credentials cannot list buckets or read objects, so they are not usable for replication or bidirectional site sync.
+- **Regular IAM credentials** (admin or scoped). Use these in connections referenced by replication rules (`ReplicationRule.target_connection_id`) and bidirectional site sync. These need bucket list / object read / object write permissions on the remote site.
+
+If you federate two sites and also replicate between them, you typically need TWO connection records per peer relationship — one with peer creds for cluster federation, one with regular creds for replication / site sync.
+
 ## Data Layout
 
 ```text
@@ -209,8 +221,8 @@ cargo test
 ```json
 {
   "status": "ok",
-  "version": "0.5.0"
+  "version": "x.x.x"
 }
 ```
 
-The `version` field comes from the Rust crate version in `crates/myfsio-server/Cargo.toml`.
+The `version` field is populated at build time from the Rust crate version in `crates/myfsio-server/Cargo.toml`.

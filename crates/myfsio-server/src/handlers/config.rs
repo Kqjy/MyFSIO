@@ -269,11 +269,138 @@ pub async fn get_location(state: &AppState, _bucket: &str) -> Response {
     xml_response(StatusCode::OK, xml)
 }
 
+pub fn parse_encryption_config(value: &serde_json::Value) -> Option<(String, Option<String>)> {
+    if let Some(obj) = value.as_object() {
+        if let Some(alg) = obj
+            .get("sse_algorithm")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        {
+            let kms_key = obj
+                .get("kms_master_key_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            return Some((alg, kms_key));
+        }
+        if let Some(default) = obj
+            .get("Rules")
+            .and_then(|rules| rules.as_array())
+            .and_then(|rules| rules.first())
+            .and_then(|rule| rule.get("ApplyServerSideEncryptionByDefault"))
+            .and_then(|inner| inner.as_object())
+        {
+            if let Some(alg) = default
+                .get("SSEAlgorithm")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            {
+                let kms_key = default
+                    .get("KMSMasterKeyID")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                return Some((alg, kms_key));
+            }
+        }
+    }
+    if let Some(raw) = value.as_str() {
+        return parse_encryption_xml(raw).ok();
+    }
+    None
+}
+
+fn parse_encryption_xml(xml: &str) -> Result<(String, Option<String>), S3Error> {
+    let doc = roxmltree::Document::parse(xml).map_err(|err| {
+        S3Error::new(
+            S3ErrorCode::MalformedXML,
+            format!("Could not parse ServerSideEncryptionConfiguration: {}", err),
+        )
+    })?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "ServerSideEncryptionConfiguration" {
+        return Err(S3Error::new(
+            S3ErrorCode::MalformedXML,
+            "Expected <ServerSideEncryptionConfiguration> root element",
+        ));
+    }
+    let rule = root
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "Rule")
+        .ok_or_else(|| {
+            S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "Missing <Rule> in ServerSideEncryptionConfiguration",
+            )
+        })?;
+    let default = rule
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "ApplyServerSideEncryptionByDefault")
+        .ok_or_else(|| {
+            S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "Missing <ApplyServerSideEncryptionByDefault> in Rule",
+            )
+        })?;
+    let algorithm = default
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "SSEAlgorithm")
+        .and_then(|n| n.text())
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| {
+            S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "Missing <SSEAlgorithm> in ApplyServerSideEncryptionByDefault",
+            )
+        })?;
+    if algorithm != "AES256" && algorithm != "aws:kms" {
+        return Err(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            format!(
+                "Unsupported SSEAlgorithm '{}'; supported values are AES256 and aws:kms",
+                algorithm
+            ),
+        ));
+    }
+    let kms_key_id = default
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "KMSMasterKeyID")
+        .and_then(|n| n.text())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if algorithm == "AES256" && kms_key_id.is_some() {
+        return Err(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "KMSMasterKeyID is only valid when SSEAlgorithm is aws:kms",
+        ));
+    }
+    Ok((algorithm, kms_key_id))
+}
+
+fn render_encryption_xml(value: &serde_json::Value) -> String {
+    let (algorithm, kms_key_id) = match parse_encryption_config(value) {
+        Some(parsed) => parsed,
+        None => {
+            return stored_xml(value);
+        }
+    };
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Rule><ApplyServerSideEncryptionByDefault>",
+    );
+    xml.push_str(&format!("<SSEAlgorithm>{}</SSEAlgorithm>", algorithm));
+    if let Some(key) = kms_key_id {
+        xml.push_str(&format!("<KMSMasterKeyID>{}</KMSMasterKeyID>", key));
+    }
+    xml.push_str("</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>");
+    xml
+}
+
 pub async fn get_encryption(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(enc) = &config.encryption {
-                xml_response(StatusCode::OK, stored_xml(enc))
+                xml_response(StatusCode::OK, render_encryption_xml(enc))
             } else {
                 xml_response(
                     StatusCode::NOT_FOUND,
@@ -289,9 +416,55 @@ pub async fn get_encryption(state: &AppState, bucket: &str) -> Response {
 pub async fn put_encryption(state: &AppState, bucket: &str, body: Body) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
+            );
+        }
     };
-    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+    let xml_str = String::from_utf8_lossy(&body_bytes);
+    let (algorithm, kms_key_id) = match parse_encryption_xml(&xml_str) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let status =
+                StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::BAD_REQUEST);
+            return xml_response(status, err.to_xml());
+        }
+    };
+    if !state.config.encryption_enabled {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Server-side encryption is not enabled on this server (set ENCRYPTION_ENABLED=true)",
+            )
+            .to_xml(),
+        );
+    }
+    if algorithm == "aws:kms" && !state.config.kms_enabled {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "KMS support is not enabled on this server (set KMS_ENABLED=true)",
+            )
+            .to_xml(),
+        );
+    }
+
+    let mut stored = serde_json::Map::new();
+    stored.insert(
+        "sse_algorithm".to_string(),
+        serde_json::Value::String(algorithm),
+    );
+    if let Some(key) = kms_key_id {
+        stored.insert(
+            "kms_master_key_id".to_string(),
+            serde_json::Value::String(key),
+        );
+    }
+    let value = serde_json::Value::Object(stored);
 
     match state.storage.get_bucket_config(bucket).await {
         Ok(mut config) => {
@@ -1887,4 +2060,128 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
     }
 
     tags
+}
+
+#[cfg(test)]
+mod encryption_xml_tests {
+    use super::{parse_encryption_config, parse_encryption_xml};
+
+    #[test]
+    fn parse_aes256_default() {
+        let xml = "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>\
+                   <SSEAlgorithm>AES256</SSEAlgorithm>\
+                   </ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+        let (algo, key) = parse_encryption_xml(xml).expect("parse");
+        assert_eq!(algo, "AES256");
+        assert_eq!(key, None);
+    }
+
+    #[test]
+    fn parse_aws_kms_with_key() {
+        let xml = "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>\
+                   <SSEAlgorithm>aws:kms</SSEAlgorithm>\
+                   <KMSMasterKeyID>arn:aws:kms:us-east-1:111:key/abc</KMSMasterKeyID>\
+                   </ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+        let (algo, key) = parse_encryption_xml(xml).expect("parse");
+        assert_eq!(algo, "aws:kms");
+        assert_eq!(key.as_deref(), Some("arn:aws:kms:us-east-1:111:key/abc"));
+    }
+
+    #[test]
+    fn reject_unknown_algorithm() {
+        let xml = "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>\
+                   <SSEAlgorithm>ROT13</SSEAlgorithm>\
+                   </ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+        assert!(parse_encryption_xml(xml).is_err());
+    }
+
+    #[test]
+    fn reject_aes256_with_kms_key() {
+        let xml = "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>\
+                   <SSEAlgorithm>AES256</SSEAlgorithm>\
+                   <KMSMasterKeyID>k</KMSMasterKeyID>\
+                   </ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+        assert!(parse_encryption_xml(xml).is_err());
+    }
+
+    #[test]
+    fn reject_garbage_body() {
+        assert!(parse_encryption_xml("this is not XML at all").is_err());
+        assert!(parse_encryption_xml("<NotTheRightRoot/>").is_err());
+    }
+
+    #[test]
+    fn parse_structured_config_object() {
+        let value = serde_json::json!({"sse_algorithm": "AES256"});
+        let (algo, key) = parse_encryption_config(&value).expect("parse");
+        assert_eq!(algo, "AES256");
+        assert_eq!(key, None);
+    }
+
+    #[test]
+    fn parse_structured_config_with_kms_key() {
+        let value = serde_json::json!({
+            "sse_algorithm": "aws:kms",
+            "kms_master_key_id": "arn:aws:kms:r:111:key/abc",
+        });
+        let (algo, key) = parse_encryption_config(&value).expect("parse");
+        assert_eq!(algo, "aws:kms");
+        assert_eq!(key.as_deref(), Some("arn:aws:kms:r:111:key/abc"));
+    }
+
+    #[test]
+    fn parse_legacy_string_config() {
+        let value = serde_json::Value::String(
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault>\
+             <SSEAlgorithm>AES256</SSEAlgorithm>\
+             </ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+                .to_string(),
+        );
+        let (algo, _) = parse_encryption_config(&value).expect("parse legacy");
+        assert_eq!(algo, "AES256");
+    }
+
+    #[test]
+    fn parse_ui_aes256_shape() {
+        let value = serde_json::json!({
+            "Rules": [{
+                "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "AES256"
+                }
+            }]
+        });
+        let (algo, key) = parse_encryption_config(&value).expect("parse ui shape");
+        assert_eq!(algo, "AES256");
+        assert_eq!(key, None);
+    }
+
+    #[test]
+    fn parse_ui_aws_kms_shape_with_key() {
+        let value = serde_json::json!({
+            "Rules": [{
+                "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "aws:kms",
+                    "KMSMasterKeyID": "arn:aws:kms:us-east-1:111:key/abc"
+                }
+            }]
+        });
+        let (algo, key) = parse_encryption_config(&value).expect("parse ui kms shape");
+        assert_eq!(algo, "aws:kms");
+        assert_eq!(key.as_deref(), Some("arn:aws:kms:us-east-1:111:key/abc"));
+    }
+
+    #[test]
+    fn parse_ui_shape_with_blank_kms_key_treated_as_none() {
+        let value = serde_json::json!({
+            "Rules": [{
+                "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "aws:kms",
+                    "KMSMasterKeyID": "  "
+                }
+            }]
+        });
+        let (algo, key) = parse_encryption_config(&value).expect("parse ui shape");
+        assert_eq!(algo, "aws:kms");
+        assert_eq!(key, None);
+    }
 }

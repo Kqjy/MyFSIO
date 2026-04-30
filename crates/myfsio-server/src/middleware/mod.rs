@@ -102,6 +102,9 @@ pub async fn admin_audit_layer(State(state): State<AppState>, req: Request, next
                 peer_ip: None,
                 idempotency_key: None,
                 error: None,
+                attribution: Some(
+                    crate::services::audit_log::ATTRIBUTION_VERIFIED.to_string(),
+                ),
             });
     }
     response

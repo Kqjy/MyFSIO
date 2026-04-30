@@ -390,6 +390,12 @@ impl FsStorageBackend {
     }
 
     fn require_bucket(&self, bucket_name: &str) -> StorageResult<PathBuf> {
+        if validation::is_reserved_bucket_name(bucket_name) {
+            return Err(StorageError::InvalidBucketName(format!(
+                "Bucket name '{}' is reserved",
+                bucket_name
+            )));
+        }
         let path = self.bucket_path(bucket_name);
         if !path.exists() {
             return Err(StorageError::BucketNotFound(bucket_name.to_string()));
@@ -2184,7 +2190,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy().to_string();
-                if name_str == SYSTEM_ROOT {
+                if validation::is_reserved_bucket_name(&name_str) {
                     continue;
                 }
                 let ft = match entry.file_type() {
@@ -2269,6 +2275,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn bucket_exists(&self, name: &str) -> StorageResult<bool> {
+        if validation::is_reserved_bucket_name(name) {
+            return Ok(false);
+        }
         Ok(self.bucket_path(name).exists())
     }
 
@@ -2324,9 +2333,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 });
             }
 
-            // Open the fd first so that the snapshot we hand back is anchored
-            // to this exact inode, even if a concurrent PUT renames over the
-            // path after we release the read lock.
             let file = std::fs::File::open(&path).map_err(StorageError::Io)?;
             let meta = file.metadata().map_err(StorageError::Io)?;
             let mtime = meta
@@ -2610,10 +2616,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             if let Some(parent) = link_owned.parent() {
                 std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
             }
-            // The hardlink shares the inode of the file *at this moment*.
-            // Later renames replace the live path with a different inode,
-            // but our hardlink path keeps resolving to the original one
-            // until it is explicitly unlinked.
             let _ = std::fs::remove_file(&link_owned);
             std::fs::hard_link(&path, &link_owned).map_err(StorageError::Io)?;
 
@@ -3102,11 +3104,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
         let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
 
-        // Copy bytes + hash under the src read lock so the source body and
-        // metadata we capture are consistent with one another. The src read
-        // guard is released at the end of this block before we take the dst
-        // write guard, so even when src == dst (same stripe) there's no
-        // upgrade deadlock.
         let copy_res = run_blocking(
             || -> StorageResult<(String, u64, HashMap<String, String>)> {
                 let _src_guard = self.get_object_lock(src_bucket, src_key).read();
@@ -3448,9 +3445,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
 
             use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-            // Open first so subsequent metadata/seek/read are all
-            // anchored to the same inode, even if a later rename swaps
-            // the path after we release the guard.
             let mut src = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
             let src_meta = src.metadata().map_err(StorageError::Io)?;
             let src_size = src_meta.len();
@@ -3580,8 +3574,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let upload_dir_owned = upload_dir.clone();
         let tmp_path_owned = tmp_path.clone();
 
-        // Assemble parts on a blocking thread using std::fs, large buffers,
-        // and a single writer flush — no per-chunk runtime crossings.
         let assemble_res =
             tokio::task::spawn_blocking(move || -> StorageResult<(String, u64, Vec<u64>)> {
                 use std::io::{BufReader, BufWriter, Read, Write};
@@ -3645,9 +3637,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let mut metadata = metadata;
         metadata.insert(META_KEY_PART_SIZES.to_string(), encode_part_sizes(&part_sizes));
 
-        // Commit to the destination key atomically under its write lock.
-        // Lock acquisition happens inside run_blocking so the wait runs under
-        // block_in_place rather than parking the async worker.
         let result = run_blocking(|| {
             let _guard = self.get_object_lock(bucket, &object_key).write();
             self.finalize_put_sync(
@@ -4660,7 +4649,6 @@ mod tests {
         let tmp_dir = root.join(".myfsio.sys").join("tmp");
         std::fs::create_dir_all(&tmp_dir).unwrap();
 
-        // Seed with known content.
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'a'; 4096]));
         backend
             .put_object("link-bkt", "hot", data, None)
@@ -4670,9 +4658,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Writers swap the object between three distinct fill bytes with
-        // distinct known etags; we'll check the snapshot's etag is one of
-        // them and matches what we read from link_path.
         for w in 0..2 {
             let b = backend.clone();
             let stop = stop.clone();
@@ -4755,8 +4740,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Writers flip between 1 KiB and 2 KiB bodies so every PUT changes
-        // the reported size.
         for w in 0..2 {
             let b = backend.clone();
             let stop = stop.clone();
@@ -4820,9 +4803,6 @@ mod tests {
         let backend = StdArc::new(backend);
         backend.create_bucket("range-bkt").await.unwrap();
 
-        // Every version is a 256 KiB run of a single byte, so body bytes
-        // alone identify which version any ranged read came from. We pair
-        // that with the returned ETag to check they agree.
         const SIZE: u64 = 256 * 1024;
         let seed = vec![b'a'; SIZE as usize];
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(seed));
@@ -4866,10 +4846,6 @@ mod tests {
                     {
                         let mut buf = Vec::with_capacity(len as usize);
                         if stream.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
-                            // Every byte in the range must be the same — all
-                            // writers fill the object uniformly — and the
-                            // etag must be the MD5 of a uniform buffer of
-                            // that byte at full object size.
                             let fill = buf[0];
                             let all_match = buf.iter().all(|b| *b == fill);
                             let expected_etag =
@@ -4911,10 +4887,6 @@ mod tests {
         let backend = StdArc::new(backend);
         backend.create_bucket("mp-bkt").await.unwrap();
 
-        // Two fixed-size source versions: all 'a' or all 'b'. Writers flip
-        // between them; readers do upload_part_copy and check that the
-        // recorded ETag corresponds to exactly one of the two known MD5s
-        // (not a cross-pollinated value).
         const SIZE: u64 = 64 * 1024;
         let etag_a = format!("{:x}", Md5::digest(&vec![b'a'; SIZE as usize]));
         let etag_b = format!("{:x}", Md5::digest(&vec![b'b'; SIZE as usize]));
@@ -4928,7 +4900,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Writer flips the source between two fixed contents.
         {
             let b = backend.clone();
             let stop = stop.clone();
@@ -4963,10 +4934,6 @@ mod tests {
                         .upload_part_copy("mp-bkt", &upload_id, 1, "mp-bkt", "src", None, None)
                         .await;
                     if let Ok((etag, _lm)) = res {
-                        // The part etag is the MD5 of the copied bytes; it
-                        // must be one of the two known values, never something
-                        // in between (which would signal metadata from one
-                        // version and bytes from another).
                         if etag != etag_a && etag != etag_b {
                             bad.fetch_add(1, Ordering::Relaxed);
                         }
@@ -4995,7 +4962,6 @@ mod tests {
             "observed {} upload_part_copy results with etag unrelated to source content (out of {})",
             x, o
         );
-        // Sanity: make sure the test actually exercised both versions.
         let _ = PartInfo {
             part_number: 1,
             etag: etag_a,
@@ -5011,7 +4977,6 @@ mod tests {
         let backend = StdArc::new(backend);
         backend.create_bucket("contend").await.unwrap();
 
-        // Seed a 1 MiB object.
         let seed = vec![b'x'; 1_048_576];
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(seed));
         backend
@@ -5022,9 +4987,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Hammer the same key with PUTs that each acquire the write lock
-        // inside block_in_place. On only 2 worker threads, this is a
-        // worst-case pattern for worker starvation.
         for w in 0..4 {
             let b = backend.clone();
             let stop = stop.clone();
@@ -5040,8 +5002,6 @@ mod tests {
             }));
         }
 
-        // Unrelated async tasks (simulating e.g. health checks, metrics
-        // emissions) that should keep firing throughout the contention.
         let pings = StdArc::new(AtomicU64::new(0));
         for _ in 0..2 {
             let stop = stop.clone();
@@ -5061,9 +5021,6 @@ mod tests {
             let _ = h.await;
         }
 
-        // If the worker was getting parked on lock.write() outside of
-        // block_in_place, the unrelated task's ping counter would stall. We
-        // expect ~1 ping per ms when healthy; assert a generous floor.
         let p = pings.load(Ordering::Relaxed);
         assert!(
             p >= 50,
@@ -5082,7 +5039,6 @@ mod tests {
         backend.create_bucket("race-bucket").await.unwrap();
 
         const SIZE: usize = 256 * 1024;
-        // Seed an initial version so GETs can start immediately.
         let seed = vec![b'a'; SIZE];
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(seed));
         backend

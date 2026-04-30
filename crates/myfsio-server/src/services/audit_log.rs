@@ -21,6 +21,8 @@ pub struct AuditEntry {
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -29,6 +31,10 @@ pub enum AuditTarget {
     Local,
     Outbound,
 }
+
+pub const ATTRIBUTION_VERIFIED: &str = "verified";
+pub const ATTRIBUTION_CLAIMED_BY_ORIGIN: &str = "claimed_by_origin";
+pub const ATTRIBUTION_REJECTED: &str = "rejected_relay";
 
 pub struct AuditLog {
     base_dir: PathBuf,

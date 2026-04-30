@@ -14,7 +14,10 @@ use parking_lot::Mutex as ParkingMutex;
 use sha2::{Digest, Sha256};
 
 use crate::handlers::RelayContext;
-use crate::services::audit_log::{AuditEntry, AuditTarget};
+use crate::services::audit_log::{
+    AuditEntry, AuditTarget, ATTRIBUTION_CLAIMED_BY_ORIGIN, ATTRIBUTION_REJECTED,
+    ATTRIBUTION_VERIFIED,
+};
 use crate::services::cluster_attest::{verify_admin_attest, verify_cluster_attest};
 use crate::state::{AppState, RelayIdempotencyEntry};
 
@@ -64,32 +67,6 @@ pub async fn relay_inbound_layer(
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string());
 
-    let peer_principal = match req.extensions().get::<Principal>() {
-        Some(p) if p.is_peer() => p.clone(),
-        _ => {
-            return json_error(
-                "AccessDenied",
-                "Peer principal required for /admin/peer/*",
-                StatusCode::FORBIDDEN,
-            );
-        }
-    };
-    let peer_site_id = peer_principal
-        .peer_site_id()
-        .unwrap_or("")
-        .to_string();
-
-    let psk = match state.config.cluster_psk.as_deref() {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => {
-            return json_error(
-                "ServiceUnavailable",
-                "Cluster federation is disabled (MYFSIO_CLUSTER_PSK not set)",
-                StatusCode::SERVICE_UNAVAILABLE,
-            );
-        }
-    };
-
     let amz_date = header_str(req.headers(), "x-amz-date").to_string();
     let origin_site = header_str(req.headers(), "x-myfsio-origin-site").to_string();
     let admin_user = header_str(req.headers(), "x-myfsio-admin-user").to_string();
@@ -105,6 +82,82 @@ pub async fn relay_inbound_layer(
         }
     };
 
+    let record_relay_failure = |code: &str,
+                                message: &str,
+                                status: StatusCode,
+                                origin_site_id: Option<String>,
+                                admin_user_id: Option<String>|
+     -> Response {
+        let status_code = status.as_u16();
+        state.audit_log.record(AuditEntry {
+            ts: chrono::Utc::now().to_rfc3339(),
+            correlation_id: correlation_id.clone(),
+            origin_site_id,
+            admin_user_id,
+            action: format!("relay-rejected:{} {} {}", code, method, path),
+            method: method.clone(),
+            path: path.clone(),
+            target: AuditTarget::Local,
+            result: "error".to_string(),
+            status_code,
+            peer_ip: peer_ip.clone(),
+            idempotency_key: if idempotency_key.is_empty() {
+                None
+            } else {
+                Some(idempotency_key.clone())
+            },
+            error: Some(message.to_string()),
+            attribution: Some(ATTRIBUTION_REJECTED.to_string()),
+        });
+        json_error(code, message, status)
+    };
+
+    let peer_principal = match req.extensions().get::<Principal>() {
+        Some(p) if p.is_peer() => p.clone(),
+        _ => {
+            return record_relay_failure(
+                "AccessDenied",
+                "Peer principal required for /admin/peer/*",
+                StatusCode::FORBIDDEN,
+                if origin_site.is_empty() {
+                    None
+                } else {
+                    Some(origin_site.clone())
+                },
+                if admin_user.is_empty() {
+                    None
+                } else {
+                    Some(admin_user.clone())
+                },
+            );
+        }
+    };
+    let peer_site_id = peer_principal
+        .peer_site_id()
+        .unwrap_or("")
+        .to_string();
+
+    let psk = match state.config.cluster_psk.as_deref() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => {
+            return record_relay_failure(
+                "ServiceUnavailable",
+                "Cluster federation is disabled (MYFSIO_CLUSTER_PSK not set)",
+                StatusCode::SERVICE_UNAVAILABLE,
+                if origin_site.is_empty() {
+                    None
+                } else {
+                    Some(origin_site.clone())
+                },
+                if admin_user.is_empty() {
+                    None
+                } else {
+                    Some(admin_user.clone())
+                },
+            );
+        }
+    };
+
     if origin_site.is_empty()
         || admin_user.is_empty()
         || admin_attest.is_empty()
@@ -112,33 +165,40 @@ pub async fn relay_inbound_layer(
         || idempotency_key.is_empty()
         || amz_date.is_empty()
     {
-        return json_error(
+        return record_relay_failure(
             "InvalidArgument",
             "Missing relay attestation headers",
             StatusCode::BAD_REQUEST,
+            if origin_site.is_empty() {
+                None
+            } else {
+                Some(origin_site.clone())
+            },
+            if admin_user.is_empty() {
+                None
+            } else {
+                Some(admin_user.clone())
+            },
         );
     }
 
     if origin_site != peer_site_id {
-        return json_error(
+        return record_relay_failure(
             "AccessDenied",
             "x-myfsio-origin-site does not match peer principal site_id",
             StatusCode::FORBIDDEN,
+            Some(origin_site.clone()),
+            Some(admin_user.clone()),
         );
     }
 
     if !verify_cluster_attest(&psk, &amz_date, &origin_site, &idempotency_key, &cluster_attest) {
-        return json_error(
+        return record_relay_failure(
             "AccessDenied",
             "Invalid cluster attestation",
             StatusCode::FORBIDDEN,
-        );
-    }
-    if !verify_admin_attest(&psk, &amz_date, &admin_user, &admin_attest) {
-        return json_error(
-            "AccessDenied",
-            "Invalid admin attestation",
-            StatusCode::FORBIDDEN,
+            Some(origin_site.clone()),
+            Some(admin_user.clone()),
         );
     }
 
@@ -152,13 +212,41 @@ pub async fn relay_inbound_layer(
     let body_bytes = match Body::from(request_body).collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => {
-            return json_error(
+            return record_relay_failure(
                 "InternalError",
                 &format!("Body read failed: {}", e),
                 StatusCode::INTERNAL_SERVER_ERROR,
+                Some(origin_site.clone()),
+                Some(admin_user.clone()),
             );
         }
     };
+    let body_sha256_hex = {
+        let mut hasher = Sha256::new();
+        hasher.update(&body_bytes);
+        hex::encode(hasher.finalize())
+    };
+    let canonical_path_for_attest = parts_for_replay.uri.path().to_string();
+
+    if !verify_admin_attest(
+        &psk,
+        &amz_date,
+        &admin_user,
+        parts_for_replay.method.as_str(),
+        &canonical_path_for_attest,
+        &body_sha256_hex,
+        &idempotency_key,
+        &admin_attest,
+    ) {
+        return record_relay_failure(
+            "AccessDenied",
+            "Invalid admin attestation",
+            StatusCode::FORBIDDEN,
+            Some(origin_site.clone()),
+            Some(admin_user.clone()),
+        );
+    }
+
     let request_fingerprint = {
         let mut hasher = Sha256::new();
         hasher.update(parts_for_replay.method.as_str().as_bytes());
@@ -192,10 +280,12 @@ pub async fn relay_inbound_layer(
         if let Some(entry) = cache.get(&idemp_cache_key) {
             if entry.stored_at.elapsed() < ttl {
                 if entry.request_fingerprint != request_fingerprint {
-                    return json_error(
+                    return record_relay_failure(
                         "InvalidArgument",
                         "x-myfsio-idempotency-key was previously used with a different method/path/body within the TTL window. Use a fresh idempotency key for distinct operations.",
                         StatusCode::CONFLICT,
+                        Some(origin_site.clone()),
+                        Some(admin_user.clone()),
                     );
                 }
                 let status = StatusCode::from_u16(entry.status)
@@ -236,10 +326,12 @@ pub async fn relay_inbound_layer(
         Ok(c) => c.to_bytes(),
         Err(e) => {
             tracing::error!("relay response read failed: {}", e);
-            return json_error(
+            return record_relay_failure(
                 "InternalError",
                 "Relay response read failed",
                 StatusCode::INTERNAL_SERVER_ERROR,
+                Some(origin_site.clone()),
+                Some(admin_user.clone()),
             );
         }
     };
@@ -282,6 +374,7 @@ pub async fn relay_inbound_layer(
         } else {
             None
         },
+        attribution: Some(ATTRIBUTION_CLAIMED_BY_ORIGIN.to_string()),
     });
 
     Response::from_parts(parts, Body::from(body_vec))
@@ -459,6 +552,7 @@ pub async fn relay_outbound(
                 } else {
                     None
                 },
+                attribution: Some(ATTRIBUTION_VERIFIED.to_string()),
             });
 
             let mut response = Response::new(Body::from(body));
@@ -466,6 +560,17 @@ pub async fn relay_outbound(
             if let Some(ct) = resp.content_type {
                 if let Ok(value) = ct.parse() {
                     response.headers_mut().insert("content-type", value);
+                }
+            }
+            for (name, value) in resp.peer_headers {
+                if name == "x-myfsio-correlation-id" || name == "x-myfsio-idempotency-key" {
+                    continue;
+                }
+                if let (Ok(header_name), Ok(header_value)) = (
+                    axum::http::HeaderName::try_from(&name),
+                    axum::http::HeaderValue::try_from(&value),
+                ) {
+                    response.headers_mut().insert(header_name, header_value);
                 }
             }
             response
@@ -491,6 +596,7 @@ pub async fn relay_outbound(
                 peer_ip: None,
                 idempotency_key: Some(idempotency_key),
                 error: Some(e.clone()),
+                attribution: Some(ATTRIBUTION_VERIFIED.to_string()),
             });
             json_error(
                 "BadGateway",

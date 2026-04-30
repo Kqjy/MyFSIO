@@ -316,6 +316,14 @@ async fn maybe_serve_website(
     let include_error_body = method != axum::http::Method::HEAD;
     let store = state.website_domains.as_ref()?;
     let bucket = store.get_bucket(&host)?;
+    if myfsio_storage::validation::is_reserved_bucket_name(&bucket) {
+        return Some(website_error_response(
+            StatusCode::NOT_FOUND,
+            None,
+            "text/plain; charset=utf-8",
+            include_error_body,
+        ));
+    }
     if !matches!(state.storage.bucket_exists(&bucket).await, Ok(true)) {
         return Some(website_error_response(
             StatusCode::NOT_FOUND,
@@ -763,6 +771,12 @@ async fn authorize_request(
             return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
         }
     };
+    if myfsio_storage::validation::is_reserved_bucket_name(bucket) {
+        return Err(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Access to reserved bucket names is not permitted",
+        ));
+    }
     let remaining: Vec<&str> = segments.collect();
 
     if remaining.is_empty() {
@@ -775,6 +789,12 @@ async fn authorize_request(
         if let Some(copy_source) = copy_source {
             let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
             if let Some((src_bucket, src_key)) = source.split_once('/') {
+                if myfsio_storage::validation::is_reserved_bucket_name(src_bucket) {
+                    return Err(S3Error::new(
+                        S3ErrorCode::AccessDenied,
+                        "Access to reserved bucket names is not permitted",
+                    ));
+                }
                 let source_allowed =
                     authorize_action(state, principal, src_bucket, "read", Some(src_key))
                         .await
@@ -971,9 +991,71 @@ fn statement_matches_action(statement: &Value, action: &str) -> bool {
     }
 }
 
+const S3_ACTION_TABLE: &[(&str, &str)] = &[
+    ("s3:listbucket", "list"),
+    ("s3:listallmybuckets", "list"),
+    ("s3:listbucketversions", "list"),
+    ("s3:listmultipartuploads", "list"),
+    ("s3:listparts", "list"),
+    ("s3:getobject", "read"),
+    ("s3:getobjectversion", "read"),
+    ("s3:getobjecttagging", "read"),
+    ("s3:getobjectversiontagging", "read"),
+    ("s3:getobjectacl", "read"),
+    ("s3:getbucketversioning", "read"),
+    ("s3:headobject", "read"),
+    ("s3:headbucket", "read"),
+    ("s3:putobject", "write"),
+    ("s3:createbucket", "write"),
+    ("s3:putobjecttagging", "write"),
+    ("s3:putbucketversioning", "write"),
+    ("s3:createmultipartupload", "write"),
+    ("s3:uploadpart", "write"),
+    ("s3:completemultipartupload", "write"),
+    ("s3:abortmultipartupload", "write"),
+    ("s3:copyobject", "write"),
+    ("s3:deleteobject", "delete"),
+    ("s3:deleteobjectversion", "delete"),
+    ("s3:deletebucket", "delete"),
+    ("s3:deleteobjecttagging", "delete"),
+    ("s3:putobjectacl", "share"),
+    ("s3:putbucketacl", "share"),
+    ("s3:getbucketacl", "share"),
+    ("s3:putbucketpolicy", "policy"),
+    ("s3:getbucketpolicy", "policy"),
+    ("s3:deletebucketpolicy", "policy"),
+    ("s3:getreplicationconfiguration", "replication"),
+    ("s3:putreplicationconfiguration", "replication"),
+    ("s3:deletereplicationconfiguration", "replication"),
+    ("s3:replicateobject", "replication"),
+    ("s3:replicatetags", "replication"),
+    ("s3:replicatedelete", "replication"),
+    ("s3:getlifecycleconfiguration", "lifecycle"),
+    ("s3:putlifecycleconfiguration", "lifecycle"),
+    ("s3:deletelifecycleconfiguration", "lifecycle"),
+    ("s3:getbucketlifecycle", "lifecycle"),
+    ("s3:putbucketlifecycle", "lifecycle"),
+    ("s3:getbucketcors", "cors"),
+    ("s3:putbucketcors", "cors"),
+    ("s3:deletebucketcors", "cors"),
+];
+
 fn policy_action_matches(policy_action: &str, requested_action: &str) -> bool {
-    let normalized_policy_action = normalize_policy_action(policy_action);
-    normalized_policy_action == "*" || normalized_policy_action == requested_action
+    let normalized_policy = policy_action.trim().to_ascii_lowercase();
+    if normalized_policy == "*" {
+        return true;
+    }
+    if normalized_policy.contains('*') || normalized_policy.contains('?') {
+        for (s3_action, internal_action) in S3_ACTION_TABLE {
+            if *internal_action == requested_action
+                && wildcard_match(s3_action, &normalized_policy)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    normalize_policy_action(&normalized_policy) == requested_action
 }
 
 fn normalize_policy_action(action: &str) -> String {
@@ -981,51 +1063,12 @@ fn normalize_policy_action(action: &str) -> String {
     if normalized == "*" {
         return normalized;
     }
-    match normalized.as_str() {
-        "s3:listbucket"
-        | "s3:listallmybuckets"
-        | "s3:listbucketversions"
-        | "s3:listmultipartuploads"
-        | "s3:listparts" => "list".to_string(),
-        "s3:getobject"
-        | "s3:getobjectversion"
-        | "s3:getobjecttagging"
-        | "s3:getobjectversiontagging"
-        | "s3:getobjectacl"
-        | "s3:getbucketversioning"
-        | "s3:headobject"
-        | "s3:headbucket" => "read".to_string(),
-        "s3:putobject"
-        | "s3:createbucket"
-        | "s3:putobjecttagging"
-        | "s3:putbucketversioning"
-        | "s3:createmultipartupload"
-        | "s3:uploadpart"
-        | "s3:completemultipartupload"
-        | "s3:abortmultipartupload"
-        | "s3:copyobject" => "write".to_string(),
-        "s3:deleteobject"
-        | "s3:deleteobjectversion"
-        | "s3:deletebucket"
-        | "s3:deleteobjecttagging" => "delete".to_string(),
-        "s3:putobjectacl" | "s3:putbucketacl" | "s3:getbucketacl" => "share".to_string(),
-        "s3:putbucketpolicy" | "s3:getbucketpolicy" | "s3:deletebucketpolicy" => {
-            "policy".to_string()
+    for (s3_action, internal_action) in S3_ACTION_TABLE {
+        if *s3_action == normalized {
+            return (*internal_action).to_string();
         }
-        "s3:getreplicationconfiguration"
-        | "s3:putreplicationconfiguration"
-        | "s3:deletereplicationconfiguration"
-        | "s3:replicateobject"
-        | "s3:replicatetags"
-        | "s3:replicatedelete" => "replication".to_string(),
-        "s3:getlifecycleconfiguration"
-        | "s3:putlifecycleconfiguration"
-        | "s3:deletelifecycleconfiguration"
-        | "s3:getbucketlifecycle"
-        | "s3:putbucketlifecycle" => "lifecycle".to_string(),
-        "s3:getbucketcors" | "s3:putbucketcors" | "s3:deletebucketcors" => "cors".to_string(),
-        other => other.to_string(),
     }
+    normalized
 }
 
 fn statement_matches_resource(statement: &Value, bucket: &str, object_key: Option<&str>) -> bool {
@@ -1662,4 +1705,70 @@ fn error_response(err: S3Error, resource: &str) -> Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{policy_action_matches, wildcard_match};
+
+    #[test]
+    fn star_action_matches_anything() {
+        assert!(policy_action_matches("*", "read"));
+        assert!(policy_action_matches("*", "delete"));
+        assert!(policy_action_matches("*", "policy"));
+    }
+
+    #[test]
+    fn s3_star_action_matches_any_s3_action() {
+        assert!(policy_action_matches("s3:*", "read"));
+        assert!(policy_action_matches("s3:*", "write"));
+        assert!(policy_action_matches("s3:*", "delete"));
+        assert!(policy_action_matches("s3:*", "list"));
+        assert!(policy_action_matches("s3:*", "policy"));
+    }
+
+    #[test]
+    fn s3_get_star_matches_read_only() {
+        assert!(policy_action_matches("s3:Get*", "read"));
+        assert!(!policy_action_matches("s3:Get*", "write"));
+        assert!(!policy_action_matches("s3:Get*", "delete"));
+    }
+
+    #[test]
+    fn s3_put_star_matches_write_and_share_policy_lifecycle() {
+        assert!(policy_action_matches("s3:Put*", "write"));
+        assert!(policy_action_matches("s3:PutObject*", "write"));
+        assert!(policy_action_matches("s3:PutBucket*", "write"));
+    }
+
+    #[test]
+    fn s3_list_star_matches_list() {
+        assert!(policy_action_matches("s3:List*", "list"));
+        assert!(!policy_action_matches("s3:List*", "read"));
+    }
+
+    #[test]
+    fn s3_delete_star_matches_delete() {
+        assert!(policy_action_matches("s3:Delete*", "delete"));
+        assert!(!policy_action_matches("s3:Delete*", "write"));
+    }
+
+    #[test]
+    fn exact_action_still_matches() {
+        assert!(policy_action_matches("s3:GetObject", "read"));
+        assert!(policy_action_matches("s3:PutObject", "write"));
+        assert!(!policy_action_matches("s3:GetObject", "write"));
+    }
+
+    #[test]
+    fn unknown_glob_pattern_does_not_match_unknown_action() {
+        assert!(!policy_action_matches("s3:NeverHeardOf*", "read"));
+    }
+
+    #[test]
+    fn wildcard_match_basic() {
+        assert!(wildcard_match("s3:getobject", "s3:get*"));
+        assert!(wildcard_match("s3:listbucket", "s3:list*"));
+        assert!(!wildcard_match("s3:listbucket", "s3:get*"));
+    }
 }

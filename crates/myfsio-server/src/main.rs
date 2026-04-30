@@ -39,15 +39,7 @@ async fn main() {
 
     let cli = Cli::parse();
     let config = ServerConfig::from_env();
-    if !config
-        .ratelimit_storage_uri
-        .eq_ignore_ascii_case("memory://")
-    {
-        tracing::warn!(
-            "RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory rate limits",
-            config.ratelimit_storage_uri
-        );
-    }
+    warn_unsupported_ratelimit_uri(&config);
 
     if cli.reset_cred {
         reset_admin_credentials(&config);
@@ -340,6 +332,25 @@ fn print_config_summary(config: &ServerConfig) {
     println!("Operation metrics enabled: {}", config.metrics_enabled);
 }
 
+fn unsupported_ratelimit_uri_message(config: &ServerConfig) -> Option<String> {
+    if config
+        .ratelimit_storage_uri
+        .eq_ignore_ascii_case("memory://")
+    {
+        return None;
+    }
+    Some(format!(
+        "RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory rate limits.",
+        config.ratelimit_storage_uri
+    ))
+}
+
+fn warn_unsupported_ratelimit_uri(config: &ServerConfig) {
+    if let Some(message) = unsupported_ratelimit_uri_message(config) {
+        tracing::warn!("{}", message);
+    }
+}
+
 fn validate_config(config: &ServerConfig) -> Vec<String> {
     let mut issues = Vec::new();
 
@@ -369,14 +380,8 @@ fn validate_config(config: &ServerConfig) -> Vec<String> {
     if config.bucket_config_cache_ttl_seconds < 0.0 {
         issues.push("CRITICAL: BUCKET_CONFIG_CACHE_TTL_SECONDS cannot be negative.".to_string());
     }
-    if !config
-        .ratelimit_storage_uri
-        .eq_ignore_ascii_case("memory://")
-    {
-        issues.push(format!(
-            "WARNING: RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory limits.",
-            config.ratelimit_storage_uri
-        ));
+    if let Some(message) = unsupported_ratelimit_uri_message(config) {
+        issues.push(format!("WARNING: {}", message));
     }
     if let Err(err) = std::fs::create_dir_all(&config.storage_root) {
         issues.push(format!(

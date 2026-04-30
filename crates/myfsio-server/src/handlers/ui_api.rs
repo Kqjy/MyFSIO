@@ -269,6 +269,11 @@ fn manifest_timestamp(value: &VersionManifest) -> DateTime<Utc> {
 
 fn manifest_to_json(record: &VersionManifest) -> Value {
     let ts = manifest_timestamp(record);
+    let public_metadata: HashMap<&String, &String> = record
+        .metadata
+        .iter()
+        .filter(|(key, _)| !is_internal_metadata_key(key))
+        .collect();
     json!({
         "version_id": record.version_id,
         "key": record.key,
@@ -276,10 +281,14 @@ fn manifest_to_json(record: &VersionManifest) -> Value {
         "etag": record.etag,
         "archived_at": ts.to_rfc3339(),
         "last_modified": ts.to_rfc3339(),
-        "metadata": record.metadata,
+        "metadata": public_metadata,
         "reason": record.reason.clone().unwrap_or_else(|| "update".to_string()),
         "is_latest": false,
     })
+}
+
+fn is_internal_metadata_key(key: &str) -> bool {
+    key.starts_with("__") && key.ends_with("__")
 }
 
 fn read_version_manifests_for_object(

@@ -269,6 +269,7 @@ pub fn audit_admin_action(
             peer_ip: None,
             idempotency_key: None,
             error,
+            attribution: Some(crate::services::audit_log::ATTRIBUTION_VERIFIED.to_string()),
         });
 }
 
