@@ -811,6 +811,67 @@ async fn authorize_request(
     authorize_action(state, principal, bucket, action, Some(&object_key)).await
 }
 
+pub async fn ui_authorize(
+    state: &AppState,
+    principal: &Principal,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> Result<(), String> {
+    authorize_action(state, Some(principal), bucket, action, object_key)
+        .await
+        .map_err(|err| err.message)
+}
+
+/// List-flavored authorization for the UI.
+///
+/// `prefix` is the requested key prefix (empty string means whole-bucket
+/// list). The IAM check uses `Some(prefix)` so prefix-scoped policies are
+/// honored — without that, a user scoped to `reports/` could call list with
+/// `?prefix=secret/` and read keys outside their allowed prefix.
+///
+/// The bucket-policy and ACL checks, by contrast, are evaluated with
+/// `object_key = None` so a `Deny` / `Allow` on the bucket ARN
+/// (`arn:aws:s3:::bucket`) actually matches — those resource ARNs only match
+/// when no object key is supplied.
+pub async fn ui_authorize_list(
+    state: &AppState,
+    principal: &Principal,
+    bucket: &str,
+    prefix: &str,
+) -> Result<(), String> {
+    let iam_allowed = state
+        .iam
+        .authorize(principal, Some(bucket), "list", Some(prefix));
+    let policy_decision = evaluate_bucket_policy(
+        state,
+        Some(principal.access_key.as_str()),
+        bucket,
+        "list",
+        None,
+    )
+    .await;
+
+    if matches!(policy_decision, PolicyDecision::Deny) {
+        return Err("Access denied by bucket policy".to_string());
+    }
+    if iam_allowed || matches!(policy_decision, PolicyDecision::Allow) {
+        return Ok(());
+    }
+    if evaluate_bucket_acl(
+        state,
+        bucket,
+        Some(principal.access_key.as_str()),
+        "list",
+        true,
+    )
+    .await
+    {
+        return Ok(());
+    }
+    Err("Access denied".to_string())
+}
+
 async fn authorize_action(
     state: &AppState,
     principal: Option<&Principal>,

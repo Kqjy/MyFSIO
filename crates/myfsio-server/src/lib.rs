@@ -157,6 +157,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             post(ui_api::archived_post_dispatch),
         )
         .route("/ui/docs", get(ui_pages::docs_page))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ui::ui_admin_audit_layer,
+        ))
         .layer(axum::middleware::from_fn(ui::require_login));
 
     let admin_only = Router::new()

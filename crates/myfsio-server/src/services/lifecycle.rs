@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::services::object_lock;
+
 pub struct LifecycleConfig {
     pub interval_seconds: u64,
     pub max_history_per_bucket: usize,
@@ -207,6 +209,22 @@ impl LifecycleService {
                     if object.last_modified < cutoff
                         && self.object_matches_tag_filter(bucket, &object.key, rule).await
                     {
+                        let metadata = self
+                            .storage
+                            .get_object_metadata(bucket, &object.key)
+                            .await
+                            .unwrap_or_default();
+                        if let Err(message) =
+                            object_lock::can_delete_object(&metadata, false)
+                        {
+                            tracing::info!(
+                                bucket = bucket,
+                                key = %object.key,
+                                "lifecycle skip locked: {}",
+                                message
+                            );
+                            continue;
+                        }
                         if let Err(err) = self.storage.delete_object(bucket, &object.key).await {
                             result
                                 .errors
@@ -308,6 +326,27 @@ impl LifecycleService {
                             .any(|t| t.key == *k && t.value == *v)
                     });
                     if !matched {
+                        continue;
+                    }
+                }
+                if let Some(version_meta) =
+                    manifest.get("metadata").and_then(|m| m.as_object())
+                {
+                    let metadata_map: std::collections::HashMap<String, String> = version_meta
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            v.as_str().map(|s| (k.clone(), s.to_string()))
+                        })
+                        .collect();
+                    if let Err(message) =
+                        object_lock::can_delete_object(&metadata_map, false)
+                    {
+                        tracing::info!(
+                            bucket = bucket,
+                            key = %key,
+                            "lifecycle skip locked archived version: {}",
+                            message
+                        );
                         continue;
                     }
                 }

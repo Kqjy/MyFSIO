@@ -4,7 +4,7 @@ pub mod ratelimit;
 pub mod session;
 pub(crate) mod sha_body;
 
-pub use auth::auth_layer;
+pub use auth::{auth_layer, ui_authorize, ui_authorize_list};
 pub use bucket_cors::bucket_cors_layer;
 pub use ratelimit::{rate_limit_layer, RateLimitLayerState};
 pub use session::{csrf_layer, session_layer, SessionHandle, SessionLayerState};

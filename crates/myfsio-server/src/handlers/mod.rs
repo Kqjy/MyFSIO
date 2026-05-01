@@ -329,6 +329,7 @@ pub async fn create_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
@@ -345,6 +346,16 @@ pub async fn create_bucket(
             )
             .await;
         }
+    }
+
+    if let Some(unsupported) = unsupported_bucket_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The bucket subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
     }
 
     if query.quota.is_some() {
@@ -454,7 +465,7 @@ pub struct BucketQuery {
     pub prefix: Option<String>,
     pub delimiter: Option<String>,
     #[serde(rename = "max-keys")]
-    pub max_keys: Option<usize>,
+    pub max_keys: Option<i64>,
     #[serde(rename = "continuation-token")]
     pub continuation_token: Option<String>,
     #[serde(rename = "start-after")]
@@ -491,6 +502,64 @@ pub struct BucketQuery {
     pub upload_id_marker: Option<String>,
     #[serde(rename = "max-uploads")]
     pub max_uploads: Option<usize>,
+}
+
+const SUPPORTED_BUCKET_SUBRESOURCES: &[&str] = &[
+    "versioning",
+    "tagging",
+    "cors",
+    "encryption",
+    "lifecycle",
+    "acl",
+    "policy",
+    "policyStatus",
+    "replication",
+    "website",
+    "object-lock",
+    "notification",
+    "logging",
+    "quota",
+    "location",
+    "uploads",
+    "delete",
+    "versions",
+    "list-type",
+    "marker",
+    "prefix",
+    "delimiter",
+    "max-keys",
+    "max-uploads",
+    "continuation-token",
+    "start-after",
+    "encoding-type",
+    "fetch-owner",
+    "key-marker",
+    "version-id-marker",
+    "upload-id-marker",
+];
+
+fn unsupported_bucket_subresource(query: Option<&str>) -> Option<String> {
+    let q = query?;
+    if q.is_empty() {
+        return None;
+    }
+    for part in q.split('&').filter(|p| !p.is_empty()) {
+        let key = part.split('=').next().unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        let key_owned = key.to_string();
+        let lower = key_owned.to_ascii_lowercase();
+        let known = SUPPORTED_BUCKET_SUBRESOURCES
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&key_owned))
+            || lower.starts_with("x-amz-")
+            || lower.starts_with("x-id");
+        if !known {
+            return Some(key_owned);
+        }
+    }
+    None
 }
 
 async fn virtual_host_bucket_from_headers(state: &AppState, headers: &HeaderMap) -> Option<String> {
@@ -577,6 +646,16 @@ pub async fn get_bucket(
     if query.logging.is_some() {
         return config::get_logging(&state, &bucket).await;
     }
+    let max_keys: usize = match query.max_keys {
+        None => 1000,
+        Some(v) if v < 0 => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Argument max-keys must be an integer between 0 and 2147483647",
+            ));
+        }
+        Some(v) => v as usize,
+    };
     if query.versions.is_some() {
         return config::list_object_versions(
             &state,
@@ -585,7 +664,7 @@ pub async fn get_bucket(
             query.delimiter.as_deref(),
             query.key_marker.as_deref(),
             query.version_id_marker.as_deref(),
-            query.max_keys.unwrap_or(1000),
+            max_keys,
         )
         .await;
     }
@@ -595,7 +674,6 @@ pub async fn get_bucket(
 
     let prefix = query.prefix.clone().unwrap_or_default();
     let delimiter = query.delimiter.clone().unwrap_or_default();
-    let max_keys = query.max_keys.unwrap_or(1000);
     let marker = query.marker.clone().unwrap_or_default();
     let list_type = query.list_type.clone().unwrap_or_default();
     let is_v2 = list_type == "2";
@@ -1258,6 +1336,19 @@ fn validate_sse_request(state: &AppState, headers: &HeaderMap) -> Result<(), Res
             "KMS is not enabled on this server",
         )));
     }
+    if alg == "aws:kms" {
+        let kid = headers
+            .get("x-amz-server-side-encryption-aws-kms-key-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if kid.is_none() {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "x-amz-server-side-encryption-aws-kms-key-id is required when SSE algorithm is aws:kms",
+            )));
+        }
+    }
     if state.encryption.is_none() {
         return Err(s3_error_response(S3Error::new(
             S3ErrorCode::InvalidArgument,
@@ -1323,6 +1414,9 @@ fn apply_stored_encryption_headers(
 
 fn apply_user_metadata(headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
     for (k, v) in metadata {
+        if k.starts_with("__") || k.starts_with("x-amz-") {
+            continue;
+        }
         if let Ok(header_val) = v.parse() {
             let header_name = format!("x-amz-meta-{}", k);
             if let Ok(name) = header_name.parse::<axum::http::HeaderName>() {
@@ -1832,6 +1926,11 @@ pub async fn put_object(
                         }
                         Err(e) => {
                             let _ = tokio::fs::remove_file(&enc_tmp).await;
+                            // Plaintext made it onto the live object path before
+                            // encryption was attempted; remove it so we never
+                            // leave plaintext at the canonical key location when
+                            // the caller asked for SSE.
+                            let _ = state.storage.delete_object(&bucket, &key).await;
                             return s3_error_response(S3Error::new(
                                 myfsio_common::error::S3ErrorCode::InternalError,
                                 format!("Encryption failed: {}", e),
@@ -2016,6 +2115,12 @@ pub async fn get_object(
     let (file, file_size, enc_header): (tokio::fs::File, u64, Option<&str>) =
         match (enc_info.as_ref(), state.encryption.as_ref()) {
             (Some(enc_info), Some(enc_svc)) => {
+                if enc_info.algorithm == "AES256" && enc_info.encrypted_data_key.is_none() {
+                    if let Err(resp) = require_sse_c_key_match(&headers, enc_info) {
+                        let _ = tokio::fs::remove_file(&snap_link).await;
+                        return resp;
+                    }
+                }
                 let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
                 let customer_key = match extract_sse_c_key(&headers) {
                     Ok(key) => key,
@@ -2251,6 +2356,17 @@ pub async fn head_object(
                 return resp;
             }
 
+            let enc_info = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(
+                &meta.internal_metadata,
+            );
+            if let Some(ref info) = enc_info {
+                if info.algorithm == "AES256" && info.encrypted_data_key.is_none() {
+                    if let Err(resp) = require_sse_c_key_match(&headers, info) {
+                        return resp;
+                    }
+                }
+            }
+
             let part_view = match query.part_number {
                 Some(n) => match resolve_part_view(&meta, n) {
                     Ok(v) => Some(v),
@@ -2266,7 +2382,14 @@ pub async fn head_object(
             }
 
             let mut headers = HeaderMap::new();
-            headers.insert("content-length", meta.size.to_string().parse().unwrap());
+            let plaintext_size = enc_info
+                .as_ref()
+                .and_then(|info| info.plaintext_size)
+                .unwrap_or(meta.size);
+            headers.insert(
+                "content-length",
+                plaintext_size.to_string().parse().unwrap(),
+            );
             if let Some(ref etag) = meta.etag {
                 headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
             }
@@ -2280,9 +2403,7 @@ pub async fn head_object(
                     .unwrap(),
             );
             headers.insert("accept-ranges", "bytes".parse().unwrap());
-            if let Some(enc_info) = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(
-                &meta.internal_metadata,
-            ) {
+            if let Some(ref enc_info) = enc_info {
                 if let Ok(alg) = enc_info.algorithm.as_str().parse() {
                     headers.insert("x-amz-server-side-encryption", alg);
                 }
@@ -2442,6 +2563,10 @@ fn resolve_part_view(
     })
 }
 
+const MULTIPART_PENDING_SSE_ALG: &str = "__pending_sse_algorithm__";
+const MULTIPART_PENDING_SSE_KMS_KEY: &str = "__pending_sse_kms_key_id__";
+const MULTIPART_PENDING_SSE_C_KEY: &str = "__pending_sse_c_customer_key__";
+
 async fn initiate_multipart_handler(
     state: &AppState,
     bucket: &str,
@@ -2451,6 +2576,30 @@ async fn initiate_multipart_handler(
     let mut metadata: HashMap<String, String> = HashMap::new();
     if let Err(resp) = insert_standard_object_metadata(headers, &mut metadata) {
         return resp;
+    }
+    if let Err(resp) = validate_sse_request(state, headers) {
+        return resp;
+    }
+    let resolved_enc_ctx = match resolve_encryption_context(state, bucket, headers).await {
+        Ok(ctx) => ctx,
+        Err(resp) => return resp,
+    };
+    if let Some(ref ctx) = resolved_enc_ctx {
+        metadata.insert(
+            MULTIPART_PENDING_SSE_ALG.to_string(),
+            ctx.algorithm.as_str().to_string(),
+        );
+        if let Some(ref kid) = ctx.kms_key_id {
+            metadata.insert(MULTIPART_PENDING_SSE_KMS_KEY.to_string(), kid.clone());
+        }
+        if let Some(ref ck) = ctx.customer_key {
+            use base64::engine::general_purpose::STANDARD as B64;
+            use base64::Engine;
+            metadata.insert(
+                MULTIPART_PENDING_SSE_C_KEY.to_string(),
+                B64.encode(ck),
+            );
+        }
     }
     if let Some(value) = headers.get("x-amz-tagging").and_then(|v| v.to_str().ok()) {
         let tags = match parse_tagging_header(value) {
@@ -2473,10 +2622,54 @@ async fn initiate_multipart_handler(
     match state.storage.initiate_multipart(bucket, key, initial).await {
         Ok(upload_id) => {
             let xml = myfsio_xml::response::initiate_multipart_upload_xml(bucket, key, &upload_id);
-            (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", "application/xml".parse().unwrap());
+            if let Some(ref ctx) = resolved_enc_ctx {
+                if let Ok(alg) = ctx.algorithm.as_str().parse() {
+                    headers.insert("x-amz-server-side-encryption", alg);
+                }
+                if let Some(ref kid) = ctx.kms_key_id {
+                    if let Ok(value) = kid.parse() {
+                        headers
+                            .insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+                    }
+                }
+            }
+            (StatusCode::OK, headers, xml).into_response()
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+async fn read_pending_multipart_sse(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Option<(myfsio_crypto::encryption::EncryptionContext, HashMap<String, String>)> {
+    let stored = state.storage.get_object_metadata(bucket, key).await.ok()?;
+    let alg = stored.get(MULTIPART_PENDING_SSE_ALG)?.clone();
+    let kms_key_id = stored.get(MULTIPART_PENDING_SSE_KMS_KEY).cloned();
+    let customer_key = stored.get(MULTIPART_PENDING_SSE_C_KEY).and_then(|s| {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine;
+        B64.decode(s).ok()
+    });
+    let algorithm = match alg.as_str() {
+        "AES256" if customer_key.is_some() => {
+            myfsio_crypto::encryption::SseAlgorithm::CustomerProvided
+        }
+        "AES256" => myfsio_crypto::encryption::SseAlgorithm::Aes256,
+        "aws:kms" => myfsio_crypto::encryption::SseAlgorithm::AwsKms,
+        _ => return None,
+    };
+    Some((
+        myfsio_crypto::encryption::EncryptionContext {
+            algorithm,
+            kms_key_id,
+            customer_key,
+        },
+        stored,
+    ))
 }
 
 async fn upload_part_handler_with_chunking(
@@ -2599,6 +2792,36 @@ async fn complete_multipart_handler(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
+    // The storage backend always finalizes to the key recorded in the upload
+    // manifest, regardless of which {key} the caller put in the URL. If those
+    // disagree, every post-complete step here (SSE encrypt-in-place,
+    // archived-null lock check, tagging, replication signal) would address
+    // the wrong path while the actual object lands somewhere else. Reject
+    // the request the way AWS S3 does instead of finalizing to one key and
+    // then operating on another.
+    let manifest_key = match state.storage.list_multipart_uploads(bucket).await {
+        Ok(uploads) => uploads
+            .into_iter()
+            .find(|u| u.upload_id == upload_id)
+            .map(|u| u.key),
+        Err(e) => return storage_err_response(e),
+    };
+    let manifest_key = match manifest_key {
+        Some(k) => k,
+        None => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::NoSuchUpload,
+                format!("Upload '{}' not found", upload_id),
+            ));
+        }
+    };
+    if manifest_key != key {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NoSuchUpload,
+            "The upload id does not belong to the requested object key",
+        ));
+    }
+
     if let Err(response) =
         ensure_archived_null_lock_allows_overwrite(state, bucket, key, Some(headers)).await
     {
@@ -2715,6 +2938,77 @@ async fn complete_multipart_handler(
                 return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
             };
             apply_pending_multipart_tagging(state, bucket, key).await;
+
+            // The pending-SSE markers were written into the multipart manifest
+            // at initiate time and only become visible on the object after
+            // complete_multipart copies the manifest's metadata down. So this
+            // lookup MUST run after complete, not before.
+            let pending_sse = read_pending_multipart_sse(state, bucket, key).await;
+
+            let mut sse_alg_response: Option<String> = None;
+            let mut sse_kms_id_response: Option<String> = None;
+            if let Some((enc_ctx, _)) = pending_sse {
+                let Some(enc_svc) = state.encryption.as_ref() else {
+                    let _ = state.storage.delete_object(bucket, key).await;
+                    return s3_error_response(S3Error::new(
+                        S3ErrorCode::InternalError,
+                        "Encryption requested for multipart upload but encryption service is disabled",
+                    ));
+                };
+                let obj_path = match state.storage.get_object_path(bucket, key).await {
+                    Ok(p) => p,
+                    Err(e) => return storage_err_response(e),
+                };
+                let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
+                let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+                let enc_tmp = tmp_dir.join(format!("mp-enc-{}", uuid::Uuid::new_v4()));
+                match enc_svc.encrypt_object(&obj_path, &enc_tmp, &enc_ctx).await {
+                    Ok(enc_meta) => {
+                        if let Err(e) = tokio::fs::rename(&enc_tmp, &obj_path).await {
+                            let _ = tokio::fs::remove_file(&enc_tmp).await;
+                            let _ = state.storage.delete_object(bucket, key).await;
+                            return storage_err_response(
+                                myfsio_storage::error::StorageError::Io(e),
+                            );
+                        }
+                        let enc_size = tokio::fs::metadata(&obj_path)
+                            .await
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        let mut enc_metadata = enc_meta.to_metadata_map();
+                        let all_meta = state
+                            .storage
+                            .get_object_metadata(bucket, key)
+                            .await
+                            .unwrap_or_default();
+                        for (k, v) in &all_meta {
+                            if k == MULTIPART_PENDING_SSE_ALG
+                                || k == MULTIPART_PENDING_SSE_KMS_KEY
+                                || k == MULTIPART_PENDING_SSE_C_KEY
+                            {
+                                continue;
+                            }
+                            enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                        enc_metadata.insert("__size__".to_string(), enc_size.to_string());
+                        let _ = state
+                            .storage
+                            .put_object_metadata(bucket, key, &enc_metadata)
+                            .await;
+                        sse_alg_response = Some(enc_ctx.algorithm.as_str().to_string());
+                        sse_kms_id_response = enc_ctx.kms_key_id.clone();
+                    }
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&enc_tmp).await;
+                        let _ = state.storage.delete_object(bucket, key).await;
+                        return s3_error_response(S3Error::new(
+                            S3ErrorCode::InternalError,
+                            format!("Encryption failed during multipart complete: {}", e),
+                        ));
+                    }
+                }
+            }
+
             let xml = myfsio_xml::response::complete_multipart_upload_xml(
                 bucket,
                 key,
@@ -2733,7 +3027,20 @@ async fn complete_multipart_handler(
                 "CompleteMultipartUpload",
             );
             trigger_replication_for_request(state, peer_marker, bucket, key, "write");
-            (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert("content-type", "application/xml".parse().unwrap());
+            if let Some(alg) = sse_alg_response {
+                if let Ok(value) = alg.parse() {
+                    resp_headers.insert("x-amz-server-side-encryption", value);
+                }
+            }
+            if let Some(kid) = sse_kms_id_response {
+                if let Ok(value) = kid.parse() {
+                    resp_headers
+                        .insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+                }
+            }
+            (StatusCode::OK, resp_headers, xml).into_response()
         }
         Err(e) => storage_err_response(e),
     }
@@ -3084,10 +3391,46 @@ async fn copy_object_handler(
         }
     };
 
-    let dst_enc_ctx = match resolve_encryption_context(state, dst_bucket, headers).await {
+    let mut dst_enc_ctx = match resolve_encryption_context(state, dst_bucket, headers).await {
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
+
+    if dst_enc_ctx.is_none() {
+        let src_alg = source_meta
+            .internal_metadata
+            .get("x-amz-server-side-encryption")
+            .map(|s| s.as_str());
+        match src_alg {
+            Some("AES256") => {
+                let is_sse_c = source_meta
+                    .internal_metadata
+                    .get("x-amz-encrypted-data-key")
+                    .is_none();
+                if !is_sse_c && state.encryption.is_some() {
+                    dst_enc_ctx = Some(myfsio_crypto::encryption::EncryptionContext {
+                        algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
+                        kms_key_id: None,
+                        customer_key: None,
+                    });
+                }
+            }
+            Some("aws:kms") => {
+                let kid = source_meta
+                    .internal_metadata
+                    .get("x-amz-encryption-key-id")
+                    .cloned();
+                if state.encryption.is_some() && kid.is_some() {
+                    dst_enc_ctx = Some(myfsio_crypto::encryption::EncryptionContext {
+                        algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
+                        kms_key_id: kid,
+                        customer_key: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
 
     let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
     if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
@@ -4156,6 +4499,20 @@ fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
             S3ErrorCode::InvalidArgument,
             "SSE-C requires algorithm, key, and key-MD5 headers together",
         ))),
+    }
+}
+
+fn require_sse_c_key_match(
+    headers: &HeaderMap,
+    _enc_info: &myfsio_crypto::encryption::EncryptionMetadata,
+) -> Result<(), Response> {
+    match extract_sse_c_key(headers) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "Object was created with SSE-C; the SSE-C customer key headers are required",
+        ))),
+        Err(resp) => Err(resp),
     }
 }
 

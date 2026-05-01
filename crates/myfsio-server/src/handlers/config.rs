@@ -512,7 +512,14 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
         Ok(collected) => collected.to_bytes(),
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+    let raw = String::from_utf8_lossy(&body_bytes).to_string();
+    if let Err(message) = validate_lifecycle_days(&raw) {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(S3ErrorCode::InvalidArgument, message).to_xml(),
+        );
+    }
+    let value = serde_json::Value::String(raw);
 
     match state.storage.get_bucket_config(bucket).await {
         Ok(mut config) => {
@@ -524,6 +531,30 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
         }
         Err(e) => storage_err(e),
     }
+}
+
+fn validate_lifecycle_days(raw: &str) -> Result<(), String> {
+    if let Ok(doc) = roxmltree::Document::parse(raw) {
+        for node in doc.descendants().filter(|node| node.is_element()) {
+            let name = node.tag_name().name();
+            if name == "Days" || name == "NoncurrentDays" || name == "DaysAfterInitiation" {
+                let text = node.text().unwrap_or("").trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let parsed: i64 = text.parse().map_err(|_| {
+                    format!("Lifecycle '{}' must be a positive integer", name)
+                })?;
+                if parsed < 1 {
+                    return Err(format!(
+                        "Lifecycle '{}' must be a positive integer (>= 1)",
+                        name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn delete_lifecycle(state: &AppState, bucket: &str) -> Response {

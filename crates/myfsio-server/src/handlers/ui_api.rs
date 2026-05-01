@@ -27,6 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::handlers::{self, ObjectQuery};
 use crate::middleware::session::SessionHandle;
+use crate::services::object_lock;
 use crate::state::AppState;
 use crate::stores::connections::RemoteConnection;
 
@@ -100,6 +101,200 @@ fn human_size(bytes: u64) -> String {
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+async fn ensure_ui_authorized(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> Result<(), Response> {
+    let access_key = match session.read(|s| s.user_id.clone()) {
+        Some(k) => k,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Sign in to continue.",
+            ));
+        }
+    };
+    let principal = match state.iam.get_principal(&access_key) {
+        Some(p) => p,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Your session is no longer valid.",
+            ));
+        }
+    };
+    match crate::middleware::ui_authorize(state, &principal, bucket, action, object_key).await {
+        Ok(()) => Ok(()),
+        Err(message) => Err(json_error(StatusCode::FORBIDDEN, message)),
+    }
+}
+
+async fn authorize_ui_list_prefix(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    prefix: &str,
+) -> Result<(), Response> {
+    // ListBucket has split semantics: IAM honors the per-prefix scope, but
+    // bucket policies on the bucket ARN (arn:aws:s3:::bucket) only match
+    // when object_key is None. Passing the prefix to both checks would make
+    // `Deny ListBucket` policies neutral and let an IAM allow slip through.
+    // Use the dedicated middleware helper that splits the two evaluations.
+    let access_key = match session.read(|s| s.user_id.clone()) {
+        Some(k) => k,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Sign in to continue.",
+            ));
+        }
+    };
+    let principal = match state.iam.get_principal(&access_key) {
+        Some(p) => p,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Your session is no longer valid.",
+            ));
+        }
+    };
+    match crate::middleware::ui_authorize_list(state, &principal, bucket, prefix).await {
+        Ok(()) => Ok(()),
+        Err(message) => Err(json_error(StatusCode::FORBIDDEN, message)),
+    }
+}
+
+async fn resolve_multipart_upload_key(
+    state: &AppState,
+    bucket: &str,
+    upload_id: &str,
+) -> Result<String, Response> {
+    let uploads = state
+        .storage
+        .list_multipart_uploads(bucket)
+        .await
+        .map_err(storage_json_error)?;
+    uploads
+        .into_iter()
+        .find(|u| u.upload_id == upload_id)
+        .map(|u| u.key)
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::NOT_FOUND,
+                format!("Multipart upload '{}' not found", upload_id),
+            )
+        })
+}
+
+async fn ensure_ui_authorized_for_upload(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    upload_id: &str,
+) -> Result<String, Response> {
+    let key = resolve_multipart_upload_key(state, bucket, upload_id).await?;
+    ensure_ui_authorized(state, session, bucket, "write", Some(&key)).await?;
+    Ok(key)
+}
+
+async fn ensure_object_lock_allows_ui_delete(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), Response> {
+    let metadata = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(m) => m,
+        Err(StorageError::ObjectNotFound { .. }) => return Ok(()),
+        Err(StorageError::DeleteMarker { .. }) => return Ok(()),
+        Err(err) => return Err(storage_json_error(err)),
+    };
+    if let Err(message) = object_lock::can_delete_object(&metadata, false) {
+        return Err(json_error(StatusCode::FORBIDDEN, message));
+    }
+    Ok(())
+}
+
+async fn authorize_bulk_key(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    key: &str,
+) -> Result<(), String> {
+    authorize_bulk_key_for(state, session, bucket, key, "delete").await
+}
+
+async fn authorize_bulk_key_for(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    key: &str,
+    action: &str,
+) -> Result<(), String> {
+    let access_key = session
+        .read(|s| s.user_id.clone())
+        .ok_or_else(|| "Sign in to continue.".to_string())?;
+    let principal = state
+        .iam
+        .get_principal(&access_key)
+        .ok_or_else(|| "Your session is no longer valid.".to_string())?;
+    crate::middleware::ui_authorize(state, &principal, bucket, action, Some(key)).await
+}
+
+async fn check_object_lock_for_bulk(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), String> {
+    let metadata = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(m) => m,
+        Err(StorageError::ObjectNotFound { .. }) => return Ok(()),
+        Err(StorageError::DeleteMarker { .. }) => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    object_lock::can_delete_object(&metadata, false)
+}
+
+async fn check_versions_lock_for_bulk(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), String> {
+    let version_dir = match version_dir_for_object(state, bucket, key) {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    if !version_dir.exists() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(&version_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let text = match std::fs::read_to_string(entry.path()) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let manifest: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(meta_obj) = manifest.get("metadata").and_then(|m| m.as_object()) {
+            let metadata: HashMap<String, String> = meta_obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            if let Err(message) = object_lock::can_delete_object(&metadata, false) {
+                return Err(format!("Cannot purge versions: {}", message));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn json_ok(value: Value) -> Response {
@@ -949,10 +1144,14 @@ fn object_json(bucket_name: &str, o: &myfsio_common::types::ObjectMeta) -> Value
 
 pub async fn list_bucket_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<ListObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -1057,10 +1256,14 @@ pub struct StreamObjectsQuery {
 
 pub async fn stream_bucket_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<StreamObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return (StatusCode::NOT_FOUND, "Bucket not found").into_response();
     }
@@ -1246,10 +1449,14 @@ pub struct SearchObjectsQuery {
 
 pub async fn search_bucket_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<SearchObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -1315,9 +1522,13 @@ pub async fn search_bucket_objects(
 
 pub async fn bucket_stats_json(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    // Bucket-wide aggregate — require unrestricted list scope.
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -1337,10 +1548,14 @@ pub async fn bucket_stats_json(
 
 pub async fn list_bucket_folders(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<StreamObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -2248,7 +2463,7 @@ struct MultipartInitPayload {
 
 pub async fn upload_object(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     headers: HeaderMap,
     body: Body,
@@ -2383,6 +2598,16 @@ pub async fn upload_object(
         Err(response) => return response,
     };
 
+    // Authorize against the actual object key — IamService::authorize only
+    // evaluates prefix scoping when an object key is provided, so checking
+    // bucket-level write earlier would let a prefix-scoped user upload outside
+    // their allowed prefix.
+    if let Err(resp) =
+        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+    {
+        return resp;
+    }
+
     let metadata = if let Some(raw) = metadata_raw {
         match serde_json::from_str::<HashMap<String, Value>>(&raw) {
             Ok(map) => Some(
@@ -2456,7 +2681,7 @@ pub async fn upload_object(
 
 pub async fn initiate_multipart_upload(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
@@ -2468,6 +2693,11 @@ pub async fn initiate_multipart_upload(
     let object_key = payload.object_key.trim();
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
+    }
+    if let Err(resp) =
+        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(object_key)).await
+    {
+        return resp;
     }
 
     match state
@@ -2488,11 +2718,16 @@ pub struct MultipartPartQuery {
 
 pub async fn upload_multipart_part(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
     Query(query): Query<MultipartPartQuery>,
     body: Body,
 ) -> Response {
+    if let Err(resp) =
+        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+    {
+        return resp;
+    }
     let Some(part_number) = query.part_number else {
         return json_error(StatusCode::BAD_REQUEST, "partNumber is required");
     };
@@ -2535,11 +2770,16 @@ struct CompleteMultipartPartPayload {
 
 pub async fn complete_multipart_upload(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let upload_key =
+        match ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await {
+            Ok(key) => key,
+            Err(resp) => return resp,
+        };
     let payload: CompleteMultipartPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2558,20 +2798,15 @@ pub async fn complete_multipart_upload(
         })
         .collect::<Vec<_>>();
 
-    let upload_key = match state.storage.list_multipart_uploads(&bucket_name).await {
-        Ok(uploads) => uploads
-            .into_iter()
-            .find(|u| u.upload_id == upload_id)
-            .map(|u| u.key),
-        Err(err) => return storage_json_error(err),
-    };
-    if let Some(ref key) = upload_key {
-        if let Err(response) =
-            super::ensure_archived_null_lock_allows_overwrite(&state, &bucket_name, key, Some(&headers))
-                .await
-        {
-            return response;
-        }
+    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
+        &state,
+        &bucket_name,
+        &upload_key,
+        Some(&headers),
+    )
+    .await
+    {
+        return response;
     }
 
     match state
@@ -2594,9 +2829,14 @@ pub async fn complete_multipart_upload(
 
 pub async fn abort_multipart_upload(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
 ) -> Response {
+    if let Err(resp) =
+        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+    {
+        return resp;
+    }
     match state
         .storage
         .abort_multipart(&bucket_name, &upload_id)
@@ -2804,11 +3044,43 @@ async fn serve_object_download_or_preview(
         query.response_content_type = Some(forced);
     }
 
+    let bucket_for_log = bucket.clone();
+    let key_for_log = key.clone();
     let mut response =
         handlers::get_object(State(state), Path((bucket, key)), Query(query), headers).await;
     response
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
+    if !response.status().is_success() {
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if content_type.contains("xml") {
+            let status = response.status();
+            tracing::debug!(
+                bucket = %bucket_for_log,
+                key = %key_for_log,
+                status = %status,
+                "rewriting XML S3 error to UI JSON"
+            );
+            let message = if status == StatusCode::BAD_REQUEST {
+                "This object cannot be served through the web UI. It may require an SSE-C customer key, which the UI does not support — use the S3 API with the customer key headers."
+            } else if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "The server could not decrypt this object. If it was uploaded with SSE-C, the customer-provided key is required and the UI does not support that flow."
+            } else {
+                "Unable to serve this object."
+            };
+            let json_body = serde_json::json!({ "error": message }).to_string();
+            return (
+                status,
+                [(header::CONTENT_TYPE, "application/json")],
+                json_body,
+            )
+                .into_response();
+        }
+    }
     response
 }
 
@@ -3052,6 +3324,7 @@ struct CopyMovePayload {
 
 async fn copy_object_json(
     state: &AppState,
+    session: &SessionHandle,
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
@@ -3068,6 +3341,15 @@ async fn copy_object_json(
             StatusCode::BAD_REQUEST,
             "dest_bucket and dest_key are required",
         );
+    }
+
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+        return resp;
+    }
+    if let Err(resp) =
+        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    {
+        return resp;
     }
 
     if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
@@ -3102,6 +3384,7 @@ async fn copy_object_json(
 
 async fn move_object_json(
     state: &AppState,
+    session: &SessionHandle,
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
@@ -3124,6 +3407,22 @@ async fn move_object_json(
             StatusCode::BAD_REQUEST,
             "Cannot move object to the same location",
         );
+    }
+
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+        return resp;
+    }
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+        return resp;
+    }
+    if let Err(resp) =
+        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    {
+        return resp;
+    }
+
+    if let Err(resp) = ensure_object_lock_allows_ui_delete(state, bucket, key).await {
+        return resp;
     }
 
     if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
@@ -3177,11 +3476,16 @@ async fn purge_object_versions_for_key(
 
 async fn delete_object_json(
     state: &AppState,
+    session: &SessionHandle,
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+        return resp;
+    }
+
     let body_bytes = match to_bytes(body, usize::MAX).await {
         Ok(bytes) => bytes,
         Err(_) => return json_error(StatusCode::BAD_REQUEST, "Failed to read request body"),
@@ -3198,7 +3502,16 @@ async fn delete_object_json(
     };
     let purge_versions = parse_bool_flag(form.get("purge_versions").map(|s| s.as_str()));
 
+    if let Err(resp) = ensure_object_lock_allows_ui_delete(state, bucket, key).await {
+        return resp;
+    }
+
     if purge_versions {
+        if let Err(resp) =
+            ensure_versions_unlocked_for_purge(state, bucket, key).await
+        {
+            return resp;
+        }
         if let Err(err) = state.storage.delete_object(bucket, key).await {
             return storage_json_error(err);
         }
@@ -3224,6 +3537,52 @@ async fn delete_object_json(
         }
         Err(err) => storage_json_error(err),
     }
+}
+
+async fn ensure_versions_unlocked_for_purge(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), Response> {
+    let version_dir = match version_dir_for_object(state, bucket, key) {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    if !version_dir.exists() {
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(&version_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()));
+        }
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let text = match std::fs::read_to_string(entry.path()) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let manifest: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(meta_obj) = manifest.get("metadata").and_then(|m| m.as_object()) {
+            let metadata: HashMap<String, String> = meta_obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            if let Err(message) = object_lock::can_delete_object(&metadata, false) {
+                return Err(json_error(
+                    StatusCode::FORBIDDEN,
+                    format!("Cannot purge versions: {}", message),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn restore_object_version_json(
@@ -3412,6 +3771,12 @@ pub async fn object_get_dispatch(
         return json_error(StatusCode::NOT_FOUND, "Unknown object action");
     };
 
+    if let Err(resp) =
+        ensure_ui_authorized(&state, &session, &bucket_name, "read", Some(&key)).await
+    {
+        return resp;
+    }
+
     match action {
         ObjectGetAction::Download => {
             serve_object_download_or_preview(state, bucket_name, key, headers, true).await
@@ -3421,10 +3786,7 @@ pub async fn object_get_dispatch(
         }
         ObjectGetAction::Metadata => object_metadata_json(&state, &bucket_name, &key).await,
         ObjectGetAction::Versions => object_versions_json(&state, &bucket_name, &key).await,
-        ObjectGetAction::Tags => {
-            let _ = session;
-            object_tags_json(&state, &bucket_name, &key).await
-        }
+        ObjectGetAction::Tags => object_tags_json(&state, &bucket_name, &key).await,
     }
 }
 
@@ -3441,19 +3803,31 @@ pub async fn object_post_dispatch(
 
     match action {
         ObjectPostAction::Delete => {
-            delete_object_json(&state, &bucket_name, &key, &headers, body).await
+            delete_object_json(&state, &session, &bucket_name, &key, &headers, body).await
         }
         ObjectPostAction::Presign => {
             object_presign_json(&state, &session, &bucket_name, &key, body).await
         }
-        ObjectPostAction::Tags => update_object_tags(&state, &bucket_name, &key, body).await,
+        ObjectPostAction::Tags => {
+            if let Err(resp) =
+                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            {
+                return resp;
+            }
+            update_object_tags(&state, &bucket_name, &key, body).await
+        }
         ObjectPostAction::Copy => {
-            copy_object_json(&state, &bucket_name, &key, &headers, body).await
+            copy_object_json(&state, &session, &bucket_name, &key, &headers, body).await
         }
         ObjectPostAction::Move => {
-            move_object_json(&state, &bucket_name, &key, &headers, body).await
+            move_object_json(&state, &session, &bucket_name, &key, &headers, body).await
         }
         ObjectPostAction::Restore(version_id) => {
+            if let Err(resp) =
+                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            {
+                return resp;
+            }
             restore_object_version_json(&state, &bucket_name, &key, &version_id).await
         }
     }
@@ -3498,7 +3872,7 @@ async fn expand_bulk_keys(
 
 pub async fn bulk_delete_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
@@ -3518,6 +3892,20 @@ pub async fn bulk_delete_objects(
             StatusCode::BAD_REQUEST,
             "Select at least one object to delete",
         );
+    }
+
+    // Folder-style entries (`foo/`) require a list to expand into concrete
+    // keys. Authorize list against each folder prefix individually so a
+    // prefix-scoped user can only expand folders inside their allowed
+    // prefix.
+    for entry in &cleaned {
+        if entry.ends_with('/') {
+            if let Err(resp) =
+                authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
+            {
+                return resp;
+            }
+        }
     }
 
     let keys = match expand_bulk_keys(&state, &bucket_name, &cleaned).await {
@@ -3544,6 +3932,28 @@ pub async fn bulk_delete_objects(
     let mut errors = Vec::new();
 
     for key in keys {
+        // Authorize each concrete key. Prefix-scoped IAM policies are only
+        // evaluated when an object key is supplied to IamService::authorize,
+        // so a single bucket-level check up-front would let users delete keys
+        // outside their allowed prefix.
+        if let Err(message) =
+            authorize_bulk_key(&state, &session, &bucket_name, &key).await
+        {
+            errors.push(json!({ "key": key, "error": message }));
+            continue;
+        }
+        if let Err(message) = check_object_lock_for_bulk(&state, &bucket_name, &key).await {
+            errors.push(json!({ "key": key, "error": message }));
+            continue;
+        }
+        if payload.purge_versions {
+            if let Err(message) =
+                check_versions_lock_for_bulk(&state, &bucket_name, &key).await
+            {
+                errors.push(json!({ "key": key, "error": message }));
+                continue;
+            }
+        }
         match state.storage.delete_object(&bucket_name, &key).await {
             Ok(_) => {
                 super::trigger_replication(&state, &bucket_name, &key, "delete");
@@ -3597,7 +4007,7 @@ pub async fn bulk_delete_objects(
 
 pub async fn bulk_download_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
@@ -3619,6 +4029,19 @@ pub async fn bulk_download_objects(
         );
     }
 
+    // Folder-style entries (`foo/`) require a list to expand. Authorize list
+    // against each folder prefix so a prefix-scoped user can only expand
+    // folders inside their allowed prefix.
+    for entry in &cleaned {
+        if entry.ends_with('/') {
+            if let Err(resp) =
+                authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
+            {
+                return resp;
+            }
+        }
+    }
+
     let keys = match expand_bulk_keys(&state, &bucket_name, &cleaned).await {
         Ok(keys) => keys,
         Err(err) => return storage_json_error(err),
@@ -3633,6 +4056,13 @@ pub async fn bulk_download_objects(
     let mut total_bytes = 0u64;
     let mut archive_entries = Vec::new();
     for key in keys {
+        // Authorize each concrete key — IamService::authorize only honors
+        // prefix scoping when an object key is supplied.
+        if let Err(message) =
+            authorize_bulk_key_for(&state, &session, &bucket_name, &key, "read").await
+        {
+            return json_error(StatusCode::FORBIDDEN, format!("{}: {}", key, message));
+        }
         match state.storage.head_object(&bucket_name, &key).await {
             Ok(meta) => {
                 total_bytes = total_bytes.saturating_add(meta.size);
@@ -3671,9 +4101,13 @@ pub async fn bulk_download_objects(
 
 pub async fn archived_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    // Walks the whole bucket's archive tree — require unrestricted list scope.
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
+        return resp;
+    }
     let versions_root = version_root_for_bucket(&state, &bucket_name);
     if !versions_root.exists() {
         return Json(json!({ "objects": [] })).into_response();
@@ -3751,13 +4185,31 @@ pub async fn archived_objects(
 
 pub async fn archived_post_dispatch(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, rest)): Path<(String, String)>,
 ) -> Response {
     if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
+        if let Err(resp) =
+            ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(key)).await
+        {
+            return resp;
+        }
         return restore_object_version_json(&state, &bucket_name, key, version_id).await;
     }
     if let Some(key) = rest.strip_suffix("/purge") {
+        if let Err(resp) =
+            ensure_ui_authorized(&state, &session, &bucket_name, "delete", Some(key)).await
+        {
+            return resp;
+        }
+        if let Err(resp) = ensure_object_lock_allows_ui_delete(&state, &bucket_name, key).await {
+            return resp;
+        }
+        if let Err(resp) =
+            ensure_versions_unlocked_for_purge(&state, &bucket_name, key).await
+        {
+            return resp;
+        }
         match purge_object_versions_for_key(&state, &bucket_name, key).await {
             Ok(()) => {
                 let _ = state.storage.delete_object(&bucket_name, key).await;
