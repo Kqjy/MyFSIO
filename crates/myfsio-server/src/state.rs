@@ -126,18 +126,76 @@ impl AppState {
 
         let site_registry = {
             let registry = SiteRegistry::new(&config.storage_root);
-            if let (Some(site_id), Some(endpoint)) =
-                (config.site_id.as_deref(), config.site_endpoint.as_deref())
-            {
-                registry.set_local_site(crate::services::site_registry::SiteInfo {
-                    site_id: site_id.to_string(),
-                    endpoint: endpoint.to_string(),
+            let existing = registry.get_local_site();
+
+            let env_endpoint = config.site_endpoint.clone();
+            let site_id = config
+                .site_id
+                .clone()
+                .or_else(|| existing.as_ref().map(|s| s.site_id.clone()));
+
+            if let Some(site_id) = site_id {
+                let endpoint = env_endpoint.clone().unwrap_or_else(|| {
+                    crate::services::site_registry::derive_local_endpoint(&config.bind_addr)
+                });
+
+                let (display_name, created_at) = match existing.as_ref() {
+                    Some(s) => {
+                        let dn = if s.display_name.is_empty() {
+                            site_id.clone()
+                        } else {
+                            s.display_name.clone()
+                        };
+                        (dn, s.created_at.clone())
+                    }
+                    None => (site_id.clone(), Some(chrono::Utc::now().to_rfc3339())),
+                };
+
+                let merged = crate::services::site_registry::SiteInfo {
+                    site_id: site_id.clone(),
+                    endpoint: endpoint.clone(),
                     region: config.site_region.clone(),
                     priority: config.site_priority,
-                    display_name: site_id.to_string(),
-                    created_at: Some(chrono::Utc::now().to_rfc3339()),
-                });
+                    display_name,
+                    created_at,
+                };
+
+                let needs_write = match existing.as_ref() {
+                    None => true,
+                    Some(s) => {
+                        s.site_id != merged.site_id
+                            || s.endpoint != merged.endpoint
+                            || s.region != merged.region
+                            || s.priority != merged.priority
+                    }
+                };
+
+                if needs_write {
+                    if let Some(prev) = existing.as_ref() {
+                        if prev.endpoint != merged.endpoint {
+                            tracing::info!(
+                                "Site registry: local endpoint updated from {} to {} (set SITE_ENDPOINT to pin)",
+                                prev.endpoint,
+                                merged.endpoint
+                            );
+                        }
+                    }
+                    registry.set_local_site(merged);
+                }
             }
+
+            if let Some(pinned) = env_endpoint.as_ref() {
+                if let Some(p) = crate::services::site_registry::endpoint_port(pinned) {
+                    if p != config.bind_addr.port() {
+                        tracing::warn!(
+                            "Site registry: pinned SITE_ENDPOINT port ({}) differs from runtime API port ({})",
+                            p,
+                            config.bind_addr.port()
+                        );
+                    }
+                }
+            }
+
             Some(Arc::new(registry))
         };
 
