@@ -257,7 +257,7 @@ async fn rate_limit_default_and_admin_are_independent() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/admin/gc/status")
+                .uri("/myfsio/admin/gc/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -269,7 +269,7 @@ async fn rate_limit_default_and_admin_are_independent() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/admin/gc/status")
+                .uri("/myfsio/admin/gc/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -280,7 +280,7 @@ async fn rate_limit_default_and_admin_are_independent() {
     let admin_third = app
         .oneshot(
             Request::builder()
-                .uri("/admin/gc/status")
+                .uri("/myfsio/admin/gc/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1411,7 +1411,12 @@ async fn test_unauthenticated_request_rejected() {
 async fn test_unauthenticated_request_includes_requested_resource_path() {
     let (app, _tmp) = test_app();
     let resp = app
-        .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/some-bucket/")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -1426,7 +1431,7 @@ async fn test_unauthenticated_request_includes_requested_resource_path() {
     .unwrap();
     assert!(body.contains("<Code>AccessDenied</Code>"));
     assert!(body.contains("<Message>Missing credentials</Message>"));
-    assert!(body.contains("<Resource>/ui/</Resource>"));
+    assert!(body.contains("<Resource>/some-bucket/</Resource>"));
     assert!(body.contains("<RequestId>"));
     assert!(!body.contains("<RequestId></RequestId>"));
 }
@@ -4962,7 +4967,7 @@ async fn test_kms_key_crud() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/keys")
+        .uri("/myfsio/kms/keys")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .header("content-type", "application/json")
@@ -4977,7 +4982,7 @@ async fn test_kms_key_crud() {
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(Method::GET, "/kms/keys", Body::empty()),
+        signed_request(Method::GET, "/myfsio/kms/keys", Body::empty()),
     )
     .await
     .unwrap();
@@ -4988,7 +4993,7 @@ async fn test_kms_key_crud() {
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(Method::GET, &format!("/kms/keys/{}", key_id), Body::empty()),
+        signed_request(Method::GET, &format!("/myfsio/kms/keys/{}", key_id), Body::empty()),
     )
     .await
     .unwrap();
@@ -4998,7 +5003,7 @@ async fn test_kms_key_crud() {
         app.clone(),
         signed_request(
             Method::DELETE,
-            &format!("/kms/keys/{}", key_id),
+            &format!("/myfsio/kms/keys/{}", key_id),
             Body::empty(),
         ),
     )
@@ -5014,7 +5019,7 @@ async fn test_kms_encrypt_decrypt() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/keys")
+        .uri("/myfsio/kms/keys")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(Body::from(r#"{"Description": "enc key"}"#))
@@ -5034,7 +5039,7 @@ async fn test_kms_encrypt_decrypt() {
     });
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/encrypt")
+        .uri("/myfsio/kms/encrypt")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(Body::from(enc_req.to_string()))
@@ -5051,7 +5056,7 @@ async fn test_kms_encrypt_decrypt() {
     });
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/decrypt")
+        .uri("/myfsio/kms/decrypt")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(Body::from(dec_req.to_string()))
@@ -8429,7 +8434,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/admin/sites")
+                .uri("/myfsio/admin/sites")
                 .header("x-access-key", ADMIN_AK)
                 .header("x-secret-key", ADMIN_SK)
                 .header("content-type", "application/json")
@@ -8498,7 +8503,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
 
     let resp = app
         .clone()
-        .oneshot(sigv4_get("/admin/cluster/overview", PEER_AK, PEER_SK))
+        .oneshot(sigv4_get("/myfsio/admin/cluster/overview", PEER_AK, PEER_SK))
         .await
         .unwrap();
     assert_eq!(
@@ -8512,7 +8517,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/cluster/overview")
+                .uri("/myfsio/admin/cluster/overview")
                 .header("x-access-key", OUTBOUND_AK)
                 .header("x-secret-key", OUTBOUND_SK)
                 .body(Body::empty())

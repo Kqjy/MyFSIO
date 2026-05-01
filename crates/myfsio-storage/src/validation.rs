@@ -10,6 +10,7 @@ const WINDOWS_ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?'
 
 const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
 const SYSTEM_ROOT: &str = ".myfsio.sys";
+const RESERVED_ROUTE_PREFIXES: &[&str] = &["myfsio"];
 
 pub fn is_reserved_bucket_name(name: &str) -> bool {
     if name.is_empty() {
@@ -22,6 +23,9 @@ pub fn is_reserved_bucket_name(name: &str) -> bool {
         return true;
     }
     if INTERNAL_FOLDERS.iter().any(|folder| *folder == name) {
+        return true;
+    }
+    if RESERVED_ROUTE_PREFIXES.iter().any(|prefix| *prefix == name) {
         return true;
     }
     false
@@ -278,8 +282,14 @@ mod tests {
         assert!(is_reserved_bucket_name("."));
         assert!(is_reserved_bucket_name(".."));
         assert!(is_reserved_bucket_name(""));
+        assert!(is_reserved_bucket_name("myfsio"));
+        assert!(!is_reserved_bucket_name("admin"));
+        assert!(!is_reserved_bucket_name("kms"));
+        assert!(!is_reserved_bucket_name("ui"));
         assert!(!is_reserved_bucket_name("my-bucket"));
         assert!(!is_reserved_bucket_name("test123"));
         assert!(!is_reserved_bucket_name("my.bucket.name"));
+        assert!(!is_reserved_bucket_name("admin-bucket"));
+        assert!(!is_reserved_bucket_name("my-admin"));
     }
 }

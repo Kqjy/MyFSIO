@@ -2228,6 +2228,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn create_bucket(&self, name: &str) -> StorageResult<()> {
+        if validation::is_reserved_bucket_name(name) {
+            return Err(StorageError::InvalidBucketName(format!(
+                "Bucket name '{}' is reserved",
+                name
+            )));
+        }
         if let Some(err) = validation::validate_bucket_name(name) {
             return Err(StorageError::InvalidBucketName(err));
         }
@@ -3997,6 +4003,21 @@ mod tests {
         assert!(!backend.bucket_exists("test-bucket").await.unwrap());
         backend.create_bucket("test-bucket").await.unwrap();
         assert!(backend.bucket_exists("test-bucket").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_create_bucket_rejects_reserved_name() {
+        let (_dir, backend) = create_test_backend();
+        let err = backend
+            .create_bucket("myfsio")
+            .await
+            .expect_err("creating reserved bucket name must fail");
+        assert!(
+            matches!(err, crate::error::StorageError::InvalidBucketName(ref msg) if msg.contains("reserved")),
+            "expected InvalidBucketName(reserved …), got {:?}",
+            err
+        );
+        assert!(!backend.bucket_exists("myfsio").await.unwrap());
     }
 
     #[tokio::test]

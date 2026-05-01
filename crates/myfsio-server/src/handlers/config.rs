@@ -215,7 +215,7 @@ pub async fn get_cors(state: &AppState, bucket: &str) -> Response {
                 xml_response(
                     StatusCode::NOT_FOUND,
                     S3Error::new(
-                        S3ErrorCode::NoSuchKey,
+                        S3ErrorCode::NoSuchCORSConfiguration,
                         "The CORS configuration does not exist",
                     )
                     .to_xml(),
@@ -727,8 +727,8 @@ pub async fn get_replication(state: &AppState, bucket: &str) -> Response {
                 xml_response(
                     StatusCode::NOT_FOUND,
                     S3Error::new(
-                        S3ErrorCode::NoSuchKey,
-                        "Replication configuration not found",
+                        S3ErrorCode::ReplicationConfigurationNotFoundError,
+                        "The replication configuration was not found",
                     )
                     .to_xml(),
                 )
@@ -860,8 +860,8 @@ pub async fn get_website(state: &AppState, bucket: &str) -> Response {
                 xml_response(
                     StatusCode::NOT_FOUND,
                     S3Error::new(
-                        S3ErrorCode::NoSuchKey,
-                        "The website configuration does not exist",
+                        S3ErrorCode::NoSuchWebsiteConfiguration,
+                        "The specified bucket does not have a website configuration",
                     )
                     .to_xml(),
                 )

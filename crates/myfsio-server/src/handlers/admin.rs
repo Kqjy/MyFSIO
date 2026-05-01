@@ -824,7 +824,7 @@ pub async fn check_bidirectional_status(
     }
     match state
         .peer_admin
-        .fetch_admin_status(&connection.endpoint_url, "/admin/sites", &connection)
+        .fetch_admin_status(&connection.endpoint_url, "/myfsio/admin/sites", &connection)
         .await
     {
         crate::services::peer_admin::PeerAdminStatus::Ok(remote_data) => {
@@ -1684,7 +1684,7 @@ async fn collect_peer_overviews(state: &AppState) -> Vec<serde_json::Value> {
                 Some(c) => match client_ref
                     .fetch_admin_status(
                         &c.endpoint_url,
-                        "/admin/cluster/overview?local_only=1",
+                        "/myfsio/admin/cluster/overview?local_only=1",
                         &c,
                     )
                     .await

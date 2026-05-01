@@ -1760,7 +1760,7 @@ pub async fn add_peer_site(
             );
             if wants_json {
                 return (
-                    StatusCode::FORBIDDEN,
+                    StatusCode::BAD_REQUEST,
                     axum::Json(json!({ "error": message })),
                 )
                     .into_response();
@@ -2944,6 +2944,7 @@ pub async fn update_bucket_replication(
 #[derive(serde::Deserialize)]
 pub struct ConnectionForm {
     pub name: String,
+    #[serde(alias = "endpoint")]
     pub endpoint_url: String,
     pub access_key: String,
     #[serde(default)]

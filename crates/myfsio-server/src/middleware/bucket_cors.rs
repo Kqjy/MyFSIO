@@ -2,6 +2,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_storage::traits::StorageEngine;
 
 use crate::state::AppState;
@@ -114,10 +115,7 @@ fn bucket_from_path(path: &str) -> Option<&str> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with("admin/")
-        || trimmed.starts_with("myfsio/")
-        || trimmed.starts_with("kms/")
-    {
+    if trimmed.starts_with("myfsio/") {
         return None;
     }
     let first = trimmed.split('/').next().unwrap_or("");
@@ -165,6 +163,22 @@ fn apply_rule_headers(headers: &mut axum::http::HeaderMap, rule: &CorsRule, orig
             headers.insert("access-control-expose-headers", val);
         }
     }
+}
+
+fn cors_preflight_denied_response() -> Response {
+    let body = S3Error::new(
+        S3ErrorCode::AccessDenied,
+        "CORSResponse: This CORS request is not allowed. \
+         This is usually because the evaluation of Origin, request method / Access-Control-Request-Method \
+         or Access-Control-Request-Headers are not whitelisted by the resource's CORS spec.",
+    )
+    .to_xml();
+    (
+        StatusCode::FORBIDDEN,
+        [("content-type", "application/xml")],
+        body,
+    )
+        .into_response()
 }
 
 fn strip_cors_response_headers(headers: &mut HeaderMap) {
@@ -257,7 +271,7 @@ pub async fn bucket_cors_layer(
                 }
                 return resp;
             }
-            return (StatusCode::FORBIDDEN, "CORSResponse: CORS is not enabled").into_response();
+            return cors_preflight_denied_response();
         }
     }
 

@@ -117,7 +117,7 @@ pub async fn relay_inbound_layer(
         _ => {
             return record_relay_failure(
                 "AccessDenied",
-                "Peer principal required for /admin/peer/*",
+                "Peer principal required for /myfsio/admin/peer/*",
                 StatusCode::FORBIDDEN,
                 if origin_site.is_empty() {
                     None
@@ -469,7 +469,7 @@ pub async fn relay_outbound(
 
     let method = req.method().clone();
     let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
-    let target_path = format!("/admin/peer/{}{}", sub_path, query);
+    let target_path = format!("/myfsio/admin/peer/{}{}", sub_path, query);
 
     let content_type = req
         .headers()
@@ -541,7 +541,7 @@ pub async fn relay_outbound(
                 admin_user_id: Some(principal.user_id.clone()),
                 action: format!("relay {} {}", method_str, target_path),
                 method: method_str,
-                path: format!("/admin/relay/{}/{}", site_id, sub_path),
+                path: format!("/myfsio/admin/relay/{}/{}", site_id, sub_path),
                 target: AuditTarget::Outbound,
                 result: outcome.to_string(),
                 status_code: status_u16,
@@ -589,7 +589,7 @@ pub async fn relay_outbound(
                 admin_user_id: Some(principal.user_id.clone()),
                 action: format!("relay {} {}", method_str, target_path),
                 method: method_str,
-                path: format!("/admin/relay/{}/{}", site_id, sub_path),
+                path: format!("/myfsio/admin/relay/{}/{}", site_id, sub_path),
                 target: AuditTarget::Outbound,
                 result: "error".to_string(),
                 status_code: 502,

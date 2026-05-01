@@ -387,6 +387,22 @@ pub async fn create_bucket(
         return config::put_logging(&state, &bucket, body).await;
     }
 
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Failed to read request body",
+            ));
+        }
+    };
+
+    if let Some(constraint) = parse_location_constraint(&body_bytes) {
+        if let Err(resp) = validate_location_constraint(&state, &constraint) {
+            return resp;
+        }
+    }
+
     match state.storage.create_bucket(&bucket).await {
         Ok(()) => (
             StatusCode::OK,
@@ -396,6 +412,38 @@ pub async fn create_bucket(
             .into_response(),
         Err(e) => storage_err_response(e),
     }
+}
+
+fn parse_location_constraint(body: &[u8]) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
+    let text = std::str::from_utf8(body).ok()?;
+    let lower = text.to_ascii_lowercase();
+    let open_idx = lower.find("<locationconstraint")?;
+    let after_open = &text[open_idx..];
+    let gt = after_open.find('>')?;
+    let value_start = open_idx + gt + 1;
+    let close_idx = lower[value_start..].find("</locationconstraint")?;
+    let raw = text[value_start..value_start + close_idx].trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+fn validate_location_constraint(state: &AppState, constraint: &str) -> Result<(), Response> {
+    if constraint.eq_ignore_ascii_case(&state.config.region) {
+        return Ok(());
+    }
+    Err(s3_error_response(S3Error::new(
+        S3ErrorCode::InvalidLocationConstraint,
+        format!(
+            "The specified location-constraint '{}' is not compatible with the endpoint region '{}'",
+            constraint, state.config.region
+        ),
+    )))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1288,6 +1336,10 @@ fn bad_digest_response(message: impl Into<String>) -> Response {
     s3_error_response(S3Error::new(S3ErrorCode::BadDigest, message))
 }
 
+fn invalid_digest_response(message: impl Into<String>) -> Response {
+    s3_error_response(S3Error::new(S3ErrorCode::InvalidDigest, message))
+}
+
 fn base64_header_bytes(headers: &HeaderMap, name: &str) -> Result<Option<Vec<u8>>, Response> {
     let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) else {
         return Ok(None);
@@ -1295,7 +1347,7 @@ fn base64_header_bytes(headers: &HeaderMap, name: &str) -> Result<Option<Vec<u8>
     STANDARD
         .decode(value.trim())
         .map(Some)
-        .map_err(|_| bad_digest_response(format!("Invalid base64 value for {}", name)))
+        .map_err(|_| invalid_digest_response(format!("Invalid base64 value for {}", name)))
 }
 
 fn has_upload_checksum(headers: &HeaderMap) -> bool {
@@ -1343,7 +1395,12 @@ fn apply_stored_checksum_headers(resp_headers: &mut HeaderMap, metadata: &HashMa
 
 fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Response> {
     if let Some(expected) = base64_header_bytes(headers, "content-md5")? {
-        if expected.len() != 16 || Md5::digest(data).as_slice() != expected.as_slice() {
+        if expected.len() != 16 {
+            return Err(invalid_digest_response(
+                "The Content-MD5 you specified is not a valid 16-byte MD5 digest",
+            ));
+        }
+        if Md5::digest(data).as_slice() != expected.as_slice() {
             return Err(bad_digest_response(
                 "The Content-MD5 you specified did not match what we received",
             ));

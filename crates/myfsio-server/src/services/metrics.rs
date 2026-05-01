@@ -347,8 +347,11 @@ pub fn classify_endpoint(path: &str) -> &'static str {
     if trimmed.starts_with("/ui") {
         return "ui";
     }
-    if trimmed.starts_with("/kms") {
+    if trimmed.starts_with("/myfsio/kms") {
         return "kms";
+    }
+    if trimmed.starts_with("/myfsio/admin") {
+        return "admin";
     }
     if trimmed.starts_with("/myfsio") {
         return "service";

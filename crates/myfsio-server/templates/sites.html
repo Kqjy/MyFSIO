@@ -145,7 +145,7 @@
                         <div class="mb-3">
                             <label for="peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
                             <input type="text" class="form-control" id="peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (optional)" autocomplete="off" spellcheck="false">
-                            <div class="form-text">Access key the peer presents when calling this site (e.g. /admin/cluster/overview). Leave blank to require admin credentials.</div>
+                            <div class="form-text">Access key the peer presents when calling this site (e.g. /myfsio/admin/cluster/overview). Leave blank to require admin credentials.</div>
                         </div>
                         <div class="d-grid">
                             <button type="submit" class="btn btn-primary">
@@ -393,7 +393,7 @@
                 </svg>
                 Peer Credentials
             </h5>
-            <p class="text-muted small mb-0">SigV4-only credentials for cross-site admin federation. Scoped to <code>/admin/cluster/overview</code> and <code>/admin/peer/*</code>; never granted S3 or user-management access.</p>
+            <p class="text-muted small mb-0">SigV4-only credentials for cross-site admin federation. Scoped to <code>/myfsio/admin/cluster/overview</code> and <code>/myfsio/admin/peer/*</code>; never granted S3 or user-management access.</p>
         </div>
         <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newPeerCredModal">+ Issue credential</button>
     </div>
@@ -410,7 +410,7 @@ site_id:     {{ peer_credential_issued.site_id }}</pre>
         {% if peer_credentials | length == 0 %}
         <div class="text-center py-4 text-muted">
             <p class="mb-0">No peer credentials issued yet.</p>
-            <p class="small mb-0">Issue one to allow another site to call this site's <code>/admin/cluster/overview</code> or relayed admin actions.</p>
+            <p class="small mb-0">Issue one to allow another site to call this site's <code>/myfsio/admin/cluster/overview</code> or relayed admin actions.</p>
         </div>
         {% else %}
         <div class="table-responsive">
@@ -534,7 +534,7 @@ site_id:     {{ peer_credential_issued.site_id }}</pre>
                     <div class="mb-3">
                         <label for="edit_peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
                         <input type="text" class="form-control" id="edit_peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (optional)" autocomplete="off" spellcheck="false">
-                        <div class="form-text">Access key the peer presents when calling this site (e.g. /admin/cluster/overview). Leave blank to require admin credentials.</div>
+                        <div class="form-text">Access key the peer presents when calling this site (e.g. /myfsio/admin/cluster/overview). Leave blank to require admin credentials.</div>
                     </div>
                 </div>
                 <div class="modal-footer">

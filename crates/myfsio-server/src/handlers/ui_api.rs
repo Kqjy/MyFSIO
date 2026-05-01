@@ -1988,7 +1988,7 @@ pub async fn peer_bidirectional_status(
     }
 
     let admin_url = format!(
-        "{}/admin/sites",
+        "{}/myfsio/admin/sites",
         connection.endpoint_url.trim_end_matches('/')
     );
     match reqwest::Client::new()

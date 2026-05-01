@@ -452,11 +452,7 @@ async fn virtual_host_bucket(
     path: &str,
     method: &Method,
 ) -> Option<String> {
-    if path.starts_with("/ui")
-        || path.starts_with("/admin")
-        || path.starts_with("/kms")
-        || path.starts_with("/myfsio")
-    {
+    if path.starts_with("/ui") || path.starts_with("/myfsio") {
         return None;
     }
 
@@ -736,7 +732,7 @@ async fn authorize_request(
         ));
     }
 
-    if path.starts_with("/admin/") {
+    if path.starts_with("/myfsio/admin/") {
         return if principal.is_some() {
             Ok(())
         } else {
@@ -747,7 +743,7 @@ async fn authorize_request(
         };
     }
 
-    if path.starts_with("/kms/") {
+    if path.starts_with("/myfsio/kms/") {
         return match principal {
             Some(p) if p.is_admin => Ok(()),
             Some(_) => Err(S3Error::new(
@@ -1620,7 +1616,7 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
 }
 
 fn is_path_allowed_for_peer(path: &str) -> bool {
-    path == "/admin/cluster/overview" || path.starts_with("/admin/peer/")
+    path == "/myfsio/admin/cluster/overview" || path.starts_with("/myfsio/admin/peer/")
 }
 
 fn enforce_peer_freshness_and_nonce(

@@ -89,15 +89,15 @@ mod tests {
 
     #[test]
     fn admin_attest_changes_when_method_changes() {
-        let a = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/admin/peer/iam", "abc", "k1");
-        let b = admin_attest("psk", "20260101T000000Z", "u-1", "POST", "/admin/peer/iam", "abc", "k1");
+        let a = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/myfsio/admin/peer/iam", "abc", "k1");
+        let b = admin_attest("psk", "20260101T000000Z", "u-1", "POST", "/myfsio/admin/peer/iam", "abc", "k1");
         assert_ne!(a, b);
     }
 
     #[test]
     fn admin_attest_changes_when_path_changes() {
-        let a = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/admin/peer/iam", "abc", "k1");
-        let b = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/admin/peer/sites", "abc", "k1");
+        let a = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/myfsio/admin/peer/iam", "abc", "k1");
+        let b = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/myfsio/admin/peer/sites", "abc", "k1");
         assert_ne!(a, b);
     }
 

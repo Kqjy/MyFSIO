@@ -421,53 +421,53 @@ pub fn create_router(state: state::AppState) -> Router {
     if state.config.kms_enabled {
         api_router = api_router
             .route(
-                "/kms/keys",
+                "/myfsio/kms/keys",
                 axum::routing::get(handlers::kms::list_keys).post(handlers::kms::create_key),
             )
             .route(
-                "/kms/keys/{key_id}",
+                "/myfsio/kms/keys/{key_id}",
                 axum::routing::get(handlers::kms::get_key).delete(handlers::kms::delete_key),
             )
             .route(
-                "/kms/keys/{key_id}/enable",
+                "/myfsio/kms/keys/{key_id}/enable",
                 axum::routing::post(handlers::kms::enable_key),
             )
             .route(
-                "/kms/keys/{key_id}/disable",
+                "/myfsio/kms/keys/{key_id}/disable",
                 axum::routing::post(handlers::kms::disable_key),
             )
-            .route("/kms/encrypt", axum::routing::post(handlers::kms::encrypt))
-            .route("/kms/decrypt", axum::routing::post(handlers::kms::decrypt))
+            .route("/myfsio/kms/encrypt", axum::routing::post(handlers::kms::encrypt))
+            .route("/myfsio/kms/decrypt", axum::routing::post(handlers::kms::decrypt))
             .route(
-                "/kms/generate-data-key",
+                "/myfsio/kms/generate-data-key",
                 axum::routing::post(handlers::kms::generate_data_key),
             )
             .route(
-                "/kms/generate-data-key-without-plaintext",
+                "/myfsio/kms/generate-data-key-without-plaintext",
                 axum::routing::post(handlers::kms::generate_data_key_without_plaintext),
             )
             .route(
-                "/kms/re-encrypt",
+                "/myfsio/kms/re-encrypt",
                 axum::routing::post(handlers::kms::re_encrypt),
             )
             .route(
-                "/kms/generate-random",
+                "/myfsio/kms/generate-random",
                 axum::routing::post(handlers::kms::generate_random),
             )
             .route(
-                "/kms/client/generate-key",
+                "/myfsio/kms/client/generate-key",
                 axum::routing::post(handlers::kms::client_generate_key),
             )
             .route(
-                "/kms/client/encrypt",
+                "/myfsio/kms/client/encrypt",
                 axum::routing::post(handlers::kms::client_encrypt),
             )
             .route(
-                "/kms/client/decrypt",
+                "/myfsio/kms/client/decrypt",
                 axum::routing::post(handlers::kms::client_decrypt),
             )
             .route(
-                "/kms/materials/{key_id}",
+                "/myfsio/kms/materials/{key_id}",
                 axum::routing::post(handlers::kms::materials),
             );
     }
@@ -484,159 +484,159 @@ pub fn create_router(state: state::AppState) -> Router {
 
     let admin_router = Router::new()
         .route(
-            "/admin/site",
+            "/myfsio/admin/site",
             axum::routing::get(handlers::admin::get_local_site)
                 .put(handlers::admin::update_local_site),
         )
         .route(
-            "/admin/sites",
+            "/myfsio/admin/sites",
             axum::routing::get(handlers::admin::list_all_sites)
                 .post(handlers::admin::register_peer_site),
         )
         .route(
-            "/admin/sites/{site_id}",
+            "/myfsio/admin/sites/{site_id}",
             axum::routing::get(handlers::admin::get_peer_site)
                 .put(handlers::admin::update_peer_site)
                 .delete(handlers::admin::delete_peer_site),
         )
         .route(
-            "/admin/sites/{site_id}/health",
+            "/myfsio/admin/sites/{site_id}/health",
             axum::routing::get(handlers::admin::check_peer_health)
                 .post(handlers::admin::check_peer_health),
         )
         .route(
-            "/admin/sites/{site_id}/bidirectional-status",
+            "/myfsio/admin/sites/{site_id}/bidirectional-status",
             axum::routing::get(handlers::admin::check_bidirectional_status),
         )
         .route(
-            "/admin/sync/stats",
+            "/myfsio/admin/sync/stats",
             axum::routing::get(handlers::admin::get_sync_stats),
         )
         .route(
-            "/admin/cluster/overview",
+            "/myfsio/admin/cluster/overview",
             axum::routing::get(handlers::admin::get_cluster_overview),
         )
         .route(
-            "/admin/topology",
+            "/myfsio/admin/topology",
             axum::routing::get(handlers::admin::get_topology),
         )
         .route(
-            "/admin/site/local",
+            "/myfsio/admin/site/local",
             axum::routing::get(handlers::admin::get_local_site)
                 .put(handlers::admin::update_local_site),
         )
         .route(
-            "/admin/site/all",
+            "/myfsio/admin/site/all",
             axum::routing::get(handlers::admin::list_all_sites),
         )
         .route(
-            "/admin/site/peers",
+            "/myfsio/admin/site/peers",
             axum::routing::post(handlers::admin::register_peer_site),
         )
         .route(
-            "/admin/site/peers/{site_id}",
+            "/myfsio/admin/site/peers/{site_id}",
             axum::routing::get(handlers::admin::get_peer_site)
                 .put(handlers::admin::update_peer_site)
                 .delete(handlers::admin::delete_peer_site),
         )
         .route(
-            "/admin/site/peers/{site_id}/health",
+            "/myfsio/admin/site/peers/{site_id}/health",
             axum::routing::post(handlers::admin::check_peer_health),
         )
         .route(
-            "/admin/site/topology",
+            "/myfsio/admin/site/topology",
             axum::routing::get(handlers::admin::get_topology),
         )
         .route(
-            "/admin/site/peers/{site_id}/bidirectional-status",
+            "/myfsio/admin/site/peers/{site_id}/bidirectional-status",
             axum::routing::get(handlers::admin::check_bidirectional_status),
         )
         .route(
-            "/admin/peer-credentials",
+            "/myfsio/admin/peer-credentials",
             axum::routing::get(handlers::admin::list_peer_credentials)
                 .post(handlers::admin::create_peer_credential),
         )
         .route(
-            "/admin/peer-credentials/{access_key}",
+            "/myfsio/admin/peer-credentials/{access_key}",
             axum::routing::delete(handlers::admin::delete_peer_credential),
         )
         .route(
-            "/admin/relay/{site_id}/{*sub_path}",
+            "/myfsio/admin/relay/{site_id}/{*sub_path}",
             axum::routing::any(handlers::admin_peer::relay_outbound),
         )
         .route(
-            "/admin/audit-log",
+            "/myfsio/admin/audit-log",
             axum::routing::get(handlers::admin::audit_log_recent),
         )
         .route(
-            "/admin/iam/users",
+            "/myfsio/admin/iam/users",
             axum::routing::get(handlers::admin::iam_list_users),
         )
         .route(
-            "/admin/iam/users/{identifier}",
+            "/myfsio/admin/iam/users/{identifier}",
             axum::routing::get(handlers::admin::iam_get_user),
         )
         .route(
-            "/admin/iam/users/{identifier}/policies",
+            "/myfsio/admin/iam/users/{identifier}/policies",
             axum::routing::get(handlers::admin::iam_get_user_policies),
         )
         .route(
-            "/admin/iam/users/{identifier}/access-keys",
+            "/myfsio/admin/iam/users/{identifier}/access-keys",
             axum::routing::post(handlers::admin::iam_create_access_key),
         )
         .route(
-            "/admin/iam/users/{identifier}/keys",
+            "/myfsio/admin/iam/users/{identifier}/keys",
             axum::routing::post(handlers::admin::iam_create_access_key),
         )
         .route(
-            "/admin/iam/users/{identifier}/access-keys/{access_key}",
+            "/myfsio/admin/iam/users/{identifier}/access-keys/{access_key}",
             axum::routing::delete(handlers::admin::iam_delete_access_key),
         )
         .route(
-            "/admin/iam/users/{identifier}/keys/{access_key}",
+            "/myfsio/admin/iam/users/{identifier}/keys/{access_key}",
             axum::routing::delete(handlers::admin::iam_delete_access_key),
         )
         .route(
-            "/admin/iam/users/{identifier}/disable",
+            "/myfsio/admin/iam/users/{identifier}/disable",
             axum::routing::post(handlers::admin::iam_disable_user),
         )
         .route(
-            "/admin/iam/users/{identifier}/enable",
+            "/myfsio/admin/iam/users/{identifier}/enable",
             axum::routing::post(handlers::admin::iam_enable_user),
         )
         .route(
-            "/admin/website-domains",
+            "/myfsio/admin/website-domains",
             axum::routing::get(handlers::admin::list_website_domains)
                 .post(handlers::admin::create_website_domain),
         )
         .route(
-            "/admin/website-domains/{domain}",
+            "/myfsio/admin/website-domains/{domain}",
             axum::routing::get(handlers::admin::get_website_domain)
                 .put(handlers::admin::update_website_domain)
                 .delete(handlers::admin::delete_website_domain),
         )
         .route(
-            "/admin/gc/status",
+            "/myfsio/admin/gc/status",
             axum::routing::get(handlers::admin::gc_status),
         )
         .route(
-            "/admin/gc/run",
+            "/myfsio/admin/gc/run",
             axum::routing::post(handlers::admin::gc_run),
         )
         .route(
-            "/admin/gc/history",
+            "/myfsio/admin/gc/history",
             axum::routing::get(handlers::admin::gc_history),
         )
         .route(
-            "/admin/integrity/status",
+            "/myfsio/admin/integrity/status",
             axum::routing::get(handlers::admin::integrity_status),
         )
         .route(
-            "/admin/integrity/run",
+            "/myfsio/admin/integrity/run",
             axum::routing::post(handlers::admin::integrity_run),
         )
         .route(
-            "/admin/integrity/history",
+            "/myfsio/admin/integrity/history",
             axum::routing::get(handlers::admin::integrity_history),
         )
         .layer(axum::middleware::from_fn_with_state(
@@ -654,65 +654,65 @@ pub fn create_router(state: state::AppState) -> Router {
 
     let admin_peer_router = Router::new()
         .route(
-            "/admin/peer/sites",
+            "/myfsio/admin/peer/sites",
             axum::routing::get(handlers::admin::list_all_sites)
                 .post(handlers::admin::register_peer_site),
         )
         .route(
-            "/admin/peer/sites/{site_id}",
+            "/myfsio/admin/peer/sites/{site_id}",
             axum::routing::get(handlers::admin::get_peer_site)
                 .put(handlers::admin::update_peer_site)
                 .delete(handlers::admin::delete_peer_site),
         )
         .route(
-            "/admin/peer/sites/{site_id}/health",
+            "/myfsio/admin/peer/sites/{site_id}/health",
             axum::routing::post(handlers::admin::check_peer_health),
         )
         .route(
-            "/admin/peer/iam/users",
+            "/myfsio/admin/peer/iam/users",
             axum::routing::get(handlers::admin::iam_list_users),
         )
         .route(
-            "/admin/peer/iam/users/{identifier}",
+            "/myfsio/admin/peer/iam/users/{identifier}",
             axum::routing::get(handlers::admin::iam_get_user),
         )
         .route(
-            "/admin/peer/iam/users/{identifier}/policies",
+            "/myfsio/admin/peer/iam/users/{identifier}/policies",
             axum::routing::get(handlers::admin::iam_get_user_policies),
         )
         .route(
-            "/admin/peer/iam/users/{identifier}/access-keys",
+            "/myfsio/admin/peer/iam/users/{identifier}/access-keys",
             axum::routing::post(handlers::admin::iam_create_access_key),
         )
         .route(
-            "/admin/peer/iam/users/{identifier}/access-keys/{access_key}",
+            "/myfsio/admin/peer/iam/users/{identifier}/access-keys/{access_key}",
             axum::routing::delete(handlers::admin::iam_delete_access_key),
         )
         .route(
-            "/admin/peer/iam/users/{identifier}/disable",
+            "/myfsio/admin/peer/iam/users/{identifier}/disable",
             axum::routing::post(handlers::admin::iam_disable_user),
         )
         .route(
-            "/admin/peer/iam/users/{identifier}/enable",
+            "/myfsio/admin/peer/iam/users/{identifier}/enable",
             axum::routing::post(handlers::admin::iam_enable_user),
         )
         .route(
-            "/admin/peer/website-domains",
+            "/myfsio/admin/peer/website-domains",
             axum::routing::get(handlers::admin::list_website_domains)
                 .post(handlers::admin::create_website_domain),
         )
         .route(
-            "/admin/peer/website-domains/{domain}",
+            "/myfsio/admin/peer/website-domains/{domain}",
             axum::routing::get(handlers::admin::get_website_domain)
                 .put(handlers::admin::update_website_domain)
                 .delete(handlers::admin::delete_website_domain),
         )
         .route(
-            "/admin/peer/gc/run",
+            "/myfsio/admin/peer/gc/run",
             axum::routing::post(handlers::admin::gc_run),
         )
         .route(
-            "/admin/peer/integrity/run",
+            "/myfsio/admin/peer/integrity/run",
             axum::routing::post(handlers::admin::integrity_run),
         )
         .layer(axum::middleware::from_fn_with_state(

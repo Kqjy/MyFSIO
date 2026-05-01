@@ -18,7 +18,7 @@ struct Cli {
     #[arg(
         long,
         help = "Mark peer_inbound_access_key entries as peer credentials (one-shot). \
-                After migration these creds are restricted to /admin/cluster/overview and \
+                After migration these creds are restricted to /myfsio/admin/cluster/overview and \
                 lose any S3 policies; reissue separate creds for site_sync if needed."
     )]
     migrate_peer_creds: bool,
@@ -606,7 +606,7 @@ fn migrate_peer_credentials(config: &ServerConfig) {
     println!();
     if !migrated.is_empty() {
         println!(
-            "WARNING: Migrated credentials are now restricted to /admin/cluster/overview \
+            "WARNING: Migrated credentials are now restricted to /myfsio/admin/cluster/overview \
              and have had their IAM policies cleared. If you used the same access key for \
              site_sync, issue a new IAM user for that and update connections.json on the \
              remote side."

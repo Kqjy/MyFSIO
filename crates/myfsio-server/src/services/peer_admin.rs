@@ -37,6 +37,20 @@ fn extract_error_detail(body: &str) -> String {
         }
     }
 
+    if trimmed.starts_with('<') {
+        let code = extract_xml_tag(trimmed, "Code");
+        let message = extract_xml_tag(trimmed, "Message");
+        let detail = match (code, message) {
+            (Some(c), Some(m)) => format!("{} — {}", c, m),
+            (Some(c), None) => c,
+            (None, Some(m)) => m,
+            (None, None) => String::new(),
+        };
+        if !detail.is_empty() {
+            return truncate_chars(&detail, 240);
+        }
+    }
+
     let collapsed = trimmed
         .lines()
         .map(|l| l.trim())
@@ -44,6 +58,19 @@ fn extract_error_detail(body: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     truncate_chars(&collapsed, 240)
+}
+
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)?;
+    let value = xml[start..start + end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -267,7 +294,7 @@ impl PeerAdminClient {
         endpoint: &str,
         connection: &RemoteConnection,
     ) -> Result<Value, String> {
-        self.fetch_admin_json(endpoint, "/admin/cluster/overview?local_only=1", connection)
+        self.fetch_admin_json(endpoint, "/myfsio/admin/cluster/overview?local_only=1", connection)
             .await
     }
 
@@ -277,7 +304,7 @@ impl PeerAdminClient {
         connection: &RemoteConnection,
     ) -> Result<(), String> {
         match self
-            .fetch_admin_status(endpoint, "/admin/cluster/overview?local_only=1", connection)
+            .fetch_admin_status(endpoint, "/myfsio/admin/cluster/overview?local_only=1", connection)
             .await
         {
             PeerAdminStatus::Ok(_) => Ok(()),

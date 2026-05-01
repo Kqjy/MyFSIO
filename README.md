@@ -99,7 +99,7 @@ Core settings:
 | `PEER_NONCE_CACHE_SIZE` | `10000` | Replay-detection LRU capacity for peer requests |
 | `ALLOW_LEGACY_HEADER_AUTH` | `false` | Accept legacy `x-access-key`/`x-secret-key` headers (peer creds are SigV4-only regardless) |
 | `PEER_REQUIRE_HTTPS` | `false` | Reject non-https peer endpoint registrations |
-| `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling cross-site admin federation (`/admin/peer/*` + `/admin/relay/*`). Same value on every node |
+| `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling cross-site admin federation (`/myfsio/admin/peer/*` + `/myfsio/admin/relay/*`). Same value on every node |
 | `RELAY_IDEMPOTENCY_CACHE_SIZE` | `10000` | LRU capacity for relay idempotency keys |
 | `RELAY_IDEMPOTENCY_TTL_SECONDS` | `3600` | TTL for cached relay responses |
 | `AUDIT_LOG_ENABLED` | `false` | Write JSONL audit lines for relayed admin actions |
@@ -157,9 +157,9 @@ See [docs.md](./docs.md) for the full Rust-side operations guide.
 
 ## Cluster Connections — Peer Creds vs S3 Creds
 
-A connection record (`POST /admin/connections`) holds the credentials used to talk to another MyFSIO site. There are two distinct credential types and they are NOT interchangeable:
+A connection record (created via the UI form `POST /ui/connections/create`, fields: `name`, `endpoint_url`, `region`, `access_key`, `secret_key`) holds the credentials used to talk to another MyFSIO site. There are two distinct credential types and they are NOT interchangeable:
 
-- **Peer credentials** (`PEERAK…`/`PEERSK…`, created via `POST /admin/peer-credentials`). SigV4-only, scoped to `/admin/cluster/overview` and `/admin/peer/*`. Use these in connections referenced by site-registry peers (`peer.connection_id`) for cluster federation, the federated cluster overview, peer health checks, and the relay path. Peer credentials cannot list buckets or read objects, so they are not usable for replication or bidirectional site sync.
+- **Peer credentials** (`PEERAK…`/`PEERSK…`, created via `POST /myfsio/admin/peer-credentials`). SigV4-only, scoped to `/myfsio/admin/cluster/overview` and `/myfsio/admin/peer/*`. Use these in connections referenced by site-registry peers (`peer.connection_id`) for cluster federation, the federated cluster overview, peer health checks, and the relay path. Peer credentials cannot list buckets or read objects, so they are not usable for replication or bidirectional site sync.
 - **Regular IAM credentials** (admin or scoped). Use these in connections referenced by replication rules (`ReplicationRule.target_connection_id`) and bidirectional site sync. These need bucket list / object read / object write permissions on the remote site.
 
 If you federate two sites and also replicate between them, you typically need TWO connection records per peer relationship — one with peer creds for cluster federation, one with regular creds for replication / site sync.
