@@ -918,6 +918,228 @@ async fn test_ui_replication_configuration_actions_work() {
 }
 
 #[tokio::test]
+async fn test_create_bidirectional_rule_requires_peer_inbound_access_key() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "bidir-bucket";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-bidir".to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let registry = state.site_registry.as_ref().expect("site_registry").clone();
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "peer-site".to_string(),
+        endpoint: "http://peer.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "Peer Site".to_string(),
+        connection_id: Some("conn-bidir".to_string()),
+        peer_inbound_access_key: None,
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=create&target_connection_id=conn-bidir&target_bucket=remote-bucket&replication_mode=bidirectional&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.to_lowercase().contains("inbound access key")
+            || err.to_lowercase().contains("loop"),
+        "expected loop guard error, got: {}",
+        err
+    );
+    assert!(
+        state.replication.get_rule(bucket_name).is_none(),
+        "rule must NOT be created when bidirectional + missing peer_inbound_access_key"
+    );
+}
+
+#[tokio::test]
+async fn test_create_bidirectional_rule_succeeds_when_peer_ak_set() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "bidir-bucket-ok";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-bidir-ok".to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let registry = state.site_registry.as_ref().expect("site_registry").clone();
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "peer-site-ok".to_string(),
+        endpoint: "http://peer.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "Peer Site".to_string(),
+        connection_id: Some("conn-bidir-ok".to_string()),
+        peer_inbound_access_key: Some("AKIAPEERINBOUND00000".to_string()),
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=create&target_connection_id=conn-bidir-ok&target_bucket=remote-bucket&replication_mode=bidirectional&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["mode"], "bidirectional");
+    let rule = state.replication.get_rule(bucket_name).expect("rule created");
+    assert_eq!(
+        rule.mode,
+        myfsio_server::services::replication::MODE_BIDIRECTIONAL
+    );
+}
+
+#[tokio::test]
+async fn test_create_unidirectional_rule_does_not_require_peer_ak() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "uni-bucket";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-uni".to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let registry = state.site_registry.as_ref().expect("site_registry").clone();
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "peer-uni".to_string(),
+        endpoint: "http://peer.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "Peer Site".to_string(),
+        connection_id: Some("conn-uni".to_string()),
+        peer_inbound_access_key: None,
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    for mode in ["new_only", "all"] {
+        let resp = app
+            .clone()
+            .oneshot(ui_form_request(
+                Method::POST,
+                &format!("/ui/buckets/{}/replication", bucket_name),
+                &session_id,
+                &csrf,
+                &format!(
+                    "action=create&target_connection_id=conn-uni&target_bucket=remote-bucket&replication_mode={}&csrf_token=test",
+                    mode
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "mode {} should not require peer_inbound_access_key",
+            mode
+        );
+        let rule = state.replication.get_rule(bucket_name).expect("rule");
+        assert_eq!(rule.mode, mode);
+    }
+}
+
+#[test]
+fn test_rule_requires_inbound_ak_helper() {
+    use myfsio_server::services::replication::{
+        rule_requires_inbound_ak, MODE_ALL, MODE_BIDIRECTIONAL, MODE_NEW_ONLY,
+    };
+    assert!(rule_requires_inbound_ak(MODE_BIDIRECTIONAL));
+    assert!(!rule_requires_inbound_ak(MODE_NEW_ONLY));
+    assert!(!rule_requires_inbound_ak(MODE_ALL));
+    assert!(!rule_requires_inbound_ak("unknown"));
+}
+
+#[test]
+fn test_find_peer_by_connection_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let registry = myfsio_server::services::site_registry::SiteRegistry::new(tmp.path());
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "site-a".to_string(),
+        endpoint: "http://a.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "A".to_string(),
+        connection_id: Some("conn-a".to_string()),
+        peer_inbound_access_key: Some("AKIAA00000000000000A".to_string()),
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "site-b".to_string(),
+        endpoint: "http://b.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "B".to_string(),
+        connection_id: None,
+        peer_inbound_access_key: None,
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let found = registry.find_peer_by_connection_id("conn-a").unwrap();
+    assert_eq!(found.site_id, "site-a");
+    assert!(registry.find_peer_by_connection_id("missing").is_none());
+    assert!(registry.find_peer_by_connection_id("").is_none());
+}
+
+#[tokio::test]
 async fn test_ui_iam_user_actions_use_real_user_ids() {
     let (state, _tmp) = test_ui_state();
     let (session_id, csrf) = authenticated_ui_session(&state);

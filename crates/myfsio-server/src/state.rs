@@ -210,6 +210,7 @@ impl AppState {
         let replication = Arc::new(ReplicationManager::new(
             storage.clone(),
             connections.clone(),
+            site_registry.clone(),
             &config.storage_root,
             Duration::from_secs(config.replication_connect_timeout_secs),
             Duration::from_secs(config.replication_read_timeout_secs),

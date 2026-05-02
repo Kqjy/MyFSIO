@@ -2536,6 +2536,30 @@ async fn create_peer_replication_rules_impl(
     }
     .to_string();
 
+    if crate::services::replication::rule_requires_inbound_ak(&mode) {
+        let ak_set = peer
+            .peer_inbound_access_key
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !ak_set {
+            session.write(|s| {
+                s.push_flash(
+                    "danger",
+                    format!(
+                        "Bidirectional replication requires the peer's inbound access key to be configured on '{}'. Set it on the Sites page (Edit Peer Site → Peer Inbound Access Key) before creating a bidirectional rule. Without it, replication will loop infinitely.",
+                        if peer.display_name.is_empty() {
+                            peer.site_id.as_str()
+                        } else {
+                            peer.display_name.as_str()
+                        }
+                    ),
+                )
+            });
+            return Redirect::to("/ui/sites").into_response();
+        }
+    }
+
     if form.buckets.is_empty() {
         session.write(|s| s.push_flash("warning", "No buckets selected."));
         return Redirect::to("/ui/sites").into_response();
@@ -2574,28 +2598,51 @@ async fn create_peer_replication_rules_impl(
         }
     }
 
+    let mut conflict_buckets: Vec<String> = Vec::new();
     for bucket_name in created_existing {
-        state
+        use crate::services::replication::ScheduleRunOutcome;
+        match state
             .replication
             .clone()
-            .schedule_existing_objects_sync(bucket_name);
+            .schedule_existing_objects_sync(bucket_name.clone())
+        {
+            ScheduleRunOutcome::Started { .. } | ScheduleRunOutcome::AlreadyRunning { .. } => {}
+            ScheduleRunOutcome::Conflict { existing_kind, .. } => {
+                tracing::warn!(
+                    "Existing-object sync deferred for bucket {}: a {} batch is already running",
+                    bucket_name,
+                    existing_kind.as_str()
+                );
+                conflict_buckets.push(bucket_name);
+            }
+        }
     }
 
     if created > 0 {
+        let peer_label = if peer.display_name.is_empty() {
+            peer.site_id.as_str()
+        } else {
+            peer.display_name.as_str()
+        }
+        .to_string();
         session.write(|s| {
             s.push_flash(
                 "success",
-                format!(
-                    "Created {} replication rule(s) for {}.",
-                    created,
-                    if peer.display_name.is_empty() {
-                        peer.site_id.as_str()
-                    } else {
-                        peer.display_name.as_str()
-                    }
-                ),
+                format!("Created {} replication rule(s) for {}.", created, peer_label),
             )
         });
+        if !conflict_buckets.is_empty() {
+            session.write(|s| {
+                s.push_flash(
+                    "warning",
+                    format!(
+                        "Existing-object sync was not scheduled for {} bucket(s) ({}) because another replication batch is already running. Click Resume on each bucket once the current batch finishes.",
+                        conflict_buckets.len(),
+                        conflict_buckets.join(", ")
+                    ),
+                )
+            });
+        }
     }
     Redirect::to("/ui/sites").into_response()
 }
@@ -2838,17 +2885,66 @@ pub async fn update_bucket_replication(
                     json!({ "action": "resume", "enabled": false, "no_op": true }),
                 );
             };
-            rule.enabled = true;
             let mode = rule.mode.clone();
+            let was_enabled = rule.enabled;
+
+            if mode == crate::services::replication::MODE_ALL {
+                if let Some(existing) = state.replication.current_run(&bucket_name) {
+                    if existing.kind != crate::services::replication::BatchRunKind::ResumeAll {
+                        let kind_str = existing.kind.as_str();
+                        let message = format!(
+                            "Cannot resume yet: a {} batch is currently running for this bucket. Wait for it to finish and try again.",
+                            kind_str
+                        );
+                        return respond(
+                            false,
+                            StatusCode::CONFLICT,
+                            message.clone(),
+                            json!({
+                                "action": "resume",
+                                "enabled": was_enabled,
+                                "mode": mode,
+                                "run_id": serde_json::Value::Null,
+                                "conflict": kind_str,
+                                "conflict_run_id": existing.run_id.clone(),
+                                "error": message,
+                            }),
+                        );
+                    }
+                }
+            }
+
+            rule.enabled = true;
             state.replication.set_rule(rule);
 
+            let mut run_id: Option<String> = None;
+            let mut race_kind: Option<&'static str> = None;
             let message = if mode == crate::services::replication::MODE_ALL {
-                state
+                use crate::services::replication::ScheduleRunOutcome;
+                match state
                     .replication
                     .clone()
-                    .schedule_existing_objects_sync(bucket_name.clone());
-                "Replication resumed. Existing object sync will continue in the background."
-                    .to_string()
+                    .schedule_existing_objects_sync(bucket_name.clone())
+                {
+                    ScheduleRunOutcome::Started { run_id: rid }
+                    | ScheduleRunOutcome::AlreadyRunning { run_id: rid } => {
+                        run_id = Some(rid);
+                        "Replication resumed. Existing object sync will continue in the background."
+                            .to_string()
+                    }
+                    ScheduleRunOutcome::Conflict { existing_kind, .. } => {
+                        race_kind = Some(existing_kind.as_str());
+                        tracing::warn!(
+                            "Resume race for bucket {}: peek saw no conflict but a {} batch started before we could schedule",
+                            bucket_name,
+                            existing_kind.as_str()
+                        );
+                        format!(
+                            "Replication enabled, but existing-object sync was not scheduled because a {} batch started concurrently. Click Resume again after it finishes to enumerate existing objects.",
+                            existing_kind.as_str()
+                        )
+                    }
+                }
             } else {
                 "Replication resumed.".to_string()
             };
@@ -2857,7 +2953,13 @@ pub async fn update_bucket_replication(
                 true,
                 StatusCode::OK,
                 message,
-                json!({ "action": "resume", "enabled": true, "mode": mode }),
+                json!({
+                    "action": "resume",
+                    "enabled": true,
+                    "mode": mode,
+                    "run_id": run_id,
+                    "conflict": race_kind,
+                }),
             )
         }
         "create" => {
@@ -2888,6 +2990,37 @@ pub async fn update_bucket_replication(
                 _ => crate::services::replication::MODE_NEW_ONLY,
             };
 
+            if crate::services::replication::rule_requires_inbound_ak(mode) {
+                let peer = state
+                    .site_registry
+                    .as_ref()
+                    .and_then(|r| r.find_peer_by_connection_id(target_connection_id));
+                let ak_set = peer
+                    .as_ref()
+                    .and_then(|p| p.peer_inbound_access_key.as_deref())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if !ak_set {
+                    let detail = match peer.as_ref() {
+                        Some(p) => format!(
+                            "Bidirectional replication requires the peer's inbound access key to be configured on '{}'. Set it on the Sites page (Edit Peer Site → Peer Inbound Access Key) before creating a bidirectional rule. Without it, replication will loop infinitely.",
+                            if p.display_name.is_empty() {
+                                p.site_id.as_str()
+                            } else {
+                                p.display_name.as_str()
+                            }
+                        ),
+                        None => "Bidirectional replication requires a peer site row with an inbound access key. The connection you selected is not registered as a peer site, or its peer_inbound_access_key is empty.".to_string(),
+                    };
+                    return respond(
+                        false,
+                        StatusCode::BAD_REQUEST,
+                        detail.clone(),
+                        json!({ "error": detail }),
+                    );
+                }
+            }
+
             state
                 .replication
                 .set_rule(crate::services::replication::ReplicationRule {
@@ -2908,13 +3041,27 @@ pub async fn update_bucket_replication(
                     filter_prefix: None,
                 });
 
+            let mut conflict_kind: Option<&'static str> = None;
             let message = if mode == crate::services::replication::MODE_ALL {
-                state
+                use crate::services::replication::ScheduleRunOutcome;
+                match state
                     .replication
                     .clone()
-                    .schedule_existing_objects_sync(bucket_name.clone());
-                "Replication configured. Existing object sync will continue in the background."
-                    .to_string()
+                    .schedule_existing_objects_sync(bucket_name.clone())
+                {
+                    ScheduleRunOutcome::Started { .. }
+                    | ScheduleRunOutcome::AlreadyRunning { .. } => {
+                        "Replication configured. Existing object sync will continue in the background."
+                            .to_string()
+                    }
+                    ScheduleRunOutcome::Conflict { existing_kind, .. } => {
+                        conflict_kind = Some(existing_kind.as_str());
+                        format!(
+                            "Replication configured, but existing-object sync was not scheduled because a {} batch is currently running for this bucket. Click Resume after it finishes to enumerate existing objects.",
+                            existing_kind.as_str()
+                        )
+                    }
+                }
             } else {
                 "Replication configured. New uploads will be replicated.".to_string()
             };
@@ -2929,6 +3076,7 @@ pub async fn update_bucket_replication(
                     "mode": mode,
                     "target_connection_id": target_connection_id,
                     "target_bucket": target_bucket,
+                    "conflict": conflict_kind,
                 }),
             )
         }

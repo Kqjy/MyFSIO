@@ -181,6 +181,18 @@ impl SiteRegistry {
             .iter()
             .any(|p| p.peer_inbound_access_key.as_deref() == Some(access_key))
     }
+
+    pub fn find_peer_by_connection_id(&self, connection_id: &str) -> Option<PeerSite> {
+        if connection_id.is_empty() {
+            return None;
+        }
+        self.data
+            .read()
+            .peers
+            .iter()
+            .find(|p| p.connection_id.as_deref() == Some(connection_id))
+            .cloned()
+    }
 }
 
 #[cfg(test)]

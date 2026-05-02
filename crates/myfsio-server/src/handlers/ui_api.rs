@@ -4401,6 +4401,16 @@ pub async fn replication_status(
         None => (false, Some("Target connection not found".to_string())),
     };
 
+    let current_run = state
+        .replication
+        .current_run(&bucket_name)
+        .map(|run| serialize_batch_run(&run, false));
+    let last_run = state
+        .replication
+        .last_run(&bucket_name)
+        .map(|run| serialize_batch_run(&run, true));
+    let healer = state.replication.healer_status();
+
     json_ok(json!({
         "enabled": rule.enabled,
         "target_bucket": rule.target_bucket,
@@ -4414,7 +4424,51 @@ pub async fn replication_status(
         "last_sync_key": rule.stats.last_sync_key,
         "endpoint_healthy": endpoint_healthy,
         "endpoint_error": endpoint_error,
+        "current_run": current_run,
+        "last_run": last_run,
+        "live": {
+            "in_flight": state.replication.live_in_flight(),
+            "replicated_total": state.replication.live_replicated_total(),
+            "failed_total": state.replication.live_failed_total(),
+        },
+        "healer": {
+            "running": healer.running,
+            "last_pass_at": healer.last_pass_at,
+            "last_pass_healed": healer.last_pass_healed,
+            "last_pass_skipped": healer.last_pass_skipped,
+        },
     }))
+}
+
+fn serialize_batch_run(
+    run: &crate::services::replication::BatchRun,
+    include_finished: bool,
+) -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+    let total_queued = run.total_queued.load(Ordering::Relaxed);
+    let completed = run.completed.load(Ordering::Relaxed);
+    let failed = run.failed.load(Ordering::Relaxed);
+    let in_flight = run.in_flight.load(Ordering::Relaxed);
+    let enumeration_done = run.enumeration_done.load(Ordering::Relaxed);
+    let last_object = run.last_object.lock().clone();
+    let finished_at = if include_finished {
+        *run.finished_at.lock()
+    } else {
+        None
+    };
+    json!({
+        "run_id": run.run_id,
+        "bucket": run.bucket,
+        "kind": run.kind.as_str(),
+        "started_at": run.started_at,
+        "enumeration_done": enumeration_done,
+        "total_queued": total_queued,
+        "completed": completed,
+        "failed": failed,
+        "in_flight": in_flight,
+        "last_object": last_object,
+        "finished_at": finished_at,
+    })
 }
 
 pub async fn replication_failures(
@@ -4485,11 +4539,26 @@ pub async fn retry_all_replication_failures(
     Extension(_session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    let (submitted, skipped) = state.replication.retry_all(&bucket_name).await;
+    let result = state.replication.clone().retry_all(&bucket_name).await;
+    if let Some(kind) = result.conflict {
+        let body = json!({
+            "status": "conflict",
+            "error": format!(
+                "Cannot start retry-all while a {} batch is running for this bucket. Wait for it to finish and try again.",
+                kind.as_str()
+            ),
+            "conflict": kind.as_str(),
+            "conflict_run_id": result.run_id,
+            "submitted": 0,
+            "skipped": result.skipped,
+        });
+        return (StatusCode::CONFLICT, axum::Json(body)).into_response();
+    }
     json_ok(json!({
         "status": "submitted",
-        "submitted": submitted,
-        "skipped": skipped,
+        "submitted": result.submitted,
+        "skipped": result.skipped,
+        "run_id": result.run_id,
     }))
 }
 
