@@ -47,16 +47,21 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
             Ok(Event::Text(ref e)) => {
                 if in_part {
                     let text = e.unescape().map_err(|e| e.to_string())?.to_string();
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        buf.clear();
+                        continue;
+                    }
                     match current_tag.as_str() {
                         "PartNumber" => {
                             part_number = Some(
-                                text.trim()
+                                trimmed
                                     .parse()
                                     .map_err(|e: std::num::ParseIntError| e.to_string())?,
                             );
                         }
                         "ETag" => {
-                            etag = Some(text.trim().trim_matches('"').to_string());
+                            etag = Some(trimmed.trim_matches('"').to_string());
                         }
                         _ => {}
                     }
@@ -65,14 +70,28 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
             Ok(Event::End(ref e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if name == "Part" && in_part {
-                    if let (Some(pn), Some(et)) = (part_number.take(), etag.take()) {
-                        result.parts.push(CompletedPart {
-                            part_number: pn,
-                            etag: et,
-                        });
+                    match (part_number.take(), etag.take()) {
+                        (Some(pn), Some(et)) => {
+                            result.parts.push(CompletedPart {
+                                part_number: pn,
+                                etag: et,
+                            });
+                        }
+                        (Some(pn), None) => {
+                            return Err(format!(
+                                "Part {} is missing required ETag element",
+                                pn
+                            ));
+                        }
+                        (None, _) => {
+                            return Err(
+                                "Part element is missing required PartNumber element".to_string(),
+                            );
+                        }
                     }
                     in_part = false;
                 }
+                current_tag.clear();
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(format!("XML parse error: {}", e)),
@@ -196,5 +215,57 @@ mod tests {
         assert_eq!(result.parts[0].etag, "etag1");
         assert_eq!(result.parts[1].part_number, 2);
         assert_eq!(result.parts[1].etag, "etag2");
+    }
+
+    #[test]
+    fn test_parse_complete_multipart_pretty_printed() {
+        let xml = r#"<CompleteMultipartUpload>
+  <Part>
+    <PartNumber>1</PartNumber>
+    <ETag>"abc"</ETag>
+  </Part>
+  <Part>
+    <PartNumber>2</PartNumber>
+    <ETag>"def"</ETag>
+  </Part>
+</CompleteMultipartUpload>"#;
+        let r = parse_complete_multipart_upload(xml).expect("pretty-printed XML must parse");
+        assert_eq!(r.parts.len(), 2);
+        assert_eq!(r.parts[0].part_number, 1);
+        assert_eq!(r.parts[0].etag, "abc");
+        assert_eq!(r.parts[1].part_number, 2);
+        assert_eq!(r.parts[1].etag, "def");
+    }
+
+    #[test]
+    fn test_parse_complete_multipart_rejects_part_without_etag() {
+        let xml = r#"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ChecksumSHA256>aGVsbG8=</ChecksumSHA256></Part></CompleteMultipartUpload>"#;
+        let err = parse_complete_multipart_upload(xml)
+            .expect_err("Part without ETag must be rejected");
+        assert!(
+            err.contains("missing required ETag"),
+            "expected ETag-missing error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_complete_multipart_rejects_part_without_part_number() {
+        let xml = r#"<CompleteMultipartUpload><Part><ETag>"abc"</ETag></Part></CompleteMultipartUpload>"#;
+        let err = parse_complete_multipart_upload(xml)
+            .expect_err("Part without PartNumber must be rejected");
+        assert!(
+            err.contains("missing required PartNumber"),
+            "expected PartNumber-missing error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_complete_multipart_with_xmlns() {
+        let xml = r#"<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Part><PartNumber>1</PartNumber><ETag>"abc"</ETag></Part></CompleteMultipartUpload>"#;
+        let r = parse_complete_multipart_upload(xml).unwrap();
+        assert_eq!(r.parts.len(), 1);
+        assert_eq!(r.parts[0].etag, "abc");
     }
 }
