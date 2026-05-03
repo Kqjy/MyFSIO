@@ -21,6 +21,8 @@ use crate::stores::connections::ConnectionStore;
 pub struct SyncedObjectInfo {
     pub last_synced_at: f64,
     pub remote_etag: String,
+    #[serde(default)]
+    pub local_etag: String,
     pub source: String,
 }
 
@@ -60,6 +62,12 @@ pub struct SiteSyncWorker {
     client_options: ClientOptions,
     bucket_stats: Mutex<HashMap<String, SiteSyncStats>>,
     shutdown: Arc<Notify>,
+}
+
+impl SiteSyncWorker {
+    pub(crate) async fn endpoint_allowed(&self, endpoint: &str) -> Result<(), String> {
+        self.replication.endpoint_allowed(endpoint).await
+    }
 }
 
 impl SiteSyncWorker {
@@ -193,12 +201,23 @@ impl SiteSyncWorker {
             .get(&rule.target_connection_id)
             .ok_or_else(|| format!("connection {} not found", rule.target_connection_id))?;
 
+        if let Err(reason) = self.endpoint_allowed(&connection.endpoint_url).await {
+            return Err(format!(
+                "endpoint rejected for connection '{}': {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow.",
+                connection.name, reason
+            ));
+        }
+
         let local_objects = self
             .list_local_objects(&rule.bucket_name)
             .await
             .map_err(|e| format!("list local failed: {}", e))?;
 
-        let client = build_client(&connection, &self.client_options);
+        let client = build_client(
+            &connection,
+            &self.client_options,
+            self.replication.http_client(),
+        );
         let remote_objects = self
             .list_remote_objects(&client, &rule.target_bucket)
             .await
@@ -238,11 +257,19 @@ impl SiteSyncWorker {
             {
                 stats.objects_pulled += 1;
                 pulled += 1;
+                let local_etag = self
+                    .storage
+                    .get_object_metadata(&rule.bucket_name, key)
+                    .await
+                    .ok()
+                    .and_then(|m| m.get("__etag__").cloned())
+                    .unwrap_or_default();
                 sync_state.synced_objects.insert(
                     key.clone(),
                     SyncedObjectInfo {
                         last_synced_at: now_secs(),
                         remote_etag: remote_meta.etag.clone(),
+                        local_etag,
                         source: "remote".to_string(),
                     },
                 );
@@ -257,10 +284,9 @@ impl SiteSyncWorker {
                 if remote_objects.contains_key(&key) {
                     continue;
                 }
-                let local_meta = match local_objects.get(&key) {
-                    Some(m) => m,
-                    None => continue,
-                };
+                if local_objects.get(&key).is_none() {
+                    continue;
+                }
                 let tracked = match sync_state.synced_objects.get(&key) {
                     Some(t) => t.clone(),
                     None => continue,
@@ -268,10 +294,57 @@ impl SiteSyncWorker {
                 if tracked.source != "remote" {
                     continue;
                 }
-                let local_ts = local_meta.last_modified.timestamp() as f64;
-                if local_ts <= tracked.last_synced_at
-                    && self.apply_remote_deletion(&rule.bucket_name, &key).await
+                let current_meta = match self
+                    .storage
+                    .get_object_metadata(&rule.bucket_name, &key)
+                    .await
                 {
+                    Ok(meta) => meta,
+                    Err(_) => {
+                        continue;
+                    }
+                };
+                let current_etag = current_meta
+                    .get("__etag__")
+                    .cloned()
+                    .unwrap_or_default();
+                let current_last_modified = current_meta
+                    .get("__last_modified__")
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| {
+                        local_objects.get(&key).map(|m| {
+                            m.last_modified.timestamp() as f64
+                                + m.last_modified.timestamp_subsec_nanos() as f64 / 1_000_000_000.0
+                        })
+                    });
+                if !tracked.local_etag.is_empty()
+                    && !current_etag.is_empty()
+                    && current_etag != tracked.local_etag
+                {
+                    tracing::info!(
+                        "Skipping remote-deletion for {}/{}: local etag changed since last sync",
+                        rule.bucket_name,
+                        key
+                    );
+                    continue;
+                }
+                let Some(current_last_modified) = current_last_modified else {
+                    tracing::info!(
+                        "Skipping remote-deletion for {}/{}: local timestamp could not be determined",
+                        rule.bucket_name,
+                        key
+                    );
+                    continue;
+                };
+                if current_last_modified > tracked.last_synced_at {
+                    tracing::info!(
+                        "Skipping remote-deletion for {}/{}: local timestamp newer than tracked sync",
+                        rule.bucket_name,
+                        key
+                    );
+                    continue;
+                }
+                if self.apply_remote_deletion(&rule.bucket_name, &key).await {
                     stats.deletions_applied += 1;
                     sync_state.synced_objects.remove(&key);
                 }

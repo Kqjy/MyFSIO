@@ -4,6 +4,7 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::{AppName, Region, SharedCredentialsProvider};
 use aws_sdk_s3::Client;
+use aws_smithy_runtime_api::client::http::SharedHttpClient;
 
 use crate::stores::connections::RemoteConnection;
 
@@ -25,7 +26,11 @@ impl Default for ClientOptions {
     }
 }
 
-pub fn build_client(connection: &RemoteConnection, options: &ClientOptions) -> Client {
+pub fn build_client(
+    connection: &RemoteConnection,
+    options: &ClientOptions,
+    http_client: SharedHttpClient,
+) -> Client {
     let credentials = Credentials::new(
         connection.access_key.clone(),
         connection.secret_key.clone(),
@@ -49,7 +54,8 @@ pub fn build_client(connection: &RemoteConnection, options: &ClientOptions) -> C
         .endpoint_url(connection.endpoint_url.clone())
         .force_path_style(true)
         .timeout_config(timeout_config)
-        .retry_config(retry_config);
+        .retry_config(retry_config)
+        .http_client(http_client);
 
     if let Ok(app_name) = AppName::new(REPLICATION_USER_AGENT_TAG) {
         builder = builder.app_name(app_name);
@@ -58,13 +64,17 @@ pub fn build_client(connection: &RemoteConnection, options: &ClientOptions) -> C
     Client::from_conf(builder.build())
 }
 
-pub fn build_health_client(connection: &RemoteConnection, options: &ClientOptions) -> Client {
+pub fn build_health_client(
+    connection: &RemoteConnection,
+    options: &ClientOptions,
+    http_client: SharedHttpClient,
+) -> Client {
     let fast_fail = ClientOptions {
         connect_timeout: options.connect_timeout,
         read_timeout: options.read_timeout,
         max_attempts: 1,
     };
-    build_client(connection, &fast_fail)
+    build_client(connection, &fast_fail, http_client)
 }
 
 pub async fn check_endpoint_health(client: &Client) -> bool {

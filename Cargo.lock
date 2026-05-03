@@ -2149,6 +2149,7 @@ dependencies = [
  "http 1.4.0",
  "hyper 1.9.0",
  "hyper-util",
+ "log",
  "rustls 0.23.37",
  "rustls-native-certs",
  "rustls-pki-types",
@@ -2660,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-auth"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aes",
  "base64",
@@ -2685,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-common"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64",
  "chrono",
@@ -2698,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-crypto"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -2719,13 +2720,14 @@ dependencies = [
 
 [[package]]
 name = "myfsio-server"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
+ "aws-smithy-runtime-api",
  "aws-smithy-types",
  "axum",
  "base64",
@@ -2739,9 +2741,14 @@ dependencies = [
  "duckdb",
  "futures",
  "hex",
+ "hmac",
+ "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
  "hyper 1.9.0",
+ "hyper-rustls 0.27.7",
+ "hyper-util",
+ "lru 0.14.0",
  "md-5 0.10.6",
  "mime_guess",
  "multer",
@@ -2758,6 +2765,7 @@ dependencies = [
  "reqwest",
  "roxmltree",
  "rust-embed",
+ "rustls 0.23.37",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -2771,6 +2779,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2778,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-storage"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2802,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-xml"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64",
  "chrono",
@@ -3615,6 +3624,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

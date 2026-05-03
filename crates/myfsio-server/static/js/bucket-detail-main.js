@@ -3470,6 +3470,146 @@
     const statusText = document.getElementById('replication-status-text');
     const pauseForm = document.getElementById('pause-replication-form');
 
+    const REPLICATION_POLL_ACTIVE_MS = 2000;
+    const REPLICATION_POLL_IDLE_MS = 30000;
+    let replicationPollMode = 'idle';
+    let optimisticRunActive = false;
+
+    const ensurePollMode = (mode) => {
+      if (!window.pollingManager) return;
+      if (replicationPollMode === mode) return;
+      replicationPollMode = mode;
+      const interval = mode === 'active' ? REPLICATION_POLL_ACTIVE_MS : REPLICATION_POLL_IDLE_MS;
+      window.pollingManager.start('replication', loadReplicationStats, interval);
+    };
+
+    const formatElapsed = (seconds) => {
+      if (seconds == null || isNaN(seconds) || seconds < 0) return '';
+      seconds = Math.floor(seconds);
+      if (seconds < 60) return `${seconds}s`;
+      const m = Math.floor(seconds / 60);
+      const s = seconds % 60;
+      if (m < 60) return `${m}m ${s}s`;
+      const h = Math.floor(m / 60);
+      return `${h}h ${m % 60}m`;
+    };
+
+    const renderCurrentRun = (run) => {
+      const card = document.getElementById('replication-current-run-card');
+      if (!card) return;
+      if (!run) {
+        if (!optimisticRunActive) {
+          card.style.display = 'none';
+        }
+        return;
+      }
+      optimisticRunActive = false;
+      card.style.display = '';
+
+      const titleEl = document.getElementById('current-run-title');
+      const kindEl = document.getElementById('current-run-kind');
+      const elapsedEl = document.getElementById('current-run-elapsed');
+      const summaryEl = document.getElementById('current-run-summary');
+      const progressEl = document.getElementById('current-run-progress');
+      const inFlightEl = document.getElementById('current-run-in-flight');
+      const failedEl = document.getElementById('current-run-failed');
+      const lastObjEl = document.getElementById('current-run-last-object');
+
+      if (kindEl) {
+        kindEl.textContent = run.kind === 'retry_all' ? 'Retrying failures' : 'Resuming all objects';
+      }
+      if (titleEl) {
+        titleEl.textContent = 'Replication run in progress';
+      }
+      if (elapsedEl && run.started_at) {
+        const elapsed = (Date.now() / 1000) - run.started_at;
+        elapsedEl.textContent = formatElapsed(elapsed);
+      }
+      const total = run.total_queued || 0;
+      const completed = run.completed || 0;
+      const failed = run.failed || 0;
+      const inFlight = run.in_flight || 0;
+      if (inFlightEl) inFlightEl.textContent = inFlight;
+      if (failedEl) failedEl.textContent = failed;
+      if (lastObjEl) {
+        lastObjEl.textContent = run.last_object || '';
+        lastObjEl.title = run.last_object || '';
+      }
+      if (summaryEl) {
+        if (!run.enumeration_done) {
+          summaryEl.textContent = `Enumerating objects... ${total.toLocaleString()} queued so far`;
+        } else {
+          const processed = completed + failed;
+          summaryEl.textContent = `${processed.toLocaleString()} of ${total.toLocaleString()} processed (${completed.toLocaleString()} succeeded, ${failed.toLocaleString()} failed)`;
+        }
+      }
+      if (progressEl) {
+        let pct = 0;
+        if (run.enumeration_done && total > 0) {
+          pct = Math.min(100, Math.round(((completed + failed) / total) * 100));
+          progressEl.classList.remove('progress-bar-animated');
+        } else {
+          progressEl.classList.add('progress-bar-animated');
+          pct = total > 0 ? Math.min(95, Math.round(((completed + failed) / total) * 100)) : 0;
+        }
+        progressEl.style.width = `${pct}%`;
+        progressEl.setAttribute('aria-valuenow', pct);
+      }
+    };
+
+    const renderLastRun = (lastRun, currentRun) => {
+      const card = document.getElementById('replication-last-run-card');
+      const summaryEl = document.getElementById('last-run-summary');
+      if (!card || !summaryEl) return;
+      if (currentRun || !lastRun) {
+        card.style.display = 'none';
+        return;
+      }
+      const total = lastRun.total_queued || 0;
+      const completed = lastRun.completed || 0;
+      const failed = lastRun.failed || 0;
+      const elapsed = lastRun.finished_at && lastRun.started_at
+        ? formatElapsed(lastRun.finished_at - lastRun.started_at)
+        : '';
+      const kind = lastRun.kind === 'retry_all' ? 'Retry-all' : 'Resume-all';
+      summaryEl.textContent = `${kind} — ${completed.toLocaleString()}/${total.toLocaleString()} synced, ${failed.toLocaleString()} failed${elapsed ? ` in ${elapsed}` : ''}`;
+      card.style.display = '';
+    };
+
+    const renderAmbientStrip = (data) => {
+      const strip = document.getElementById('replication-ambient-strip');
+      if (!strip) return;
+      const live = data.live || {};
+      const healer = data.healer || {};
+      const showAny = (live.in_flight || 0) > 0
+        || (live.replicated_total || 0) > 0
+        || (live.failed_total || 0) > 0
+        || healer.running
+        || healer.last_pass_at;
+      if (!showAny) {
+        strip.style.display = 'none';
+        return;
+      }
+      strip.style.display = '';
+      const liveInFlightEl = document.getElementById('live-in-flight');
+      const liveReplicatedEl = document.getElementById('live-replicated');
+      const liveFailedEl = document.getElementById('live-failed');
+      const healerStatusEl = document.getElementById('healer-status');
+      if (liveInFlightEl) liveInFlightEl.textContent = (live.in_flight || 0).toLocaleString();
+      if (liveReplicatedEl) liveReplicatedEl.textContent = (live.replicated_total || 0).toLocaleString();
+      if (liveFailedEl) liveFailedEl.textContent = (live.failed_total || 0).toLocaleString();
+      if (healerStatusEl) {
+        if (healer.running) {
+          healerStatusEl.textContent = 'running...';
+        } else if (healer.last_pass_at) {
+          const ago = Math.max(0, Math.floor((Date.now() / 1000) - healer.last_pass_at));
+          healerStatusEl.textContent = `idle (last pass ${healer.last_pass_healed || 0} healed, ${formatElapsed(ago)} ago)`;
+        } else {
+          healerStatusEl.textContent = 'idle';
+        }
+      }
+    };
+
     const loadReplicationStats = async () => {
       try {
         const resp = await fetch(statusEndpoint);
@@ -3534,6 +3674,11 @@
             lastSyncKeyEl.innerHTML = ' — <code class="small">' + escapeHtml(data.last_sync_key) + '</code>';
           }
         }
+
+        renderCurrentRun(data.current_run);
+        renderLastRun(data.last_run, data.current_run);
+        renderAmbientStrip(data);
+        ensurePollMode(data.current_run ? 'active' : 'idle');
       } catch (err) {
         console.error('Failed to load replication stats:', err);
         if (syncedEl) syncedEl.textContent = '—';
@@ -3543,10 +3688,39 @@
       }
     };
 
+    const showOptimisticRun = (kind) => {
+      optimisticRunActive = true;
+      const card = document.getElementById('replication-current-run-card');
+      if (card) card.style.display = '';
+      const lastRunCard = document.getElementById('replication-last-run-card');
+      if (lastRunCard) lastRunCard.style.display = 'none';
+      const titleEl = document.getElementById('current-run-title');
+      const kindEl = document.getElementById('current-run-kind');
+      const summaryEl = document.getElementById('current-run-summary');
+      const progressEl = document.getElementById('current-run-progress');
+      const inFlightEl = document.getElementById('current-run-in-flight');
+      const failedEl = document.getElementById('current-run-failed');
+      const lastObjEl = document.getElementById('current-run-last-object');
+      const elapsedEl = document.getElementById('current-run-elapsed');
+      if (titleEl) titleEl.textContent = 'Replication run starting';
+      if (kindEl) kindEl.textContent = kind === 'retry_all' ? 'Retrying failures' : 'Resuming all objects';
+      if (summaryEl) summaryEl.textContent = 'Starting...';
+      if (progressEl) {
+        progressEl.classList.add('progress-bar-animated');
+        progressEl.style.width = '0%';
+      }
+      if (inFlightEl) inFlightEl.textContent = '0';
+      if (failedEl) failedEl.textContent = '0';
+      if (lastObjEl) { lastObjEl.textContent = ''; lastObjEl.title = ''; }
+      if (elapsedEl) elapsedEl.textContent = '';
+      ensurePollMode('active');
+    };
+    window.__myfsioShowOptimisticRun = showOptimisticRun;
+
     loadReplicationStats();
 
     if (window.pollingManager) {
-      window.pollingManager.start('replication', loadReplicationStats);
+      window.pollingManager.start('replication', loadReplicationStats, REPLICATION_POLL_IDLE_MS);
     }
 
     const refreshBtn = document.querySelector('[data-refresh-replication]');
@@ -3677,13 +3851,40 @@
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Retrying...';
       const endpoint = failuresCard.dataset.retryAllEndpoint;
+      if (typeof window.__myfsioShowOptimisticRun === 'function') {
+        window.__myfsioShowOptimisticRun('retry_all');
+      }
       try {
         const resp = await fetch(endpoint, { method: 'POST' });
+        optimisticRunActive = false;
         if (resp.ok) {
+          let body = null;
+          try { body = await resp.json(); } catch (_) {}
+          const startedRunId = body && body.run_id;
+          if (!startedRunId) {
+            const msg = (body && body.skipped && body.skipped > 0)
+              ? 'Retry-all could not start: target endpoint or rule is not currently usable.'
+              : 'No failures to retry.';
+            if (window.showToast) window.showToast(msg, 'Retry-all', 'info');
+          }
+          loadReplicationStats();
           loadReplicationFailures();
+        } else if (resp.status === 409) {
+          let message = 'Another replication batch is running for this bucket. Try again when it finishes.';
+          try {
+            const data = await resp.json();
+            if (data && (data.error || data.message)) message = data.error || data.message;
+          } catch (_) {}
+          loadReplicationStats();
+          if (window.showToast) window.showToast(message, 'Conflict', 'warning');
+        } else {
+          loadReplicationStats();
+          if (window.showToast) window.showToast('Retry-all request failed', 'Error', 'danger');
         }
       } catch (err) {
         console.error('Failed to retry all:', err);
+        optimisticRunActive = false;
+        loadReplicationStats();
       } finally {
         btn.disabled = false;
         btn.innerHTML = originalHtml;

@@ -10,6 +10,26 @@ const WINDOWS_ILLEGAL_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?'
 
 const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
 const SYSTEM_ROOT: &str = ".myfsio.sys";
+const RESERVED_ROUTE_PREFIXES: &[&str] = &["myfsio"];
+
+pub fn is_reserved_bucket_name(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    if name == SYSTEM_ROOT {
+        return true;
+    }
+    if name.starts_with('.') {
+        return true;
+    }
+    if INTERNAL_FOLDERS.iter().any(|folder| *folder == name) {
+        return true;
+    }
+    if RESERVED_ROUTE_PREFIXES.iter().any(|prefix| *prefix == name) {
+        return true;
+    }
+    false
+}
 
 static IP_REGEX: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap());
@@ -250,5 +270,26 @@ mod tests {
         assert!(validate_object_key("a\u{0001}b", 1024, false, None).is_none());
         assert!(validate_object_key("a\nb", 1024, false, None).is_none());
         assert!(validate_object_key("a\0b", 1024, false, None).is_some());
+    }
+
+    #[test]
+    fn test_reserved_bucket_names() {
+        assert!(is_reserved_bucket_name(".myfsio.sys"));
+        assert!(is_reserved_bucket_name(".meta"));
+        assert!(is_reserved_bucket_name(".versions"));
+        assert!(is_reserved_bucket_name(".multipart"));
+        assert!(is_reserved_bucket_name(".hidden"));
+        assert!(is_reserved_bucket_name("."));
+        assert!(is_reserved_bucket_name(".."));
+        assert!(is_reserved_bucket_name(""));
+        assert!(is_reserved_bucket_name("myfsio"));
+        assert!(!is_reserved_bucket_name("admin"));
+        assert!(!is_reserved_bucket_name("kms"));
+        assert!(!is_reserved_bucket_name("ui"));
+        assert!(!is_reserved_bucket_name("my-bucket"));
+        assert!(!is_reserved_bucket_name("test123"));
+        assert!(!is_reserved_bucket_name("my.bucket.name"));
+        assert!(!is_reserved_bucket_name("admin-bucket"));
+        assert!(!is_reserved_bucket_name("my-admin"));
     }
 }

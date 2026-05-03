@@ -390,7 +390,7 @@ if [[ "$SKIP_SYSTEMD" != true ]]; then
             echo "  ============================================"
             echo "  ADMIN CREDENTIALS (save these securely!)"
             echo "  ============================================"
-            CRED_OUTPUT=$(journalctl -u myfsio --no-pager -n 100 2>/dev/null | grep -A 5 "FIRST RUN - ADMIN CREDENTIALS")
+            CRED_OUTPUT=$(journalctl -u myfsio --no-pager -n 200 2>/dev/null | grep -A 5 "MYFSIO - ADMIN CREDENTIALS")
             ACCESS_KEY=$(echo "$CRED_OUTPUT" | grep "Access Key:" | head -1 | sed 's/.*Access Key: //' | awk '{print $1}')
             SECRET_KEY=$(echo "$CRED_OUTPUT" | grep "Secret Key:" | head -1 | sed 's/.*Secret Key: //' | awk '{print $1}')
             if [[ -n "$ACCESS_KEY" && -n "$SECRET_KEY" ]]; then
@@ -398,7 +398,7 @@ if [[ "$SKIP_SYSTEMD" != true ]]; then
                 echo "  Secret Key: $SECRET_KEY"
             else
                 echo "  [!] Could not extract credentials from service logs."
-                echo "      Check: journalctl -u myfsio --no-pager | grep -A 5 'ADMIN CREDENTIALS'"
+                echo "      Check: journalctl -u myfsio --no-pager | grep -A 5 'MYFSIO - ADMIN CREDENTIALS'"
                 echo "      Or reset:  $INSTALL_DIR/myfsio --reset-cred"
             fi
             echo "  ============================================"

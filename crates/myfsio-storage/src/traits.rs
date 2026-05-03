@@ -143,6 +143,14 @@ pub trait StorageEngine: Send + Sync {
         metadata: &HashMap<String, String>,
     ) -> StorageResult<()>;
 
+    async fn put_object_version_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        metadata: &HashMap<String, String>,
+    ) -> StorageResult<()>;
+
     async fn list_objects(
         &self,
         bucket: &str,

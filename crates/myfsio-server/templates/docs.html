@@ -236,7 +236,7 @@ cargo build --release -p myfsio-server
               <tr>
                 <td><code>RATE_LIMIT_ADMIN</code></td>
                 <td><code>60 per minute</code></td>
-                <td>Rate limit for admin API endpoints (<code>/admin/*</code>).</td>
+                <td>Rate limit for admin API endpoints (<code>/myfsio/admin/*</code>).</td>
               </tr>
               <tr>
                 <td><code>RATE_LIMIT_STORAGE_URI</code></td>
@@ -357,8 +357,8 @@ cargo build --release -p myfsio-server
               </tr>
               <tr>
                 <td><code>REPLICATION_READ_TIMEOUT_SECONDS</code></td>
-                <td><code>30</code></td>
-                <td>Read timeout for replication (seconds).</td>
+                <td><code>120</code></td>
+                <td>Per-part read timeout for replication (seconds). Applies to each multipart part or single PUT attempt, not the whole transfer.</td>
               </tr>
               <tr>
                 <td><code>REPLICATION_MAX_RETRIES</code></td>
@@ -374,6 +374,21 @@ cargo build --release -p myfsio-server
                 <td><code>REPLICATION_MAX_FAILURES_PER_BUCKET</code></td>
                 <td><code>50</code></td>
                 <td>Max failure records to keep per bucket.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_HEALER_ENABLED</code></td>
+                <td><code>true</code></td>
+                <td>Background worker that auto-retries persisted replication failures with exponential backoff. Set <code>false</code> to disable.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_HEALER_INTERVAL_SECONDS</code></td>
+                <td><code>60</code></td>
+                <td>Interval between healer passes; each pass re-runs eligible failures across all rules.</td>
+              </tr>
+              <tr>
+                <td><code>REPLICATION_HEALER_MAX_ATTEMPTS</code></td>
+                <td><code>12</code></td>
+                <td>Per-object retry cap; failures whose <code>failure_count</code> reaches this value are skipped by the healer (manual <strong>Retry</strong> from the UI still works).</td>
               </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Security & Auth Settings</td>
@@ -529,7 +544,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
         <div class="docs-highlight mb-3">
           <ol class="mb-0">
             <li>Check the console output for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/ui/login</code>.</li>
-            <li>Create additional users with descriptive display names, AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>), and optional credential expiry dates. Use <code>{"bucket": "*", "actions": ["*"]}</code> to grant full administrator access — this is the only policy shape that satisfies <code>require_admin</code> on routes such as <code>/admin/cluster/overview</code>. <code>iam:*</code> grants only IAM-management actions and is <strong>not</strong> a substitute for <code>"*"</code> on admin routes.</li>
+            <li>Create additional users with descriptive display names, AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>), and optional credential expiry dates. Use <code>{"bucket": "*", "actions": ["*"]}</code> to grant full administrator access — this is the only policy shape that satisfies <code>require_admin</code> on routes such as <code>/myfsio/admin/cluster/overview</code>. <code>iam:*</code> grants only IAM-management actions and is <strong>not</strong> a substitute for <code>"*"</code> on admin routes.</li>
             <li>Set credential expiry on users to grant time-limited access. The UI shows expiry badges and provides preset durations (1h, 24h, 7d, 30d, 90d). Expired credentials are rejected at authentication.</li>
             <li>Rotate secrets when sharing with CI jobs—new secrets display once and persist to <code>data/.myfsio.sys/config/iam.json</code>.</li>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
@@ -890,7 +905,7 @@ s3.complete_multipart_upload(
                 </svg>
                 <div>
                     <strong>Headless Target Setup</strong>
-                    <p class="small text-muted mb-0">If your target server has no UI, start it with <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> set so the first-run bootstrap installs deterministic credentials, then create the destination bucket via the AWS CLI: <code>aws --endpoint-url &lt;target&gt; s3api create-bucket --bucket backup-bucket</code>. Use the admin API at <code>/admin/iam/users</code> (or <code>--reset-cred</code>) to manage credentials remotely.</p>
+                    <p class="small text-muted mb-0">If your target server has no UI, start it with <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> set so the first-run bootstrap installs deterministic credentials, then create the destination bucket via the AWS CLI: <code>aws --endpoint-url &lt;target&gt; s3api create-bucket --bucket backup-bucket</code>. Use the admin API at <code>/myfsio/admin/iam/users</code> (or <code>--reset-cred</code>) to manage credentials remotely.</p>
                 </div>
             </div>
         </div>
@@ -1058,7 +1073,7 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
               </tr>
               <tr>
                 <td><strong>Timeouts</strong></td>
-                <td>Connect: <code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code> (default 5s), Read: <code>REPLICATION_READ_TIMEOUT_SECONDS</code> (default 30s). Objects larger than <code>REPLICATION_STREAMING_THRESHOLD_BYTES</code> (default 10&nbsp;MB) use streaming transfers.</td>
+                <td>Connect: <code>REPLICATION_CONNECT_TIMEOUT_SECONDS</code> (default 5s), per-part read: <code>REPLICATION_READ_TIMEOUT_SECONDS</code> (default 120s). Objects larger than <code>REPLICATION_STREAMING_THRESHOLD_BYTES</code> (default 10&nbsp;MB) are uploaded as multipart with adaptive 8&nbsp;MiB+ parts and 4 concurrent part uploads, so the per-part timeout applies independently to each part.</td>
               </tr>
             </tbody>
           </table>
@@ -1193,84 +1208,99 @@ cargo run -p myfsio-server --</code></pre>
           </div>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Cross-site authentication (Peer Inbound Access Key)</h3>
-        <p class="small text-muted">When the Cluster page asks one site to render a peer card, the local server signs a SigV4 call to <code>/admin/cluster/overview</code> on the peer. The peer needs to know which inbound caller is authorized. There are two ways for that signed call to be accepted:</p>
+        <h3 class="h6 text-uppercase text-muted mt-4">Cross-site authentication (Peer Credentials)</h3>
+        <p class="small text-muted">When the Cluster dashboard asks one site to render a peer card, the local server signs a SigV4 call to <code>/myfsio/admin/cluster/overview</code> on the peer. That endpoint accepts a request when <strong>either</strong>:</p>
         <ol class="small text-muted mb-3">
-          <li>The signing access key resolves to a real admin user on the peer (policy <code>{"bucket":"*","actions":["*"]}</code>), <strong>or</strong></li>
-          <li>The signing access key is whitelisted on the peer's site-registry entry as <strong>Peer Inbound Access Key</strong>. With this set, the peer accepts the call without granting full admin.</li>
+          <li>The signing principal is a full admin on the receiving site (policy <code>{"bucket":"*","actions":["*"]}</code>), <strong>or</strong></li>
+          <li>The signing principal is a <strong>peer credential</strong> issued on the receiving site (an IAM record with the internal <code>peer_site_id</code> flag set; new peer access keys conventionally start with <code>PEERAK…</code>).</li>
         </ol>
-        <p class="small text-muted">Option 2 is preferred — it follows least-privilege. The mental model is:</p>
-        <div class="alert alert-light border mb-3">
-          <strong class="small">Peer Inbound Access Key on Site&nbsp;X for peer&nbsp;Y</strong>
-          <span class="small">= "the access key Y signs with when calling X."</span>
-          <br>
-          <span class="small text-muted">It is copied from <em>the other site's outbound Connection</em>, never from your own IAM.</span>
-        </div>
+        <p class="small text-muted">Peer credentials are scoped: they can <strong>only</strong> call <code>/myfsio/admin/cluster/overview</code> (any S3 path returns <code>403</code>), they refuse the legacy <code>x-access-key</code>/<code>x-secret-key</code> header pair (peer creds are SigV4-only), and they do not appear in the user-management endpoints. Their requests run under a stricter 60-second clock-skew window with in-memory replay-detection LRU.</p>
+
+        <h4 class="h6 mt-3 mb-2">Issuing a peer credential</h4>
+<pre class="mb-3"><code class="language-bash">curl -X POST {{ api_base }}/myfsio/admin/peer-credentials \
+     -H 'content-type: application/json' \
+     -d '{"site_id":"us-west-1","display_name":"peer:us-west-1"}'
+# → { "user_id": "peer-…", "access_key": "PEERAK…", "secret_key": "PEERSK…", "site_id": "us-west-1" }
+
+# List peer credentials
+curl {{ api_base }}/myfsio/admin/peer-credentials
+
+# Revoke
+curl -X DELETE {{ api_base }}/myfsio/admin/peer-credentials/PEERAK…</code></pre>
 
         <h4 class="h6 mt-3 mb-2">Worked example (two sites: <code>us-east-1</code> and <code>us-west-1</code>)</h4>
-        <p class="small text-muted">Each site has an outbound Connection it uses to reach the other:</p>
-        <ul class="small text-muted mb-3">
-          <li><code>us-east-1</code>'s "to-west" Connection signs with access key <code>AKIA-EAST-OUT</code></li>
-          <li><code>us-west-1</code>'s "to-east" Connection signs with access key <code>AKIA-WEST-OUT</code></li>
-        </ul>
-        <p class="small text-muted">For the Cluster page on both sides to fetch peer data, register the peer entries with cross-paired inbound keys:</p>
+        <p class="small text-muted">Issue one peer credential on each site, hand the resulting access key/secret to the <em>other</em> site's outbound Connection:</p>
         <div class="row g-3 mb-3">
           <div class="col-md-6">
             <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On us-east-1 → peer "us-west-1"</strong></div>
+              <div class="card-header bg-light py-2"><strong class="small">On us-east-1</strong></div>
               <div class="card-body small">
                 <ul class="mb-0 ps-3">
-                  <li>Connection: "to-west"</li>
-                  <li><strong>Peer Inbound Access Key:</strong> <code>AKIA-WEST-OUT</code></li>
-                  <li class="text-muted">(the key us-west-1 will sign with when calling us-east-1)</li>
+                  <li><code>POST /myfsio/admin/peer-credentials {"site_id":"us-west-1"}</code></li>
+                  <li>Returns <code>(PEERAK_E, PEERSK_E)</code></li>
+                  <li class="text-muted">Hand to us-west-1 — its outbound Connection to us-east-1 signs with these.</li>
                 </ul>
               </div>
             </div>
           </div>
           <div class="col-md-6">
             <div class="card border h-100">
-              <div class="card-header bg-light py-2"><strong class="small">On us-west-1 → peer "us-east-1"</strong></div>
+              <div class="card-header bg-light py-2"><strong class="small">On us-west-1</strong></div>
               <div class="card-body small">
                 <ul class="mb-0 ps-3">
-                  <li>Connection: "to-east"</li>
-                  <li><strong>Peer Inbound Access Key:</strong> <code>AKIA-EAST-OUT</code></li>
-                  <li class="text-muted">(the key us-east-1 will sign with when calling us-west-1)</li>
+                  <li><code>POST /myfsio/admin/peer-credentials {"site_id":"us-east-1"}</code></li>
+                  <li>Returns <code>(PEERAK_W, PEERSK_W)</code></li>
+                  <li class="text-muted">Hand to us-east-1 — its outbound Connection to us-west-1 signs with these.</li>
                 </ul>
               </div>
             </div>
           </div>
         </div>
-        <p class="small text-muted">Each side's inbound key matches the <em>other</em> side's outbound key. Putting your own admin key (e.g. <code>localadmin</code>) into your own peer entry does nothing — the inbound caller is the peer, not you.</p>
-        <p class="small text-muted">Each whitelisted access key still has to exist as an enabled IAM user on the receiving site (so SigV4 verification can find a matching secret). Its policy can be empty for cluster-overview alone; for site-sync to work, it needs the S3 verbs the sync workload uses (<code>list</code>, <code>read</code>, plus <code>write</code>/<code>delete</code> for inbound replication / bidirectional sync). Leave the field blank only if the signing key is a full admin on the receiving site.</p>
+        <p class="small text-muted">Putting an admin key into your own peer entry does nothing — the inbound caller is the peer, not you. Once both sides have peer creds, the cluster dashboard on either side renders both cards.</p>
+
+        <h4 class="h6 mt-3 mb-2">Migrating a pre-existing deployment</h4>
+        <p class="small text-muted">Releases prior to peer-credential namespacing reused regular IAM users for the <strong>Peer Inbound Access Key</strong> field. Run <code>myfsio-server --migrate-peer-creds</code> once on each site to retag those access keys. The migration:</p>
+        <ul class="small text-muted mb-3">
+          <li>Refuses any access key that shares an IAM user with other access keys (it would clear that user's policies and convert all of its keys to peer credentials). Move the AK to a dedicated user before retrying.</li>
+          <li>Errors with exit code <code>1</code> when the registry references an AK that is not present in IAM, instead of silently treating it as already-migrated.</li>
+          <li>Clears the migrated user's policies. <strong>If you used the same AK as a site-sync credential, reissue separate IAM users for site-sync</strong> — the migrated AK is now restricted to <code>/myfsio/admin/cluster/overview</code>.</li>
+        </ul>
+
+        <h4 class="h6 mt-3 mb-2">Other relevant settings</h4>
+        <ul class="small text-muted mb-3">
+          <li><code>ALLOW_LEGACY_HEADER_AUTH=false</code> (default) rejects the old <code>x-access-key</code>/<code>x-secret-key</code> header pair. Set to <code>true</code> only for development clients that don't sign SigV4. Peer credentials remain SigV4-only either way.</li>
+          <li><code>PEER_REQUIRE_HTTPS=false</code> (default). When <code>true</code>, peer endpoint registration rejects <code>http://</code> URLs; otherwise the server logs a startup warning if any registered peer uses <code>http://</code>.</li>
+          <li><code>PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS=60</code> stricter skew window for peer SigV4. <code>PEER_NONCE_CACHE_SIZE=10000</code> sizes the in-memory replay LRU.</li>
+        </ul>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Admin API Endpoints</h3>
-        <p class="small text-muted">The <code>/admin</code> API provides programmatic access to site registry:</p>
+        <p class="small text-muted">The <code>/myfsio/admin</code> API provides programmatic access to site registry:</p>
 <pre class="mb-3"><code class="language-bash"># Get local site configuration
-curl {{ api_base }}/admin/site \
+curl {{ api_base }}/myfsio/admin/site \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Update local site
-curl -X PUT {{ api_base }}/admin/site \
+curl -X PUT {{ api_base }}/myfsio/admin/site \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '{"site_id": "us-west-1", "endpoint": "https://s3.example.com", "region": "us-west-1"}'
 
 # List all peer sites
-curl {{ api_base }}/admin/sites \
+curl {{ api_base }}/myfsio/admin/sites \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Add a peer site
-curl -X POST {{ api_base }}/admin/sites \
+curl -X POST {{ api_base }}/myfsio/admin/sites \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '{"site_id": "us-east-1", "endpoint": "https://s3.us-east-1.example.com"}'
 
 # Check peer health
-curl {{ api_base }}/admin/sites/us-east-1/health \
+curl {{ api_base }}/myfsio/admin/sites/us-east-1/health \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Get cluster topology
-curl {{ api_base }}/admin/topology \
+curl {{ api_base }}/myfsio/admin/topology \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
@@ -1509,29 +1539,29 @@ cargo run -p myfsio-server --</code></pre>
         <h3 class="h6 text-uppercase text-muted mt-4">KMS Key Management</h3>
         <p class="small text-muted">When <code>KMS_ENABLED=true</code>, manage encryption keys via the API:</p>
 <pre class="mb-3"><code class="language-bash"># Create a new KMS key
-curl -X POST {{ api_base }}/kms/keys \
+curl -X POST {{ api_base }}/myfsio/kms/keys \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '{"alias": "my-key", "description": "Production key"}'
 
 # List all keys
-curl {{ api_base }}/kms/keys \
+curl {{ api_base }}/myfsio/kms/keys \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Disable a key
-curl -X POST {{ api_base }}/kms/keys/{key-id}/disable \
+curl -X POST {{ api_base }}/myfsio/kms/keys/{key-id}/disable \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Re-enable a key
-curl -X POST {{ api_base }}/kms/keys/{key-id}/enable \
+curl -X POST {{ api_base }}/myfsio/kms/keys/{key-id}/enable \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Delete a key
-curl -X DELETE "{{ api_base }}/kms/keys/{key-id}" \
+curl -X DELETE "{{ api_base }}/myfsio/kms/keys/{key-id}" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Generate a data key (sized between KMS_GENERATE_DATA_KEY_MIN_BYTES and _MAX_BYTES)
-curl -X POST {{ api_base }}/kms/generate-data-key \
+curl -X POST {{ api_base }}/myfsio/kms/generate-data-key \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '{"KeyId": "&lt;key-id&gt;", "NumberOfBytes": 32}'</code></pre>
@@ -1737,29 +1767,29 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
               </tr>
             </thead>
             <tbody>
-              <tr><td><code>GET</code></td><td><code>/admin/gc/status</code></td><td>Get GC status and configuration</td></tr>
-              <tr><td><code>POST</code></td><td><code>/admin/gc/run</code></td><td>Trigger manual GC run</td></tr>
-              <tr><td><code>GET</code></td><td><code>/admin/gc/history</code></td><td>Get execution history</td></tr>
+              <tr><td><code>GET</code></td><td><code>/myfsio/admin/gc/status</code></td><td>Get GC status and configuration</td></tr>
+              <tr><td><code>POST</code></td><td><code>/myfsio/admin/gc/run</code></td><td>Trigger manual GC run</td></tr>
+              <tr><td><code>GET</code></td><td><code>/myfsio/admin/gc/history</code></td><td>Get execution history</td></tr>
             </tbody>
           </table>
         </div>
 
 <pre class="mb-3"><code class="language-bash"># Trigger a dry run (preview what would be cleaned)
-curl -X POST "{{ api_base }}/admin/gc/run" \
+curl -X POST "{{ api_base }}/myfsio/admin/gc/run" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "Content-Type: application/json" \
   -d '{"dry_run": true}'
 
 # Trigger actual GC
-curl -X POST "{{ api_base }}/admin/gc/run" \
+curl -X POST "{{ api_base }}/myfsio/admin/gc/run" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Check status
-curl "{{ api_base }}/admin/gc/status" \
+curl "{{ api_base }}/myfsio/admin/gc/status" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # View history
-curl "{{ api_base }}/admin/gc/history?limit=10" \
+curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
         <div class="alert alert-light border mb-0">
@@ -1836,31 +1866,31 @@ curl "{{ api_base }}/admin/gc/history?limit=10" \
               </tr>
             </thead>
             <tbody>
-              <tr><td><code>GET</code></td><td><code>/admin/integrity/status</code></td><td>Get scanner status and configuration</td></tr>
-              <tr><td><code>POST</code></td><td><code>/admin/integrity/run</code></td><td>Trigger manual scan</td></tr>
-              <tr><td><code>GET</code></td><td><code>/admin/integrity/history</code></td><td>Get scan history</td></tr>
+              <tr><td><code>GET</code></td><td><code>/myfsio/admin/integrity/status</code></td><td>Get scanner status and configuration</td></tr>
+              <tr><td><code>POST</code></td><td><code>/myfsio/admin/integrity/run</code></td><td>Trigger manual scan</td></tr>
+              <tr><td><code>GET</code></td><td><code>/myfsio/admin/integrity/history</code></td><td>Get scan history</td></tr>
             </tbody>
           </table>
         </div>
 
 <pre class="mb-3"><code class="language-bash"># Trigger a dry run with auto-heal preview
-curl -X POST "{{ api_base }}/admin/integrity/run" \
+curl -X POST "{{ api_base }}/myfsio/admin/integrity/run" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "Content-Type: application/json" \
   -d '{"dry_run": true, "auto_heal": true}'
 
 # Trigger actual scan with healing
-curl -X POST "{{ api_base }}/admin/integrity/run" \
+curl -X POST "{{ api_base }}/myfsio/admin/integrity/run" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -H "Content-Type: application/json" \
   -d '{"auto_heal": true}'
 
 # Check status
-curl "{{ api_base }}/admin/integrity/status" \
+curl "{{ api_base }}/myfsio/admin/integrity/status" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # View history
-curl "{{ api_base }}/admin/integrity/history?limit=10" \
+curl "{{ api_base }}/myfsio/admin/integrity/history?limit=10" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
         <div class="alert alert-light border mb-0">
@@ -1870,7 +1900,7 @@ curl "{{ api_base }}/admin/integrity/history?limit=10" \
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
             <div>
-              <strong>Dry Run:</strong> Pass <code>{"dry_run": true}</code> to <code>/admin/integrity/run</code> to preview detected issues without making any changes. Combine with <code>{"auto_heal": true}</code> to see what would be repaired.
+              <strong>Dry Run:</strong> Pass <code>{"dry_run": true}</code> to <code>/myfsio/admin/integrity/run</code> to preview detected issues without making any changes. Combine with <code>{"auto_heal": true}</code> to see what would be repaired.
             </div>
           </div>
         </div>
@@ -2130,7 +2160,7 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
 curl {{ api_base }}/myfsio/health
 
 # Response
-{"status": "ok", "version": "0.5.0"}</code></pre>
+{"status": "ok", "version": "x.x.x"}</code></pre>
 
         <p class="small text-muted mb-3">Use this endpoint for:</p>
         <ul class="small text-muted mb-0">
@@ -2554,23 +2584,23 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?website" \
 
         <h3 class="h6 text-uppercase text-muted mt-4">2. Map a custom domain to the bucket</h3>
 <pre class="mb-3"><code class="language-bash"># Create domain mapping (admin only)
-curl -X POST "{{ api_base }}/admin/website-domains" \
+curl -X POST "{{ api_base }}/myfsio/admin/website-domains" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '{"domain": "example.com", "bucket": "my-site"}'
 
 # List all domain mappings
-curl "{{ api_base }}/admin/website-domains" \
+curl "{{ api_base }}/myfsio/admin/website-domains" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Update a mapping
-curl -X PUT "{{ api_base }}/admin/website-domains/example.com" \
+curl -X PUT "{{ api_base }}/myfsio/admin/website-domains/example.com" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
   -d '{"bucket": "new-site-bucket"}'
 
 # Delete a mapping
-curl -X DELETE "{{ api_base }}/admin/website-domains/example.com" \
+curl -X DELETE "{{ api_base }}/myfsio/admin/website-domains/example.com" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">3. Point your domain</h3>
@@ -2863,40 +2893,40 @@ PUT    /&lt;bucket&gt;/&lt;key&gt;                  # CopyObject
 PUT    /&lt;bucket&gt;/&lt;key&gt;?uploadId&amp;partNumber # UploadPartCopy
 
 # Admin API
-GET|PUT /admin/site                     # Local site config
-GET     /admin/sites                    # List peers
-POST    /admin/sites                    # Register peer
-GET|PUT|DELETE /admin/sites/&lt;id&gt;        # Manage peer
-GET|POST /admin/sites/&lt;id&gt;/health       # Peer health
-GET     /admin/sites/&lt;id&gt;/bidirectional-status  # Bidi sync state
-GET     /admin/topology                 # Cluster topology
-GET|POST /admin/website-domains              # List / Create domain mapping
-GET|PUT|DELETE /admin/website-domains/&lt;domain&gt;  # Manage domain mapping
-GET     /admin/iam/users                # List IAM users
-GET     /admin/iam/users/&lt;id&gt;           # Get user
-GET     /admin/iam/users/&lt;id&gt;/policies  # Get user policies
-POST    /admin/iam/users/&lt;id&gt;/access-keys     # Create access key
-DELETE  /admin/iam/users/&lt;id&gt;/access-keys/&lt;ak&gt; # Delete access key
-POST    /admin/iam/users/&lt;id&gt;/disable    # Disable user
-POST    /admin/iam/users/&lt;id&gt;/enable     # Enable user
-GET|POST /admin/gc/status, /admin/gc/run, /admin/gc/history
-GET|POST /admin/integrity/status, /admin/integrity/run, /admin/integrity/history
+GET|PUT /myfsio/admin/site                     # Local site config
+GET     /myfsio/admin/sites                    # List peers
+POST    /myfsio/admin/sites                    # Register peer
+GET|PUT|DELETE /myfsio/admin/sites/&lt;id&gt;        # Manage peer
+GET|POST /myfsio/admin/sites/&lt;id&gt;/health       # Peer health
+GET     /myfsio/admin/sites/&lt;id&gt;/bidirectional-status  # Bidi sync state
+GET     /myfsio/admin/topology                 # Cluster topology
+GET|POST /myfsio/admin/website-domains              # List / Create domain mapping
+GET|PUT|DELETE /myfsio/admin/website-domains/&lt;domain&gt;  # Manage domain mapping
+GET     /myfsio/admin/iam/users                # List IAM users
+GET     /myfsio/admin/iam/users/&lt;id&gt;           # Get user
+GET     /myfsio/admin/iam/users/&lt;id&gt;/policies  # Get user policies
+POST    /myfsio/admin/iam/users/&lt;id&gt;/access-keys     # Create access key
+DELETE  /myfsio/admin/iam/users/&lt;id&gt;/access-keys/&lt;ak&gt; # Delete access key
+POST    /myfsio/admin/iam/users/&lt;id&gt;/disable    # Disable user
+POST    /myfsio/admin/iam/users/&lt;id&gt;/enable     # Enable user
+GET|POST /myfsio/admin/gc/status, /myfsio/admin/gc/run, /myfsio/admin/gc/history
+GET|POST /myfsio/admin/integrity/status, /myfsio/admin/integrity/run, /myfsio/admin/integrity/history
 
 # KMS API (only mounted when KMS_ENABLED=true)
-GET|POST /kms/keys                            # List / Create keys
-GET|DELETE /kms/keys/&lt;id&gt;                     # Get / Delete key
-POST   /kms/keys/&lt;id&gt;/enable                  # Enable key
-POST   /kms/keys/&lt;id&gt;/disable                 # Disable key
-POST   /kms/encrypt                           # Encrypt data
-POST   /kms/decrypt                           # Decrypt data
-POST   /kms/re-encrypt                        # Re-encrypt under a different key
-POST   /kms/generate-data-key                 # Generate data key
-POST   /kms/generate-data-key-without-plaintext  # Generate wrapped DEK only
-POST   /kms/generate-random                   # Generate random bytes
-POST   /kms/client/generate-key               # Client-side key helper
-POST   /kms/client/encrypt                    # Client-side encrypt helper
-POST   /kms/client/decrypt                    # Client-side decrypt helper
-POST   /kms/materials/&lt;id&gt;                    # Fetch wrapped key materials</code></pre>
+GET|POST /myfsio/kms/keys                            # List / Create keys
+GET|DELETE /myfsio/kms/keys/&lt;id&gt;                     # Get / Delete key
+POST   /myfsio/kms/keys/&lt;id&gt;/enable                  # Enable key
+POST   /myfsio/kms/keys/&lt;id&gt;/disable                 # Disable key
+POST   /myfsio/kms/encrypt                           # Encrypt data
+POST   /myfsio/kms/decrypt                           # Decrypt data
+POST   /myfsio/kms/re-encrypt                        # Re-encrypt under a different key
+POST   /myfsio/kms/generate-data-key                 # Generate data key
+POST   /myfsio/kms/generate-data-key-without-plaintext  # Generate wrapped DEK only
+POST   /myfsio/kms/generate-random                   # Generate random bytes
+POST   /myfsio/kms/client/generate-key               # Client-side key helper
+POST   /myfsio/kms/client/encrypt                    # Client-side encrypt helper
+POST   /myfsio/kms/client/decrypt                    # Client-side decrypt helper
+POST   /myfsio/kms/materials/&lt;id&gt;                    # Fetch wrapped key materials</code></pre>
       </div>
     </article>
   </div>

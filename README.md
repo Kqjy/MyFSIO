@@ -91,7 +91,18 @@ Core settings:
 | `IAM_CONFIG` | `<STORAGE_ROOT>/.myfsio.sys/config/iam.json` | IAM config path |
 | `API_BASE_URL` | unset | Public API base used by the UI and presigned URL generation |
 | `AWS_REGION` | `us-east-1` | Region used in SigV4 scope |
-| `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew |
+| `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew (regular SigV4) |
+| `STRICT_STREAMING_SIGV4` | `false` | When `true`, reject streaming SigV4 (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD*`) requests because per-chunk signature validation is not yet implemented. When `false` (default) the server logs a warning and accepts the request without validating chunk signatures — leave it `false` only if you need AWS CLI/SDK compatibility for large uploads and trust the network |
+| `ALLOW_INTERNAL_ENDPOINTS` | `false` | Permit relay/replication targets to resolve to loopback / RFC1918 / link-local / CGNAT addresses. Required for local cluster testing; leave disabled in production unless you intentionally federate over private networks |
+| `RATE_LIMIT_STORAGE_URI` | `memory://` | Rate-limit backend. Only `memory://` is supported today; any other value logs a warning and falls back to in-memory limits |
+| `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter skew enforced for peer-credential SigV4 requests |
+| `PEER_NONCE_CACHE_SIZE` | `10000` | Replay-detection LRU capacity for peer requests |
+| `ALLOW_LEGACY_HEADER_AUTH` | `false` | Accept legacy `x-access-key`/`x-secret-key` headers (peer creds are SigV4-only regardless) |
+| `PEER_REQUIRE_HTTPS` | `false` | Reject non-https peer endpoint registrations |
+| `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling cross-site admin federation (`/myfsio/admin/peer/*` + `/myfsio/admin/relay/*`). Same value on every node |
+| `RELAY_IDEMPOTENCY_CACHE_SIZE` | `10000` | LRU capacity for relay idempotency keys |
+| `RELAY_IDEMPOTENCY_TTL_SECONDS` | `3600` | TTL for cached relay responses |
+| `AUDIT_LOG_ENABLED` | `false` | Write JSONL audit lines for relayed admin actions |
 | `PRESIGNED_URL_MIN_EXPIRY_SECONDS` | `1` | Minimum presigned URL expiry |
 | `PRESIGNED_URL_MAX_EXPIRY_SECONDS` | `604800` | Maximum presigned URL expiry |
 | `SECRET_KEY` | loaded from `.myfsio.sys/config/.secret` if present | Session signing key and IAM-at-rest encryption key |
@@ -121,10 +132,13 @@ Metrics and replication tuning:
 | `METRICS_HISTORY_INTERVAL_MINUTES` | `5` |
 | `METRICS_HISTORY_RETENTION_HOURS` | `24` |
 | `REPLICATION_CONNECT_TIMEOUT_SECONDS` | `5` |
-| `REPLICATION_READ_TIMEOUT_SECONDS` | `30` |
+| `REPLICATION_READ_TIMEOUT_SECONDS` | `120` |
 | `REPLICATION_MAX_RETRIES` | `2` |
 | `REPLICATION_STREAMING_THRESHOLD_BYTES` | `10485760` |
 | `REPLICATION_MAX_FAILURES_PER_BUCKET` | `50` |
+| `REPLICATION_HEALER_ENABLED` | `true` |
+| `REPLICATION_HEALER_INTERVAL_SECONDS` | `60` |
+| `REPLICATION_HEALER_MAX_ATTEMPTS` | `12` |
 | `SITE_SYNC_INTERVAL_SECONDS` | `60` |
 | `SITE_SYNC_BATCH_SIZE` | `100` |
 | `SITE_SYNC_CONNECT_TIMEOUT_SECONDS` | `10` |
@@ -140,6 +154,15 @@ UI asset overrides:
 | `STATIC_DIR` | built-in crate static directory |
 
 See [docs.md](./docs.md) for the full Rust-side operations guide.
+
+## Cluster Connections — Peer Creds vs S3 Creds
+
+A connection record (created via the UI form `POST /ui/connections/create`, fields: `name`, `endpoint_url`, `region`, `access_key`, `secret_key`) holds the credentials used to talk to another MyFSIO site. There are two distinct credential types and they are NOT interchangeable:
+
+- **Peer credentials** (`PEERAK…`/`PEERSK…`, created via `POST /myfsio/admin/peer-credentials`). SigV4-only, scoped to `/myfsio/admin/cluster/overview` and `/myfsio/admin/peer/*`. Use these in connections referenced by site-registry peers (`peer.connection_id`) for cluster federation, the federated cluster overview, peer health checks, and the relay path. Peer credentials cannot list buckets or read objects, so they are not usable for replication or bidirectional site sync.
+- **Regular IAM credentials** (admin or scoped). Use these in connections referenced by replication rules (`ReplicationRule.target_connection_id`) and bidirectional site sync. These need bucket list / object read / object write permissions on the remote site.
+
+If you federate two sites and also replicate between them, you typically need TWO connection records per peer relationship — one with peer creds for cluster federation, one with regular creds for replication / site sync.
 
 ## Data Layout
 
@@ -198,8 +221,8 @@ cargo test
 ```json
 {
   "status": "ok",
-  "version": "0.5.0"
+  "version": "x.x.x"
 }
 ```
 
-The `version` field comes from the Rust crate version in `crates/myfsio-server/Cargo.toml`.
+The `version` field is populated at build time from the Rust crate version in `crates/myfsio-server/Cargo.toml`.

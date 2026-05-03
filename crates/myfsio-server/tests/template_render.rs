@@ -213,6 +213,8 @@ fn render_sites() {
     ctx.insert("peers", &Vec::<Value>::new());
     ctx.insert("peers_with_stats", &Vec::<Value>::new());
     ctx.insert("connections", &Vec::<Value>::new());
+    ctx.insert("peer_credentials", &Vec::<Value>::new());
+    ctx.insert("peer_credential_issued", &Value::Null);
     ctx.insert("config_site_id", &"");
     ctx.insert("config_site_endpoint", &"");
     ctx.insert("config_site_region", &"us-east-1");
@@ -228,6 +230,8 @@ fn render_cluster_empty() {
     ctx.insert("cluster_total_size_bytes", &0u64);
     ctx.insert("cluster_online_count", &0usize);
     ctx.insert("cluster_total_count", &0usize);
+    ctx.insert("audit_entries", &Vec::<Value>::new());
+    ctx.insert("audit_enabled", &false);
     render_or_panic("cluster.html", &ctx);
 }
 
@@ -269,6 +273,8 @@ fn render_cluster_with_sites() {
     ctx.insert("cluster_total_size_bytes", &1048576u64);
     ctx.insert("cluster_online_count", &1usize);
     ctx.insert("cluster_total_count", &2usize);
+    ctx.insert("audit_entries", &Vec::<Value>::new());
+    ctx.insert("audit_enabled", &false);
     render_or_panic("cluster.html", &ctx);
 }
 

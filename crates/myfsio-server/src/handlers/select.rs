@@ -261,10 +261,29 @@ fn child_text(node: &roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
 }
 
 fn execute_select_query(path: PathBuf, request: SelectRequest) -> Result<Vec<Vec<u8>>, String> {
+    if let Some(token) = find_disallowed_token(&request.expression) {
+        return Err(format!(
+            "Disallowed function or statement in expression: {}",
+            token
+        ));
+    }
+
     let conn =
         Connection::open_in_memory().map_err(|e| format!("DuckDB connection error: {}", e))?;
 
+    conn.execute_batch(
+        "SET autoinstall_known_extensions=false; \
+         SET autoload_known_extensions=false;",
+    )
+    .map_err(|e| format!("DuckDB lockdown failed: {}", e))?;
+
     load_input_table(&conn, &path, &request.input_format)?;
+
+    conn.execute_batch(
+        "SET enable_external_access=false; \
+         SET lock_configuration=true;",
+    )
+    .map_err(|e| format!("DuckDB lockdown failed: {}", e))?;
 
     let expression = request
         .expression
@@ -342,6 +361,265 @@ fn load_input_table(conn: &Connection, path: &Path, input: &InputFormat) -> Resu
 
 fn sql_escape(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn find_disallowed_token(expression: &str) -> Option<&'static str> {
+    const BANNED_FUNCTIONS: &[&str] = &[
+        "read_csv",
+        "read_csv_auto",
+        "read_json",
+        "read_json_auto",
+        "read_json_objects",
+        "read_ndjson",
+        "read_ndjson_auto",
+        "read_ndjson_objects",
+        "read_parquet",
+        "parquet_scan",
+        "read_blob",
+        "read_text",
+        "sniff_csv",
+        "parquet_schema",
+        "parquet_metadata",
+        "parquet_file_metadata",
+        "parquet_kv_metadata",
+        "from_substrait",
+        "from_substrait_json",
+        "copy_from_database",
+        "copy_to_database",
+        "duckdb_extensions",
+        "load_extension",
+        "install_extension",
+        "load_aws_credentials",
+    ];
+    const BANNED_LEADING_KEYWORDS: &[&str] = &[
+        "copy", "attach", "detach", "install", "load", "pragma", "set", "export", "import",
+    ];
+
+    #[derive(Clone)]
+    struct Tok {
+        pos: usize,
+        end: usize,
+        text: String,
+        followed_by_paren: bool,
+    }
+
+    let mut tokens: Vec<Tok> = Vec::new();
+    let mut buf = String::new();
+    let mut start = 0usize;
+    let bytes = expression.as_bytes();
+    let mut i = 0usize;
+
+    let push_token = |tokens: &mut Vec<Tok>, buf: &mut String, start: usize, end: usize| {
+        if buf.is_empty() {
+            return;
+        }
+        tokens.push(Tok {
+            pos: start,
+            end,
+            text: std::mem::take(buf),
+            followed_by_paren: false,
+        });
+    };
+
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c == '\'' {
+            push_token(&mut tokens, &mut buf, start, i);
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] as char == '\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if c == '"' {
+            push_token(&mut tokens, &mut buf, start, i);
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] as char == '"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if c == '-' && i + 1 < bytes.len() && bytes[i + 1] as char == '-' {
+            push_token(&mut tokens, &mut buf, start, i);
+            while i < bytes.len() && bytes[i] as char != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < bytes.len() && bytes[i + 1] as char == '*' {
+            push_token(&mut tokens, &mut buf, start, i);
+            i += 2;
+            while i + 1 < bytes.len() {
+                if bytes[i] as char == '*' && bytes[i + 1] as char == '/' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' {
+            if buf.is_empty() {
+                start = i;
+            }
+            buf.push(c.to_ascii_lowercase());
+        } else if !buf.is_empty() {
+            push_token(&mut tokens, &mut buf, start, i);
+        }
+        i += 1;
+    }
+    if !buf.is_empty() {
+        let end = bytes.len();
+        push_token(&mut tokens, &mut buf, start, end);
+    }
+
+    for tok in tokens.iter_mut() {
+        let mut j = tok.end;
+        while j < bytes.len() {
+            let c = bytes[j] as char;
+            if c.is_whitespace() {
+                j += 1;
+                continue;
+            }
+            if c == '-' && j + 1 < bytes.len() && bytes[j + 1] as char == '-' {
+                while j < bytes.len() && bytes[j] as char != '\n' {
+                    j += 1;
+                }
+                continue;
+            }
+            if c == '/' && j + 1 < bytes.len() && bytes[j + 1] as char == '*' {
+                j += 2;
+                while j + 1 < bytes.len() {
+                    if bytes[j] as char == '*' && bytes[j + 1] as char == '/' {
+                        j += 2;
+                        break;
+                    }
+                    j += 1;
+                }
+                continue;
+            }
+            tok.followed_by_paren = c == '(';
+            break;
+        }
+    }
+
+    for tok in &tokens {
+        if !tok.followed_by_paren {
+            continue;
+        }
+        for banned in BANNED_FUNCTIONS {
+            if tok.text == *banned {
+                return Some(banned);
+            }
+        }
+    }
+
+    let mut at_statement_start = true;
+    let mut last_end = 0usize;
+    for tok in &tokens {
+        let between = &expression[last_end..tok.pos];
+        if between.contains(';') {
+            at_statement_start = true;
+        }
+        if at_statement_start {
+            if !tok.followed_by_paren {
+                for kw in BANNED_LEADING_KEYWORDS {
+                    if tok.text == *kw {
+                        return Some(match *kw {
+                            "copy" => "COPY",
+                            "attach" => "ATTACH",
+                            "detach" => "DETACH",
+                            "install" => "INSTALL",
+                            "load" => "LOAD",
+                            "pragma" => "PRAGMA",
+                            "set" => "SET",
+                            "export" => "EXPORT",
+                            "import" => "IMPORT",
+                            _ => unreachable!(),
+                        });
+                    }
+                }
+            }
+            at_statement_start = false;
+        }
+        last_end = tok.end;
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod select_denylist_tests {
+    use super::find_disallowed_token;
+
+    #[test]
+    fn allows_plain_select() {
+        assert!(find_disallowed_token("SELECT * FROM s3object").is_none());
+        assert!(find_disallowed_token("SELECT a, b FROM data WHERE c > 1").is_none());
+        assert!(find_disallowed_token("SELECT load FROM data").is_none());
+        assert!(find_disallowed_token("SELECT copy_count FROM data").is_none());
+    }
+
+    #[test]
+    fn allows_columns_named_like_banned_functions() {
+        assert!(find_disallowed_token("SELECT read_csv FROM s3object").is_none());
+        assert!(find_disallowed_token("SELECT read_parquet, read_json FROM data").is_none());
+        assert!(find_disallowed_token("SELECT s.read_blob FROM data s").is_none());
+        assert!(find_disallowed_token("SELECT read_csv AS x FROM data").is_none());
+    }
+
+    #[test]
+    fn allows_keywords_used_as_columns() {
+        assert!(find_disallowed_token("SELECT copy, attach FROM data").is_none());
+        assert!(find_disallowed_token("SELECT load AS l FROM data").is_none());
+    }
+
+    #[test]
+    fn rejects_file_functions() {
+        assert!(find_disallowed_token("SELECT * FROM read_csv_auto('/etc/passwd')").is_some());
+        assert!(find_disallowed_token("select * from read_parquet('x')").is_some());
+        assert!(find_disallowed_token("SELECT read_blob('/etc/hosts')").is_some());
+        assert!(find_disallowed_token("SELECT read_csv ('x')").is_some());
+        assert!(find_disallowed_token("SELECT read_csv\n('x')").is_some());
+    }
+
+    #[test]
+    fn rejects_leading_statements() {
+        assert!(find_disallowed_token("ATTACH 'x.db'").is_some());
+        assert!(find_disallowed_token("INSTALL httpfs").is_some());
+        assert!(find_disallowed_token("LOAD httpfs").is_some());
+        assert!(find_disallowed_token("COPY data TO 'x'").is_some());
+    }
+
+    #[test]
+    fn rejects_chained_statements() {
+        assert!(find_disallowed_token("SELECT 1; ATTACH 'x.db'").is_some());
+        assert!(find_disallowed_token("SELECT 1;\nLOAD httpfs").is_some());
+    }
+
+    #[test]
+    fn ignores_string_literals() {
+        assert!(find_disallowed_token("SELECT 'read_csv' FROM data").is_none());
+        assert!(find_disallowed_token("SELECT 'ATTACH abc' AS x FROM data").is_none());
+    }
+
+    #[test]
+    fn ignores_comments() {
+        assert!(find_disallowed_token("SELECT * FROM data -- read_csv").is_none());
+        assert!(find_disallowed_token("SELECT * /* read_parquet */ FROM data").is_none());
+    }
 }
 
 fn normalize_single_char(value: &str, default_char: char) -> String {

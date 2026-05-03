@@ -45,6 +45,9 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         replication_max_retries: 2,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -56,6 +59,7 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
         multipart_min_part_size: 1,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -123,6 +127,9 @@ fn test_app_and_state() -> (
         replication_max_retries: 2,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -134,6 +141,7 @@ fn test_app_and_state() -> (
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
         multipart_min_part_size: 1,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -205,6 +213,7 @@ fn test_app_with_rate_limits(
         ratelimit_head_ops: default,
         ratelimit_admin: admin,
         ui_enabled: false,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -248,7 +257,7 @@ async fn rate_limit_default_and_admin_are_independent() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/admin/gc/status")
+                .uri("/myfsio/admin/gc/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -260,7 +269,7 @@ async fn rate_limit_default_and_admin_are_independent() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/admin/gc/status")
+                .uri("/myfsio/admin/gc/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -271,7 +280,7 @@ async fn rate_limit_default_and_admin_are_independent() {
     let admin_third = app
         .oneshot(
             Request::builder()
-                .uri("/admin/gc/status")
+                .uri("/myfsio/admin/gc/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -337,6 +346,9 @@ fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         replication_max_retries: 1,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -347,6 +359,7 @@ fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         ui_enabled: true,
         templates_dir: manifest_dir.join("templates"),
         static_dir: manifest_dir.join("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     (myfsio_server::state::AppState::new(config), tmp)
@@ -494,6 +507,9 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         replication_max_retries: 2,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -504,6 +520,7 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     (myfsio_server::state::AppState::new(config), tmp)
@@ -901,6 +918,228 @@ async fn test_ui_replication_configuration_actions_work() {
 }
 
 #[tokio::test]
+async fn test_create_bidirectional_rule_requires_peer_inbound_access_key() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "bidir-bucket";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-bidir".to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let registry = state.site_registry.as_ref().expect("site_registry").clone();
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "peer-site".to_string(),
+        endpoint: "http://peer.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "Peer Site".to_string(),
+        connection_id: Some("conn-bidir".to_string()),
+        peer_inbound_access_key: None,
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=create&target_connection_id=conn-bidir&target_bucket=remote-bucket&replication_mode=bidirectional&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.to_lowercase().contains("inbound access key")
+            || err.to_lowercase().contains("loop"),
+        "expected loop guard error, got: {}",
+        err
+    );
+    assert!(
+        state.replication.get_rule(bucket_name).is_none(),
+        "rule must NOT be created when bidirectional + missing peer_inbound_access_key"
+    );
+}
+
+#[tokio::test]
+async fn test_create_bidirectional_rule_succeeds_when_peer_ak_set() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "bidir-bucket-ok";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-bidir-ok".to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let registry = state.site_registry.as_ref().expect("site_registry").clone();
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "peer-site-ok".to_string(),
+        endpoint: "http://peer.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "Peer Site".to_string(),
+        connection_id: Some("conn-bidir-ok".to_string()),
+        peer_inbound_access_key: Some("AKIAPEERINBOUND00000".to_string()),
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    let resp = app
+        .oneshot(ui_form_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/replication", bucket_name),
+            &session_id,
+            &csrf,
+            "action=create&target_connection_id=conn-bidir-ok&target_bucket=remote-bucket&replication_mode=bidirectional&csrf_token=test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["mode"], "bidirectional");
+    let rule = state.replication.get_rule(bucket_name).expect("rule created");
+    assert_eq!(
+        rule.mode,
+        myfsio_server::services::replication::MODE_BIDIRECTIONAL
+    );
+}
+
+#[tokio::test]
+async fn test_create_unidirectional_rule_does_not_require_peer_ak() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "uni-bucket";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    state
+        .connections
+        .add(myfsio_server::stores::connections::RemoteConnection {
+            id: "conn-uni".to_string(),
+            name: "Peer".to_string(),
+            endpoint_url: "http://127.0.0.1:1".to_string(),
+            access_key: "remote-key".to_string(),
+            secret_key: "remote-secret".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+    let registry = state.site_registry.as_ref().expect("site_registry").clone();
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "peer-uni".to_string(),
+        endpoint: "http://peer.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "Peer Site".to_string(),
+        connection_id: Some("conn-uni".to_string()),
+        peer_inbound_access_key: None,
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state.clone());
+
+    for mode in ["new_only", "all"] {
+        let resp = app
+            .clone()
+            .oneshot(ui_form_request(
+                Method::POST,
+                &format!("/ui/buckets/{}/replication", bucket_name),
+                &session_id,
+                &csrf,
+                &format!(
+                    "action=create&target_connection_id=conn-uni&target_bucket=remote-bucket&replication_mode={}&csrf_token=test",
+                    mode
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "mode {} should not require peer_inbound_access_key",
+            mode
+        );
+        let rule = state.replication.get_rule(bucket_name).expect("rule");
+        assert_eq!(rule.mode, mode);
+    }
+}
+
+#[test]
+fn test_rule_requires_inbound_ak_helper() {
+    use myfsio_server::services::replication::{
+        rule_requires_inbound_ak, MODE_ALL, MODE_BIDIRECTIONAL, MODE_NEW_ONLY,
+    };
+    assert!(rule_requires_inbound_ak(MODE_BIDIRECTIONAL));
+    assert!(!rule_requires_inbound_ak(MODE_NEW_ONLY));
+    assert!(!rule_requires_inbound_ak(MODE_ALL));
+    assert!(!rule_requires_inbound_ak("unknown"));
+}
+
+#[test]
+fn test_find_peer_by_connection_id() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let registry = myfsio_server::services::site_registry::SiteRegistry::new(tmp.path());
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "site-a".to_string(),
+        endpoint: "http://a.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "A".to_string(),
+        connection_id: Some("conn-a".to_string()),
+        peer_inbound_access_key: Some("AKIAA00000000000000A".to_string()),
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+    registry.add_peer(myfsio_server::services::site_registry::PeerSite {
+        site_id: "site-b".to_string(),
+        endpoint: "http://b.example.com".to_string(),
+        region: "us-east-1".to_string(),
+        priority: 100,
+        display_name: "B".to_string(),
+        connection_id: None,
+        peer_inbound_access_key: None,
+        created_at: None,
+        is_healthy: false,
+        last_health_check: None,
+    });
+
+    let found = registry.find_peer_by_connection_id("conn-a").unwrap();
+    assert_eq!(found.site_id, "site-a");
+    assert!(registry.find_peer_by_connection_id("missing").is_none());
+    assert!(registry.find_peer_by_connection_id("").is_none());
+}
+
+#[tokio::test]
 async fn test_ui_iam_user_actions_use_real_user_ids() {
     let (state, _tmp) = test_ui_state();
     let (session_id, csrf) = authenticated_ui_session(&state);
@@ -943,6 +1182,7 @@ async fn test_ui_iam_user_actions_use_real_user_ids() {
     assert_eq!(update_body["display_name"], "Updated Admin");
 
     let policies_json = serde_json::json!([
+        {"bucket": "*", "actions": ["*"], "prefix": "*"},
         {"bucket": "reports", "actions": ["list", "read"], "prefix": "*"}
     ]);
     let policies_encoded = percent_encoding::utf8_percent_encode(
@@ -971,7 +1211,13 @@ async fn test_ui_iam_user_actions_use_real_user_ids() {
             .to_bytes(),
     )
     .unwrap();
-    assert_eq!(policies_body["policies"][0]["bucket"], "reports");
+    let bucket_set: std::collections::HashSet<String> = policies_body["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["bucket"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(bucket_set.contains("reports"));
 
     let create_resp = app
         .clone()
@@ -1323,6 +1569,9 @@ async fn test_ui_metrics_history_endpoint_reads_system_history() {
         replication_max_retries: 1,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -1333,6 +1582,7 @@ async fn test_ui_metrics_history_endpoint_reads_system_history() {
         ui_enabled: true,
         templates_dir: manifest_dir.join("templates"),
         static_dir: manifest_dir.join("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -1383,7 +1633,12 @@ async fn test_unauthenticated_request_rejected() {
 async fn test_unauthenticated_request_includes_requested_resource_path() {
     let (app, _tmp) = test_app();
     let resp = app
-        .oneshot(Request::builder().uri("/ui/").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/some-bucket/")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -1398,7 +1653,7 @@ async fn test_unauthenticated_request_includes_requested_resource_path() {
     .unwrap();
     assert!(body.contains("<Code>AccessDenied</Code>"));
     assert!(body.contains("<Message>Missing credentials</Message>"));
-    assert!(body.contains("<Resource>/ui/</Resource>"));
+    assert!(body.contains("<Resource>/some-bucket/</Resource>"));
     assert!(body.contains("<RequestId>"));
     assert!(!body.contains("<RequestId></RequestId>"));
 }
@@ -4768,6 +5023,9 @@ async fn test_non_admin_authorization_enforced() {
         replication_max_retries: 2,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -4778,6 +5036,7 @@ async fn test_non_admin_authorization_enforced() {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -4850,6 +5109,9 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         replication_max_retries: 2,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -4860,6 +5122,7 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         ui_enabled: false,
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new_with_encryption(config).await;
@@ -4926,7 +5189,7 @@ async fn test_kms_key_crud() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/keys")
+        .uri("/myfsio/kms/keys")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .header("content-type", "application/json")
@@ -4941,7 +5204,7 @@ async fn test_kms_key_crud() {
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(Method::GET, "/kms/keys", Body::empty()),
+        signed_request(Method::GET, "/myfsio/kms/keys", Body::empty()),
     )
     .await
     .unwrap();
@@ -4952,7 +5215,7 @@ async fn test_kms_key_crud() {
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(Method::GET, &format!("/kms/keys/{}", key_id), Body::empty()),
+        signed_request(Method::GET, &format!("/myfsio/kms/keys/{}", key_id), Body::empty()),
     )
     .await
     .unwrap();
@@ -4962,7 +5225,7 @@ async fn test_kms_key_crud() {
         app.clone(),
         signed_request(
             Method::DELETE,
-            &format!("/kms/keys/{}", key_id),
+            &format!("/myfsio/kms/keys/{}", key_id),
             Body::empty(),
         ),
     )
@@ -4978,7 +5241,7 @@ async fn test_kms_encrypt_decrypt() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/keys")
+        .uri("/myfsio/kms/keys")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(Body::from(r#"{"Description": "enc key"}"#))
@@ -4998,7 +5261,7 @@ async fn test_kms_encrypt_decrypt() {
     });
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/encrypt")
+        .uri("/myfsio/kms/encrypt")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(Body::from(enc_req.to_string()))
@@ -5015,7 +5278,7 @@ async fn test_kms_encrypt_decrypt() {
     });
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/kms/decrypt")
+        .uri("/myfsio/kms/decrypt")
         .header("x-access-key", TEST_ACCESS_KEY)
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(Body::from(dec_req.to_string()))
@@ -8345,6 +8608,9 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         replication_max_retries: 2,
         replication_streaming_threshold_bytes: 10_485_760,
         replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -8356,6 +8622,8 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         templates_dir: std::path::PathBuf::from("templates"),
         static_dir: std::path::PathBuf::from("static"),
         multipart_min_part_size: 1,
+        allow_internal_endpoints: true,
+        allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
     let state = myfsio_server::state::AppState::new(config);
@@ -8388,7 +8656,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/admin/sites")
+                .uri("/myfsio/admin/sites")
                 .header("x-access-key", ADMIN_AK)
                 .header("x-secret-key", ADMIN_SK)
                 .header("content-type", "application/json")
@@ -8407,17 +8675,57 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
     assert_eq!(registered["peer_inbound_access_key"], PEER_AK);
     assert_eq!(registered["connection_id"], "conn-to-peer");
 
+    state
+        .iam
+        .mark_access_key_as_peer(PEER_AK, "peer-site")
+        .expect("mark PEER_AK as peer credential");
+
+    fn sigv4_get(uri: &str, ak: &str, sk: &str) -> Request<Body> {
+        use myfsio_auth::sigv4::{
+            build_string_to_sign, compute_signature, derive_signing_key, sha256_hex,
+        };
+        let now = chrono::Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let region = "us-east-1";
+        let service = "s3";
+        let payload_hash = sha256_hex(b"");
+        let host = "127.0.0.1";
+        let (path, query) = match uri.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (uri, ""),
+        };
+        let canonical_headers = format!(
+            "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+            host, payload_hash, amz_date
+        );
+        let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+        let canonical_request = format!(
+            "GET\n{}\n{}\n{}\n{}\n{}",
+            path, query, canonical_headers, signed_headers, payload_hash
+        );
+        let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
+        let sts = build_string_to_sign(&amz_date, &credential_scope, &canonical_request);
+        let signing_key = derive_signing_key(sk, &date_stamp, region, service);
+        let signature = compute_signature(&signing_key, &sts);
+        let authorization = format!(
+            "AWS4-HMAC-SHA256 Credential={}/{},SignedHeaders={},Signature={}",
+            ak, credential_scope, signed_headers, signature
+        );
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("host", host)
+            .header("x-amz-content-sha256", payload_hash)
+            .header("x-amz-date", amz_date)
+            .header("authorization", authorization)
+            .body(Body::empty())
+            .unwrap()
+    }
+
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/admin/cluster/overview")
-                .header("x-access-key", PEER_AK)
-                .header("x-secret-key", PEER_SK)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(sigv4_get("/myfsio/admin/cluster/overview", PEER_AK, PEER_SK))
         .await
         .unwrap();
     assert_eq!(
@@ -8431,7 +8739,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/admin/cluster/overview")
+                .uri("/myfsio/admin/cluster/overview")
                 .header("x-access-key", OUTBOUND_AK)
                 .header("x-secret-key", OUTBOUND_SK)
                 .body(Body::empty())

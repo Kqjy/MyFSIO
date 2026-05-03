@@ -1,5 +1,7 @@
 pub mod access_logging;
 pub mod acl;
+pub mod audit_log;
+pub mod cluster_attest;
 pub mod gc;
 pub mod integrity;
 pub mod lifecycle;
@@ -10,6 +12,8 @@ pub mod peer_admin;
 pub mod peer_fetch;
 pub mod replication;
 pub mod s3_client;
+pub mod safe_http_client;
+pub mod safe_resolver;
 pub mod site_registry;
 pub mod site_sync;
 pub mod system_metrics;

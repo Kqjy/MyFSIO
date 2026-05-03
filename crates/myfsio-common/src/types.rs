@@ -226,12 +226,25 @@ pub struct QuotaConfig {
     pub max_objects: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrincipalKind {
+    User,
+    Peer { site_id: String },
+}
+
+impl Default for PrincipalKind {
+    fn default() -> Self {
+        Self::User
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Principal {
     pub access_key: String,
     pub user_id: String,
     pub display_name: String,
     pub is_admin: bool,
+    pub kind: PrincipalKind,
 }
 
 impl Principal {
@@ -241,6 +254,28 @@ impl Principal {
             user_id,
             display_name,
             is_admin,
+            kind: PrincipalKind::User,
+        }
+    }
+
+    pub fn peer(access_key: String, user_id: String, display_name: String, site_id: String) -> Self {
+        Self {
+            access_key,
+            user_id,
+            display_name,
+            is_admin: false,
+            kind: PrincipalKind::Peer { site_id },
+        }
+    }
+
+    pub fn is_peer(&self) -> bool {
+        matches!(self.kind, PrincipalKind::Peer { .. })
+    }
+
+    pub fn peer_site_id(&self) -> Option<&str> {
+        match &self.kind {
+            PrincipalKind::Peer { site_id } => Some(site_id.as_str()),
+            PrincipalKind::User => None,
         }
     }
 }

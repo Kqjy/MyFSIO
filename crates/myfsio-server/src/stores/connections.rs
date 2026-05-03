@@ -138,25 +138,34 @@ fn load_from_disk(path: &Path, encryption_key: &str) -> Vec<RemoteConnection> {
         Ok(text) => text,
         Err(_) => return Vec::new(),
     };
-    let mut connections: Vec<RemoteConnection> =
-        serde_json::from_str(&text).unwrap_or_default();
-    for conn in &mut connections {
+    let raw: Vec<RemoteConnection> = serde_json::from_str(&text).unwrap_or_default();
+    let mut connections = Vec::with_capacity(raw.len());
+    for mut conn in raw {
         if let Some(token) = conn.secret_key.strip_prefix(ENCRYPTED_PREFIX) {
             match myfsio_auth::fernet::decrypt(encryption_key, token) {
-                Ok(plaintext) => {
-                    if let Ok(s) = String::from_utf8(plaintext) {
-                        conn.secret_key = s;
+                Ok(plaintext) => match String::from_utf8(plaintext) {
+                    Ok(s) => conn.secret_key = s,
+                    Err(_) => {
+                        tracing::error!(
+                            "Connection '{}' (id={}) decrypted to non-UTF-8 secret; skipping. Recreate the connection to restore replication.",
+                            conn.name,
+                            conn.id
+                        );
+                        continue;
                     }
-                }
+                },
                 Err(err) => {
                     tracing::error!(
-                        "Failed to decrypt peer secret_key for connection {}: {}",
+                        "Connection '{}' (id={}) has an undecryptable secret_key ({}). Skipping. Common cause: .myfsio.sys/config/.connections_key was rotated/lost. Recreate the connection.",
+                        conn.name,
                         conn.id,
                         err
                     );
+                    continue;
                 }
             }
         }
+        connections.push(conn);
     }
     connections
 }

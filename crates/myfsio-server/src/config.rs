@@ -63,6 +63,9 @@ pub struct ServerConfig {
     pub replication_max_retries: u32,
     pub replication_streaming_threshold_bytes: u64,
     pub replication_max_failures_per_bucket: usize,
+    pub replication_healer_enabled: bool,
+    pub replication_healer_interval_secs: u64,
+    pub replication_healer_max_attempts: u32,
     pub site_sync_enabled: bool,
     pub site_sync_interval_secs: u64,
     pub site_sync_batch_size: usize,
@@ -78,11 +81,20 @@ pub struct ServerConfig {
     pub num_trusted_proxies: usize,
     pub allowed_redirect_hosts: Vec<String>,
     pub allow_internal_endpoints: bool,
+    pub allow_legacy_header_auth: bool,
+    pub peer_require_https: bool,
+    pub peer_sigv4_timestamp_tolerance_secs: u64,
+    pub peer_nonce_cache_size: usize,
+    pub cluster_psk: Option<String>,
+    pub relay_idempotency_cache_size: usize,
+    pub relay_idempotency_ttl_secs: u64,
+    pub audit_log_enabled: bool,
     pub cors_origins: Vec<String>,
     pub cors_methods: Vec<String>,
     pub cors_allow_headers: Vec<String>,
     pub cors_expose_headers: Vec<String>,
     pub session_lifetime_days: u64,
+    pub session_cookie_secure: bool,
     pub log_level: String,
     pub display_timezone: String,
     pub multipart_min_part_size: u64,
@@ -205,12 +217,17 @@ impl ServerConfig {
 
         let replication_connect_timeout_secs =
             parse_u64_env("REPLICATION_CONNECT_TIMEOUT_SECONDS", 5);
-        let replication_read_timeout_secs = parse_u64_env("REPLICATION_READ_TIMEOUT_SECONDS", 30);
+        let replication_read_timeout_secs = parse_u64_env("REPLICATION_READ_TIMEOUT_SECONDS", 120);
         let replication_max_retries = parse_u64_env("REPLICATION_MAX_RETRIES", 2) as u32;
         let replication_streaming_threshold_bytes =
             parse_u64_env("REPLICATION_STREAMING_THRESHOLD_BYTES", 10_485_760);
         let replication_max_failures_per_bucket =
             parse_u64_env("REPLICATION_MAX_FAILURES_PER_BUCKET", 50) as usize;
+        let replication_healer_enabled = parse_bool_env("REPLICATION_HEALER_ENABLED", true);
+        let replication_healer_interval_secs =
+            parse_u64_env("REPLICATION_HEALER_INTERVAL_SECONDS", 60);
+        let replication_healer_max_attempts =
+            parse_u64_env("REPLICATION_HEALER_MAX_ATTEMPTS", 12) as u32;
 
         let site_sync_enabled = parse_bool_env("SITE_SYNC_ENABLED", false);
         let site_sync_interval_secs = parse_u64_env("SITE_SYNC_INTERVAL_SECONDS", 60);
@@ -235,11 +252,25 @@ impl ServerConfig {
         let num_trusted_proxies = parse_usize_env("NUM_TRUSTED_PROXIES", 0);
         let allowed_redirect_hosts = parse_list_env("ALLOWED_REDIRECT_HOSTS", "");
         let allow_internal_endpoints = parse_bool_env("ALLOW_INTERNAL_ENDPOINTS", false);
+        let allow_legacy_header_auth = parse_bool_env("ALLOW_LEGACY_HEADER_AUTH", false);
+        let peer_require_https = parse_bool_env("PEER_REQUIRE_HTTPS", false);
+        let peer_sigv4_timestamp_tolerance_secs =
+            parse_u64_env("PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS", 60);
+        let peer_nonce_cache_size = parse_usize_env("PEER_NONCE_CACHE_SIZE", 10_000);
+        let cluster_psk = std::env::var("MYFSIO_CLUSTER_PSK")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let relay_idempotency_cache_size =
+            parse_usize_env("RELAY_IDEMPOTENCY_CACHE_SIZE", 10_000);
+        let relay_idempotency_ttl_secs = parse_u64_env("RELAY_IDEMPOTENCY_TTL_SECONDS", 3_600);
+        let audit_log_enabled = parse_bool_env("AUDIT_LOG_ENABLED", false);
         let cors_origins = parse_list_env("CORS_ORIGINS", "*");
         let cors_methods = parse_list_env("CORS_METHODS", "GET,PUT,POST,DELETE,OPTIONS,HEAD");
         let cors_allow_headers = parse_list_env("CORS_ALLOW_HEADERS", "*");
         let cors_expose_headers = parse_list_env("CORS_EXPOSE_HEADERS", "*");
         let session_lifetime_days = parse_u64_env("SESSION_LIFETIME_DAYS", 1);
+        let session_cookie_secure = parse_bool_env("SESSION_COOKIE_SECURE", false);
         let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());
         let display_timezone = {
             let raw = std::env::var("DISPLAY_TIMEZONE").unwrap_or_else(|_| "UTC".to_string());
@@ -324,6 +355,9 @@ impl ServerConfig {
             replication_max_retries,
             replication_streaming_threshold_bytes,
             replication_max_failures_per_bucket,
+            replication_healer_enabled,
+            replication_healer_interval_secs,
+            replication_healer_max_attempts,
             site_sync_enabled,
             site_sync_interval_secs,
             site_sync_batch_size,
@@ -339,11 +373,20 @@ impl ServerConfig {
             num_trusted_proxies,
             allowed_redirect_hosts,
             allow_internal_endpoints,
+            allow_legacy_header_auth,
+            peer_require_https,
+            peer_sigv4_timestamp_tolerance_secs,
+            peer_nonce_cache_size,
+            cluster_psk,
+            relay_idempotency_cache_size,
+            relay_idempotency_ttl_secs,
+            audit_log_enabled,
             cors_origins,
             cors_methods,
             cors_allow_headers,
             cors_expose_headers,
             session_lifetime_days,
+            session_cookie_secure,
             log_level,
             display_timezone,
             multipart_min_part_size,
@@ -408,10 +451,13 @@ impl Default for ServerConfig {
             object_cache_max_size: 100,
             bucket_config_cache_ttl_seconds: 30.0,
             replication_connect_timeout_secs: 5,
-            replication_read_timeout_secs: 30,
+            replication_read_timeout_secs: 120,
             replication_max_retries: 2,
             replication_streaming_threshold_bytes: 10_485_760,
             replication_max_failures_per_bucket: 50,
+            replication_healer_enabled: true,
+            replication_healer_interval_secs: 60,
+            replication_healer_max_attempts: 12,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,
@@ -427,6 +473,14 @@ impl Default for ServerConfig {
             num_trusted_proxies: 0,
             allowed_redirect_hosts: Vec::new(),
             allow_internal_endpoints: false,
+            allow_legacy_header_auth: false,
+            peer_require_https: false,
+            peer_sigv4_timestamp_tolerance_secs: 60,
+            peer_nonce_cache_size: 10_000,
+            cluster_psk: None,
+            relay_idempotency_cache_size: 10_000,
+            relay_idempotency_ttl_secs: 3_600,
+            audit_log_enabled: false,
             cors_origins: vec!["*".to_string()],
             cors_methods: vec![
                 "GET".to_string(),
@@ -439,6 +493,7 @@ impl Default for ServerConfig {
             cors_allow_headers: vec!["*".to_string()],
             cors_expose_headers: vec!["*".to_string()],
             session_lifetime_days: 1,
+            session_cookie_secure: false,
             log_level: "INFO".to_string(),
             display_timezone: "UTC".to_string(),
             multipart_min_part_size: 5_242_880,

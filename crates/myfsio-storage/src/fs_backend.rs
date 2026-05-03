@@ -23,6 +23,13 @@ pub const META_KEY_CORRUPTION_DETAIL: &str = "__corruption_detail__";
 pub const META_KEY_QUARANTINE_PATH: &str = "__quarantine_path__";
 pub const META_KEY_PART_SIZES: &str = "__part_sizes__";
 
+const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
+    "__etag__",
+    "__size__",
+    "__last_modified__",
+    "__version_id__",
+];
+
 pub fn encode_part_sizes(sizes: &[u64]) -> String {
     let mut out = String::with_capacity(sizes.len() * 8);
     for (i, s) in sizes.iter().enumerate() {
@@ -306,6 +313,10 @@ impl FsStorageBackend {
         self.root.join(bucket_name)
     }
 
+    pub fn system_tmp_dir(&self) -> PathBuf {
+        self.root.join(SYSTEM_ROOT).join("tmp")
+    }
+
     fn system_root_path(&self) -> PathBuf {
         self.root.join(SYSTEM_ROOT)
     }
@@ -379,6 +390,12 @@ impl FsStorageBackend {
     }
 
     fn require_bucket(&self, bucket_name: &str) -> StorageResult<PathBuf> {
+        if validation::is_reserved_bucket_name(bucket_name) {
+            return Err(StorageError::InvalidBucketName(format!(
+                "Bucket name '{}' is reserved",
+                bucket_name
+            )));
+        }
         let path = self.bucket_path(bucket_name);
         if !path.exists() {
             return Err(StorageError::BucketNotFound(bucket_name.to_string()));
@@ -820,6 +837,81 @@ impl FsStorageBackend {
         })
     }
 
+    pub async fn put_object_with_etag_override(
+        &self,
+        bucket: &str,
+        key: &str,
+        stream: crate::traits::AsyncReadStream,
+        metadata: Option<HashMap<String, String>>,
+        etag_override: Option<String>,
+    ) -> StorageResult<ObjectMeta> {
+        self.validate_key(key)?;
+
+        let tmp_dir = self.tmp_dir();
+        tokio::fs::create_dir_all(&tmp_dir)
+            .await
+            .map_err(StorageError::Io)?;
+        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+
+        let chunk_size = self.stream_chunk_size;
+        let drain_tmp = tmp_path.clone();
+
+        let drain_result = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
+            use std::io::{BufWriter, Read, Write};
+            let mut reader = tokio_util::io::SyncIoBridge::new(stream);
+            let file = std::fs::File::create(&drain_tmp).map_err(StorageError::Io)?;
+            let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
+            let mut hasher = Md5::new();
+            let mut total: u64 = 0;
+            let mut buf = vec![0u8; chunk_size];
+            loop {
+                let n = reader.read(&mut buf).map_err(StorageError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
+                total += n as u64;
+            }
+            writer.flush().map_err(StorageError::Io)?;
+            Ok((format!("{:x}", hasher.finalize()), total))
+        })
+        .await;
+
+        let (etag, total_size) = match drain_result {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(e);
+            }
+            Err(join_err) => {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    join_err,
+                )));
+            }
+        };
+
+        let result = run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.finalize_put_sync(
+                bucket,
+                key,
+                &tmp_path,
+                etag,
+                total_size,
+                metadata,
+                etag_override,
+            )
+        });
+
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+        }
+        result
+    }
+
     fn compute_etag_sync(path: &Path) -> std::io::Result<String> {
         myfsio_crypto::hashing::md5_file(path)
     }
@@ -1235,11 +1327,15 @@ impl FsStorageBackend {
 
 
     fn validate_version_id(bucket_name: &str, key: &str, version_id: &str) -> StorageResult<()> {
-        if version_id.is_empty()
-            || version_id.contains('/')
-            || version_id.contains('\\')
-            || version_id.contains("..")
-        {
+        const MAX_VERSION_ID_LEN: usize = 128;
+        let invalid = version_id.is_empty()
+            || version_id.len() > MAX_VERSION_ID_LEN
+            || version_id == "."
+            || version_id == ".."
+            || !version_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+        if invalid {
             return Err(StorageError::VersionNotFound {
                 bucket: bucket_name.to_string(),
                 key: key.to_string(),
@@ -1952,7 +2048,9 @@ impl FsStorageBackend {
         etag: String,
         new_size: u64,
         metadata: Option<HashMap<String, String>>,
+        etag_override: Option<String>,
     ) -> StorageResult<ObjectMeta> {
+        let etag = etag_override.unwrap_or(etag);
         self.require_bucket(bucket_name)?;
         let destination = self.object_live_path(bucket_name, key);
         if let Some(parent) = destination.parent() {
@@ -2047,17 +2145,19 @@ impl FsStorageBackend {
         };
 
         let mut internal_meta = HashMap::new();
+        if let Some(ref user_meta) = metadata {
+            for (k, v) in user_meta {
+                if STORAGE_MANAGED_METADATA_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
+                internal_meta.insert(k.clone(), v.clone());
+            }
+        }
         internal_meta.insert("__etag__".to_string(), etag.clone());
         internal_meta.insert("__size__".to_string(), new_size.to_string());
         internal_meta.insert("__last_modified__".to_string(), mtime.to_string());
         if let Some(ref vid) = new_version_id {
             internal_meta.insert("__version_id__".to_string(), vid.clone());
-        }
-
-        if let Some(ref user_meta) = metadata {
-            for (k, v) in user_meta {
-                internal_meta.insert(k.clone(), v.clone());
-            }
         }
 
         self.write_metadata_sync(bucket_name, key, &internal_meta)
@@ -2090,7 +2190,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy().to_string();
-                if name_str == SYSTEM_ROOT {
+                if validation::is_reserved_bucket_name(&name_str) {
                     continue;
                 }
                 let ft = match entry.file_type() {
@@ -2128,14 +2228,26 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn create_bucket(&self, name: &str) -> StorageResult<()> {
+        if validation::is_reserved_bucket_name(name) {
+            return Err(StorageError::InvalidBucketName(format!(
+                "Bucket name '{}' is reserved",
+                name
+            )));
+        }
         if let Some(err) = validation::validate_bucket_name(name) {
             return Err(StorageError::InvalidBucketName(err));
         }
         let bucket_path = self.bucket_path(name);
-        if bucket_path.exists() {
-            return Err(StorageError::BucketAlreadyExists(name.to_string()));
+        if let Some(parent) = bucket_path.parent() {
+            std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
-        std::fs::create_dir_all(&bucket_path).map_err(StorageError::Io)?;
+        match std::fs::create_dir(&bucket_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(StorageError::BucketAlreadyExists(name.to_string()));
+            }
+            Err(err) => return Err(StorageError::Io(err)),
+        }
         std::fs::create_dir_all(self.system_bucket_root(name)).map_err(StorageError::Io)?;
         Ok(())
     }
@@ -2169,6 +2281,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn bucket_exists(&self, name: &str) -> StorageResult<bool> {
+        if validation::is_reserved_bucket_name(name) {
+            return Ok(false);
+        }
         Ok(self.bucket_path(name).exists())
     }
 
@@ -2183,70 +2298,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         stream: AsyncReadStream,
         metadata: Option<HashMap<String, String>>,
     ) -> StorageResult<ObjectMeta> {
-        self.validate_key(key)?;
-
-        let tmp_dir = self.tmp_dir();
-        tokio::fs::create_dir_all(&tmp_dir)
+        self.put_object_with_etag_override(bucket, key, stream, metadata, None)
             .await
-            .map_err(StorageError::Io)?;
-        let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
-
-        let chunk_size = self.stream_chunk_size;
-        let drain_tmp = tmp_path.clone();
-
-        // Drain request body + MD5 on a blocking thread: one runtime crossing
-        // for the whole transfer, not one per 256 KiB chunk.
-        let drain_result = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
-            use std::io::{BufWriter, Read, Write};
-            let mut reader = tokio_util::io::SyncIoBridge::new(stream);
-            let file = std::fs::File::create(&drain_tmp).map_err(StorageError::Io)?;
-            let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
-            let mut hasher = Md5::new();
-            let mut total: u64 = 0;
-            let mut buf = vec![0u8; chunk_size];
-            loop {
-                let n = reader.read(&mut buf).map_err(StorageError::Io)?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-                writer.write_all(&buf[..n]).map_err(StorageError::Io)?;
-                total += n as u64;
-            }
-            writer.flush().map_err(StorageError::Io)?;
-            Ok((format!("{:x}", hasher.finalize()), total))
-        })
-        .await;
-
-        let (etag, total_size) = match drain_result {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(e);
-            }
-            Err(join_err) => {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    join_err,
-                )));
-            }
-        };
-
-        // Commit body+metadata atomically under the per-key write lock. The
-        // lock is acquired *inside* run_blocking so the wait happens under
-        // block_in_place — if a long-running GET holds the read side, the
-        // runtime can migrate other async tasks off this worker instead of
-        // parking it.
-        let result = run_blocking(|| {
-            let _guard = self.get_object_lock(bucket, key).write();
-            self.finalize_put_sync(bucket, key, &tmp_path, etag, total_size, metadata)
-        });
-
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-        }
-        result
     }
 
     async fn get_object(
@@ -2286,9 +2339,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 });
             }
 
-            // Open the fd first so that the snapshot we hand back is anchored
-            // to this exact inode, even if a concurrent PUT renames over the
-            // path after we release the read lock.
             let file = std::fs::File::open(&path).map_err(StorageError::Io)?;
             let meta = file.metadata().map_err(StorageError::Io)?;
             let mtime = meta
@@ -2572,10 +2622,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             if let Some(parent) = link_owned.parent() {
                 std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
             }
-            // The hardlink shares the inode of the file *at this moment*.
-            // Later renames replace the live path with a different inode,
-            // but our hardlink path keeps resolving to the original one
-            // until it is explicitly unlinked.
             let _ = std::fs::remove_file(&link_owned);
             std::fs::hard_link(&path, &link_owned).map_err(StorageError::Io)?;
 
@@ -3064,11 +3110,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
         let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
 
-        // Copy bytes + hash under the src read lock so the source body and
-        // metadata we capture are consistent with one another. The src read
-        // guard is released at the end of this block before we take the dst
-        // write guard, so even when src == dst (same stripe) there's no
-        // upgrade deadlock.
         let copy_res = run_blocking(
             || -> StorageResult<(String, u64, HashMap<String, String>)> {
                 let _src_guard = self.get_object_lock(src_bucket, src_key).read();
@@ -3128,6 +3169,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 etag,
                 new_size,
                 Some(src_metadata),
+                None,
             )
         });
 
@@ -3164,6 +3206,70 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             entry.insert("metadata".to_string(), Value::Object(meta_map));
             self.write_index_entry_sync(bucket, key, &entry)
                 .map_err(StorageError::Io)?;
+            self.invalidate_bucket_caches(bucket);
+            Ok(())
+        })
+    }
+
+    async fn put_object_version_metadata(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        metadata: &HashMap<String, String>,
+    ) -> StorageResult<()> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.require_bucket(bucket)?;
+            self.validate_key(key)?;
+            Self::validate_version_id(bucket, key, version_id)?;
+
+            if self
+                .try_live_version_record_sync(bucket, key, version_id)
+                .is_some()
+            {
+                let mut entry = self.read_index_entry_sync(bucket, key).unwrap_or_default();
+                let meta_map: serde_json::Map<String, Value> = metadata
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                entry.insert("metadata".to_string(), Value::Object(meta_map));
+                self.write_index_entry_sync(bucket, key, &entry)
+                    .map_err(StorageError::Io)?;
+                self.invalidate_bucket_caches(bucket);
+                return Ok(());
+            }
+
+            let (manifest_path, _data_path) =
+                self.version_record_paths(bucket, key, version_id);
+            if !manifest_path.is_file() {
+                return Err(StorageError::VersionNotFound {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    version_id: version_id.to_string(),
+                });
+            }
+            let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+            let mut record: Value =
+                serde_json::from_str(&content).map_err(StorageError::Json)?;
+            let meta_map: serde_json::Map<String, Value> = metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            match record {
+                Value::Object(ref mut map) => {
+                    map.insert("metadata".to_string(), Value::Object(meta_map));
+                }
+                _ => {
+                    return Err(StorageError::Internal(
+                        "Invalid version manifest".to_string(),
+                    ));
+                }
+            }
+            let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
+            let tmp = manifest_path.with_extension("json.tmp");
+            std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
+            std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
             self.invalidate_bucket_caches(bucket);
             Ok(())
         })
@@ -3345,9 +3451,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
 
             use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-            // Open first so subsequent metadata/seek/read are all
-            // anchored to the same inode, even if a later rename swaps
-            // the path after we release the guard.
             let mut src = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
             let src_meta = src.metadata().map_err(StorageError::Io)?;
             let src_size = src_meta.len();
@@ -3477,8 +3580,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let upload_dir_owned = upload_dir.clone();
         let tmp_path_owned = tmp_path.clone();
 
-        // Assemble parts on a blocking thread using std::fs, large buffers,
-        // and a single writer flush — no per-chunk runtime crossings.
         let assemble_res =
             tokio::task::spawn_blocking(move || -> StorageResult<(String, u64, Vec<u64>)> {
                 use std::io::{BufReader, BufWriter, Read, Write};
@@ -3542,9 +3643,6 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let mut metadata = metadata;
         metadata.insert(META_KEY_PART_SIZES.to_string(), encode_part_sizes(&part_sizes));
 
-        // Commit to the destination key atomically under its write lock.
-        // Lock acquisition happens inside run_blocking so the wait runs under
-        // block_in_place rather than parking the async worker.
         let result = run_blocking(|| {
             let _guard = self.get_object_lock(bucket, &object_key).write();
             self.finalize_put_sync(
@@ -3554,6 +3652,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 etag,
                 total_size,
                 Some(metadata),
+                None,
             )
         });
 
@@ -3904,6 +4003,21 @@ mod tests {
         assert!(!backend.bucket_exists("test-bucket").await.unwrap());
         backend.create_bucket("test-bucket").await.unwrap();
         assert!(backend.bucket_exists("test-bucket").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_create_bucket_rejects_reserved_name() {
+        let (_dir, backend) = create_test_backend();
+        let err = backend
+            .create_bucket("myfsio")
+            .await
+            .expect_err("creating reserved bucket name must fail");
+        assert!(
+            matches!(err, crate::error::StorageError::InvalidBucketName(ref msg) if msg.contains("reserved")),
+            "expected InvalidBucketName(reserved …), got {:?}",
+            err
+        );
+        assert!(!backend.bucket_exists("myfsio").await.unwrap());
     }
 
     #[tokio::test]
@@ -4556,7 +4670,6 @@ mod tests {
         let tmp_dir = root.join(".myfsio.sys").join("tmp");
         std::fs::create_dir_all(&tmp_dir).unwrap();
 
-        // Seed with known content.
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'a'; 4096]));
         backend
             .put_object("link-bkt", "hot", data, None)
@@ -4566,9 +4679,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Writers swap the object between three distinct fill bytes with
-        // distinct known etags; we'll check the snapshot's etag is one of
-        // them and matches what we read from link_path.
         for w in 0..2 {
             let b = backend.clone();
             let stop = stop.clone();
@@ -4651,8 +4761,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Writers flip between 1 KiB and 2 KiB bodies so every PUT changes
-        // the reported size.
         for w in 0..2 {
             let b = backend.clone();
             let stop = stop.clone();
@@ -4716,9 +4824,6 @@ mod tests {
         let backend = StdArc::new(backend);
         backend.create_bucket("range-bkt").await.unwrap();
 
-        // Every version is a 256 KiB run of a single byte, so body bytes
-        // alone identify which version any ranged read came from. We pair
-        // that with the returned ETag to check they agree.
         const SIZE: u64 = 256 * 1024;
         let seed = vec![b'a'; SIZE as usize];
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(seed));
@@ -4762,10 +4867,6 @@ mod tests {
                     {
                         let mut buf = Vec::with_capacity(len as usize);
                         if stream.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
-                            // Every byte in the range must be the same — all
-                            // writers fill the object uniformly — and the
-                            // etag must be the MD5 of a uniform buffer of
-                            // that byte at full object size.
                             let fill = buf[0];
                             let all_match = buf.iter().all(|b| *b == fill);
                             let expected_etag =
@@ -4807,10 +4908,6 @@ mod tests {
         let backend = StdArc::new(backend);
         backend.create_bucket("mp-bkt").await.unwrap();
 
-        // Two fixed-size source versions: all 'a' or all 'b'. Writers flip
-        // between them; readers do upload_part_copy and check that the
-        // recorded ETag corresponds to exactly one of the two known MD5s
-        // (not a cross-pollinated value).
         const SIZE: u64 = 64 * 1024;
         let etag_a = format!("{:x}", Md5::digest(&vec![b'a'; SIZE as usize]));
         let etag_b = format!("{:x}", Md5::digest(&vec![b'b'; SIZE as usize]));
@@ -4824,7 +4921,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Writer flips the source between two fixed contents.
         {
             let b = backend.clone();
             let stop = stop.clone();
@@ -4859,10 +4955,6 @@ mod tests {
                         .upload_part_copy("mp-bkt", &upload_id, 1, "mp-bkt", "src", None, None)
                         .await;
                     if let Ok((etag, _lm)) = res {
-                        // The part etag is the MD5 of the copied bytes; it
-                        // must be one of the two known values, never something
-                        // in between (which would signal metadata from one
-                        // version and bytes from another).
                         if etag != etag_a && etag != etag_b {
                             bad.fetch_add(1, Ordering::Relaxed);
                         }
@@ -4891,7 +4983,6 @@ mod tests {
             "observed {} upload_part_copy results with etag unrelated to source content (out of {})",
             x, o
         );
-        // Sanity: make sure the test actually exercised both versions.
         let _ = PartInfo {
             part_number: 1,
             etag: etag_a,
@@ -4907,7 +4998,6 @@ mod tests {
         let backend = StdArc::new(backend);
         backend.create_bucket("contend").await.unwrap();
 
-        // Seed a 1 MiB object.
         let seed = vec![b'x'; 1_048_576];
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(seed));
         backend
@@ -4918,9 +5008,6 @@ mod tests {
         let stop = StdArc::new(std::sync::atomic::AtomicBool::new(false));
         let mut handles = Vec::new();
 
-        // Hammer the same key with PUTs that each acquire the write lock
-        // inside block_in_place. On only 2 worker threads, this is a
-        // worst-case pattern for worker starvation.
         for w in 0..4 {
             let b = backend.clone();
             let stop = stop.clone();
@@ -4936,8 +5023,6 @@ mod tests {
             }));
         }
 
-        // Unrelated async tasks (simulating e.g. health checks, metrics
-        // emissions) that should keep firing throughout the contention.
         let pings = StdArc::new(AtomicU64::new(0));
         for _ in 0..2 {
             let stop = stop.clone();
@@ -4957,9 +5042,6 @@ mod tests {
             let _ = h.await;
         }
 
-        // If the worker was getting parked on lock.write() outside of
-        // block_in_place, the unrelated task's ping counter would stall. We
-        // expect ~1 ping per ms when healthy; assert a generous floor.
         let p = pings.load(Ordering::Relaxed);
         assert!(
             p >= 50,
@@ -4978,7 +5060,6 @@ mod tests {
         backend.create_bucket("race-bucket").await.unwrap();
 
         const SIZE: usize = 256 * 1024;
-        // Seed an initial version so GETs can start immediately.
         let seed = vec![b'a'; SIZE];
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(seed));
         backend

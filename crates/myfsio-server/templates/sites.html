@@ -144,8 +144,8 @@
                         </div>
                         <div class="mb-3">
                             <label for="peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
-                            <input type="text" class="form-control" id="peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (optional)" autocomplete="off" spellcheck="false">
-                            <div class="form-text">Access key the peer presents when calling this site (e.g. /admin/cluster/overview). Leave blank to require admin credentials.</div>
+                            <input type="text" class="form-control" id="peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (required for bidirectional replication)" autocomplete="off" spellcheck="false">
+                            <div class="form-text"><strong>Required for bidirectional replication</strong> to prevent loops. This is the S3 access key the peer signs its replication PUTs with when pushing to this site &mdash; we use it to recognize "this object came from a peer" and skip re-replication. Optional for admin-only or one-way replication setups.</div>
                         </div>
                         <div class="d-grid">
                             <button type="submit" class="btn btn-primary">
@@ -383,6 +383,189 @@
     </div>
 </div>
 
+<div class="card shadow-sm border-0 mt-4" style="border-radius: 1rem;">
+    <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4 d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div>
+            <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                    <path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/>
+                    <path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                </svg>
+                Peer Credentials
+            </h5>
+            <p class="text-muted small mb-0">SigV4-only credentials for cross-site admin federation. Scoped to <code>/myfsio/admin/cluster/overview</code> and <code>/myfsio/admin/peer/*</code>; never granted S3 or user-management access.</p>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newPeerCredModal">+ Issue credential</button>
+    </div>
+    <div class="card-body px-4 pb-4">
+        {% if peer_credential_issued %}
+        <div id="peer-cred-issued-data" data-payload="{{ peer_credential_issued | json_encode | escape }}" hidden></div>
+        {% endif %}
+
+        {% if peer_credentials | length == 0 %}
+        <div class="text-center py-4 text-muted">
+            <p class="mb-0">No peer credentials issued yet.</p>
+            <p class="small mb-0">Issue one to allow another site to call this site's <code>/myfsio/admin/cluster/overview</code> or relayed admin actions.</p>
+        </div>
+        {% else %}
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th class="ps-3">Site</th>
+                        <th>Display name</th>
+                        <th>Access key</th>
+                        <th>Status</th>
+                        <th>Created</th>
+                        <th class="pe-3 text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for cred in peer_credentials %}
+                    {% set ak = cred.access_keys[0] %}
+                    <tr>
+                        <td class="ps-3"><code>{{ cred.site_id }}</code></td>
+                        <td>{{ cred.display_name }}</td>
+                        <td><code class="small">{{ ak.access_key }}</code></td>
+                        <td>
+                            {% if cred.enabled %}
+                            <span class="badge bg-success bg-opacity-10 text-success">enabled</span>
+                            {% else %}
+                            <span class="badge bg-secondary bg-opacity-10 text-secondary">disabled</span>
+                            {% endif %}
+                        </td>
+                        <td class="small text-muted">{{ ak.created_at | default(value="") }}</td>
+                        <td class="pe-3 text-end">
+                            <button type="button" class="btn btn-sm btn-outline-danger btn-revoke-peer-cred"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#revokePeerCredModal"
+                                    data-access-key="{{ ak.access_key }}"
+                                    data-site-id="{{ cred.site_id }}">
+                                Revoke
+                            </button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="modal fade" id="newPeerCredModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <form class="modal-content" method="post" action="/ui/peer-credentials/create">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+            <input type="hidden" name="return_to" value="/ui/sites" />
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">Issue peer credential</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted">The returned access key and secret are shown <strong>once</strong>. Hand them to the operator of the target site, who will use them in their outbound Connection back to here.</p>
+                <div class="mb-3">
+                    <label for="newPeerCredSite" class="form-label fw-medium">Site ID</label>
+                    <input id="newPeerCredSite" name="site_id" type="text" class="form-control" placeholder="us-west-1" required />
+                    <div class="form-text">Identifier of the peer site that will sign requests with this credential.</div>
+                </div>
+                <div class="mb-3">
+                    <label for="newPeerCredDisplay" class="form-label fw-medium">Display name (optional)</label>
+                    <input id="newPeerCredDisplay" name="display_name" type="text" class="form-control" placeholder="peer:us-west-1" />
+                </div>
+            </div>
+            <div class="modal-footer border-0 pt-0">
+                <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary">Issue</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal fade" id="revokePeerCredModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-danger me-2" viewBox="0 0 16 16">
+                        <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/>
+                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                    </svg>
+                    Revoke peer credential
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>Revoke <code id="revokePeerCredAccessKey"></code>?</p>
+                <div class="alert alert-warning d-flex align-items-start small mb-0" role="alert">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="flex-shrink-0 me-2 mt-0" viewBox="0 0 16 16">
+                        <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+                    </svg>
+                    <div>The peer (<code id="revokePeerCredSiteId"></code>) using this credential will immediately lose access to <code>/myfsio/admin/cluster/overview</code> and relayed admin actions.</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form method="post" id="revokePeerCredForm" class="d-inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
+                    <input type="hidden" name="return_to" value="/ui/sites" />
+                    <button class="btn btn-danger" type="submit">Revoke</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="peerCredIssuedModal" tabindex="-1" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+                <h5 class="modal-title fw-semibold">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-success me-2" viewBox="0 0 16 16">
+                        <path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/>
+                        <path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                    </svg>
+                    Peer credential issued
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted mb-3">Hand these to the operator of the target site. The <strong>secret key is shown only once</strong> &mdash; if you close this without copying it, you will need to issue a new credential.</p>
+                <div class="mb-3">
+                    <label class="form-label fw-medium small text-muted mb-1">Access key</label>
+                    <div class="input-group input-group-sm">
+                        <input type="text" class="form-control font-monospace" id="peerCredIssuedAccessKey" readonly>
+                        <button type="button" class="btn btn-outline-secondary btn-copy-cred" data-copy-target="peerCredIssuedAccessKey" data-copy-label="Access key">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-medium small text-muted mb-1">Secret key</label>
+                    <div class="input-group input-group-sm">
+                        <input type="text" class="form-control font-monospace" id="peerCredIssuedSecretKey" readonly>
+                        <button type="button" class="btn btn-outline-secondary btn-copy-cred" data-copy-target="peerCredIssuedSecretKey" data-copy-label="Secret key">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="mb-0">
+                    <label class="form-label fw-medium small text-muted mb-1">Site ID</label>
+                    <div class="input-group input-group-sm">
+                        <input type="text" class="form-control font-monospace" id="peerCredIssuedSiteId" readonly>
+                        <button type="button" class="btn btn-outline-secondary btn-copy-cred" data-copy-target="peerCredIssuedSiteId" data-copy-label="Site ID">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer border-0 pt-0">
+                <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Done</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="modal fade" id="editPeerModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -431,8 +614,9 @@
                     </div>
                     <div class="mb-3">
                         <label for="edit_peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
-                        <input type="text" class="form-control" id="edit_peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (optional)" autocomplete="off" spellcheck="false">
-                        <div class="form-text">Access key the peer presents when calling this site (e.g. /admin/cluster/overview). Leave blank to require admin credentials.</div>
+                        <input type="text" class="form-control" id="edit_peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (required for bidirectional replication)" autocomplete="off" spellcheck="false">
+                        <div class="form-text small">Required for bidirectional replication: the S3 access key this peer signs replication PUTs with when pushing to us. Without it, bidirectional rules are blocked to prevent infinite loops.</div>
+                        <div class="form-text">Access key the peer presents when calling this site (e.g. /myfsio/admin/cluster/overview). Leave blank to require admin credentials.</div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -806,6 +990,51 @@
                 .catch(function(err) {
                     contentDiv.innerHTML = '<div class="alert alert-danger" role="alert"><strong>Error:</strong> Failed to check bidirectional status. ' + escapeHtml(err.message || '') + '</div>';
                 });
+        });
+    });
+
+    var revokePeerCredModal = document.getElementById('revokePeerCredModal');
+    if (revokePeerCredModal) {
+        revokePeerCredModal.addEventListener('show.bs.modal', function (event) {
+            var button = event.relatedTarget;
+            if (!button) return;
+            var ak = button.getAttribute('data-access-key') || '';
+            var siteId = button.getAttribute('data-site-id') || '';
+            document.getElementById('revokePeerCredAccessKey').textContent = ak;
+            document.getElementById('revokePeerCredSiteId').textContent = siteId;
+            document.getElementById('revokePeerCredForm').action = '/ui/peer-credentials/' + encodeURIComponent(ak) + '/delete';
+        });
+    }
+
+    var peerCredIssuedDataEl = document.getElementById('peer-cred-issued-data');
+    if (peerCredIssuedDataEl) {
+        try {
+            var issued = JSON.parse(peerCredIssuedDataEl.dataset.payload || '{}');
+            var modalEl = document.getElementById('peerCredIssuedModal');
+            if (modalEl && issued && issued.access_key) {
+                document.getElementById('peerCredIssuedAccessKey').value = issued.access_key || '';
+                document.getElementById('peerCredIssuedSecretKey').value = issued.secret_key || '';
+                document.getElementById('peerCredIssuedSiteId').value = issued.site_id || '';
+                new bootstrap.Modal(modalEl).show();
+            }
+        } catch (e) {}
+    }
+
+    document.querySelectorAll('.btn-copy-cred').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var targetId = this.getAttribute('data-copy-target');
+            var label = this.getAttribute('data-copy-label') || 'Value';
+            var input = document.getElementById(targetId);
+            if (!input) return;
+            var value = input.value;
+            if (window.UICore && window.UICore.copyToClipboard) {
+                window.UICore.copyToClipboard(value).then(function(ok) {
+                    if (ok && window.showToast) window.showToast(label + ' copied', 'Copied', 'success');
+                });
+            } else {
+                input.select();
+                try { document.execCommand('copy'); } catch (e) {}
+            }
         });
     });
 

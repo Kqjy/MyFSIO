@@ -154,6 +154,181 @@ pub async fn require_login(
     Redirect::to(&target).into_response()
 }
 
+fn session_principal(
+    state: &AppState,
+    session: &SessionHandle,
+) -> Option<myfsio_common::types::Principal> {
+    let access_key = session.read(|s| s.user_id.clone())?;
+    state.iam.get_principal(&access_key)
+}
+
+pub fn current_principal(
+    state: &AppState,
+    session: &SessionHandle,
+) -> Option<myfsio_common::types::Principal> {
+    session_principal(state, session)
+}
+
+pub fn ensure_admin(
+    state: &AppState,
+    session: &SessionHandle,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let is_admin = current_principal(state, session)
+        .map(|p| p.is_admin)
+        .unwrap_or(false);
+    if is_admin {
+        return None;
+    }
+    let wants_json = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/json"))
+        .unwrap_or(false)
+        || headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("application/json"))
+            .unwrap_or(false);
+    if wants_json {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({"error": "Admin privileges required."}).to_string(),
+            )
+                .into_response(),
+        );
+    }
+    session.write(|s| s.push_flash("danger", "Admin privileges required."));
+    Some(Redirect::to("/ui/buckets").into_response())
+}
+
+pub async fn ui_admin_audit_layer(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = req.method().clone();
+    let should_audit = matches!(
+        method,
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::PATCH
+            | axum::http::Method::DELETE
+    );
+    let path = req.uri().path().to_string();
+    let response = next.run(req).await;
+    if should_audit && state.audit_log.enabled() {
+        let status = response.status().as_u16();
+        audit_admin_action(
+            &state,
+            &session,
+            &format!("ui:{} {}", method, path),
+            method.as_str(),
+            &path,
+            status,
+            None,
+        );
+    }
+    response
+}
+
+pub fn audit_admin_action(
+    state: &AppState,
+    session: &SessionHandle,
+    action: &str,
+    method: &str,
+    path: &str,
+    status_code: u16,
+    error: Option<String>,
+) {
+    if !state.audit_log.enabled() {
+        return;
+    }
+    let admin_user = session.read(|s| s.user_id.clone());
+    let result = if (200..400).contains(&status_code) {
+        "ok".to_string()
+    } else {
+        "error".to_string()
+    };
+    state
+        .audit_log
+        .record(crate::services::audit_log::AuditEntry {
+            ts: chrono::Utc::now().to_rfc3339(),
+            correlation_id: uuid::Uuid::new_v4().to_string(),
+            origin_site_id: None,
+            admin_user_id: admin_user,
+            action: action.to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
+            target: crate::services::audit_log::AuditTarget::Local,
+            result,
+            status_code,
+            peer_ip: None,
+            idempotency_key: None,
+            error,
+            attribution: Some(crate::services::audit_log::ATTRIBUTION_VERIFIED.to_string()),
+        });
+}
+
+pub async fn require_admin(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let principal = match session_principal(&state, &session) {
+        Some(p) => p,
+        None => {
+            return forbid(&state, &session, &req, "Sign in as an admin to continue.");
+        }
+    };
+    if !principal.is_admin {
+        return forbid(
+            &state,
+            &session,
+            &req,
+            "Admin privileges are required for this action.",
+        );
+    }
+    next.run(req).await
+}
+
+fn forbid(
+    _state: &AppState,
+    session: &SessionHandle,
+    req: &axum::extract::Request,
+    message: &str,
+) -> Response {
+    let wants_json = req
+        .headers()
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/json"))
+        .unwrap_or(false)
+        || req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("application/json"))
+            .unwrap_or(false);
+    if wants_json {
+        return (
+            StatusCode::FORBIDDEN,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json",
+            )],
+            serde_json::json!({ "error": message }).to_string(),
+        )
+            .into_response();
+    }
+    session.write(|s| s.push_flash("danger", message.to_string()));
+    Redirect::to("/ui/buckets").into_response()
+}
+
 pub fn render(state: &AppState, template: &str, ctx: &Context) -> Response {
     let engine = match &state.templates {
         Some(e) => e,

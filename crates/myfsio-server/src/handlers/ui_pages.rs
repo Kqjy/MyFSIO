@@ -124,6 +124,10 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
         ("ui.update_local_site", "/ui/sites/local"),
         ("ui.add_peer_site", "/ui/sites/peers"),
         ("ui.cluster_dashboard", "/ui/cluster"),
+        ("ui.peer_credentials", "/ui/peer-credentials"),
+        ("ui.create_peer_credential", "/ui/peer-credentials/create"),
+        ("ui.delete_peer_credential", "/ui/peer-credentials/{access_key}/delete"),
+        ("ui.audit_log", "/ui/audit-log"),
         ("ui.metrics_dashboard", "/ui/metrics"),
         ("ui.system_dashboard", "/ui/system"),
         ("ui.system_gc_status", "/ui/system/gc/status"),
@@ -148,7 +152,12 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
 
 fn page_context(state: &AppState, session: &SessionHandle, endpoint: &str) -> Context {
     let mut ctx = base_context(session, Some(endpoint));
-    let principal = session.read(|s| {
+    let live_principal = crate::handlers::ui::current_principal(state, session);
+    let is_admin = live_principal
+        .as_ref()
+        .map(|p| p.is_admin)
+        .unwrap_or(false);
+    let principal_value = session.read(|s| {
         s.user_id.as_ref().map(|uid| {
             json!({
                 "access_key": uid,
@@ -157,21 +166,25 @@ fn page_context(state: &AppState, session: &SessionHandle, endpoint: &str) -> Co
                     .display_name
                     .clone()
                     .unwrap_or_else(|| uid.clone()),
-                "is_admin": true,
+                "is_admin": is_admin,
             })
         })
     });
-    match principal {
+    match principal_value {
         Some(p) => ctx.insert("principal", &p),
         None => ctx.insert("principal", &Value::Null),
     }
-    ctx.insert("can_manage_iam", &true);
-    ctx.insert("can_manage_replication", &true);
-    ctx.insert("can_manage_sites", &true);
-    ctx.insert("can_manage_encryption", &state.config.encryption_enabled);
+    ctx.insert("can_manage_iam", &is_admin);
+    ctx.insert("can_manage_replication", &is_admin);
+    ctx.insert("can_manage_sites", &is_admin);
+    ctx.insert(
+        "can_manage_encryption",
+        &(is_admin && state.config.encryption_enabled),
+    );
     ctx.insert("website_hosting_nav", &state.config.website_hosting_enabled);
     ctx.insert("encryption_enabled", &state.config.encryption_enabled);
     ctx.insert("kms_enabled", &state.config.kms_enabled);
+    ctx.insert("is_admin", &is_admin);
 
     let flashed = session.write(|s| s.take_flash());
     inject_flash(&mut ctx, flashed);
@@ -585,14 +598,17 @@ pub async fn bucket_detail(
             .map(|conn| conn.name.clone())
             .unwrap_or_default(),
     );
+    let viewer_is_admin = crate::handlers::ui::current_principal(&state, &session)
+        .map(|p| p.is_admin)
+        .unwrap_or(false);
     ctx.insert("default_policy", &default_policy);
-    ctx.insert("can_manage_cors", &true);
-    ctx.insert("can_manage_lifecycle", &true);
-    ctx.insert("can_manage_quota", &true);
-    ctx.insert("can_manage_versioning", &true);
-    ctx.insert("can_manage_website", &true);
-    ctx.insert("can_edit_policy", &true);
-    ctx.insert("is_replication_admin", &true);
+    ctx.insert("can_manage_cors", &viewer_is_admin);
+    ctx.insert("can_manage_lifecycle", &viewer_is_admin);
+    ctx.insert("can_manage_quota", &viewer_is_admin);
+    ctx.insert("can_manage_versioning", &viewer_is_admin);
+    ctx.insert("can_manage_website", &viewer_is_admin);
+    ctx.insert("can_edit_policy", &viewer_is_admin);
+    ctx.insert("is_replication_admin", &viewer_is_admin);
     ctx.insert("lifecycle_enabled", &state.config.lifecycle_enabled);
     ctx.insert("site_sync_enabled", &state.config.site_sync_enabled);
     ctx.insert(
@@ -1282,10 +1298,17 @@ pub async fn sites_dashboard(
         })
         .collect();
 
+    let credentials = state.iam.list_peer_credentials();
+    let issued_payload = session
+        .write(|s| s.extra.remove("peer_cred_issued"))
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
     ctx.insert("local_site", &local_site);
     ctx.insert("peers", &peers);
     ctx.insert("peers_with_stats", &peers_with_stats);
     ctx.insert("connections", &conns);
+    ctx.insert("peer_credentials", &credentials);
+    ctx.insert("peer_credential_issued", &issued_payload);
     ctx.insert(
         "config_site_id",
         &state.config.site_id.clone().unwrap_or_default(),
@@ -1349,6 +1372,111 @@ fn cluster_totals(sites: &[Value]) -> Value {
     })
 }
 
+pub async fn peer_credentials_page(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+) -> Response {
+    let mut ctx = page_context(&state, &session, "ui.peer_credentials");
+    let (api_base, _) = parse_api_base(&state);
+    ctx.insert("api_base", &api_base);
+    let credentials = state.iam.list_peer_credentials();
+    ctx.insert("credentials", &credentials);
+    let issued_payload = session
+        .write(|s| s.extra.remove("peer_cred_issued"))
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    ctx.insert("issued_payload", &issued_payload);
+    render(&state, "peer_credentials.html", &ctx)
+}
+
+#[derive(serde::Deserialize)]
+pub struct PeerCredentialForm {
+    pub site_id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub return_to: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PeerCredentialDeleteForm {
+    #[serde(default)]
+    pub return_to: String,
+}
+
+fn resolve_peer_credential_return(raw: &str) -> &'static str {
+    match raw.trim() {
+        "/ui/sites" => "/ui/sites",
+        _ => "/ui/peer-credentials",
+    }
+}
+
+pub async fn ui_create_peer_credential(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+    axum::Form(form): axum::Form<PeerCredentialForm>,
+) -> Response {
+    let target = resolve_peer_credential_return(&form.return_to);
+    let site_id = form.site_id.trim();
+    if site_id.is_empty() {
+        session.write(|s| s.push_flash("danger", "Site ID is required."));
+        return axum::response::Redirect::to(target).into_response();
+    }
+    let display_name_opt = if form.display_name.trim().is_empty() {
+        None
+    } else {
+        Some(form.display_name.trim())
+    };
+    match state.iam.create_peer_credential(site_id, display_name_opt) {
+        Ok(value) => {
+            let payload = serde_json::json!({
+                "site_id": value.get("site_id").cloned().unwrap_or_default(),
+                "access_key": value.get("access_key").cloned().unwrap_or_default(),
+                "secret_key": value.get("secret_key").cloned().unwrap_or_default(),
+            });
+            session.write(|s| {
+                s.extra
+                    .insert("peer_cred_issued".to_string(), payload.to_string());
+                s.push_flash("success", "Peer credential issued. Copy the secret now.");
+            });
+        }
+        Err(e) => {
+            session.write(|s| s.push_flash("danger", format!("Create failed: {}", e)));
+        }
+    }
+    axum::response::Redirect::to(target).into_response()
+}
+
+pub async fn ui_delete_peer_credential(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+    axum::extract::Path(access_key): axum::extract::Path<String>,
+    axum::Form(form): axum::Form<PeerCredentialDeleteForm>,
+) -> Response {
+    let target = resolve_peer_credential_return(&form.return_to);
+    match state.iam.delete_peer_credential(&access_key) {
+        Ok(()) => {
+            session.write(|s| s.push_flash("success", "Peer credential revoked."));
+        }
+        Err(e) => {
+            session.write(|s| s.push_flash("danger", format!("Revoke failed: {}", e)));
+        }
+    }
+    axum::response::Redirect::to(target).into_response()
+}
+
+pub async fn audit_log_page(
+    State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
+) -> Response {
+    let mut ctx = page_context(&state, &session, "ui.audit_log");
+    let (api_base, _) = parse_api_base(&state);
+    ctx.insert("api_base", &api_base);
+    let entries = state.audit_log.read_recent(200);
+    ctx.insert("entries", &entries);
+    ctx.insert("audit_enabled", &state.audit_log.enabled());
+    render(&state, "audit_log.html", &ctx)
+}
+
 pub async fn cluster_dashboard(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
@@ -1374,12 +1502,15 @@ pub async fn cluster_dashboard(
         .filter(|s| s.get("online").and_then(|v| v.as_bool()).unwrap_or(false))
         .count();
 
+    let audit_entries = state.audit_log.read_recent(10);
     ctx.insert("cluster_sites", &sites);
     ctx.insert("cluster_total_buckets", &total_buckets);
     ctx.insert("cluster_total_objects", &total_objects);
     ctx.insert("cluster_total_size_bytes", &total_size_bytes);
     ctx.insert("cluster_online_count", &online_count);
     ctx.insert("cluster_total_count", &sites.len());
+    ctx.insert("audit_entries", &audit_entries);
+    ctx.insert("audit_enabled", &state.audit_log.enabled());
     render(&state, "cluster.html", &ctx)
 }
 
@@ -1417,7 +1548,11 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
 
     let connect_to = std::time::Duration::from_secs(2);
     let read_to = std::time::Duration::from_secs(3);
-    let client = crate::services::peer_admin::PeerAdminClient::new(connect_to, read_to);
+    let client = crate::services::peer_admin::PeerAdminClient::new(
+        connect_to,
+        read_to,
+        state.config.allow_internal_endpoints,
+    );
 
     let mut peer_futures = Vec::new();
     for peer in peers {
@@ -1425,12 +1560,11 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
             .connection_id
             .as_deref()
             .and_then(|id| state.connections.get(id));
-        let endpoint = peer.endpoint.clone();
         let conn_clone = conn.clone();
         let client_ref = &client;
         peer_futures.push(async move {
             let value = match conn_clone {
-                Some(c) => client_ref.fetch_cluster_overview(&endpoint, &c).await,
+                Some(c) => client_ref.fetch_cluster_overview(&c.endpoint_url, &c).await,
                 None => Err("no connection configured".to_string()),
             };
             (peer, value)
@@ -1618,6 +1752,24 @@ pub async fn add_peer_site(
         return Redirect::to("/ui/sites").into_response();
     }
 
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/sites").into_response();
+        }
+    }
+
     let Some(registry) = &state.site_registry else {
         let message = "Site registry is not available.".to_string();
         if wants_json {
@@ -1764,6 +1916,24 @@ pub async fn update_peer_site(
         }
         session.write(|s| s.push_flash("danger", message));
         return Redirect::to("/ui/sites").into_response();
+    }
+
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/sites").into_response();
+        }
     }
 
     let connection_id = {
@@ -2366,6 +2536,30 @@ async fn create_peer_replication_rules_impl(
     }
     .to_string();
 
+    if crate::services::replication::rule_requires_inbound_ak(&mode) {
+        let ak_set = peer
+            .peer_inbound_access_key
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !ak_set {
+            session.write(|s| {
+                s.push_flash(
+                    "danger",
+                    format!(
+                        "Bidirectional replication requires the peer's inbound access key to be configured on '{}'. Set it on the Sites page (Edit Peer Site → Peer Inbound Access Key) before creating a bidirectional rule. Without it, replication will loop infinitely.",
+                        if peer.display_name.is_empty() {
+                            peer.site_id.as_str()
+                        } else {
+                            peer.display_name.as_str()
+                        }
+                    ),
+                )
+            });
+            return Redirect::to("/ui/sites").into_response();
+        }
+    }
+
     if form.buckets.is_empty() {
         session.write(|s| s.push_flash("warning", "No buckets selected."));
         return Redirect::to("/ui/sites").into_response();
@@ -2404,28 +2598,51 @@ async fn create_peer_replication_rules_impl(
         }
     }
 
+    let mut conflict_buckets: Vec<String> = Vec::new();
     for bucket_name in created_existing {
-        state
+        use crate::services::replication::ScheduleRunOutcome;
+        match state
             .replication
             .clone()
-            .schedule_existing_objects_sync(bucket_name);
+            .schedule_existing_objects_sync(bucket_name.clone())
+        {
+            ScheduleRunOutcome::Started { .. } | ScheduleRunOutcome::AlreadyRunning { .. } => {}
+            ScheduleRunOutcome::Conflict { existing_kind, .. } => {
+                tracing::warn!(
+                    "Existing-object sync deferred for bucket {}: a {} batch is already running",
+                    bucket_name,
+                    existing_kind.as_str()
+                );
+                conflict_buckets.push(bucket_name);
+            }
+        }
     }
 
     if created > 0 {
+        let peer_label = if peer.display_name.is_empty() {
+            peer.site_id.as_str()
+        } else {
+            peer.display_name.as_str()
+        }
+        .to_string();
         session.write(|s| {
             s.push_flash(
                 "success",
-                format!(
-                    "Created {} replication rule(s) for {}.",
-                    created,
-                    if peer.display_name.is_empty() {
-                        peer.site_id.as_str()
-                    } else {
-                        peer.display_name.as_str()
-                    }
-                ),
+                format!("Created {} replication rule(s) for {}.", created, peer_label),
             )
         });
+        if !conflict_buckets.is_empty() {
+            session.write(|s| {
+                s.push_flash(
+                    "warning",
+                    format!(
+                        "Existing-object sync was not scheduled for {} bucket(s) ({}) because another replication batch is already running. Click Resume on each bucket once the current batch finishes.",
+                        conflict_buckets.len(),
+                        conflict_buckets.join(", ")
+                    ),
+                )
+            });
+        }
     }
     Redirect::to("/ui/sites").into_response()
 }
@@ -2454,6 +2671,9 @@ pub async fn create_bucket(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let wants_json = wants_json(&headers);
     let form = match parse_form_any(&headers, body).await {
         Ok(fields) => CreateBucketForm {
@@ -2665,17 +2885,66 @@ pub async fn update_bucket_replication(
                     json!({ "action": "resume", "enabled": false, "no_op": true }),
                 );
             };
-            rule.enabled = true;
             let mode = rule.mode.clone();
+            let was_enabled = rule.enabled;
+
+            if mode == crate::services::replication::MODE_ALL {
+                if let Some(existing) = state.replication.current_run(&bucket_name) {
+                    if existing.kind != crate::services::replication::BatchRunKind::ResumeAll {
+                        let kind_str = existing.kind.as_str();
+                        let message = format!(
+                            "Cannot resume yet: a {} batch is currently running for this bucket. Wait for it to finish and try again.",
+                            kind_str
+                        );
+                        return respond(
+                            false,
+                            StatusCode::CONFLICT,
+                            message.clone(),
+                            json!({
+                                "action": "resume",
+                                "enabled": was_enabled,
+                                "mode": mode,
+                                "run_id": serde_json::Value::Null,
+                                "conflict": kind_str,
+                                "conflict_run_id": existing.run_id.clone(),
+                                "error": message,
+                            }),
+                        );
+                    }
+                }
+            }
+
+            rule.enabled = true;
             state.replication.set_rule(rule);
 
+            let mut run_id: Option<String> = None;
+            let mut race_kind: Option<&'static str> = None;
             let message = if mode == crate::services::replication::MODE_ALL {
-                state
+                use crate::services::replication::ScheduleRunOutcome;
+                match state
                     .replication
                     .clone()
-                    .schedule_existing_objects_sync(bucket_name.clone());
-                "Replication resumed. Existing object sync will continue in the background."
-                    .to_string()
+                    .schedule_existing_objects_sync(bucket_name.clone())
+                {
+                    ScheduleRunOutcome::Started { run_id: rid }
+                    | ScheduleRunOutcome::AlreadyRunning { run_id: rid } => {
+                        run_id = Some(rid);
+                        "Replication resumed. Existing object sync will continue in the background."
+                            .to_string()
+                    }
+                    ScheduleRunOutcome::Conflict { existing_kind, .. } => {
+                        race_kind = Some(existing_kind.as_str());
+                        tracing::warn!(
+                            "Resume race for bucket {}: peek saw no conflict but a {} batch started before we could schedule",
+                            bucket_name,
+                            existing_kind.as_str()
+                        );
+                        format!(
+                            "Replication enabled, but existing-object sync was not scheduled because a {} batch started concurrently. Click Resume again after it finishes to enumerate existing objects.",
+                            existing_kind.as_str()
+                        )
+                    }
+                }
             } else {
                 "Replication resumed.".to_string()
             };
@@ -2684,7 +2953,13 @@ pub async fn update_bucket_replication(
                 true,
                 StatusCode::OK,
                 message,
-                json!({ "action": "resume", "enabled": true, "mode": mode }),
+                json!({
+                    "action": "resume",
+                    "enabled": true,
+                    "mode": mode,
+                    "run_id": run_id,
+                    "conflict": race_kind,
+                }),
             )
         }
         "create" => {
@@ -2715,6 +2990,37 @@ pub async fn update_bucket_replication(
                 _ => crate::services::replication::MODE_NEW_ONLY,
             };
 
+            if crate::services::replication::rule_requires_inbound_ak(mode) {
+                let peer = state
+                    .site_registry
+                    .as_ref()
+                    .and_then(|r| r.find_peer_by_connection_id(target_connection_id));
+                let ak_set = peer
+                    .as_ref()
+                    .and_then(|p| p.peer_inbound_access_key.as_deref())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if !ak_set {
+                    let detail = match peer.as_ref() {
+                        Some(p) => format!(
+                            "Bidirectional replication requires the peer's inbound access key to be configured on '{}'. Set it on the Sites page (Edit Peer Site → Peer Inbound Access Key) before creating a bidirectional rule. Without it, replication will loop infinitely.",
+                            if p.display_name.is_empty() {
+                                p.site_id.as_str()
+                            } else {
+                                p.display_name.as_str()
+                            }
+                        ),
+                        None => "Bidirectional replication requires a peer site row with an inbound access key. The connection you selected is not registered as a peer site, or its peer_inbound_access_key is empty.".to_string(),
+                    };
+                    return respond(
+                        false,
+                        StatusCode::BAD_REQUEST,
+                        detail.clone(),
+                        json!({ "error": detail }),
+                    );
+                }
+            }
+
             state
                 .replication
                 .set_rule(crate::services::replication::ReplicationRule {
@@ -2735,13 +3041,27 @@ pub async fn update_bucket_replication(
                     filter_prefix: None,
                 });
 
+            let mut conflict_kind: Option<&'static str> = None;
             let message = if mode == crate::services::replication::MODE_ALL {
-                state
+                use crate::services::replication::ScheduleRunOutcome;
+                match state
                     .replication
                     .clone()
-                    .schedule_existing_objects_sync(bucket_name.clone());
-                "Replication configured. Existing object sync will continue in the background."
-                    .to_string()
+                    .schedule_existing_objects_sync(bucket_name.clone())
+                {
+                    ScheduleRunOutcome::Started { .. }
+                    | ScheduleRunOutcome::AlreadyRunning { .. } => {
+                        "Replication configured. Existing object sync will continue in the background."
+                            .to_string()
+                    }
+                    ScheduleRunOutcome::Conflict { existing_kind, .. } => {
+                        conflict_kind = Some(existing_kind.as_str());
+                        format!(
+                            "Replication configured, but existing-object sync was not scheduled because a {} batch is currently running for this bucket. Click Resume after it finishes to enumerate existing objects.",
+                            existing_kind.as_str()
+                        )
+                    }
+                }
             } else {
                 "Replication configured. New uploads will be replicated.".to_string()
             };
@@ -2756,6 +3076,7 @@ pub async fn update_bucket_replication(
                     "mode": mode,
                     "target_connection_id": target_connection_id,
                     "target_bucket": target_bucket,
+                    "conflict": conflict_kind,
                 }),
             )
         }
@@ -2771,6 +3092,7 @@ pub async fn update_bucket_replication(
 #[derive(serde::Deserialize)]
 pub struct ConnectionForm {
     pub name: String,
+    #[serde(alias = "endpoint")]
     pub endpoint_url: String,
     pub access_key: String,
     #[serde(default)]
@@ -2809,6 +3131,24 @@ pub async fn create_connection(
         }
         session.write(|s| s.push_flash("danger", message));
         return Redirect::to("/ui/connections").into_response();
+    }
+
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/connections").into_response();
+        }
     }
 
     let connection = crate::stores::connections::RemoteConnection {
@@ -2899,6 +3239,24 @@ pub async fn update_connection(
         }
         session.write(|s| s.push_flash("danger", message));
         return Redirect::to("/ui/connections").into_response();
+    }
+
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+            let message = format!(
+                "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                reason
+            );
+            if wants_json {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to("/ui/connections").into_response();
+        }
     }
 
     connection.name = name.to_string();

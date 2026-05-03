@@ -15,6 +15,13 @@ struct Cli {
     show_config: bool,
     #[arg(long, help = "Reset admin credentials and exit")]
     reset_cred: bool,
+    #[arg(
+        long,
+        help = "Mark peer_inbound_access_key entries as peer credentials (one-shot). \
+                After migration these creds are restricted to /myfsio/admin/cluster/overview and \
+                lose any S3 policies; reissue separate creds for site_sync if needed."
+    )]
+    migrate_peer_creds: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -32,18 +39,14 @@ async fn main() {
 
     let cli = Cli::parse();
     let config = ServerConfig::from_env();
-    if !config
-        .ratelimit_storage_uri
-        .eq_ignore_ascii_case("memory://")
-    {
-        tracing::warn!(
-            "RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory rate limits",
-            config.ratelimit_storage_uri
-        );
-    }
+    warn_unsupported_ratelimit_uri(&config);
 
     if cli.reset_cred {
         reset_admin_credentials(&config);
+        return;
+    }
+    if cli.migrate_peer_creds {
+        migrate_peer_credentials(&config);
         return;
     }
     if cli.check_config || cli.show_config {
@@ -96,6 +99,25 @@ async fn main() {
         AppState::new(config.clone())
     };
 
+    if !config.peer_require_https {
+        if let Some(registry) = state.site_registry.as_ref() {
+            let http_peers: Vec<String> = registry
+                .list_peers()
+                .into_iter()
+                .filter(|p| p.endpoint.starts_with("http://"))
+                .map(|p| p.site_id)
+                .collect();
+            if !http_peers.is_empty() {
+                tracing::warn!(
+                    "PEER_REQUIRE_HTTPS=false and the following peers use http:// endpoints: {}. \
+                     Request bodies and admin payloads are visible to anyone on the network path. \
+                     Set PEER_REQUIRE_HTTPS=true to reject http:// peer endpoints.",
+                    http_peers.join(", ")
+                );
+            }
+        }
+    }
+
     let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     if let Some(ref gc) = state.gc {
@@ -138,6 +160,19 @@ async fn main() {
             worker.run().await;
         }));
         tracing::info!("Site sync worker started");
+    }
+
+    if config.ui_enabled {
+        bg_handles.push(
+            state
+                .sessions
+                .clone()
+                .spawn_sweeper(std::time::Duration::from_secs(300)),
+        );
+        tracing::info!(
+            "Session sweeper started (capacity={}, interval=300s)",
+            state.sessions.capacity()
+        );
     }
 
     let ui_enabled = config.ui_enabled;
@@ -297,6 +332,25 @@ fn print_config_summary(config: &ServerConfig) {
     println!("Operation metrics enabled: {}", config.metrics_enabled);
 }
 
+fn unsupported_ratelimit_uri_message(config: &ServerConfig) -> Option<String> {
+    if config
+        .ratelimit_storage_uri
+        .eq_ignore_ascii_case("memory://")
+    {
+        return None;
+    }
+    Some(format!(
+        "RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory rate limits.",
+        config.ratelimit_storage_uri
+    ))
+}
+
+fn warn_unsupported_ratelimit_uri(config: &ServerConfig) {
+    if let Some(message) = unsupported_ratelimit_uri_message(config) {
+        tracing::warn!("{}", message);
+    }
+}
+
 fn validate_config(config: &ServerConfig) -> Vec<String> {
     let mut issues = Vec::new();
 
@@ -326,14 +380,8 @@ fn validate_config(config: &ServerConfig) -> Vec<String> {
     if config.bucket_config_cache_ttl_seconds < 0.0 {
         issues.push("CRITICAL: BUCKET_CONFIG_CACHE_TTL_SECONDS cannot be negative.".to_string());
     }
-    if !config
-        .ratelimit_storage_uri
-        .eq_ignore_ascii_case("memory://")
-    {
-        issues.push(format!(
-            "WARNING: RATE_LIMIT_STORAGE_URI={} is not supported yet; using in-memory limits.",
-            config.ratelimit_storage_uri
-        ));
+    if let Some(message) = unsupported_ratelimit_uri_message(config) {
+        issues.push(format!("WARNING: {}", message));
     }
     if let Err(err) = std::fs::create_dir_all(&config.storage_root) {
         issues.push(format!(
@@ -486,6 +534,88 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         "Admin credentials initialized; access key written to {}",
         iam_path.display()
     );
+}
+
+fn migrate_peer_credentials(config: &ServerConfig) {
+    use myfsio_auth::iam::{IamService, PeerMigrationOutcome};
+    use myfsio_server::services::site_registry::SiteRegistry;
+
+    let registry = SiteRegistry::new(&config.storage_root);
+    let peers = registry.list_peers();
+    let candidates: Vec<(String, String)> = peers
+        .iter()
+        .filter_map(|p| {
+            p.peer_inbound_access_key
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|ak| (ak.to_string(), p.site_id.clone()))
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        println!(
+            "No peer_inbound_access_key entries found in site registry; nothing to migrate."
+        );
+        return;
+    }
+
+    let iam = IamService::new_with_secret(config.iam_config_path.clone(), config.secret_key.clone());
+
+    let mut migrated: Vec<String> = Vec::new();
+    let mut already: Vec<String> = Vec::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    for (access_key, site_id) in &candidates {
+        match iam.mark_access_key_as_peer(access_key, site_id) {
+            Ok(PeerMigrationOutcome::Migrated) => {
+                migrated.push(format!("{} (site_id={})", access_key, site_id))
+            }
+            Ok(PeerMigrationOutcome::AlreadyPeer) => {
+                already.push(format!("{} (site_id={})", access_key, site_id))
+            }
+            Err(e) => errors.push((access_key.clone(), e)),
+        }
+    }
+
+    println!("============================================================");
+    println!("PEER CREDENTIAL MIGRATION");
+    println!("============================================================");
+    if !migrated.is_empty() {
+        println!("Migrated {} credential(s):", migrated.len());
+        for m in &migrated {
+            println!("  - {}", m);
+        }
+    }
+    if !already.is_empty() {
+        println!(
+            "Skipped {} credential(s) already migrated for the same site:",
+            already.len()
+        );
+        for s in &already {
+            println!("  - {}", s);
+        }
+    }
+    if !errors.is_empty() {
+        println!(
+            "Failed to migrate {} credential(s) (no changes written for these):",
+            errors.len()
+        );
+        for (ak, err) in &errors {
+            println!("  - {}: {}", ak, err);
+        }
+    }
+    println!();
+    if !migrated.is_empty() {
+        println!(
+            "WARNING: Migrated credentials are now restricted to /myfsio/admin/cluster/overview \
+             and have had their IAM policies cleared. If you used the same access key for \
+             site_sync, issue a new IAM user for that and update connections.json on the \
+             remote side."
+        );
+    }
+    println!("============================================================");
+    if !errors.is_empty() {
+        std::process::exit(1);
+    }
 }
 
 fn reset_admin_credentials(config: &ServerConfig) {

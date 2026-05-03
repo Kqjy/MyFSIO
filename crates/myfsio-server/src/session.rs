@@ -68,23 +68,51 @@ impl Default for SessionData {
     }
 }
 
+const DEFAULT_SESSION_STORE_CAPACITY: usize = 10_000;
+
 pub struct SessionStore {
     sessions: RwLock<HashMap<String, SessionData>>,
     ttl: Duration,
+    capacity: usize,
 }
 
 impl SessionStore {
     pub fn new(ttl: Duration) -> Self {
+        Self::with_capacity(ttl, DEFAULT_SESSION_STORE_CAPACITY)
+    }
+
+    pub fn with_capacity(ttl: Duration, capacity: usize) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             ttl,
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn enforce_capacity(&self, guard: &mut HashMap<String, SessionData>) {
+        if guard.len() < self.capacity {
+            return;
+        }
+        let ttl = self.ttl;
+        guard.retain(|_, data| data.last_accessed.elapsed() <= ttl);
+        while guard.len() >= self.capacity {
+            let Some(victim) = guard
+                .iter()
+                .min_by_key(|(_, v)| v.last_accessed)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            guard.remove(&victim);
         }
     }
 
     pub fn create(&self) -> (String, SessionData) {
         let id = generate_token(SESSION_ID_BYTES);
         let data = SessionData::new();
-        self.sessions.write().insert(id.clone(), data.clone());
+        let mut guard = self.sessions.write();
+        self.enforce_capacity(&mut guard);
+        guard.insert(id.clone(), data.clone());
         (id, data)
     }
 
@@ -101,6 +129,9 @@ impl SessionStore {
 
     pub fn save(&self, id: &str, data: SessionData) {
         let mut guard = self.sessions.write();
+        if !guard.contains_key(id) {
+            self.enforce_capacity(&mut guard);
+        }
         let mut updated = data;
         updated.last_accessed = Instant::now();
         guard.insert(id.to_string(), updated);
@@ -114,6 +145,30 @@ impl SessionStore {
         let ttl = self.ttl;
         let mut guard = self.sessions.write();
         guard.retain(|_, data| data.last_accessed.elapsed() <= ttl);
+    }
+
+    pub fn len(&self) -> usize {
+        self.sessions.read().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.read().is_empty()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn spawn_sweeper(self: Arc<Self>, interval: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                self.sweep();
+            }
+        })
     }
 }
 

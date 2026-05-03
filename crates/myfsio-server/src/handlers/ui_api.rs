@@ -23,10 +23,11 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sysinfo::{Disks, System};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::handlers::{self, ObjectQuery};
 use crate::middleware::session::SessionHandle;
+use crate::services::object_lock;
 use crate::state::AppState;
 use crate::stores::connections::RemoteConnection;
 
@@ -100,6 +101,200 @@ fn human_size(bytes: u64) -> String {
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
+}
+
+async fn ensure_ui_authorized(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> Result<(), Response> {
+    let access_key = match session.read(|s| s.user_id.clone()) {
+        Some(k) => k,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Sign in to continue.",
+            ));
+        }
+    };
+    let principal = match state.iam.get_principal(&access_key) {
+        Some(p) => p,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Your session is no longer valid.",
+            ));
+        }
+    };
+    match crate::middleware::ui_authorize(state, &principal, bucket, action, object_key).await {
+        Ok(()) => Ok(()),
+        Err(message) => Err(json_error(StatusCode::FORBIDDEN, message)),
+    }
+}
+
+async fn authorize_ui_list_prefix(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    prefix: &str,
+) -> Result<(), Response> {
+    // ListBucket has split semantics: IAM honors the per-prefix scope, but
+    // bucket policies on the bucket ARN (arn:aws:s3:::bucket) only match
+    // when object_key is None. Passing the prefix to both checks would make
+    // `Deny ListBucket` policies neutral and let an IAM allow slip through.
+    // Use the dedicated middleware helper that splits the two evaluations.
+    let access_key = match session.read(|s| s.user_id.clone()) {
+        Some(k) => k,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Sign in to continue.",
+            ));
+        }
+    };
+    let principal = match state.iam.get_principal(&access_key) {
+        Some(p) => p,
+        None => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "Your session is no longer valid.",
+            ));
+        }
+    };
+    match crate::middleware::ui_authorize_list(state, &principal, bucket, prefix).await {
+        Ok(()) => Ok(()),
+        Err(message) => Err(json_error(StatusCode::FORBIDDEN, message)),
+    }
+}
+
+async fn resolve_multipart_upload_key(
+    state: &AppState,
+    bucket: &str,
+    upload_id: &str,
+) -> Result<String, Response> {
+    let uploads = state
+        .storage
+        .list_multipart_uploads(bucket)
+        .await
+        .map_err(storage_json_error)?;
+    uploads
+        .into_iter()
+        .find(|u| u.upload_id == upload_id)
+        .map(|u| u.key)
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::NOT_FOUND,
+                format!("Multipart upload '{}' not found", upload_id),
+            )
+        })
+}
+
+async fn ensure_ui_authorized_for_upload(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    upload_id: &str,
+) -> Result<String, Response> {
+    let key = resolve_multipart_upload_key(state, bucket, upload_id).await?;
+    ensure_ui_authorized(state, session, bucket, "write", Some(&key)).await?;
+    Ok(key)
+}
+
+async fn ensure_object_lock_allows_ui_delete(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), Response> {
+    let metadata = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(m) => m,
+        Err(StorageError::ObjectNotFound { .. }) => return Ok(()),
+        Err(StorageError::DeleteMarker { .. }) => return Ok(()),
+        Err(err) => return Err(storage_json_error(err)),
+    };
+    if let Err(message) = object_lock::can_delete_object(&metadata, false) {
+        return Err(json_error(StatusCode::FORBIDDEN, message));
+    }
+    Ok(())
+}
+
+async fn authorize_bulk_key(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    key: &str,
+) -> Result<(), String> {
+    authorize_bulk_key_for(state, session, bucket, key, "delete").await
+}
+
+async fn authorize_bulk_key_for(
+    state: &AppState,
+    session: &SessionHandle,
+    bucket: &str,
+    key: &str,
+    action: &str,
+) -> Result<(), String> {
+    let access_key = session
+        .read(|s| s.user_id.clone())
+        .ok_or_else(|| "Sign in to continue.".to_string())?;
+    let principal = state
+        .iam
+        .get_principal(&access_key)
+        .ok_or_else(|| "Your session is no longer valid.".to_string())?;
+    crate::middleware::ui_authorize(state, &principal, bucket, action, Some(key)).await
+}
+
+async fn check_object_lock_for_bulk(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), String> {
+    let metadata = match state.storage.get_object_metadata(bucket, key).await {
+        Ok(m) => m,
+        Err(StorageError::ObjectNotFound { .. }) => return Ok(()),
+        Err(StorageError::DeleteMarker { .. }) => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    object_lock::can_delete_object(&metadata, false)
+}
+
+async fn check_versions_lock_for_bulk(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), String> {
+    let version_dir = match version_dir_for_object(state, bucket, key) {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    if !version_dir.exists() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(&version_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let text = match std::fs::read_to_string(entry.path()) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let manifest: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(meta_obj) = manifest.get("metadata").and_then(|m| m.as_object()) {
+            let metadata: HashMap<String, String> = meta_obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            if let Err(message) = object_lock::can_delete_object(&metadata, false) {
+                return Err(format!("Cannot purge versions: {}", message));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn json_ok(value: Value) -> Response {
@@ -269,6 +464,11 @@ fn manifest_timestamp(value: &VersionManifest) -> DateTime<Utc> {
 
 fn manifest_to_json(record: &VersionManifest) -> Value {
     let ts = manifest_timestamp(record);
+    let public_metadata: HashMap<&String, &String> = record
+        .metadata
+        .iter()
+        .filter(|(key, _)| !is_internal_metadata_key(key))
+        .collect();
     json!({
         "version_id": record.version_id,
         "key": record.key,
@@ -276,10 +476,14 @@ fn manifest_to_json(record: &VersionManifest) -> Value {
         "etag": record.etag,
         "archived_at": ts.to_rfc3339(),
         "last_modified": ts.to_rfc3339(),
-        "metadata": record.metadata,
+        "metadata": public_metadata,
         "reason": record.reason.clone().unwrap_or_else(|| "update".to_string()),
         "is_latest": false,
     })
+}
+
+fn is_internal_metadata_key(key: &str) -> bool {
+    key.starts_with("__") && key.ends_with("__")
 }
 
 fn read_version_manifests_for_object(
@@ -940,10 +1144,14 @@ fn object_json(bucket_name: &str, o: &myfsio_common::types::ObjectMeta) -> Value
 
 pub async fn list_bucket_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<ListObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -954,8 +1162,13 @@ pub async fn list_bucket_objects(
         .is_versioning_enabled(&bucket_name)
         .await
         .unwrap_or(false);
-    let stats = state.storage.bucket_stats(&bucket_name).await.ok();
-    let total_count = stats.as_ref().map(|s| s.objects).unwrap_or(0);
+    let bucket_stats = state.storage.bucket_stats(&bucket_name).await.ok();
+    let bucket_total = bucket_stats.as_ref().map(|s| s.objects).unwrap_or(0);
+    let prefix_active = q
+        .prefix
+        .as_deref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
 
     let use_shallow = q.delimiter.as_deref() == Some("/");
 
@@ -977,9 +1190,15 @@ pub async fn list_bucket_objects(
                     .iter()
                     .map(|o| object_json(&bucket_name, o))
                     .collect();
+                let view_count: u64 = if prefix_active {
+                    (objects.len() + res.common_prefixes.len()) as u64
+                } else {
+                    bucket_total
+                };
                 Json(json!({
                     "versioning_enabled": versioning_enabled,
-                    "total_count": total_count,
+                    "total_count": view_count,
+                    "bucket_total": bucket_total,
                     "is_truncated": res.is_truncated,
                     "next_continuation_token": res.next_continuation_token,
                     "url_templates": url_templates_for(&bucket_name),
@@ -1006,10 +1225,16 @@ pub async fn list_bucket_objects(
                 .iter()
                 .map(|o| object_json(&bucket_name, o))
                 .collect();
+            let view_count: u64 = if prefix_active {
+                objects.len() as u64
+            } else {
+                bucket_total
+            };
 
             Json(json!({
                 "versioning_enabled": versioning_enabled,
-                "total_count": total_count,
+                "total_count": view_count,
+                "bucket_total": bucket_total,
                 "is_truncated": res.is_truncated,
                 "next_continuation_token": res.next_continuation_token,
                 "url_templates": url_templates_for(&bucket_name),
@@ -1031,10 +1256,14 @@ pub struct StreamObjectsQuery {
 
 pub async fn stream_bucket_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<StreamObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return (StatusCode::NOT_FOUND, "Bucket not found").into_response();
     }
@@ -1220,10 +1449,14 @@ pub struct SearchObjectsQuery {
 
 pub async fn search_bucket_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<SearchObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -1289,9 +1522,13 @@ pub async fn search_bucket_objects(
 
 pub async fn bucket_stats_json(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    // Bucket-wide aggregate — require unrestricted list scope.
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -1311,10 +1548,14 @@ pub async fn bucket_stats_json(
 
 pub async fn list_bucket_folders(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<StreamObjectsQuery>,
 ) -> Response {
+    let prefix = q.prefix.clone().unwrap_or_default();
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, &prefix).await {
+        return resp;
+    }
     if !matches!(state.storage.bucket_exists(&bucket_name).await, Ok(true)) {
         return json_error(StatusCode::NOT_FOUND, "Bucket not found");
     }
@@ -1367,6 +1608,244 @@ fn default_region() -> String {
     "us-east-1".to_string()
 }
 
+pub(crate) async fn guard_external_endpoint_async(endpoint: &str) -> Result<(), String> {
+    if let Err(reason) = guard_external_endpoint(endpoint) {
+        return Err(reason.to_string());
+    }
+    let (host, port) = match parse_endpoint_authority(endpoint) {
+        Some(v) => v,
+        None => return Err("could not parse endpoint authority".to_string()),
+    };
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let lookup = format!("{}:{}", host, port);
+    let resolved = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::lookup_host(lookup),
+    )
+    .await
+    {
+        Ok(Ok(it)) => it.collect::<Vec<_>>(),
+        Ok(Err(e)) => {
+            return Err(format!("DNS resolution failed for '{}': {}", host, e));
+        }
+        Err(_) => {
+            return Err(format!("DNS resolution timed out for '{}'", host));
+        }
+    };
+    if resolved.is_empty() {
+        return Err(format!("hostname '{}' resolved to no addresses", host));
+    }
+    for sa in &resolved {
+        if let Err(reason) = reject_internal_ip(sa.ip()) {
+            return Err(format!(
+                "hostname '{}' resolves to internal address {} ({})",
+                host,
+                sa.ip(),
+                reason
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_endpoint_authority(endpoint: &str) -> Option<(String, u16)> {
+    let trimmed = endpoint.trim();
+    let scheme_idx = trimmed.find("://")?;
+    let scheme = &trimmed[..scheme_idx];
+    let after_scheme = &trimmed[scheme_idx + 3..];
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else {
+        80
+    };
+    if let Some(stripped) = authority.strip_prefix('[') {
+        let end = stripped.find(']')?;
+        let host = &stripped[..end];
+        let rest = &stripped[end + 1..];
+        let port = if let Some(p) = rest.strip_prefix(':') {
+            p.parse::<u16>().ok().unwrap_or(default_port)
+        } else {
+            default_port
+        };
+        return Some((host.to_string(), port));
+    }
+    if let Some((h, p)) = authority.rsplit_once(':') {
+        if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(port) = p.parse::<u16>() {
+                return Some((h.to_string(), port));
+            }
+        }
+    }
+    Some((authority.to_string(), default_port))
+}
+
+pub(crate) fn guard_external_endpoint(endpoint: &str) -> Result<(), &'static str> {
+    use std::net::IpAddr;
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() {
+        return Err("empty endpoint");
+    }
+    let scheme_idx = trimmed.find("://").ok_or("missing scheme (use http:// or https://)")?;
+    let scheme = &trimmed[..scheme_idx];
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err("only http and https schemes are allowed");
+    }
+    let after_scheme = &trimmed[scheme_idx + 3..];
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host_part = if let Some(stripped) = authority.strip_prefix('[') {
+        let end = stripped.find(']').ok_or("malformed IPv6 host")?;
+        &stripped[..end]
+    } else {
+        authority
+            .rsplit_once('@')
+            .map(|(_, h)| h)
+            .unwrap_or(authority)
+            .split(':')
+            .next()
+            .unwrap_or(authority)
+    };
+    if host_part.is_empty() {
+        return Err("missing host");
+    }
+    let lowered = host_part.to_ascii_lowercase();
+    if matches!(lowered.as_str(), "localhost" | "ip6-localhost" | "ip6-loopback") {
+        return Err("loopback hostnames are not allowed");
+    }
+    if lowered.ends_with(".localhost") || lowered.ends_with(".local") {
+        return Err("loopback or mDNS hostnames are not allowed");
+    }
+    if let Ok(ip) = host_part.parse::<IpAddr>() {
+        return reject_internal_ip(ip);
+    }
+    Ok(())
+}
+
+pub(crate) fn reject_internal_ip(ip: std::net::IpAddr) -> Result<(), &'static str> {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                return Err("loopback addresses are not allowed");
+            }
+            if v4.is_link_local() {
+                return Err("link-local addresses are not allowed");
+            }
+            if v4.is_unspecified() {
+                return Err("unspecified addresses are not allowed");
+            }
+            if v4.is_broadcast() || v4.is_multicast() {
+                return Err("broadcast/multicast addresses are not allowed");
+            }
+            if v4.is_private() {
+                return Err("RFC1918 private addresses are not allowed");
+            }
+            let octets = v4.octets();
+            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                return Err("CGNAT (100.64.0.0/10) addresses are not allowed");
+            }
+            if octets[0] == 0 {
+                return Err("0.0.0.0/8 addresses are not allowed");
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return Err("loopback addresses are not allowed");
+            }
+            if v6.is_unspecified() {
+                return Err("unspecified addresses are not allowed");
+            }
+            if v6.is_multicast() {
+                return Err("multicast addresses are not allowed");
+            }
+            let segs = v6.segments();
+            if segs[0] & 0xffc0 == 0xfe80 {
+                return Err("link-local addresses are not allowed");
+            }
+            if (segs[0] & 0xfe00) == 0xfc00 {
+                return Err("unique-local (fc00::/7) addresses are not allowed");
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return reject_internal_ip(IpAddr::V4(v4));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod ssrf_guard_tests {
+    use super::guard_external_endpoint;
+
+    #[test]
+    fn rejects_loopback() {
+        assert!(guard_external_endpoint("http://127.0.0.1:9000").is_err());
+        assert!(guard_external_endpoint("http://localhost:9000").is_err());
+        assert!(guard_external_endpoint("http://[::1]:9000").is_err());
+    }
+
+    #[test]
+    fn rejects_link_local_and_metadata() {
+        assert!(guard_external_endpoint("http://169.254.169.254/").is_err());
+        assert!(guard_external_endpoint("http://[fe80::1]/").is_err());
+    }
+
+    #[test]
+    fn rejects_rfc1918() {
+        assert!(guard_external_endpoint("http://10.0.0.5").is_err());
+        assert!(guard_external_endpoint("http://10.255.255.255:9000").is_err());
+        assert!(guard_external_endpoint("http://172.16.0.1").is_err());
+        assert!(guard_external_endpoint("http://172.31.255.255:9000").is_err());
+        assert!(guard_external_endpoint("http://192.168.1.10").is_err());
+        assert!(guard_external_endpoint("http://192.168.255.1:9000").is_err());
+    }
+
+    #[test]
+    fn rejects_cgnat() {
+        assert!(guard_external_endpoint("http://100.64.0.1").is_err());
+        assert!(guard_external_endpoint("http://100.127.255.255").is_err());
+    }
+
+    #[test]
+    fn rejects_unique_local_v6() {
+        assert!(guard_external_endpoint("http://[fc00::1]").is_err());
+        assert!(guard_external_endpoint("http://[fdff::1]").is_err());
+    }
+
+    #[test]
+    fn rejects_v4_mapped_internal_v6() {
+        assert!(guard_external_endpoint("http://[::ffff:127.0.0.1]").is_err());
+        assert!(guard_external_endpoint("http://[::ffff:10.0.0.1]").is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_scheme() {
+        assert!(guard_external_endpoint("file:///etc/passwd").is_err());
+        assert!(guard_external_endpoint("gopher://x").is_err());
+    }
+
+    #[test]
+    fn allows_normal_remote() {
+        assert!(guard_external_endpoint("https://s3.example.com").is_ok());
+        assert!(guard_external_endpoint("http://192.0.2.10:9000").is_ok());
+        assert!(guard_external_endpoint("http://172.32.0.1").is_ok());
+        assert!(guard_external_endpoint("http://100.63.255.255").is_ok());
+        assert!(guard_external_endpoint("http://100.128.0.1").is_ok());
+    }
+}
+
 pub async fn test_connection(
     State(state): State<AppState>,
     Extension(_session): Extension<SessionHandle>,
@@ -1400,10 +1879,27 @@ pub async fn test_connection(
             .into_response();
     }
 
+    let endpoint_trimmed = payload.endpoint_url.trim().to_string();
+    if !state.config.allow_internal_endpoints {
+        if let Err(reason) = guard_external_endpoint_async(&endpoint_trimmed).await {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "status": "error",
+                    "message": format!(
+                        "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
+                        reason
+                    ),
+                })),
+            )
+                .into_response();
+        }
+    }
+
     let connection = RemoteConnection {
         id: "test".to_string(),
         name: "Test".to_string(),
-        endpoint_url: payload.endpoint_url.trim().to_string(),
+        endpoint_url: endpoint_trimmed,
         access_key: payload.access_key.trim().to_string(),
         secret_key: payload.secret_key.trim().to_string(),
         region: payload.region.trim().to_string(),
@@ -1707,7 +2203,7 @@ pub async fn peer_bidirectional_status(
     }
 
     let admin_url = format!(
-        "{}/admin/sites",
+        "{}/myfsio/admin/sites",
         connection.endpoint_url.trim_end_matches('/')
     );
     match reqwest::Client::new()
@@ -1885,16 +2381,39 @@ fn metrics_settings_snapshot(state: &AppState) -> MetricsSettingsSnapshot {
 
 pub async fn metrics_settings(State(state): State<AppState>) -> Response {
     let settings = metrics_settings_snapshot(&state);
+    let history_active = state.system_metrics.is_some();
+    let operation_active = state.metrics.is_some();
     Json(json!({
-        "enabled": settings.enabled,
+        "enabled": settings.enabled && history_active,
         "retention_hours": settings.retention_hours,
         "interval_minutes": settings.interval_minutes,
+        "history_active": history_active,
+        "operation_metrics_active": operation_active,
+        "requires_restart_for_enable": !history_active,
+        "requires_restart_for_operations": !operation_active,
     }))
     .into_response()
 }
 
 pub async fn update_metrics_settings(State(state): State<AppState>, body: Body) -> Response {
     let payload: Value = parse_json_body(body).await.unwrap_or_else(|_| json!({}));
+    let history_active = state.system_metrics.is_some();
+    let operation_active = state.metrics.is_some();
+
+    let requested_enabled = payload.get("enabled").and_then(|value| value.as_bool());
+    if matches!(requested_enabled, Some(true)) && !history_active {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "Metrics history collection is disabled at boot. Set METRICS_HISTORY_ENABLED=true and restart the server to enable it.",
+                "history_active": false,
+                "operation_metrics_active": operation_active,
+                "requires_restart_for_enable": true,
+            })),
+        )
+            .into_response();
+    }
+
     let mut settings = METRICS_SETTINGS
         .get_or_init(|| {
             Mutex::new(MetricsSettingsSnapshot {
@@ -1905,10 +2424,7 @@ pub async fn update_metrics_settings(State(state): State<AppState>, body: Body) 
         })
         .lock()
         .unwrap();
-    let enabled = payload
-        .get("enabled")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(settings.enabled);
+    let enabled = requested_enabled.unwrap_or(settings.enabled) && history_active;
     let retention_hours = payload
         .get("retention_hours")
         .and_then(|value| value.as_u64())
@@ -1929,6 +2445,10 @@ pub async fn update_metrics_settings(State(state): State<AppState>, body: Body) 
         "enabled": enabled,
         "retention_hours": retention_hours,
         "interval_minutes": interval_minutes,
+        "history_active": history_active,
+        "operation_metrics_active": operation_active,
+        "requires_restart_for_enable": !history_active,
+        "requires_restart_for_operations": !operation_active,
     }))
     .into_response()
 }
@@ -1943,7 +2463,7 @@ struct MultipartInitPayload {
 
 pub async fn upload_object(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     headers: HeaderMap,
     body: Body,
@@ -1976,9 +2496,9 @@ pub async fn upload_object(
     let mut metadata_raw: Option<String> = None;
     let mut file_name: Option<String> = None;
     let mut file_content_type: Option<String> = None;
-    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut spooled: Option<(tempfile::NamedTempFile, u64)> = None;
 
-    while let Some(field) = match multipart.next_field().await {
+    while let Some(mut field) = match multipart.next_field().await {
         Ok(field) => field,
         Err(e) => {
             return json_error(
@@ -2002,15 +2522,60 @@ pub async fn upload_object(
             "object" => {
                 file_name = field.file_name().map(|s| s.to_string());
                 file_content_type = field.content_type().map(|mime| mime.to_string());
-                match field.bytes().await {
-                    Ok(bytes) => file_bytes = Some(bytes.to_vec()),
+
+                let temp = match tempfile::NamedTempFile::new() {
+                    Ok(t) => t,
                     Err(e) => {
                         return json_error(
-                            StatusCode::BAD_REQUEST,
-                            format!("Failed to read upload: {}", e),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to create upload spool: {}", e),
                         )
                     }
+                };
+                let path = temp.path().to_path_buf();
+                let mut file = match tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&path)
+                    .await
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return json_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to open upload spool: {}", e),
+                        )
+                    }
+                };
+                let mut total: u64 = 0;
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            total = total.saturating_add(chunk.len() as u64);
+                            if let Err(e) = file.write_all(&chunk).await {
+                                return json_error(
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    format!("Failed writing upload spool: {}", e),
+                                );
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            return json_error(
+                                StatusCode::BAD_REQUEST,
+                                format!("Failed to read upload: {}", e),
+                            )
+                        }
+                    }
                 }
+                if let Err(e) = file.flush().await {
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to flush upload spool: {}", e),
+                    );
+                }
+                drop(file);
+                spooled = Some((temp, total));
             }
             _ => {
                 let _ = field.bytes().await;
@@ -2018,8 +2583,8 @@ pub async fn upload_object(
         }
     }
 
-    let bytes = match file_bytes {
-        Some(bytes) if !bytes.is_empty() => bytes,
+    let (temp_file, total_size) = match spooled {
+        Some((t, n)) if n > 0 => (t, n),
         _ => return json_error(StatusCode::BAD_REQUEST, "Choose a file to upload"),
     };
 
@@ -2032,6 +2597,16 @@ pub async fn upload_object(
         Ok(key) => key,
         Err(response) => return response,
     };
+
+    // Authorize against the actual object key — IamService::authorize only
+    // evaluates prefix scoping when an object key is provided, so checking
+    // bucket-level write earlier would let a prefix-scoped user upload outside
+    // their allowed prefix.
+    if let Err(resp) =
+        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+    {
+        return resp;
+    }
 
     let metadata = if let Some(raw) = metadata_raw {
         match serde_json::from_str::<HashMap<String, Value>>(&raw) {
@@ -2052,6 +2627,9 @@ pub async fn upload_object(
             upload_headers.insert(header::CONTENT_TYPE, value);
         }
     }
+    if let Ok(value) = total_size.to_string().parse() {
+        upload_headers.insert(header::CONTENT_LENGTH, value);
+    }
     if let Some(metadata) = &metadata {
         for (key, value) in metadata {
             let header_name = format!("x-amz-meta-{}", key);
@@ -2063,15 +2641,28 @@ pub async fn upload_object(
         }
     }
 
+    let read_handle = match tokio::fs::File::open(temp_file.path()).await {
+        Ok(f) => f,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to open upload spool for read: {}", e),
+            )
+        }
+    };
+    let reader_stream = tokio_util::io::ReaderStream::new(read_handle);
+    let upload_body = Body::from_stream(reader_stream);
+
     let response = handlers::put_object(
         State(state),
         Path((bucket_name.clone(), key.clone())),
         Query(ObjectQuery::default()),
         None,
         upload_headers,
-        Body::from(bytes),
+        upload_body,
     )
     .await;
+    drop(temp_file);
 
     if !response.status().is_success() {
         return response;
@@ -2090,7 +2681,7 @@ pub async fn upload_object(
 
 pub async fn initiate_multipart_upload(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
@@ -2102,6 +2693,11 @@ pub async fn initiate_multipart_upload(
     let object_key = payload.object_key.trim();
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
+    }
+    if let Err(resp) =
+        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(object_key)).await
+    {
+        return resp;
     }
 
     match state
@@ -2122,11 +2718,16 @@ pub struct MultipartPartQuery {
 
 pub async fn upload_multipart_part(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
     Query(query): Query<MultipartPartQuery>,
     body: Body,
 ) -> Response {
+    if let Err(resp) =
+        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+    {
+        return resp;
+    }
     let Some(part_number) = query.part_number else {
         return json_error(StatusCode::BAD_REQUEST, "partNumber is required");
     };
@@ -2169,11 +2770,16 @@ struct CompleteMultipartPartPayload {
 
 pub async fn complete_multipart_upload(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let upload_key =
+        match ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await {
+            Ok(key) => key,
+            Err(resp) => return resp,
+        };
     let payload: CompleteMultipartPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2192,20 +2798,15 @@ pub async fn complete_multipart_upload(
         })
         .collect::<Vec<_>>();
 
-    let upload_key = match state.storage.list_multipart_uploads(&bucket_name).await {
-        Ok(uploads) => uploads
-            .into_iter()
-            .find(|u| u.upload_id == upload_id)
-            .map(|u| u.key),
-        Err(err) => return storage_json_error(err),
-    };
-    if let Some(ref key) = upload_key {
-        if let Err(response) =
-            super::ensure_archived_null_lock_allows_overwrite(&state, &bucket_name, key, Some(&headers))
-                .await
-        {
-            return response;
-        }
+    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
+        &state,
+        &bucket_name,
+        &upload_key,
+        Some(&headers),
+    )
+    .await
+    {
+        return response;
     }
 
     match state
@@ -2228,9 +2829,14 @@ pub async fn complete_multipart_upload(
 
 pub async fn abort_multipart_upload(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
 ) -> Response {
+    if let Err(resp) =
+        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+    {
+        return resp;
+    }
     match state
         .storage
         .abort_multipart(&bucket_name, &upload_id)
@@ -2273,8 +2879,12 @@ pub async fn update_bucket_acl(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let payload: BucketAclPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2325,10 +2935,14 @@ struct BucketCorsPayload {
 
 pub async fn update_bucket_cors(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let payload: BucketCorsPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2373,10 +2987,14 @@ struct BucketLifecyclePayload {
 
 pub async fn update_bucket_lifecycle(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+        return resp;
+    }
     let payload: BucketLifecyclePayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -2426,11 +3044,43 @@ async fn serve_object_download_or_preview(
         query.response_content_type = Some(forced);
     }
 
+    let bucket_for_log = bucket.clone();
+    let key_for_log = key.clone();
     let mut response =
         handlers::get_object(State(state), Path((bucket, key)), Query(query), headers).await;
     response
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
+    if !response.status().is_success() {
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if content_type.contains("xml") {
+            let status = response.status();
+            tracing::debug!(
+                bucket = %bucket_for_log,
+                key = %key_for_log,
+                status = %status,
+                "rewriting XML S3 error to UI JSON"
+            );
+            let message = if status == StatusCode::BAD_REQUEST {
+                "This object cannot be served through the web UI. It may require an SSE-C customer key, which the UI does not support — use the S3 API with the customer key headers."
+            } else if status == StatusCode::INTERNAL_SERVER_ERROR {
+                "The server could not decrypt this object. If it was uploaded with SSE-C, the customer-provided key is required and the UI does not support that flow."
+            } else {
+                "Unable to serve this object."
+            };
+            let json_body = serde_json::json!({ "error": message }).to_string();
+            return (
+                status,
+                [(header::CONTENT_TYPE, "application/json")],
+                json_body,
+            )
+                .into_response();
+        }
+    }
     response
 }
 
@@ -2674,6 +3324,7 @@ struct CopyMovePayload {
 
 async fn copy_object_json(
     state: &AppState,
+    session: &SessionHandle,
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
@@ -2690,6 +3341,15 @@ async fn copy_object_json(
             StatusCode::BAD_REQUEST,
             "dest_bucket and dest_key are required",
         );
+    }
+
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+        return resp;
+    }
+    if let Err(resp) =
+        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    {
+        return resp;
     }
 
     if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
@@ -2724,6 +3384,7 @@ async fn copy_object_json(
 
 async fn move_object_json(
     state: &AppState,
+    session: &SessionHandle,
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
@@ -2746,6 +3407,22 @@ async fn move_object_json(
             StatusCode::BAD_REQUEST,
             "Cannot move object to the same location",
         );
+    }
+
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+        return resp;
+    }
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+        return resp;
+    }
+    if let Err(resp) =
+        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    {
+        return resp;
+    }
+
+    if let Err(resp) = ensure_object_lock_allows_ui_delete(state, bucket, key).await {
+        return resp;
     }
 
     if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
@@ -2799,11 +3476,16 @@ async fn purge_object_versions_for_key(
 
 async fn delete_object_json(
     state: &AppState,
+    session: &SessionHandle,
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+        return resp;
+    }
+
     let body_bytes = match to_bytes(body, usize::MAX).await {
         Ok(bytes) => bytes,
         Err(_) => return json_error(StatusCode::BAD_REQUEST, "Failed to read request body"),
@@ -2820,7 +3502,16 @@ async fn delete_object_json(
     };
     let purge_versions = parse_bool_flag(form.get("purge_versions").map(|s| s.as_str()));
 
+    if let Err(resp) = ensure_object_lock_allows_ui_delete(state, bucket, key).await {
+        return resp;
+    }
+
     if purge_versions {
+        if let Err(resp) =
+            ensure_versions_unlocked_for_purge(state, bucket, key).await
+        {
+            return resp;
+        }
         if let Err(err) = state.storage.delete_object(bucket, key).await {
             return storage_json_error(err);
         }
@@ -2846,6 +3537,52 @@ async fn delete_object_json(
         }
         Err(err) => storage_json_error(err),
     }
+}
+
+async fn ensure_versions_unlocked_for_purge(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), Response> {
+    let version_dir = match version_dir_for_object(state, bucket, key) {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+    if !version_dir.exists() {
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(&version_dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()));
+        }
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let text = match std::fs::read_to_string(entry.path()) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let manifest: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(meta_obj) = manifest.get("metadata").and_then(|m| m.as_object()) {
+            let metadata: HashMap<String, String> = meta_obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+            if let Err(message) = object_lock::can_delete_object(&metadata, false) {
+                return Err(json_error(
+                    StatusCode::FORBIDDEN,
+                    format!("Cannot purge versions: {}", message),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn restore_object_version_json(
@@ -2948,20 +3685,6 @@ fn parse_object_get_action(rest: &str) -> Option<(String, ObjectGetAction)> {
 }
 
 fn parse_object_post_action(rest: &str) -> Option<(String, ObjectPostAction)> {
-    if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
-        return Some((
-            key.to_string(),
-            ObjectPostAction::Restore(version_id.to_string()),
-        ));
-    }
-    if let Some(key_with_version) = rest.strip_suffix("/restore") {
-        if let Some((key, version_id)) = key_with_version.rsplit_once("/versions/") {
-            return Some((
-                key.to_string(),
-                ObjectPostAction::Restore(version_id.to_string()),
-            ));
-        }
-    }
     for (suffix, action) in [
         ("/delete", ObjectPostAction::Delete),
         ("/presign", ObjectPostAction::Presign),
@@ -2973,7 +3696,69 @@ fn parse_object_post_action(rest: &str) -> Option<(String, ObjectPostAction)> {
             return Some((key.to_string(), action));
         }
     }
+    if let Some(key_with_version) = rest.strip_suffix("/restore") {
+        if let Some((key, version_id)) = key_with_version.rsplit_once("/versions/") {
+            return Some((
+                key.to_string(),
+                ObjectPostAction::Restore(version_id.to_string()),
+            ));
+        }
+    }
+    if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
+        return Some((
+            key.to_string(),
+            ObjectPostAction::Restore(version_id.to_string()),
+        ));
+    }
     None
+}
+
+#[cfg(test)]
+mod object_action_tests {
+    use super::{parse_object_post_action, ObjectPostAction};
+
+    #[test]
+    fn parses_delete_for_key_containing_restore() {
+        let (key, action) =
+            parse_object_post_action("foo/restore/bar.txt/delete").expect("parsed");
+        assert_eq!(key, "foo/restore/bar.txt");
+        assert!(matches!(action, ObjectPostAction::Delete));
+    }
+
+    #[test]
+    fn parses_copy_for_key_containing_restore() {
+        let (key, action) = parse_object_post_action("a/restore/b/copy").expect("parsed");
+        assert_eq!(key, "a/restore/b");
+        assert!(matches!(action, ObjectPostAction::Copy));
+    }
+
+    #[test]
+    fn parses_move_for_key_containing_restore() {
+        let (key, action) = parse_object_post_action("a/restore/b/move").expect("parsed");
+        assert_eq!(key, "a/restore/b");
+        assert!(matches!(action, ObjectPostAction::Move));
+    }
+
+    #[test]
+    fn parses_versioned_restore() {
+        let (key, action) =
+            parse_object_post_action("foo/bar/versions/v1/restore").expect("parsed");
+        assert_eq!(key, "foo/bar");
+        match action {
+            ObjectPostAction::Restore(v) => assert_eq!(v, "v1"),
+            _ => panic!("expected Restore"),
+        }
+    }
+
+    #[test]
+    fn parses_inline_restore() {
+        let (key, action) = parse_object_post_action("foo/bar/restore/v2").expect("parsed");
+        assert_eq!(key, "foo/bar");
+        match action {
+            ObjectPostAction::Restore(v) => assert_eq!(v, "v2"),
+            _ => panic!("expected Restore"),
+        }
+    }
 }
 
 pub async fn object_get_dispatch(
@@ -2986,6 +3771,12 @@ pub async fn object_get_dispatch(
         return json_error(StatusCode::NOT_FOUND, "Unknown object action");
     };
 
+    if let Err(resp) =
+        ensure_ui_authorized(&state, &session, &bucket_name, "read", Some(&key)).await
+    {
+        return resp;
+    }
+
     match action {
         ObjectGetAction::Download => {
             serve_object_download_or_preview(state, bucket_name, key, headers, true).await
@@ -2995,10 +3786,7 @@ pub async fn object_get_dispatch(
         }
         ObjectGetAction::Metadata => object_metadata_json(&state, &bucket_name, &key).await,
         ObjectGetAction::Versions => object_versions_json(&state, &bucket_name, &key).await,
-        ObjectGetAction::Tags => {
-            let _ = session;
-            object_tags_json(&state, &bucket_name, &key).await
-        }
+        ObjectGetAction::Tags => object_tags_json(&state, &bucket_name, &key).await,
     }
 }
 
@@ -3015,19 +3803,31 @@ pub async fn object_post_dispatch(
 
     match action {
         ObjectPostAction::Delete => {
-            delete_object_json(&state, &bucket_name, &key, &headers, body).await
+            delete_object_json(&state, &session, &bucket_name, &key, &headers, body).await
         }
         ObjectPostAction::Presign => {
             object_presign_json(&state, &session, &bucket_name, &key, body).await
         }
-        ObjectPostAction::Tags => update_object_tags(&state, &bucket_name, &key, body).await,
+        ObjectPostAction::Tags => {
+            if let Err(resp) =
+                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            {
+                return resp;
+            }
+            update_object_tags(&state, &bucket_name, &key, body).await
+        }
         ObjectPostAction::Copy => {
-            copy_object_json(&state, &bucket_name, &key, &headers, body).await
+            copy_object_json(&state, &session, &bucket_name, &key, &headers, body).await
         }
         ObjectPostAction::Move => {
-            move_object_json(&state, &bucket_name, &key, &headers, body).await
+            move_object_json(&state, &session, &bucket_name, &key, &headers, body).await
         }
         ObjectPostAction::Restore(version_id) => {
+            if let Err(resp) =
+                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            {
+                return resp;
+            }
             restore_object_version_json(&state, &bucket_name, &key, &version_id).await
         }
     }
@@ -3072,7 +3872,7 @@ async fn expand_bulk_keys(
 
 pub async fn bulk_delete_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
@@ -3092,6 +3892,20 @@ pub async fn bulk_delete_objects(
             StatusCode::BAD_REQUEST,
             "Select at least one object to delete",
         );
+    }
+
+    // Folder-style entries (`foo/`) require a list to expand into concrete
+    // keys. Authorize list against each folder prefix individually so a
+    // prefix-scoped user can only expand folders inside their allowed
+    // prefix.
+    for entry in &cleaned {
+        if entry.ends_with('/') {
+            if let Err(resp) =
+                authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
+            {
+                return resp;
+            }
+        }
     }
 
     let keys = match expand_bulk_keys(&state, &bucket_name, &cleaned).await {
@@ -3118,6 +3932,28 @@ pub async fn bulk_delete_objects(
     let mut errors = Vec::new();
 
     for key in keys {
+        // Authorize each concrete key. Prefix-scoped IAM policies are only
+        // evaluated when an object key is supplied to IamService::authorize,
+        // so a single bucket-level check up-front would let users delete keys
+        // outside their allowed prefix.
+        if let Err(message) =
+            authorize_bulk_key(&state, &session, &bucket_name, &key).await
+        {
+            errors.push(json!({ "key": key, "error": message }));
+            continue;
+        }
+        if let Err(message) = check_object_lock_for_bulk(&state, &bucket_name, &key).await {
+            errors.push(json!({ "key": key, "error": message }));
+            continue;
+        }
+        if payload.purge_versions {
+            if let Err(message) =
+                check_versions_lock_for_bulk(&state, &bucket_name, &key).await
+            {
+                errors.push(json!({ "key": key, "error": message }));
+                continue;
+            }
+        }
         match state.storage.delete_object(&bucket_name, &key).await {
             Ok(_) => {
                 super::trigger_replication(&state, &bucket_name, &key, "delete");
@@ -3171,7 +4007,7 @@ pub async fn bulk_delete_objects(
 
 pub async fn bulk_download_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
@@ -3193,6 +4029,19 @@ pub async fn bulk_download_objects(
         );
     }
 
+    // Folder-style entries (`foo/`) require a list to expand. Authorize list
+    // against each folder prefix so a prefix-scoped user can only expand
+    // folders inside their allowed prefix.
+    for entry in &cleaned {
+        if entry.ends_with('/') {
+            if let Err(resp) =
+                authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
+            {
+                return resp;
+            }
+        }
+    }
+
     let keys = match expand_bulk_keys(&state, &bucket_name, &cleaned).await {
         Ok(keys) => keys,
         Err(err) => return storage_json_error(err),
@@ -3207,6 +4056,13 @@ pub async fn bulk_download_objects(
     let mut total_bytes = 0u64;
     let mut archive_entries = Vec::new();
     for key in keys {
+        // Authorize each concrete key — IamService::authorize only honors
+        // prefix scoping when an object key is supplied.
+        if let Err(message) =
+            authorize_bulk_key_for(&state, &session, &bucket_name, &key, "read").await
+        {
+            return json_error(StatusCode::FORBIDDEN, format!("{}: {}", key, message));
+        }
         match state.storage.head_object(&bucket_name, &key).await {
             Ok(meta) => {
                 total_bytes = total_bytes.saturating_add(meta.size);
@@ -3245,9 +4101,13 @@ pub async fn bulk_download_objects(
 
 pub async fn archived_objects(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    // Walks the whole bucket's archive tree — require unrestricted list scope.
+    if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
+        return resp;
+    }
     let versions_root = version_root_for_bucket(&state, &bucket_name);
     if !versions_root.exists() {
         return Json(json!({ "objects": [] })).into_response();
@@ -3325,13 +4185,31 @@ pub async fn archived_objects(
 
 pub async fn archived_post_dispatch(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, rest)): Path<(String, String)>,
 ) -> Response {
     if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
+        if let Err(resp) =
+            ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(key)).await
+        {
+            return resp;
+        }
         return restore_object_version_json(&state, &bucket_name, key, version_id).await;
     }
     if let Some(key) = rest.strip_suffix("/purge") {
+        if let Err(resp) =
+            ensure_ui_authorized(&state, &session, &bucket_name, "delete", Some(key)).await
+        {
+            return resp;
+        }
+        if let Err(resp) = ensure_object_lock_allows_ui_delete(&state, &bucket_name, key).await {
+            return resp;
+        }
+        if let Err(resp) =
+            ensure_versions_unlocked_for_purge(&state, &bucket_name, key).await
+        {
+            return resp;
+        }
         match purge_object_versions_for_key(&state, &bucket_name, key).await {
             Ok(()) => {
                 let _ = state.storage.delete_object(&bucket_name, key).await;
@@ -3523,6 +4401,16 @@ pub async fn replication_status(
         None => (false, Some("Target connection not found".to_string())),
     };
 
+    let current_run = state
+        .replication
+        .current_run(&bucket_name)
+        .map(|run| serialize_batch_run(&run, false));
+    let last_run = state
+        .replication
+        .last_run(&bucket_name)
+        .map(|run| serialize_batch_run(&run, true));
+    let healer = state.replication.healer_status();
+
     json_ok(json!({
         "enabled": rule.enabled,
         "target_bucket": rule.target_bucket,
@@ -3536,7 +4424,51 @@ pub async fn replication_status(
         "last_sync_key": rule.stats.last_sync_key,
         "endpoint_healthy": endpoint_healthy,
         "endpoint_error": endpoint_error,
+        "current_run": current_run,
+        "last_run": last_run,
+        "live": {
+            "in_flight": state.replication.live_in_flight(),
+            "replicated_total": state.replication.live_replicated_total(),
+            "failed_total": state.replication.live_failed_total(),
+        },
+        "healer": {
+            "running": healer.running,
+            "last_pass_at": healer.last_pass_at,
+            "last_pass_healed": healer.last_pass_healed,
+            "last_pass_skipped": healer.last_pass_skipped,
+        },
     }))
+}
+
+fn serialize_batch_run(
+    run: &crate::services::replication::BatchRun,
+    include_finished: bool,
+) -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+    let total_queued = run.total_queued.load(Ordering::Relaxed);
+    let completed = run.completed.load(Ordering::Relaxed);
+    let failed = run.failed.load(Ordering::Relaxed);
+    let in_flight = run.in_flight.load(Ordering::Relaxed);
+    let enumeration_done = run.enumeration_done.load(Ordering::Relaxed);
+    let last_object = run.last_object.lock().clone();
+    let finished_at = if include_finished {
+        *run.finished_at.lock()
+    } else {
+        None
+    };
+    json!({
+        "run_id": run.run_id,
+        "bucket": run.bucket,
+        "kind": run.kind.as_str(),
+        "started_at": run.started_at,
+        "enumeration_done": enumeration_done,
+        "total_queued": total_queued,
+        "completed": completed,
+        "failed": failed,
+        "in_flight": in_flight,
+        "last_object": last_object,
+        "finished_at": finished_at,
+    })
 }
 
 pub async fn replication_failures(
@@ -3607,11 +4539,26 @@ pub async fn retry_all_replication_failures(
     Extension(_session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    let (submitted, skipped) = state.replication.retry_all(&bucket_name).await;
+    let result = state.replication.clone().retry_all(&bucket_name).await;
+    if let Some(kind) = result.conflict {
+        let body = json!({
+            "status": "conflict",
+            "error": format!(
+                "Cannot start retry-all while a {} batch is running for this bucket. Wait for it to finish and try again.",
+                kind.as_str()
+            ),
+            "conflict": kind.as_str(),
+            "conflict_run_id": result.run_id,
+            "submitted": 0,
+            "skipped": result.skipped,
+        });
+        return (StatusCode::CONFLICT, axum::Json(body)).into_response();
+    }
     json_ok(json!({
         "status": "submitted",
-        "submitted": submitted,
-        "skipped": skipped,
+        "submitted": result.submitted,
+        "skipped": result.skipped,
+        "run_id": result.run_id,
     }))
 }
 

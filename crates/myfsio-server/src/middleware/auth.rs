@@ -316,6 +316,14 @@ async fn maybe_serve_website(
     let include_error_body = method != axum::http::Method::HEAD;
     let store = state.website_domains.as_ref()?;
     let bucket = store.get_bucket(&host)?;
+    if myfsio_storage::validation::is_reserved_bucket_name(&bucket) {
+        return Some(website_error_response(
+            StatusCode::NOT_FOUND,
+            None,
+            "text/plain; charset=utf-8",
+            include_error_body,
+        ));
+    }
     if !matches!(state.storage.bucket_exists(&bucket).await, Ok(true)) {
         return Some(website_error_response(
             StatusCode::NOT_FOUND,
@@ -444,11 +452,7 @@ async fn virtual_host_bucket(
     path: &str,
     method: &Method,
 ) -> Option<String> {
-    if path.starts_with("/ui")
-        || path.starts_with("/admin")
-        || path.starts_with("/kms")
-        || path.starts_with("/myfsio")
-    {
+    if path.starts_with("/ui") || path.starts_with("/myfsio") {
         return None;
     }
 
@@ -707,6 +711,14 @@ async fn authorize_request(
     if path == "/myfsio/health" {
         return Ok(());
     }
+    if let Some(p) = principal {
+        if p.is_peer() && !is_path_allowed_for_peer(path) {
+            return Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Peer credentials are restricted to cluster admin endpoints",
+            ));
+        }
+    }
     if path == "/" {
         if let Some(principal) = principal {
             if state.iam.authorize(principal, None, "list", None) {
@@ -720,7 +732,7 @@ async fn authorize_request(
         ));
     }
 
-    if path.starts_with("/admin/") || path.starts_with("/kms/") {
+    if path.starts_with("/myfsio/admin/") {
         return if principal.is_some() {
             Ok(())
         } else {
@@ -728,6 +740,20 @@ async fn authorize_request(
                 S3ErrorCode::AccessDenied,
                 "Missing credentials",
             ))
+        };
+    }
+
+    if path.starts_with("/myfsio/kms/") {
+        return match principal {
+            Some(p) if p.is_admin => Ok(()),
+            Some(_) => Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "KMS access requires admin privileges",
+            )),
+            None => Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Missing credentials",
+            )),
         };
     }
 
@@ -741,6 +767,12 @@ async fn authorize_request(
             return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
         }
     };
+    if myfsio_storage::validation::is_reserved_bucket_name(bucket) {
+        return Err(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Access to reserved bucket names is not permitted",
+        ));
+    }
     let remaining: Vec<&str> = segments.collect();
 
     if remaining.is_empty() {
@@ -753,6 +785,12 @@ async fn authorize_request(
         if let Some(copy_source) = copy_source {
             let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
             if let Some((src_bucket, src_key)) = source.split_once('/') {
+                if myfsio_storage::validation::is_reserved_bucket_name(src_bucket) {
+                    return Err(S3Error::new(
+                        S3ErrorCode::AccessDenied,
+                        "Access to reserved bucket names is not permitted",
+                    ));
+                }
                 let source_allowed =
                     authorize_action(state, principal, src_bucket, "read", Some(src_key))
                         .await
@@ -771,6 +809,56 @@ async fn authorize_request(
 
     let action = resolve_object_action(method, query);
     authorize_action(state, principal, bucket, action, Some(&object_key)).await
+}
+
+pub async fn ui_authorize(
+    state: &AppState,
+    principal: &Principal,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> Result<(), String> {
+    authorize_action(state, Some(principal), bucket, action, object_key)
+        .await
+        .map_err(|err| err.message)
+}
+
+pub async fn ui_authorize_list(
+    state: &AppState,
+    principal: &Principal,
+    bucket: &str,
+    prefix: &str,
+) -> Result<(), String> {
+    let iam_allowed = state
+        .iam
+        .authorize(principal, Some(bucket), "list", Some(prefix));
+    let policy_decision = evaluate_bucket_policy(
+        state,
+        Some(principal.access_key.as_str()),
+        bucket,
+        "list",
+        None,
+    )
+    .await;
+
+    if matches!(policy_decision, PolicyDecision::Deny) {
+        return Err("Access denied by bucket policy".to_string());
+    }
+    if iam_allowed || matches!(policy_decision, PolicyDecision::Allow) {
+        return Ok(());
+    }
+    if evaluate_bucket_acl(
+        state,
+        bucket,
+        Some(principal.access_key.as_str()),
+        "list",
+        true,
+    )
+    .await
+    {
+        return Ok(());
+    }
+    Err("Access denied".to_string())
 }
 
 async fn authorize_action(
@@ -949,9 +1037,71 @@ fn statement_matches_action(statement: &Value, action: &str) -> bool {
     }
 }
 
+const S3_ACTION_TABLE: &[(&str, &str)] = &[
+    ("s3:listbucket", "list"),
+    ("s3:listallmybuckets", "list"),
+    ("s3:listbucketversions", "list"),
+    ("s3:listmultipartuploads", "list"),
+    ("s3:listparts", "list"),
+    ("s3:getobject", "read"),
+    ("s3:getobjectversion", "read"),
+    ("s3:getobjecttagging", "read"),
+    ("s3:getobjectversiontagging", "read"),
+    ("s3:getobjectacl", "read"),
+    ("s3:getbucketversioning", "read"),
+    ("s3:headobject", "read"),
+    ("s3:headbucket", "read"),
+    ("s3:putobject", "write"),
+    ("s3:createbucket", "write"),
+    ("s3:putobjecttagging", "write"),
+    ("s3:putbucketversioning", "write"),
+    ("s3:createmultipartupload", "write"),
+    ("s3:uploadpart", "write"),
+    ("s3:completemultipartupload", "write"),
+    ("s3:abortmultipartupload", "write"),
+    ("s3:copyobject", "write"),
+    ("s3:deleteobject", "delete"),
+    ("s3:deleteobjectversion", "delete"),
+    ("s3:deletebucket", "delete"),
+    ("s3:deleteobjecttagging", "delete"),
+    ("s3:putobjectacl", "share"),
+    ("s3:putbucketacl", "share"),
+    ("s3:getbucketacl", "share"),
+    ("s3:putbucketpolicy", "policy"),
+    ("s3:getbucketpolicy", "policy"),
+    ("s3:deletebucketpolicy", "policy"),
+    ("s3:getreplicationconfiguration", "replication"),
+    ("s3:putreplicationconfiguration", "replication"),
+    ("s3:deletereplicationconfiguration", "replication"),
+    ("s3:replicateobject", "replication"),
+    ("s3:replicatetags", "replication"),
+    ("s3:replicatedelete", "replication"),
+    ("s3:getlifecycleconfiguration", "lifecycle"),
+    ("s3:putlifecycleconfiguration", "lifecycle"),
+    ("s3:deletelifecycleconfiguration", "lifecycle"),
+    ("s3:getbucketlifecycle", "lifecycle"),
+    ("s3:putbucketlifecycle", "lifecycle"),
+    ("s3:getbucketcors", "cors"),
+    ("s3:putbucketcors", "cors"),
+    ("s3:deletebucketcors", "cors"),
+];
+
 fn policy_action_matches(policy_action: &str, requested_action: &str) -> bool {
-    let normalized_policy_action = normalize_policy_action(policy_action);
-    normalized_policy_action == "*" || normalized_policy_action == requested_action
+    let normalized_policy = policy_action.trim().to_ascii_lowercase();
+    if normalized_policy == "*" {
+        return true;
+    }
+    if normalized_policy.contains('*') || normalized_policy.contains('?') {
+        for (s3_action, internal_action) in S3_ACTION_TABLE {
+            if *internal_action == requested_action
+                && wildcard_match(s3_action, &normalized_policy)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    normalize_policy_action(&normalized_policy) == requested_action
 }
 
 fn normalize_policy_action(action: &str) -> String {
@@ -959,51 +1109,12 @@ fn normalize_policy_action(action: &str) -> String {
     if normalized == "*" {
         return normalized;
     }
-    match normalized.as_str() {
-        "s3:listbucket"
-        | "s3:listallmybuckets"
-        | "s3:listbucketversions"
-        | "s3:listmultipartuploads"
-        | "s3:listparts" => "list".to_string(),
-        "s3:getobject"
-        | "s3:getobjectversion"
-        | "s3:getobjecttagging"
-        | "s3:getobjectversiontagging"
-        | "s3:getobjectacl"
-        | "s3:getbucketversioning"
-        | "s3:headobject"
-        | "s3:headbucket" => "read".to_string(),
-        "s3:putobject"
-        | "s3:createbucket"
-        | "s3:putobjecttagging"
-        | "s3:putbucketversioning"
-        | "s3:createmultipartupload"
-        | "s3:uploadpart"
-        | "s3:completemultipartupload"
-        | "s3:abortmultipartupload"
-        | "s3:copyobject" => "write".to_string(),
-        "s3:deleteobject"
-        | "s3:deleteobjectversion"
-        | "s3:deletebucket"
-        | "s3:deleteobjecttagging" => "delete".to_string(),
-        "s3:putobjectacl" | "s3:putbucketacl" | "s3:getbucketacl" => "share".to_string(),
-        "s3:putbucketpolicy" | "s3:getbucketpolicy" | "s3:deletebucketpolicy" => {
-            "policy".to_string()
+    for (s3_action, internal_action) in S3_ACTION_TABLE {
+        if *s3_action == normalized {
+            return (*internal_action).to_string();
         }
-        "s3:getreplicationconfiguration"
-        | "s3:putreplicationconfiguration"
-        | "s3:deletereplicationconfiguration"
-        | "s3:replicateobject"
-        | "s3:replicatetags"
-        | "s3:replicatedelete" => "replication".to_string(),
-        "s3:getlifecycleconfiguration"
-        | "s3:putlifecycleconfiguration"
-        | "s3:deletelifecycleconfiguration"
-        | "s3:getbucketlifecycle"
-        | "s3:putbucketlifecycle" => "lifecycle".to_string(),
-        "s3:getbucketcors" | "s3:putbucketcors" | "s3:deletebucketcors" => "cors".to_string(),
-        other => other.to_string(),
     }
+    normalized
 }
 
 fn statement_matches_resource(statement: &Value, bucket: &str, object_key: Option<&str>) -> bool {
@@ -1191,18 +1302,44 @@ fn try_auth(state: &AppState, req: &Request) -> AuthResult {
         return verify_sigv4_query(state, req);
     }
 
-    if let (Some(ak), Some(sk)) = (
-        req.headers()
-            .get("x-access-key")
-            .and_then(|v| v.to_str().ok()),
-        req.headers()
-            .get("x-secret-key")
-            .and_then(|v| v.to_str().ok()),
-    ) {
-        return match state.iam.authenticate(ak, sk) {
-            Some(principal) => AuthResult::Ok(principal),
-            None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch)),
-        };
+    let has_legacy_headers = req.headers().get("x-access-key").is_some()
+        || req.headers().get("x-secret-key").is_some();
+    if has_legacy_headers && !state.config.allow_legacy_header_auth {
+        tracing::warn!(
+            "Rejecting x-access-key/x-secret-key auth (set ALLOW_LEGACY_HEADER_AUTH=true to re-enable; SigV4 is preferred)"
+        );
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "Legacy header authentication is disabled (set ALLOW_LEGACY_HEADER_AUTH=true to re-enable)",
+        ));
+    }
+
+    if state.config.allow_legacy_header_auth {
+        if let (Some(ak), Some(sk)) = (
+            req.headers()
+                .get("x-access-key")
+                .and_then(|v| v.to_str().ok()),
+            req.headers()
+                .get("x-secret-key")
+                .and_then(|v| v.to_str().ok()),
+        ) {
+            return match state.iam.authenticate(ak, sk) {
+                Some(principal) => {
+                    if principal.is_peer() {
+                        tracing::warn!(
+                            "Peer credential '{}' attempted x-access-key/x-secret-key auth; peer credentials are SigV4-only",
+                            principal.access_key
+                        );
+                        return AuthResult::Denied(S3Error::new(
+                            S3ErrorCode::AccessDenied,
+                            "Peer credentials must use SigV4 authentication",
+                        ));
+                    }
+                    AuthResult::Ok(principal)
+                }
+                None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch)),
+            };
+        }
     }
 
     AuthResult::NoAuth
@@ -1295,6 +1432,22 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
         .unwrap_or("UNSIGNED-PAYLOAD");
 
     let signed_headers: Vec<&str> = signed_headers_str.split(';').collect();
+    let signed_lc: Vec<String> = signed_headers
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    if !signed_lc.iter().any(|h| h == "host") {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "SignedHeaders must include host",
+        ));
+    }
+    if !signed_lc.iter().any(|h| h == "x-amz-date" || h == "date") {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "SignedHeaders must include x-amz-date or date",
+        ));
+    }
     let header_values: Vec<(String, String)> = signed_headers
         .iter()
         .map(|&name| {
@@ -1327,7 +1480,14 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
     }
 
     match state.iam.get_principal(access_key) {
-        Some(p) => AuthResult::Ok(p),
+        Some(p) => {
+            if let Some(err) =
+                enforce_peer_freshness_and_nonce(state, &p, amz_date, provided_signature)
+            {
+                return AuthResult::Denied(err);
+            }
+            AuthResult::Ok(p)
+        }
         None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }
 }
@@ -1451,6 +1611,16 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     let payload_hash = "UNSIGNED-PAYLOAD";
 
     let signed_headers: Vec<&str> = signed_headers_str.split(';').collect();
+    let signed_lc: Vec<String> = signed_headers
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    if !signed_lc.iter().any(|h| h == "host") {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "X-Amz-SignedHeaders must include host",
+        ));
+    }
     let header_values: Vec<(String, String)> = signed_headers
         .iter()
         .map(|&name| {
@@ -1483,9 +1653,45 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
     }
 
     match state.iam.get_principal(access_key) {
-        Some(p) => AuthResult::Ok(p),
+        Some(p) => {
+            if let Some(err) =
+                enforce_peer_freshness_and_nonce(state, &p, amz_date, provided_signature)
+            {
+                return AuthResult::Denied(err);
+            }
+            AuthResult::Ok(p)
+        }
         None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }
+}
+
+fn is_path_allowed_for_peer(path: &str) -> bool {
+    path == "/myfsio/admin/cluster/overview" || path.starts_with("/myfsio/admin/peer/")
+}
+
+fn enforce_peer_freshness_and_nonce(
+    state: &AppState,
+    principal: &Principal,
+    amz_date: &str,
+    signature: &str,
+) -> Option<S3Error> {
+    if !principal.is_peer() {
+        return None;
+    }
+    if let Some(err) =
+        check_timestamp_freshness(amz_date, state.config.peer_sigv4_timestamp_tolerance_secs)
+    {
+        return Some(err);
+    }
+    let key = format!("{}:{}", principal.access_key, signature);
+    let mut cache = state.peer_request_nonces.lock();
+    if cache.put(key, Instant::now()).is_some() {
+        return Some(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            "Peer request signature replay detected",
+        ));
+    }
+    None
 }
 
 fn check_timestamp_freshness(amz_date: &str, tolerance_secs: u64) -> Option<S3Error> {
@@ -1545,4 +1751,70 @@ fn error_response(err: S3Error, resource: &str) -> Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{policy_action_matches, wildcard_match};
+
+    #[test]
+    fn star_action_matches_anything() {
+        assert!(policy_action_matches("*", "read"));
+        assert!(policy_action_matches("*", "delete"));
+        assert!(policy_action_matches("*", "policy"));
+    }
+
+    #[test]
+    fn s3_star_action_matches_any_s3_action() {
+        assert!(policy_action_matches("s3:*", "read"));
+        assert!(policy_action_matches("s3:*", "write"));
+        assert!(policy_action_matches("s3:*", "delete"));
+        assert!(policy_action_matches("s3:*", "list"));
+        assert!(policy_action_matches("s3:*", "policy"));
+    }
+
+    #[test]
+    fn s3_get_star_matches_read_only() {
+        assert!(policy_action_matches("s3:Get*", "read"));
+        assert!(!policy_action_matches("s3:Get*", "write"));
+        assert!(!policy_action_matches("s3:Get*", "delete"));
+    }
+
+    #[test]
+    fn s3_put_star_matches_write_and_share_policy_lifecycle() {
+        assert!(policy_action_matches("s3:Put*", "write"));
+        assert!(policy_action_matches("s3:PutObject*", "write"));
+        assert!(policy_action_matches("s3:PutBucket*", "write"));
+    }
+
+    #[test]
+    fn s3_list_star_matches_list() {
+        assert!(policy_action_matches("s3:List*", "list"));
+        assert!(!policy_action_matches("s3:List*", "read"));
+    }
+
+    #[test]
+    fn s3_delete_star_matches_delete() {
+        assert!(policy_action_matches("s3:Delete*", "delete"));
+        assert!(!policy_action_matches("s3:Delete*", "write"));
+    }
+
+    #[test]
+    fn exact_action_still_matches() {
+        assert!(policy_action_matches("s3:GetObject", "read"));
+        assert!(policy_action_matches("s3:PutObject", "write"));
+        assert!(!policy_action_matches("s3:GetObject", "write"));
+    }
+
+    #[test]
+    fn unknown_glob_pattern_does_not_match_unknown_action() {
+        assert!(!policy_action_matches("s3:NeverHeardOf*", "read"));
+    }
+
+    #[test]
+    fn wildcard_match_basic() {
+        assert!(wildcard_match("s3:getobject", "s3:get*"));
+        assert!(wildcard_match("s3:listbucket", "s3:list*"));
+        assert!(!wildcard_match("s3:listbucket", "s3:get*"));
+    }
 }

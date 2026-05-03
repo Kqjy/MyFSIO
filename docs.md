@@ -78,6 +78,10 @@ cargo run -p myfsio-server -- --check-config
 
 # Back up the current IAM file and generate fresh admin credentials
 cargo run -p myfsio-server -- --reset-cred
+
+# One-shot: tag existing peer_inbound_access_key entries as peer credentials
+# (restricts them to /myfsio/admin/cluster/overview and clears their IAM policies)
+cargo run -p myfsio-server -- --migrate-peer-creds
 ```
 
 If you are running a release build instead of `cargo run`, replace the `cargo run ... --` prefix with the binary path.
@@ -116,7 +120,15 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `STORAGE_ROOT` | `./data` | Root for buckets and internal state |
 | `IAM_CONFIG` | `<STORAGE_ROOT>/.myfsio.sys/config/iam.json` | IAM config path |
 | `AWS_REGION` | `us-east-1` | SigV4 region |
-| `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew |
+| `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew for regular SigV4 |
+| `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter time skew enforced for peer-credential SigV4 requests |
+| `PEER_NONCE_CACHE_SIZE` | `10000` | Capacity of the in-memory replay-detection LRU for peer requests |
+| `ALLOW_LEGACY_HEADER_AUTH` | `false` | When `true`, accepts the legacy `x-access-key`/`x-secret-key` header pair. Default is off; SigV4 is preferred. Peer credentials are SigV4-only regardless of this flag |
+| `PEER_REQUIRE_HTTPS` | `false` | When `true`, peer endpoint registration rejects non-`https://` URLs. The server logs a startup warning if any registered peer uses `http://` and this flag is unset |
+| `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling `/myfsio/admin/peer/*` (inbound relay) and `/myfsio/admin/relay/*` (outbound dispatch). Same value required on every node. When unset, Phase 3 federation is disabled |
+| `RELAY_IDEMPOTENCY_CACHE_SIZE` | `10000` | LRU capacity for relay idempotency dedup |
+| `RELAY_IDEMPOTENCY_TTL_SECONDS` | `3600` | How long a cached relay response is replayable for the same idempotency key |
+| `AUDIT_LOG_ENABLED` | `false` | When `true`, append-only JSONL log of relayed admin actions at `<STORAGE_ROOT>/.myfsio.sys/audit/YYYYMMDD.jsonl` |
 | `PRESIGNED_URL_MIN_EXPIRY_SECONDS` | `1` | Minimum presigned URL lifetime |
 | `PRESIGNED_URL_MAX_EXPIRY_SECONDS` | `604800` | Maximum presigned URL lifetime |
 | `SECRET_KEY` | unset, then fallback to `.myfsio.sys/config/.secret` if present | Session signing and IAM config encryption key |
@@ -142,7 +154,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `RATE_LIMIT_BUCKET_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for `/{bucket}` |
 | `RATE_LIMIT_OBJECT_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for `/{bucket}/{key}` |
 | `RATE_LIMIT_HEAD_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for HEAD requests |
-| `RATE_LIMIT_ADMIN` | `60 per minute` | Override for `/admin/*` |
+| `RATE_LIMIT_ADMIN` | `60 per minute` | Override for `/myfsio/admin/*` |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Backend for rate-limit state. Only `memory://` is supported today |
 
 ### CORS and proxying
@@ -191,10 +203,13 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `REPLICATION_CONNECT_TIMEOUT_SECONDS` | `5` | Replication connect timeout |
-| `REPLICATION_READ_TIMEOUT_SECONDS` | `30` | Replication read timeout |
+| `REPLICATION_READ_TIMEOUT_SECONDS` | `120` | Replication per-part / per-attempt read timeout |
 | `REPLICATION_MAX_RETRIES` | `2` | Replication retry count |
 | `REPLICATION_STREAMING_THRESHOLD_BYTES` | `10485760` | Switch to streaming for large copies |
 | `REPLICATION_MAX_FAILURES_PER_BUCKET` | `50` | Failure budget before a bucket is skipped |
+| `REPLICATION_HEALER_ENABLED` | `true` | Background worker that auto-retries persisted replication failures (set `false` to disable) |
+| `REPLICATION_HEALER_INTERVAL_SECONDS` | `60` | Healer pass interval; each pass re-runs eligible failures |
+| `REPLICATION_HEALER_MAX_ATTEMPTS` | `12` | Per-object retry cap; failures with `failure_count` at or above this are skipped (manual retry still works) |
 | `SITE_SYNC_INTERVAL_SECONDS` | `60` | Poll interval for the site sync worker |
 | `SITE_SYNC_BATCH_SIZE` | `100` | Max objects processed per site sync batch |
 | `SITE_SYNC_CONNECT_TIMEOUT_SECONDS` | `10` | Site sync connect timeout |
@@ -234,23 +249,108 @@ These are read directly by UI pages:
 
 ### Cross-site authentication
 
-The Cluster page on each site fetches `/admin/cluster/overview` from every registered peer to render their cards. That endpoint is gated by `require_admin_or_registered_peer`, which accepts a request when **either**:
+The Cluster dashboard on each site fetches `/myfsio/admin/cluster/overview` from every registered peer to render their cards. That endpoint is gated by `require_admin_or_registered_peer`, which accepts a request when **either**:
 
-1. The signing access key is a full admin on the receiving site (policy `{"bucket":"*","actions":["*"]}`), **or**
-2. The signing access key matches the **Peer Inbound Access Key** field on the receiving site's site-registry entry for that peer.
+1. The signing principal is a full admin on the receiving site (policy `{"bucket":"*","actions":["*"]}`), **or**
+2. The signing principal is a **peer credential** issued on the receiving site (an IAM record with the internal `peer_site_id` flag set; access keys conventionally start with `PEERAK…`).
 
-Option 2 is the least-privilege path and is what the Sites UI exposes per peer. The value goes into the *receiving* peer entry and is **the access key the other site signs with when calling here** — i.e. copied from the *other* site's outbound Connection that targets this site.
+Peer credentials are deliberately scoped: they can **only** call `/myfsio/admin/cluster/overview` and they refuse `x-access-key`/`x-secret-key` (legacy) header authentication. They appear in `/myfsio/admin/cluster/overview` request signing and nowhere else — list/get user-management endpoints filter them out.
 
-Symmetric setup for two sites `us-east-1` and `us-west-1`:
+Issue a peer credential on the receiving site:
 
-| On site | Peer entry | Peer Inbound Access Key |
+```bash
+curl -X POST -H 'content-type: application/json' \
+     -d '{"site_id":"us-west-1","display_name":"peer:us-west-1"}' \
+     http://api.example.com/myfsio/admin/peer-credentials
+# → { "user_id": "peer-…", "access_key": "PEERAK…", "secret_key": "PEERSK…", "site_id": "us-west-1" }
+```
+
+The returned access key/secret are what the *other* site signs with when calling here — copy them into that site's outbound Connection (or whatever it uses for cluster-overview). Symmetric setup for two sites `us-east-1` and `us-west-1`:
+
+| On site | Action | Result |
 | --- | --- | --- |
-| `us-east-1` | `us-west-1` | the access key in **us-west-1's** outbound Connection that points at us-east-1 |
-| `us-west-1` | `us-east-1` | the access key in **us-east-1's** outbound Connection that points at us-west-1 |
+| `us-east-1` | `POST /myfsio/admin/peer-credentials {"site_id":"us-west-1"}` | Returns `(PEERAK_E, PEERSK_E)` to hand to `us-west-1` |
+| `us-west-1` | `POST /myfsio/admin/peer-credentials {"site_id":"us-east-1"}` | Returns `(PEERAK_W, PEERSK_W)` to hand to `us-east-1` |
+| `us-east-1` | Connection → `us-west-1` uses `(PEERAK_W, PEERSK_W)` | Local node signs cluster-overview to `us-west-1` |
+| `us-west-1` | Connection → `us-east-1` uses `(PEERAK_E, PEERSK_E)` | Local node signs cluster-overview to `us-east-1` |
 
-Putting your own admin key into your own peer entry does nothing — the inbound caller is the peer, not you. The whitelisted access key must still exist as an enabled IAM user on the receiving site so SigV4 verification finds a matching secret. Its policy can be empty for cluster-overview alone; for site-sync it needs the S3 verbs the sync workload uses (`list`, `read`, plus `write`/`delete` for replicated/bidirectional buckets). Leave the field blank only if the signing key is a real admin on the receiving site.
+List with `GET /myfsio/admin/peer-credentials`; revoke with `DELETE /myfsio/admin/peer-credentials/{access_key}`.
+
+#### Replay protection
+
+Peer SigV4 requests are subject to a **60-second** clock-skew window (`PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS`) and an in-memory `(access_key, signature)` LRU dedupe (`PEER_NONCE_CACHE_SIZE`). To prevent same-second false-positives, the server's outbound `peer_admin` client adds a unique signed `x-myfsio-nonce` header to every request, so two simultaneous overview pulls produce distinct signatures.
+
+#### Migrating existing deployments
+
+Releases prior to peer-credential namespacing reused regular IAM users for the **Peer Inbound Access Key** field. Run
+
+```bash
+cargo run -p myfsio-server -- --migrate-peer-creds
+```
+
+once on each site to retag those access keys. The migration:
+
+- Refuses to migrate any access key that shares an IAM user with other access keys (it would clear that user's policies and convert all of its keys into peer credentials). Move the AK onto a dedicated user before retrying.
+- Errors (with exit code 1) when the registry references an AK that is not present in IAM, instead of silently treating it as already-migrated.
+- Clears the migrated user's policies. **If you used the same AK as a site-sync credential, you must reissue separate IAM users for site-sync** before relying on the data plane again — the migrated AK is now restricted to `/myfsio/admin/cluster/overview`.
 
 The in-app **Documentation → Site Registry** page has a worked example with side-by-side cards.
+
+### Cross-site admin actions (federated writes)
+
+Once peer credentials are issued and `MYFSIO_CLUSTER_PSK` is set on every node, an admin can apply most write actions on a peer site through their local node. The local node signs a SigV4 request with the peer credential it holds for the target site and attaches three HMACs over the cluster PSK:
+
+- `x-myfsio-cluster-attest` = `HMAC-SHA256(PSK, amz_date || origin_site_id || idempotency_key)` — proves the call comes from a cluster member
+- `x-myfsio-admin-attest` = `HMAC-SHA256(PSK, amz_date || admin_user_id)` — proves a real admin authorised it
+- `x-myfsio-origin-site` must equal the peer principal's site_id on the target node
+
+Plus a unique `x-myfsio-idempotency-key` (UUIDv4) for safe retry, a `x-myfsio-correlation-id` so origin and target audit entries can be joined, and `x-myfsio-nonce` to prevent same-second signature collisions.
+
+#### Outbound (origin) — `/myfsio/admin/relay/{site_id}/{*path}`
+
+Operators don't construct these signatures themselves. The local node exposes an outbound relay dispatcher: take any inbound `/myfsio/admin/peer/{...}` path, prefix it with `/myfsio/admin/relay/{target_site_id}/`, and the local node signs and forwards.
+
+```bash
+# Disable a user on us-west-1 from us-east-1's UI/API
+curl -X POST https://us-east-1.example.com/myfsio/admin/relay/us-west-1/iam/users/u-someone/disable \
+     -H 'authorization: AWS4-HMAC-SHA256 …'   # signed by us-east-1's local admin key
+```
+
+The response is the target site's response (status, headers, body) with `x-myfsio-correlation-id` and `x-myfsio-idempotency-key` echoed for audit/log lookup.
+
+#### Inbound (target) — `/myfsio/admin/peer/{*}`
+
+The target site mounts a parallel route set under `/myfsio/admin/peer/`:
+
+| Outbound path | Underlying action |
+| --- | --- |
+| `POST /myfsio/admin/peer/sites` | Register peer site |
+| `PUT/DELETE /myfsio/admin/peer/sites/{site_id}` | Update / delete peer site entry |
+| `POST /myfsio/admin/peer/sites/{site_id}/health` | Re-check peer reachability |
+| `POST /myfsio/admin/peer/iam/users/{id}/access-keys` | Issue access key for an existing user |
+| `DELETE /myfsio/admin/peer/iam/users/{id}/access-keys/{ak}` | Revoke an access key |
+| `POST /myfsio/admin/peer/iam/users/{id}/disable` and `/enable` | Toggle user enable flag |
+| `POST/PUT/DELETE /myfsio/admin/peer/website-domains[/{domain}]` | Manage website domain mappings |
+| `POST /myfsio/admin/peer/gc/run` | Trigger garbage collection |
+| `POST /myfsio/admin/peer/integrity/run` | Trigger integrity scan |
+| `GET /myfsio/admin/peer/{...}` | Read counterparts of the above (cluster-wide introspection) |
+
+These accept **only** peer principals carrying valid attestation. Each request is dedup'd by `(origin_site_id, idempotency_key)` for `RELAY_IDEMPOTENCY_TTL_SECONDS`; replays return the cached response with header `x-myfsio-idempotent-replay: true`. Attestation failure is `403`; `MYFSIO_CLUSTER_PSK` not configured returns `503`.
+
+> **Idempotent replay caveat.** The cached response is returned verbatim and the underlying action is **not** re-executed against current state. If something else mutated the target between the original call and a replay, the replay body still reflects the *original* outcome — not the live state. Treat the replay body as proof the action was applied at least once, not as a fresh status read. Use a follow-up `GET` if you need to confirm current state. Reusing the same key with a different method/path/body returns `409 InvalidArgument`.
+
+#### Audit log
+
+When `AUDIT_LOG_ENABLED=true`, every relayed action writes one JSONL line on both the origin (target=`outbound`) and target (target=`local`) nodes, sharing the same `correlation_id`. The UI surfaces this at `/ui/audit-log`.
+
+#### Threat model summary
+
+A successful federated write requires three independent secrets:
+1. A SigV4-valid peer credential issued on the target site
+2. The cluster PSK (shared cluster-wide; rotate by rolling restart)
+3. The HMAC over the admin's `user_id` (also keyed by PSK; proves a human admin authorized the call)
+
+Compromise of any one of the three is insufficient. The narrow `/myfsio/admin/peer/*` URL prefix and the explicit allowlist of relayable paths give a second layer of defense beyond the attestation check.
 
 ## 7. Data Layout
 
@@ -330,7 +430,7 @@ Defaults (override with the env vars in section 6):
 
 Each GC cycle also sweeps `data/.myfsio.sys/quarantine/<bucket>/<ts>/` directories whose `<ts>` mtime is older than `INTEGRITY_QUARANTINE_RETENTION_DAYS`, freeing the bytes recorded in `quarantine_bytes_freed` / `quarantine_entries_deleted` in the result JSON.
 
-History is persisted at `data/.myfsio.sys/config/gc_history.json` and can be triggered manually via `POST /admin/gc/run` (use `{"dry_run": true}` to preview).
+History is persisted at `data/.myfsio.sys/config/gc_history.json` and can be triggered manually via `POST /myfsio/admin/gc/run` (use `{"dry_run": true}` to preview).
 
 ### Integrity scanning
 
@@ -360,7 +460,7 @@ Subsequent reads (`GET`, `HEAD`, `CopyObject` source) on a poisoned key return `
 
 `stale_version`, `etag_cache_inconsistency`, and `phantom_metadata` issues are healed locally (move-to-quarantine, rebuild cache, drop entry); `orphaned_object` is reported only.
 
-Override per-invocation by passing `auto_heal` / `dry_run` to `POST /admin/integrity/run`. The response and history records now include a `heal_stats` map keyed by issue type with `{found, healed, poisoned, peer_mismatch, peer_unavailable, verify_failed, failed, skipped}`. History is at `data/.myfsio.sys/config/integrity_history.json`.
+Override per-invocation by passing `auto_heal` / `dry_run` to `POST /myfsio/admin/integrity/run`. The response and history records now include a `heal_stats` map keyed by issue type with `{found, healed, poisoned, peer_mismatch, peer_unavailable, verify_failed, failed, skipped}`. History is at `data/.myfsio.sys/config/integrity_history.json`.
 
 ### Metrics history
 
@@ -471,7 +571,7 @@ The response includes the active Rust crate version:
 ```json
 {
   "status": "ok",
-  "version": "0.5.0"
+  "version": "x.x.x"
 }
 ```
 
@@ -509,8 +609,8 @@ The Rust server exposes:
 - `GET /myfsio/health`
 - S3 bucket and object operations on `/<bucket>` and `/<bucket>/<key>`
 - UI routes under `/ui/...`
-- admin routes under `/admin/...`
-- KMS routes under `/kms/...`
+- admin routes under `/myfsio/admin/...`
+- KMS routes under `/myfsio/kms/...`
 
 For a route-level view, inspect:
 

@@ -1,14 +1,18 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::config::ServerConfig;
 use crate::services::access_logging::AccessLoggingService;
+use crate::services::audit_log::AuditLog;
 use crate::services::gc::GcService;
 use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
+use crate::services::peer_admin::PeerAdminClient;
 use crate::services::peer_fetch::PeerFetcher;
 use crate::services::replication::ReplicationManager;
 use crate::services::s3_client::ClientOptions;
@@ -36,6 +40,7 @@ pub struct AppState {
     pub metrics: Option<Arc<MetricsService>>,
     pub system_metrics: Option<Arc<SystemMetricsService>>,
     pub site_registry: Option<Arc<SiteRegistry>>,
+    pub peer_admin: Arc<PeerAdminClient>,
     pub website_domains: Option<Arc<WebsiteDomainStore>>,
     pub connections: Arc<ConnectionStore>,
     pub replication: Arc<ReplicationManager>,
@@ -45,6 +50,19 @@ pub struct AppState {
     pub access_logging: Arc<AccessLoggingService>,
     pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
+    pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
+    pub relay_idempotency_cache: Arc<Mutex<LruCache<String, RelayIdempotencyEntry>>>,
+    pub relay_idempotency_inflight:
+        Arc<Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub audit_log: Arc<AuditLog>,
+}
+
+#[derive(Clone)]
+pub struct RelayIdempotencyEntry {
+    pub stored_at: Instant,
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub request_fingerprint: String,
 }
 
 impl AppState {
@@ -108,18 +126,76 @@ impl AppState {
 
         let site_registry = {
             let registry = SiteRegistry::new(&config.storage_root);
-            if let (Some(site_id), Some(endpoint)) =
-                (config.site_id.as_deref(), config.site_endpoint.as_deref())
-            {
-                registry.set_local_site(crate::services::site_registry::SiteInfo {
-                    site_id: site_id.to_string(),
-                    endpoint: endpoint.to_string(),
+            let existing = registry.get_local_site();
+
+            let env_endpoint = config.site_endpoint.clone();
+            let site_id = config
+                .site_id
+                .clone()
+                .or_else(|| existing.as_ref().map(|s| s.site_id.clone()));
+
+            if let Some(site_id) = site_id {
+                let endpoint = env_endpoint.clone().unwrap_or_else(|| {
+                    crate::services::site_registry::derive_local_endpoint(&config.bind_addr)
+                });
+
+                let (display_name, created_at) = match existing.as_ref() {
+                    Some(s) => {
+                        let dn = if s.display_name.is_empty() {
+                            site_id.clone()
+                        } else {
+                            s.display_name.clone()
+                        };
+                        (dn, s.created_at.clone())
+                    }
+                    None => (site_id.clone(), Some(chrono::Utc::now().to_rfc3339())),
+                };
+
+                let merged = crate::services::site_registry::SiteInfo {
+                    site_id: site_id.clone(),
+                    endpoint: endpoint.clone(),
                     region: config.site_region.clone(),
                     priority: config.site_priority,
-                    display_name: site_id.to_string(),
-                    created_at: Some(chrono::Utc::now().to_rfc3339()),
-                });
+                    display_name,
+                    created_at,
+                };
+
+                let needs_write = match existing.as_ref() {
+                    None => true,
+                    Some(s) => {
+                        s.site_id != merged.site_id
+                            || s.endpoint != merged.endpoint
+                            || s.region != merged.region
+                            || s.priority != merged.priority
+                    }
+                };
+
+                if needs_write {
+                    if let Some(prev) = existing.as_ref() {
+                        if prev.endpoint != merged.endpoint {
+                            tracing::info!(
+                                "Site registry: local endpoint updated from {} to {} (set SITE_ENDPOINT to pin)",
+                                prev.endpoint,
+                                merged.endpoint
+                            );
+                        }
+                    }
+                    registry.set_local_site(merged);
+                }
             }
+
+            if let Some(pinned) = env_endpoint.as_ref() {
+                if let Some(p) = crate::services::site_registry::endpoint_port(pinned) {
+                    if p != config.bind_addr.port() {
+                        tracing::warn!(
+                            "Site registry: pinned SITE_ENDPOINT port ({}) differs from runtime API port ({})",
+                            p,
+                            config.bind_addr.port()
+                        );
+                    }
+                }
+            }
+
             Some(Arc::new(registry))
         };
 
@@ -134,13 +210,21 @@ impl AppState {
         let replication = Arc::new(ReplicationManager::new(
             storage.clone(),
             connections.clone(),
+            site_registry.clone(),
             &config.storage_root,
             Duration::from_secs(config.replication_connect_timeout_secs),
             Duration::from_secs(config.replication_read_timeout_secs),
             config.replication_max_retries,
             config.replication_streaming_threshold_bytes,
             config.replication_max_failures_per_bucket,
+            config.allow_internal_endpoints,
         ));
+        if config.replication_healer_enabled {
+            replication.clone().start_healer(
+                Duration::from_secs(config.replication_healer_interval_secs.max(1)),
+                config.replication_healer_max_attempts,
+            );
+        }
 
         let site_sync = if config.site_sync_enabled {
             Some(Arc::new(SiteSyncWorker::new(
@@ -195,6 +279,16 @@ impl AppState {
         let templates = init_templates(&config.templates_dir, &config.display_timezone);
         let access_logging = Arc::new(AccessLoggingService::new(&config.storage_root));
         let session_ttl = Duration::from_secs(config.session_lifetime_days.saturating_mul(86_400));
+        let peer_admin = Arc::new(PeerAdminClient::new(
+            Duration::from_secs(3),
+            Duration::from_secs(5),
+            config.allow_internal_endpoints,
+        ));
+        let nonce_cap = NonZeroUsize::new(config.peer_nonce_cache_size.max(1))
+            .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
+        let idemp_cap = NonZeroUsize::new(config.relay_idempotency_cache_size.max(1))
+            .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
+        let audit_log = Arc::new(AuditLog::new(&config.storage_root, config.audit_log_enabled));
         Self {
             config,
             storage,
@@ -206,6 +300,7 @@ impl AppState {
             metrics,
             system_metrics,
             site_registry,
+            peer_admin,
             website_domains,
             connections,
             replication,
@@ -215,6 +310,12 @@ impl AppState {
             access_logging,
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
+            peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
+            relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),
+            relay_idempotency_inflight: Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            audit_log,
         }
     }
 
