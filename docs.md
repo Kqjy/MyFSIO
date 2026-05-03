@@ -571,7 +571,7 @@ The response includes the active Rust crate version:
 ```json
 {
   "status": "ok",
-  "version": "0.5.0"
+  "version": "x.x.x"
 }
 ```
 

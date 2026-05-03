@@ -823,17 +823,6 @@ pub async fn ui_authorize(
         .map_err(|err| err.message)
 }
 
-/// List-flavored authorization for the UI.
-///
-/// `prefix` is the requested key prefix (empty string means whole-bucket
-/// list). The IAM check uses `Some(prefix)` so prefix-scoped policies are
-/// honored — without that, a user scoped to `reports/` could call list with
-/// `?prefix=secret/` and read keys outside their allowed prefix.
-///
-/// The bucket-policy and ACL checks, by contrast, are evaluated with
-/// `object_key = None` so a `Deny` / `Allow` on the bucket ARN
-/// (`arn:aws:s3:::bucket`) actually matches — those resource ARNs only match
-/// when no object key is supplied.
 pub async fn ui_authorize_list(
     state: &AppState,
     principal: &Principal,
