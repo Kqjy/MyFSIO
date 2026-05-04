@@ -10,6 +10,7 @@ use crate::stores::connections::RemoteConnection;
 
 pub const REPLICATION_USER_AGENT_TAG: &str = "MyFSIO-Replication";
 
+#[derive(Debug, Clone, Copy)]
 pub struct ClientOptions {
     pub connect_timeout: Duration,
     pub read_timeout: Duration,

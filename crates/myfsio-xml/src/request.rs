@@ -156,15 +156,20 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
             }
             Ok(Event::Text(ref e)) => {
                 let text = e.unescape().map_err(|e| e.to_string())?.to_string();
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    buf.clear();
+                    continue;
+                }
                 match current_tag.as_str() {
                     "Key" if in_object => {
-                        current_key = Some(text.trim().to_string());
+                        current_key = Some(trimmed.to_string());
                     }
                     "VersionId" if in_object => {
-                        current_version_id = Some(text.trim().to_string());
+                        current_version_id = Some(trimmed.to_string());
                     }
                     "Quiet" => {
-                        result.quiet = text.trim() == "true";
+                        result.quiet = trimmed == "true";
                     }
                     _ => {}
                 }
@@ -180,6 +185,7 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
                     }
                     in_object = false;
                 }
+                current_tag.clear();
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(format!("XML parse error: {}", e)),
@@ -267,5 +273,50 @@ mod tests {
         let r = parse_complete_multipart_upload(xml).unwrap();
         assert_eq!(r.parts.len(), 1);
         assert_eq!(r.parts[0].etag, "abc");
+    }
+
+    #[test]
+    fn test_parse_delete_objects_compact() {
+        let xml = "<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key><VersionId>v1</VersionId></Object></Delete>";
+        let r = parse_delete_objects(xml).expect("compact XML must parse");
+        assert_eq!(r.objects.len(), 2);
+        assert_eq!(r.objects[0].key, "a.txt");
+        assert_eq!(r.objects[0].version_id, None);
+        assert_eq!(r.objects[1].key, "b.txt");
+        assert_eq!(r.objects[1].version_id.as_deref(), Some("v1"));
+    }
+
+    #[test]
+    fn test_parse_delete_objects_pretty_printed() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Delete>
+  <Object>
+    <Key>del-a.txt</Key>
+  </Object>
+  <Object>
+    <Key>del-b.txt</Key>
+    <VersionId>v-2</VersionId>
+  </Object>
+</Delete>"#;
+        let r = parse_delete_objects(xml).expect("pretty-printed XML must parse");
+        assert_eq!(r.objects.len(), 2);
+        assert_eq!(r.objects[0].key, "del-a.txt");
+        assert_eq!(r.objects[0].version_id, None);
+        assert_eq!(r.objects[1].key, "del-b.txt");
+        assert_eq!(r.objects[1].version_id.as_deref(), Some("v-2"));
+    }
+
+    #[test]
+    fn test_parse_delete_objects_quiet_pretty() {
+        let xml = r#"<Delete>
+  <Quiet>true</Quiet>
+  <Object>
+    <Key>x</Key>
+  </Object>
+</Delete>"#;
+        let r = parse_delete_objects(xml).expect("pretty quiet must parse");
+        assert!(r.quiet);
+        assert_eq!(r.objects.len(), 1);
+        assert_eq!(r.objects[0].key, "x");
     }
 }

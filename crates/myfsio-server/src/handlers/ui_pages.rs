@@ -2047,12 +2047,18 @@ pub async fn connections_dashboard(
     let items: Vec<Value> = conns
         .into_iter()
         .map(|c| {
+            let tuning = c.tuning.as_ref();
             json!({
                 "id": c.id,
                 "name": c.name,
                 "endpoint_url": c.endpoint_url,
                 "region": c.region,
                 "access_key": c.access_key,
+                "tuning_profile": tuning.and_then(|t| t.profile.map(|p| p.as_str())).unwrap_or(""),
+                "tuning_part_size_mb": tuning.and_then(|t| t.part_size_bytes).map(|b| b / (1024 * 1024)),
+                "tuning_concurrency": tuning.and_then(|t| t.multipart_concurrency),
+                "tuning_buffer_kb": tuning.and_then(|t| t.part_buffer_bytes).map(|b| b / 1024),
+                "tuning_in_place_retries": tuning.and_then(|t| t.mpu_in_place_retries),
             })
         })
         .collect();
@@ -3101,6 +3107,83 @@ pub struct ConnectionForm {
     pub region: String,
     #[serde(default)]
     pub csrf_token: String,
+    #[serde(default)]
+    pub tuning_profile: String,
+    #[serde(default)]
+    pub tuning_part_size_mb: String,
+    #[serde(default)]
+    pub tuning_concurrency: String,
+    #[serde(default)]
+    pub tuning_buffer_kb: String,
+    #[serde(default)]
+    pub tuning_in_place_retries: String,
+}
+
+impl ConnectionForm {
+    pub fn tuning_from_form(&self) -> Option<crate::stores::connections::TransferTuning> {
+        use crate::stores::connections::{TransferTuning, TuningProfile};
+        let profile_str = self.tuning_profile.trim();
+        let profile = if profile_str.is_empty() {
+            None
+        } else {
+            TuningProfile::from_str_opt(profile_str)
+        };
+        let part_size_bytes = parse_optional_u64(&self.tuning_part_size_mb)
+            .map(|mb| mb.saturating_mul(1024 * 1024));
+        let multipart_concurrency = parse_optional_u64(&self.tuning_concurrency)
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+        let part_buffer_bytes = parse_optional_u64(&self.tuning_buffer_kb)
+            .map(|kb| usize::try_from(kb.saturating_mul(1024)).unwrap_or(usize::MAX));
+        let mpu_in_place_retries = parse_optional_u64_allow_zero(&self.tuning_in_place_retries)
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+        let tuning = TransferTuning {
+            profile,
+            part_size_bytes,
+            multipart_concurrency,
+            part_buffer_bytes,
+            mpu_in_place_retries,
+        };
+        if tuning.is_empty() {
+            None
+        } else {
+            Some(tuning)
+        }
+    }
+}
+
+fn parse_optional_u64(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok().filter(|n| *n > 0)
+}
+
+fn parse_optional_u64_allow_zero(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
+}
+
+fn connection_tuning_json(
+    conn: &crate::stores::connections::RemoteConnection,
+) -> (
+    &'static str,
+    Option<u64>,
+    Option<usize>,
+    Option<u64>,
+    Option<u32>,
+) {
+    let t = conn.tuning.as_ref();
+    (
+        t.and_then(|t| t.profile.map(|p| p.as_str())).unwrap_or(""),
+        t.and_then(|t| t.part_size_bytes).map(|b| b / (1024 * 1024)),
+        t.and_then(|t| t.multipart_concurrency),
+        t.and_then(|t| t.part_buffer_bytes).map(|b| (b / 1024) as u64),
+        t.and_then(|t| t.mpu_in_place_retries),
+    )
 }
 
 fn default_connection_region() -> String {
@@ -3162,12 +3245,14 @@ pub async fn create_connection(
         } else {
             region.to_string()
         },
+        tuning: form.tuning_from_form(),
     };
 
     match state.connections.add(connection.clone()) {
         Ok(()) => {
             let message = format!("Connection '{}' created.", connection.name);
             if wants_json {
+                let tuning_json = connection_tuning_json(&connection);
                 axum::Json(json!({
                     "ok": true,
                     "message": message,
@@ -3177,6 +3262,11 @@ pub async fn create_connection(
                         "endpoint_url": connection.endpoint_url,
                         "access_key": connection.access_key,
                         "region": connection.region,
+                        "tuning_profile": tuning_json.0,
+                        "tuning_part_size_mb": tuning_json.1,
+                        "tuning_concurrency": tuning_json.2,
+                        "tuning_buffer_kb": tuning_json.3,
+                        "tuning_in_place_retries": tuning_json.4,
                     }
                 }))
                 .into_response()
@@ -3270,11 +3360,13 @@ pub async fn update_connection(
     } else {
         region.to_string()
     };
+    connection.tuning = form.tuning_from_form();
 
     match state.connections.add(connection.clone()) {
         Ok(()) => {
             let message = format!("Connection '{}' updated.", connection.name);
             if wants_json {
+                let tuning_json = connection_tuning_json(&connection);
                 axum::Json(json!({
                     "ok": true,
                     "message": message,
@@ -3284,6 +3376,11 @@ pub async fn update_connection(
                         "endpoint_url": connection.endpoint_url,
                         "access_key": connection.access_key,
                         "region": connection.region,
+                        "tuning_profile": tuning_json.0,
+                        "tuning_part_size_mb": tuning_json.1,
+                        "tuning_concurrency": tuning_json.2,
+                        "tuning_buffer_kb": tuning_json.3,
+                        "tuning_in_place_retries": tuning_json.4,
                     }
                 }))
                 .into_response()
@@ -3721,5 +3818,102 @@ pub async fn update_bucket_website(
             axum::Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod connection_form_tests {
+    use super::*;
+    use crate::stores::connections::TuningProfile;
+
+    fn form_with(profile: &str, retries: &str) -> ConnectionForm {
+        ConnectionForm {
+            name: "n".into(),
+            endpoint_url: "https://x".into(),
+            access_key: "ak".into(),
+            secret_key: String::new(),
+            region: String::new(),
+            csrf_token: String::new(),
+            tuning_profile: profile.into(),
+            tuning_part_size_mb: String::new(),
+            tuning_concurrency: String::new(),
+            tuning_buffer_kb: String::new(),
+            tuning_in_place_retries: retries.into(),
+        }
+    }
+
+    #[test]
+    fn parse_optional_u64_rejects_zero() {
+        assert_eq!(parse_optional_u64("0"), None);
+        assert_eq!(parse_optional_u64(" 0 "), None);
+        assert_eq!(parse_optional_u64(""), None);
+        assert_eq!(parse_optional_u64("12"), Some(12));
+    }
+
+    #[test]
+    fn parse_optional_u64_allow_zero_distinguishes_blank_from_zero() {
+        assert_eq!(parse_optional_u64_allow_zero(""), None);
+        assert_eq!(parse_optional_u64_allow_zero("   "), None);
+        assert_eq!(parse_optional_u64_allow_zero("0"), Some(0));
+        assert_eq!(parse_optional_u64_allow_zero("3"), Some(3));
+        assert_eq!(parse_optional_u64_allow_zero("not-a-number"), None);
+    }
+
+    #[test]
+    fn tuning_from_form_persists_explicit_zero_retries() {
+        let form = form_with("ssd_wan", "0");
+        let tuning = form.tuning_from_form().expect("tuning present");
+        assert_eq!(tuning.profile, Some(TuningProfile::SsdWan));
+        assert_eq!(tuning.mpu_in_place_retries, Some(0));
+        assert_eq!(tuning.resolve().mpu_in_place_retries, 0);
+    }
+
+    #[test]
+    fn tuning_from_form_blank_retries_falls_back_to_profile() {
+        let form = form_with("ssd_wan", "");
+        let tuning = form.tuning_from_form().expect("tuning present");
+        assert_eq!(tuning.mpu_in_place_retries, None);
+        assert_eq!(tuning.resolve().mpu_in_place_retries, 5);
+    }
+
+    #[test]
+    fn tuning_from_form_returns_none_when_all_blank() {
+        let form = form_with("", "");
+        assert!(form.tuning_from_form().is_none());
+    }
+
+    #[test]
+    fn tuning_from_form_clamps_oversized_retries_does_not_wrap_to_zero() {
+        let form = form_with("", "4294967296");
+        let tuning = form.tuning_from_form().expect("tuning present");
+        let stored = tuning.mpu_in_place_retries.expect("retries persisted");
+        assert!(stored > 0, "must not wrap to 0; got {stored}");
+        assert_eq!(stored, u32::MAX);
+        let resolved = tuning.resolve().mpu_in_place_retries;
+        assert!(resolved > 1, "resolved retries must exceed 1; got {resolved}");
+        assert!(resolved <= 10, "resolved must be clamped to documented max; got {resolved}");
+    }
+
+    #[test]
+    fn tuning_from_form_clamps_oversized_concurrency_does_not_wrap() {
+        let huge = (u64::from(u32::MAX) + 1).to_string();
+        let form = ConnectionForm {
+            name: "n".into(),
+            endpoint_url: "https://x".into(),
+            access_key: "ak".into(),
+            secret_key: String::new(),
+            region: String::new(),
+            csrf_token: String::new(),
+            tuning_profile: String::new(),
+            tuning_part_size_mb: String::new(),
+            tuning_concurrency: huge,
+            tuning_buffer_kb: String::new(),
+            tuning_in_place_retries: String::new(),
+        };
+        let tuning = form.tuning_from_form().expect("tuning present");
+        let stored = tuning.multipart_concurrency.expect("concurrency persisted");
+        assert!(stored > 0, "must not wrap to 0; got {stored}");
+        let resolved = tuning.resolve().multipart_concurrency;
+        assert!(resolved >= 1 && resolved <= 64, "got {resolved}");
     }
 }

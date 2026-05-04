@@ -845,6 +845,7 @@ async fn test_ui_replication_configuration_actions_work() {
             access_key: "remote-key".to_string(),
             secret_key: "remote-secret".to_string(),
             region: "us-east-1".to_string(),
+            tuning: None,
         })
         .unwrap();
 
@@ -931,6 +932,7 @@ async fn test_create_bidirectional_rule_requires_peer_inbound_access_key() {
             access_key: "remote-key".to_string(),
             secret_key: "remote-secret".to_string(),
             region: "us-east-1".to_string(),
+            tuning: None,
         })
         .unwrap();
 
@@ -992,6 +994,7 @@ async fn test_create_bidirectional_rule_succeeds_when_peer_ak_set() {
             access_key: "remote-key".to_string(),
             secret_key: "remote-secret".to_string(),
             region: "us-east-1".to_string(),
+            tuning: None,
         })
         .unwrap();
 
@@ -1047,6 +1050,7 @@ async fn test_create_unidirectional_rule_does_not_require_peer_ak() {
             access_key: "remote-key".to_string(),
             secret_key: "remote-secret".to_string(),
             region: "us-east-1".to_string(),
+            tuning: None,
         })
         .unwrap();
 
@@ -8637,6 +8641,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
             access_key: OUTBOUND_AK.to_string(),
             secret_key: OUTBOUND_SK.to_string(),
             region: "us-east-1".to_string(),
+            tuning: None,
         })
         .unwrap();
 

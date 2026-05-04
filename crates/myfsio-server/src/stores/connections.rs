@@ -18,10 +18,158 @@ pub struct RemoteConnection {
     pub secret_key: String,
     #[serde(default = "default_region")]
     pub region: String,
+    #[serde(default)]
+    pub tuning: Option<TransferTuning>,
+}
+
+impl RemoteConnection {
+    pub fn resolved_tuning(&self) -> ResolvedTuning {
+        self.tuning
+            .as_ref()
+            .map(|t| t.resolve())
+            .unwrap_or_else(ResolvedTuning::legacy_default)
+    }
 }
 
 fn default_region() -> String {
     "us-east-1".to_string()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransferTuning {
+    #[serde(default)]
+    pub profile: Option<TuningProfile>,
+    #[serde(default)]
+    pub part_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub multipart_concurrency: Option<usize>,
+    #[serde(default)]
+    pub part_buffer_bytes: Option<usize>,
+    #[serde(default)]
+    pub mpu_in_place_retries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TuningProfile {
+    SsdLan,
+    SsdWan,
+    HddLan,
+    HddWan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedTuning {
+    pub part_size_bytes: u64,
+    pub multipart_concurrency: usize,
+    pub part_buffer_bytes: usize,
+    pub mpu_in_place_retries: u32,
+}
+
+const S3_MIN_PART_BYTES: u64 = 5 * 1024 * 1024;
+const TUNING_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+const TUNING_MAX_CONCURRENCY: usize = 64;
+const TUNING_MAX_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+const TUNING_MAX_IN_PLACE_RETRIES: u32 = 10;
+
+impl ResolvedTuning {
+    pub const fn legacy_default() -> Self {
+        Self {
+            part_size_bytes: 8 * 1024 * 1024,
+            multipart_concurrency: 4,
+            part_buffer_bytes: 1024 * 1024,
+            mpu_in_place_retries: 3,
+        }
+    }
+
+    fn clamp(self) -> Self {
+        Self {
+            part_size_bytes: self
+                .part_size_bytes
+                .clamp(S3_MIN_PART_BYTES, TUNING_MAX_PART_BYTES),
+            multipart_concurrency: self.multipart_concurrency.clamp(1, TUNING_MAX_CONCURRENCY),
+            part_buffer_bytes: self.part_buffer_bytes.clamp(64 * 1024, TUNING_MAX_BUFFER_BYTES),
+            mpu_in_place_retries: self.mpu_in_place_retries.min(TUNING_MAX_IN_PLACE_RETRIES),
+        }
+    }
+}
+
+impl TuningProfile {
+    pub fn defaults(self) -> ResolvedTuning {
+        match self {
+            Self::SsdLan => ResolvedTuning {
+                part_size_bytes: 8 * 1024 * 1024,
+                multipart_concurrency: 4,
+                part_buffer_bytes: 1024 * 1024,
+                mpu_in_place_retries: 3,
+            },
+            Self::SsdWan => ResolvedTuning {
+                part_size_bytes: 32 * 1024 * 1024,
+                multipart_concurrency: 12,
+                part_buffer_bytes: 2 * 1024 * 1024,
+                mpu_in_place_retries: 5,
+            },
+            Self::HddLan => ResolvedTuning {
+                part_size_bytes: 32 * 1024 * 1024,
+                multipart_concurrency: 2,
+                part_buffer_bytes: 4 * 1024 * 1024,
+                mpu_in_place_retries: 3,
+            },
+            Self::HddWan => ResolvedTuning {
+                part_size_bytes: 64 * 1024 * 1024,
+                multipart_concurrency: 2,
+                part_buffer_bytes: 4 * 1024 * 1024,
+                mpu_in_place_retries: 5,
+            },
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SsdLan => "ssd_lan",
+            Self::SsdWan => "ssd_wan",
+            Self::HddLan => "hdd_lan",
+            Self::HddWan => "hdd_wan",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "ssd_lan" => Some(Self::SsdLan),
+            "ssd_wan" => Some(Self::SsdWan),
+            "hdd_lan" => Some(Self::HddLan),
+            "hdd_wan" => Some(Self::HddWan),
+            _ => None,
+        }
+    }
+}
+
+impl TransferTuning {
+    pub fn resolve(&self) -> ResolvedTuning {
+        let base = self
+            .profile
+            .map(|p| p.defaults())
+            .unwrap_or_else(ResolvedTuning::legacy_default);
+        ResolvedTuning {
+            part_size_bytes: self.part_size_bytes.unwrap_or(base.part_size_bytes),
+            multipart_concurrency: self
+                .multipart_concurrency
+                .unwrap_or(base.multipart_concurrency),
+            part_buffer_bytes: self.part_buffer_bytes.unwrap_or(base.part_buffer_bytes),
+            mpu_in_place_retries: self
+                .mpu_in_place_retries
+                .unwrap_or(base.mpu_in_place_retries),
+        }
+        .clamp()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.profile.is_none()
+            && self.part_size_bytes.is_none()
+            && self.multipart_concurrency.is_none()
+            && self.part_buffer_bytes.is_none()
+            && self.mpu_in_place_retries.is_none()
+    }
 }
 
 pub struct ConnectionStore {
@@ -128,6 +276,136 @@ fn load_or_create_key(storage_root: &Path) -> String {
     }
     let _ = std::fs::write(&key_path, &encoded);
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_default_uses_documented_values() {
+        let r = ResolvedTuning::legacy_default();
+        assert_eq!(r.part_size_bytes, 8 * 1024 * 1024);
+        assert_eq!(r.multipart_concurrency, 4);
+        assert_eq!(r.part_buffer_bytes, 1024 * 1024);
+        assert_eq!(r.mpu_in_place_retries, 3);
+    }
+
+    #[test]
+    fn empty_tuning_resolves_to_legacy_default() {
+        let t = TransferTuning::default();
+        assert_eq!(t.resolve(), ResolvedTuning::legacy_default());
+    }
+
+    #[test]
+    fn ssd_wan_profile_defaults() {
+        let r = TuningProfile::SsdWan.defaults();
+        assert_eq!(r.part_size_bytes, 32 * 1024 * 1024);
+        assert_eq!(r.multipart_concurrency, 12);
+        assert_eq!(r.part_buffer_bytes, 2 * 1024 * 1024);
+        assert_eq!(r.mpu_in_place_retries, 5);
+    }
+
+    #[test]
+    fn hdd_wan_profile_defaults() {
+        let r = TuningProfile::HddWan.defaults();
+        assert_eq!(r.part_size_bytes, 64 * 1024 * 1024);
+        assert_eq!(r.multipart_concurrency, 2);
+        assert_eq!(r.part_buffer_bytes, 4 * 1024 * 1024);
+        assert_eq!(r.mpu_in_place_retries, 5);
+    }
+
+    #[test]
+    fn explicit_overrides_beat_profile() {
+        let t = TransferTuning {
+            profile: Some(TuningProfile::SsdWan),
+            multipart_concurrency: Some(20),
+            part_size_bytes: None,
+            part_buffer_bytes: None,
+            mpu_in_place_retries: None,
+        };
+        let r = t.resolve();
+        assert_eq!(r.multipart_concurrency, 20);
+        assert_eq!(r.part_size_bytes, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn override_alone_falls_back_to_legacy_for_unset() {
+        let t = TransferTuning {
+            profile: None,
+            multipart_concurrency: Some(8),
+            part_size_bytes: None,
+            part_buffer_bytes: None,
+            mpu_in_place_retries: None,
+        };
+        let r = t.resolve();
+        assert_eq!(r.multipart_concurrency, 8);
+        assert_eq!(r.part_size_bytes, 8 * 1024 * 1024);
+        assert_eq!(r.mpu_in_place_retries, 3);
+    }
+
+    #[test]
+    fn part_size_clamped_to_s3_minimum() {
+        let t = TransferTuning {
+            part_size_bytes: Some(1024),
+            ..TransferTuning::default()
+        };
+        assert_eq!(t.resolve().part_size_bytes, S3_MIN_PART_BYTES);
+    }
+
+    #[test]
+    fn concurrency_clamped_to_at_least_one() {
+        let t = TransferTuning {
+            multipart_concurrency: Some(0),
+            ..TransferTuning::default()
+        };
+        assert_eq!(t.resolve().multipart_concurrency, 1);
+    }
+
+    #[test]
+    fn concurrency_clamped_to_max() {
+        let t = TransferTuning {
+            multipart_concurrency: Some(99999),
+            ..TransferTuning::default()
+        };
+        assert_eq!(t.resolve().multipart_concurrency, TUNING_MAX_CONCURRENCY);
+    }
+
+    #[test]
+    fn buffer_clamped_to_max() {
+        let t = TransferTuning {
+            part_buffer_bytes: Some(usize::MAX),
+            ..TransferTuning::default()
+        };
+        assert_eq!(t.resolve().part_buffer_bytes, TUNING_MAX_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn legacy_json_round_trips_with_no_tuning_field() {
+        let json = r#"{"id":"x","name":"n","endpoint_url":"http://a","access_key":"k","secret_key":"s"}"#;
+        let conn: RemoteConnection = serde_json::from_str(json).unwrap();
+        assert!(conn.tuning.is_none());
+        assert_eq!(conn.region, "us-east-1");
+        assert_eq!(conn.resolved_tuning(), ResolvedTuning::legacy_default());
+    }
+
+    #[test]
+    fn profile_serializes_snake_case() {
+        let json = serde_json::to_string(&TuningProfile::SsdWan).unwrap();
+        assert_eq!(json, "\"ssd_wan\"");
+        let parsed: TuningProfile = serde_json::from_str("\"hdd_wan\"").unwrap();
+        assert_eq!(parsed, TuningProfile::HddWan);
+    }
+
+    #[test]
+    fn is_empty_detects_blank_tuning() {
+        assert!(TransferTuning::default().is_empty());
+        let t = TransferTuning {
+            profile: Some(TuningProfile::SsdLan),
+            ..TransferTuning::default()
+        };
+        assert!(!t.is_empty());
+    }
 }
 
 fn load_from_disk(path: &Path, encryption_key: &str) -> Vec<RemoteConnection> {

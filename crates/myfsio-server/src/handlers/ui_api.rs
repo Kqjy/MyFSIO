@@ -1903,6 +1903,7 @@ pub async fn test_connection(
         access_key: payload.access_key.trim().to_string(),
         secret_key: payload.secret_key.trim().to_string(),
         region: payload.region.trim().to_string(),
+        tuning: None,
     };
 
     if state.replication.check_endpoint(&connection).await {

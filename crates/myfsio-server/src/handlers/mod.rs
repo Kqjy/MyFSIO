@@ -4327,10 +4327,11 @@ fn parse_range(range_str: &str, total_size: u64) -> Option<(u64, u64)> {
 
     if let Some(suffix) = range_spec.strip_prefix('-') {
         let suffix_len: u64 = suffix.parse().ok()?;
-        if suffix_len == 0 || suffix_len > total_size {
+        if suffix_len == 0 {
             return None;
         }
-        return Some((total_size - suffix_len, total_size - 1));
+        let start = total_size.saturating_sub(suffix_len);
+        return Some((start, total_size - 1));
     }
 
     let (start_str, end_str) = range_spec.split_once('-')?;
@@ -4348,6 +4349,59 @@ fn parse_range(range_str: &str, total_size: u64) -> Option<(u64, u64)> {
     }
 
     Some((start, end))
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::parse_range;
+
+    #[test]
+    fn parses_explicit_range() {
+        assert_eq!(parse_range("bytes=0-3", 100), Some((0, 3)));
+        assert_eq!(parse_range("bytes=10-19", 100), Some((10, 19)));
+    }
+
+    #[test]
+    fn open_ended_range_clamps_to_end() {
+        assert_eq!(parse_range("bytes=10-", 100), Some((10, 99)));
+    }
+
+    #[test]
+    fn end_past_eof_clamps() {
+        assert_eq!(parse_range("bytes=0-200", 100), Some((0, 99)));
+    }
+
+    #[test]
+    fn suffix_range_returns_tail() {
+        assert_eq!(parse_range("bytes=-10", 100), Some((90, 99)));
+    }
+
+    #[test]
+    fn suffix_larger_than_size_returns_full_object() {
+        assert_eq!(parse_range("bytes=-100", 4), Some((0, 3)));
+        assert_eq!(parse_range("bytes=-1000000", 50), Some((0, 49)));
+    }
+
+    #[test]
+    fn empty_object_rejects_range() {
+        assert_eq!(parse_range("bytes=0-0", 0), None);
+        assert_eq!(parse_range("bytes=-10", 0), None);
+    }
+
+    #[test]
+    fn suffix_zero_rejected() {
+        assert_eq!(parse_range("bytes=-0", 100), None);
+    }
+
+    #[test]
+    fn start_past_eof_rejected() {
+        assert_eq!(parse_range("bytes=200-300", 100), None);
+    }
+
+    #[test]
+    fn missing_prefix_rejected() {
+        assert_eq!(parse_range("0-3", 100), None);
+    }
 }
 
 use futures::TryStreamExt;
@@ -5268,5 +5322,132 @@ mod tests {
         .unwrap();
         assert!(body.contains("AllUsers"));
         assert!(body.contains("READ"));
+    }
+
+    #[tokio::test]
+    async fn object_acl_xml_rejects_owner_id_mismatch() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("acl").await.unwrap();
+        state
+            .storage
+            .put_object(
+                "acl",
+                "photo.jpg",
+                Box::pin(std::io::Cursor::new(b"image".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        let app = crate::create_router(state);
+
+        let spoofed_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<AccessControlPolicy xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner><ID>attacker</ID></Owner>
+  <AccessControlList>
+    <Grant>
+      <Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CanonicalUser">
+        <ID>attacker</ID>
+      </Grantee>
+      <Permission>FULL_CONTROL</Permission>
+    </Grant>
+  </AccessControlList>
+</AccessControlPolicy>"#;
+
+        let response = app
+            .clone()
+            .oneshot(auth_request(
+                axum::http::Method::PUT,
+                "/acl/photo.jpg?acl",
+                Body::from(spoofed_xml),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/acl/photo.jpg?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!body.contains("attacker"), "owner must not be the spoofed id; got: {body}");
+        assert!(body.contains("myfsio"), "owner must remain the existing one; got: {body}");
+    }
+
+    #[tokio::test]
+    async fn object_acl_xml_accepts_matching_owner() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("acl").await.unwrap();
+        state
+            .storage
+            .put_object(
+                "acl",
+                "photo.jpg",
+                Box::pin(std::io::Cursor::new(b"image".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        let app = crate::create_router(state);
+
+        let matching_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<AccessControlPolicy xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner><ID>myfsio</ID></Owner>
+  <AccessControlList>
+    <Grant>
+      <Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="Group">
+        <URI>http://acs.amazonaws.com/groups/global/AllUsers</URI>
+      </Grantee>
+      <Permission>READ</Permission>
+    </Grant>
+  </AccessControlList>
+</AccessControlPolicy>"#;
+
+        let response = app
+            .clone()
+            .oneshot(auth_request(
+                axum::http::Method::PUT,
+                "/acl/photo.jpg?acl",
+                Body::from(matching_xml),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(auth_request(
+                axum::http::Method::GET,
+                "/acl/photo.jpg?acl",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("AllUsers"));
+        assert!(body.contains("READ"));
+        assert!(body.contains("myfsio"));
     }
 }

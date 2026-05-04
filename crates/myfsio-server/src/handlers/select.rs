@@ -334,6 +334,8 @@ fn load_input_table(conn: &Connection, path: &Path, input: &InputFormat) -> Resu
                 .map_err(|e| format!("Failed loading CSV data: {}", e))?;
         }
         InputFormat::Json(cfg) => {
+            conn.execute_batch("LOAD json;")
+                .map_err(|e| format!("Failed loading JSON extension: {}", e))?;
             let format = if cfg.json_type == "LINES" {
                 "newline_delimited"
             } else {
