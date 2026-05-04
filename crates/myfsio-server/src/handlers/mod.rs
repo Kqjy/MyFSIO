@@ -354,6 +354,7 @@ pub async fn create_bucket(
     Query(query): Query<BucketQuery>,
     raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -364,6 +365,7 @@ pub async fn create_bucket(
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
                 peer,
+                principal,
                 headers,
                 body,
             )
@@ -1374,21 +1376,10 @@ fn insert_standard_object_metadata(
     headers: &HeaderMap,
     metadata: &mut HashMap<String, String>,
 ) -> Result<(), Response> {
-    let was_chunked = is_aws_chunked(headers);
     for (request_header, metadata_key, _) in internal_header_pairs() {
         if let Some(value) = headers.get(*request_header).and_then(|v| v.to_str().ok()) {
             if *request_header == "content-encoding" {
-                let stored = if was_chunked {
-                    decoded_content_encoding(value)
-                } else {
-                    let trimmed = value.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                };
-                if let Some(stored) = stored {
+                if let Some(stored) = decoded_content_encoding(value) {
                     metadata.insert((*metadata_key).to_string(), stored);
                 }
             } else {
@@ -1480,14 +1471,13 @@ const CANNED_ACL_VALUES: &[&str] = &[
     "aws-exec-read",
 ];
 
-fn apply_canned_acl_header(
+fn apply_object_acl(
     headers: &HeaderMap,
     metadata: &mut HashMap<String, String>,
+    owner: &str,
 ) -> Result<(), Response> {
-    let Some(value) = canned_acl_value(headers)? else {
-        return Ok(());
-    };
-    let acl = crate::services::acl::create_canned_acl(&value, "myfsio");
+    let canned = canned_acl_value(headers)?.unwrap_or_else(|| "private".to_string());
+    let acl = crate::services::acl::create_canned_acl(&canned, owner);
     crate::services::acl::store_object_acl(metadata, &acl);
     Ok(())
 }
@@ -1846,10 +1836,15 @@ pub async fn put_object(
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     let peer_marker = peer.as_ref().map(|e| &e.0);
+    let owner_id = principal
+        .as_ref()
+        .map(|p| p.0.user_id.clone())
+        .unwrap_or_else(|| "myfsio".to_string());
     if query.tagging.is_some() {
         if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
             return s3_error_response(S3Error::new(
@@ -1971,7 +1966,7 @@ pub async fn put_object(
     if let Err(response) = insert_standard_object_metadata(&headers, &mut metadata) {
         return response;
     }
-    if let Err(response) = apply_canned_acl_header(&headers, &mut metadata) {
+    if let Err(response) = apply_object_acl(&headers, &mut metadata, &owner_id) {
         return response;
     }
     if let Err(response) = validate_sse_request(&state, &headers) {
@@ -5405,10 +5400,7 @@ mod tests {
     }
 
     #[test]
-    fn user_supplied_aws_chunked_in_metadata_is_preserved_when_body_is_plain() {
-        // No x-amz-decoded-content-length and no streaming sha => server treats
-        // body as plain bytes, so the user-supplied Content-Encoding (which
-        // happens to literally include "aws-chunked") must round-trip verbatim.
+    fn aws_chunked_is_stripped_from_stored_content_encoding_regardless_of_transport() {
         let mut headers = HeaderMap::new();
         headers.insert("content-encoding", "gzip, aws-chunked".parse().unwrap());
         headers.insert(
@@ -5419,7 +5411,7 @@ mod tests {
         insert_standard_object_metadata(&headers, &mut metadata).unwrap();
         assert_eq!(
             metadata.get("__content_encoding__").map(String::as_str),
-            Some("gzip, aws-chunked")
+            Some("gzip")
         );
     }
 

@@ -140,11 +140,6 @@ fn validate_list_prefix(prefix: &str) -> StorageResult<()> {
             "prefix contains null bytes".to_string(),
         ));
     }
-    if prefix.starts_with('/') || prefix.starts_with('\\') {
-        return Err(StorageError::InvalidObjectKey(
-            "prefix cannot start with a slash".to_string(),
-        ));
-    }
     for part in prefix.split(['/', '\\']) {
         if part == ".." {
             return Err(StorageError::InvalidObjectKey(
@@ -1853,32 +1848,30 @@ impl FsStorageBackend {
 
             let display_name = fs_decode_key(&name_str);
             if ft.is_dir() {
-                let subdir_path = entry.path();
-                let marker_path = subdir_path.join(DIR_MARKER_FILE);
-                if marker_path.is_file() {
-                    if let Ok(meta) = std::fs::metadata(&marker_path) {
-                        let mtime = meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs_f64())
-                            .unwrap_or(0.0);
-                        let lm = Utc
-                            .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
-                            .single()
-                            .unwrap_or_else(Utc::now);
-                        let mut obj = ObjectMeta::new(
-                            format!("{}{}/", rel_dir_prefix, display_name),
-                            meta.len(),
-                            lm,
-                        );
-                        obj.etag = None;
-                        files.push(obj);
-                    }
-                }
                 dirs.push(format!("{}{}{}", rel_dir_prefix, display_name, delimiter));
             } else if ft.is_file() {
                 if name_str == DIR_MARKER_FILE {
+                    if !rel_dir_prefix.is_empty() {
+                        if let Ok(meta) = entry.metadata() {
+                            let mtime = meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0);
+                            let lm = Utc
+                                .timestamp_opt(
+                                    mtime as i64,
+                                    ((mtime % 1.0) * 1_000_000_000.0) as u32,
+                                )
+                                .single()
+                                .unwrap_or_else(Utc::now);
+                            let mut obj =
+                                ObjectMeta::new(rel_dir_prefix.clone(), meta.len(), lm);
+                            obj.etag = None;
+                            files.push(obj);
+                        }
+                    }
                     continue;
                 }
                 let rel = format!("{}{}", rel_dir_prefix, display_name);
@@ -1950,6 +1943,15 @@ impl FsStorageBackend {
         params: &ShallowListParams,
     ) -> StorageResult<ShallowListResult> {
         self.require_bucket(bucket_name)?;
+
+        if params.prefix.starts_with('/') || params.prefix.starts_with('\\') {
+            return Ok(ShallowListResult {
+                objects: Vec::new(),
+                common_prefixes: Vec::new(),
+                is_truncated: false,
+                next_continuation_token: None,
+            });
+        }
 
         let rel_dir: PathBuf = if params.prefix.is_empty() {
             PathBuf::new()

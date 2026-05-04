@@ -2659,6 +2659,7 @@ pub async fn upload_object(
         Path((bucket_name.clone(), key.clone())),
         Query(ObjectQuery::default()),
         None,
+        None,
         upload_headers,
         upload_body,
     )
