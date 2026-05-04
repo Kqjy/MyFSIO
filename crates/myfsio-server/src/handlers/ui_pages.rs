@@ -363,6 +363,9 @@ pub async fn buckets_overview(
 ) -> Response {
     let mut ctx = page_context(&state, &session, "ui.buckets_overview");
 
+    let principal = crate::handlers::ui::current_principal(&state, &session);
+    let is_admin = principal.as_ref().map(|p| p.is_admin).unwrap_or(false);
+
     let buckets = match state.storage.list_buckets().await {
         Ok(list) => list,
         Err(e) => {
@@ -373,6 +376,16 @@ pub async fn buckets_overview(
 
     let mut items: Vec<Value> = Vec::with_capacity(buckets.len());
     for b in &buckets {
+        if !is_admin {
+            let allowed = match principal.as_ref() {
+                Some(p) => crate::middleware::ui_can_see_bucket(&state, p, &b.name).await,
+                None => false,
+            };
+            if !allowed {
+                continue;
+            }
+        }
+
         let stats = state.storage.bucket_stats(&b.name).await.ok();
         let total_bytes = stats.as_ref().map(|s| s.total_bytes()).unwrap_or(0);
         let total_objects = stats.as_ref().map(|s| s.total_objects()).unwrap_or(0);
