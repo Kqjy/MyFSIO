@@ -134,9 +134,13 @@ pub fn list_objects_v2_xml(
         key_count,
         None,
         false,
+        None,
+        None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn list_objects_v2_xml_with_encoding(
     bucket_name: &str,
     prefix: &str,
@@ -150,6 +154,9 @@ pub fn list_objects_v2_xml_with_encoding(
     key_count: usize,
     encoding_type: Option<&str>,
     fetch_owner: bool,
+    start_after: Option<&str>,
+    owner_id: Option<&str>,
+    owner_display_name: Option<&str>,
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
@@ -185,6 +192,14 @@ pub fn list_objects_v2_xml_with_encoding(
     if let Some(token) = next_continuation_token {
         write_text_element(&mut writer, "NextContinuationToken", token);
     }
+    if let Some(sa) = start_after {
+        if !sa.is_empty() {
+            write_text_element(&mut writer, "StartAfter", &maybe_url_encode(sa, encoding_type));
+        }
+    }
+
+    let owner_id_value = owner_id.unwrap_or("myfsio");
+    let owner_display_value = owner_display_name.unwrap_or(owner_id_value);
 
     for obj in objects {
         writer
@@ -209,8 +224,8 @@ pub fn list_objects_v2_xml_with_encoding(
             writer
                 .write_event(Event::Start(BytesStart::new("Owner")))
                 .unwrap();
-            write_text_element(&mut writer, "ID", "myfsio");
-            write_text_element(&mut writer, "DisplayName", "myfsio");
+            write_text_element(&mut writer, "ID", owner_id_value);
+            write_text_element(&mut writer, "DisplayName", owner_display_value);
             writer
                 .write_event(Event::End(BytesEnd::new("Owner")))
                 .unwrap();

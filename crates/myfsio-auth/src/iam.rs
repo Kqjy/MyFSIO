@@ -712,6 +712,18 @@ impl IamService {
         Ok(())
     }
 
+    pub fn get_display_name(&self, identifier: &str) -> Option<String> {
+        self.reload_if_needed();
+        let state = self.state.read();
+        let user = state.user_records.get(identifier).or_else(|| {
+            state
+                .key_index
+                .get(identifier)
+                .and_then(|uid| state.user_records.get(uid))
+        })?;
+        Some(user.display_name.clone())
+    }
+
     pub fn get_user_policies(&self, identifier: &str) -> Option<Vec<serde_json::Value>> {
         self.reload_if_needed();
         let state = self.state.read();

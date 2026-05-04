@@ -100,13 +100,21 @@ pub fn create_canned_acl(canned_acl: &str, owner: &str) -> Acl {
 }
 
 pub fn acl_to_xml(acl: &Acl) -> String {
+    acl_to_xml_with_lookup(acl, |id| id.to_string())
+}
+
+pub fn acl_to_xml_with_lookup<F>(acl: &Acl, mut display_name_for: F) -> String
+where
+    F: FnMut(&str) -> String,
+{
+    let owner_display = display_name_for(&acl.owner);
     let mut xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
          <AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
          <Owner><ID>{}</ID><DisplayName>{}</DisplayName></Owner>\
          <AccessControlList>",
         xml_escape(&acl.owner),
-        xml_escape(&acl.owner),
+        xml_escape(&owner_display),
     );
     for grant in &acl.grants {
         xml.push_str("<Grant>");
@@ -126,12 +134,13 @@ pub fn acl_to_xml(acl: &Acl) -> String {
                 );
             }
             other => {
+                let display = display_name_for(other);
                 xml.push_str(&format!(
                     "<Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\">\
                      <ID>{}</ID><DisplayName>{}</DisplayName>\
                      </Grantee>",
                     xml_escape(other),
-                    xml_escape(other),
+                    xml_escape(&display),
                 ));
             }
         }

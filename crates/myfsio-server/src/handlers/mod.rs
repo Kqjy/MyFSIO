@@ -60,6 +60,16 @@ async fn open_self_deleting(path: std::path::PathBuf) -> std::io::Result<tokio::
     }
 }
 
+fn parse_max_keys(raw: &str) -> Result<usize, Response> {
+    match raw.parse::<i64>() {
+        Ok(v) if (0..=2_147_483_647).contains(&v) => Ok(v as usize),
+        _ => Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Argument max-keys must be an integer between 0 and 2147483647",
+        ))),
+    }
+}
+
 fn s3_error_response(err: S3Error) -> Response {
     let status =
         StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -293,16 +303,19 @@ pub async fn list_buckets(
     State(state): State<AppState>,
     Query(query): Query<BucketQuery>,
     headers: HeaderMap,
+    request: axum::extract::Request,
 ) -> Response {
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
         return get_bucket(State(state), Path(host_bucket), Query(query), headers).await;
     }
 
+    let (owner_id, owner_display) = caller_owner(&state, &request);
+
     match state.storage.list_buckets().await {
         Ok(buckets) => {
             let xml = myfsio_xml::response::list_buckets_xml(
-                "myfsio",
-                "myfsio",
+                &owner_id,
+                &owner_display,
                 &buckets,
                 &state.config.region,
             );
@@ -310,6 +323,16 @@ pub async fn list_buckets(
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+fn caller_owner(_state: &AppState, request: &axum::extract::Request) -> (String, String) {
+    if let Some(principal) = request
+        .extensions()
+        .get::<myfsio_common::types::Principal>()
+    {
+        return (principal.user_id.clone(), principal.display_name.clone());
+    }
+    ("myfsio".to_string(), "myfsio".to_string())
 }
 
 pub async fn health_check() -> Response {
@@ -398,6 +421,10 @@ pub async fn create_bucket(
         return config::put_logging(&state, &bucket, body).await;
     }
 
+    if let Err(resp) = canned_acl_value(&headers) {
+        return resp;
+    }
+
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(c) => c.to_bytes(),
         Err(_) => {
@@ -465,7 +492,7 @@ pub struct BucketQuery {
     pub prefix: Option<String>,
     pub delimiter: Option<String>,
     #[serde(rename = "max-keys")]
-    pub max_keys: Option<i64>,
+    pub max_keys: Option<String>,
     #[serde(rename = "continuation-token")]
     pub continuation_token: Option<String>,
     #[serde(rename = "start-after")]
@@ -646,15 +673,12 @@ pub async fn get_bucket(
     if query.logging.is_some() {
         return config::get_logging(&state, &bucket).await;
     }
-    let max_keys: usize = match query.max_keys {
+    let max_keys: usize = match query.max_keys.as_deref() {
         None => 1000,
-        Some(v) if v < 0 => {
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::InvalidArgument,
-                "Argument max-keys must be an integer between 0 and 2147483647",
-            ));
-        }
-        Some(v) => v as usize,
+        Some(raw) => match parse_max_keys(raw) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        },
     };
     if query.versions.is_some() {
         return config::list_object_versions(
@@ -706,58 +730,35 @@ pub async fn get_bucket(
         Some(marker.clone())
     };
 
+    let fetch_owner = query
+        .fetch_owner
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let encoding_type = query.encoding_type.as_deref();
+    let start_after_v2 = if is_v2 {
+        query.start_after.clone()
+    } else {
+        None
+    };
+
     if max_keys == 0 {
-        let has_any = if delimiter.is_empty() {
-            state
-                .storage
-                .list_objects(
-                    &bucket,
-                    &myfsio_common::types::ListParams {
-                        max_keys: 1,
-                        continuation_token: effective_start.clone(),
-                        prefix: if prefix.is_empty() {
-                            None
-                        } else {
-                            Some(prefix.clone())
-                        },
-                        start_after: if is_v2 {
-                            query.start_after.clone()
-                        } else {
-                            None
-                        },
-                    },
-                )
-                .await
-                .map(|r| !r.objects.is_empty())
-                .unwrap_or(false)
-        } else {
-            state
-                .storage
-                .list_objects_shallow(
-                    &bucket,
-                    &myfsio_common::types::ShallowListParams {
-                        prefix: prefix.clone(),
-                        delimiter: delimiter.clone(),
-                        max_keys: 1,
-                        continuation_token: effective_start.clone(),
-                    },
-                )
-                .await
-                .map(|r| !r.objects.is_empty() || !r.common_prefixes.is_empty())
-                .unwrap_or(false)
-        };
         let xml = if is_v2 {
-            myfsio_xml::response::list_objects_v2_xml(
+            myfsio_xml::response::list_objects_v2_xml_with_encoding(
                 &bucket,
                 &prefix,
                 &delimiter,
                 0,
                 &[],
                 &[],
-                has_any,
+                false,
                 query.continuation_token.as_deref(),
                 None,
                 0,
+                encoding_type,
+                fetch_owner,
+                start_after_v2.as_deref(),
+                None,
+                None,
             )
         } else {
             myfsio_xml::response::list_objects_v1_xml(
@@ -768,7 +769,7 @@ pub async fn get_bucket(
                 0,
                 &[],
                 &[],
-                has_any,
+                false,
                 None,
             )
         };
@@ -784,11 +785,7 @@ pub async fn get_bucket(
             } else {
                 Some(prefix.clone())
             },
-            start_after: if is_v2 {
-                query.start_after.clone()
-            } else {
-                None
-            },
+            start_after: start_after_v2.clone(),
         };
         match state.storage.list_objects(&bucket, &params).await {
             Ok(result) => {
@@ -800,7 +797,6 @@ pub async fn get_bucket(
                 } else {
                     None
                 };
-                let encoding_type = query.encoding_type.as_deref();
                 let xml = if is_v2 {
                     let next_token = next_marker
                         .as_deref()
@@ -817,10 +813,10 @@ pub async fn get_bucket(
                         next_token.as_deref(),
                         result.objects.len(),
                         encoding_type,
-                        query
-                            .fetch_owner
-                            .as_deref()
-                            .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+                        fetch_owner,
+                        start_after_v2.as_deref(),
+                        None,
+                        None,
                     )
                 } else {
                     myfsio_xml::response::list_objects_v1_xml_with_encoding(
@@ -840,7 +836,7 @@ pub async fn get_bucket(
             }
             Err(e) => storage_err_response(e),
         }
-    } else {
+    } else if delimiter == "/" {
         let params = myfsio_common::types::ShallowListParams {
             prefix,
             delimiter: delimiter.clone(),
@@ -849,7 +845,6 @@ pub async fn get_bucket(
         };
         match state.storage.list_objects_shallow(&bucket, &params).await {
             Ok(result) => {
-                let encoding_type = query.encoding_type.as_deref();
                 let xml = if is_v2 {
                     let next_token = result
                         .next_continuation_token
@@ -867,10 +862,10 @@ pub async fn get_bucket(
                         next_token.as_deref(),
                         result.objects.len() + result.common_prefixes.len(),
                         encoding_type,
-                        query
-                            .fetch_owner
-                            .as_deref()
-                            .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+                        fetch_owner,
+                        start_after_v2.as_deref(),
+                        None,
+                        None,
                     )
                 } else {
                     myfsio_xml::response::list_objects_v1_xml_with_encoding(
@@ -890,7 +885,189 @@ pub async fn get_bucket(
             }
             Err(e) => storage_err_response(e),
         }
+    } else {
+        match list_with_arbitrary_delimiter(
+            &state,
+            &bucket,
+            &prefix,
+            &delimiter,
+            max_keys,
+            effective_start.clone(),
+            start_after_v2.clone(),
+        )
+        .await
+        {
+            Ok(grouped) => {
+                let xml = if is_v2 {
+                    let next_token = grouped
+                        .next_token
+                        .as_deref()
+                        .map(|s| URL_SAFE.encode(s.as_bytes()));
+                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
+                        &bucket,
+                        &prefix,
+                        &delimiter,
+                        max_keys,
+                        &grouped.objects,
+                        &grouped.common_prefixes,
+                        grouped.is_truncated,
+                        query.continuation_token.as_deref(),
+                        next_token.as_deref(),
+                        grouped.objects.len() + grouped.common_prefixes.len(),
+                        encoding_type,
+                        fetch_owner,
+                        start_after_v2.as_deref(),
+                        None,
+                        None,
+                    )
+                } else {
+                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
+                        &bucket,
+                        &prefix,
+                        &marker,
+                        &delimiter,
+                        max_keys,
+                        &grouped.objects,
+                        &grouped.common_prefixes,
+                        grouped.is_truncated,
+                        grouped.next_token.as_deref(),
+                        encoding_type,
+                    )
+                };
+                (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+            }
+            Err(e) => storage_err_response(e),
+        }
     }
+}
+
+struct GroupedListing {
+    objects: Vec<myfsio_common::types::ObjectMeta>,
+    common_prefixes: Vec<String>,
+    is_truncated: bool,
+    next_token: Option<String>,
+}
+
+async fn list_with_arbitrary_delimiter(
+    state: &AppState,
+    bucket: &str,
+    prefix: &str,
+    delimiter: &str,
+    max_keys: usize,
+    continuation_token: Option<String>,
+    start_after: Option<String>,
+) -> Result<GroupedListing, myfsio_storage::error::StorageError> {
+    const SCAN_PAGE_SIZE: usize = 1000;
+    let prefix_len = prefix.len();
+
+    let initial_skip = continuation_token
+        .clone()
+        .or_else(|| start_after.clone());
+
+    let mut storage_cursor: Option<String> = initial_skip.clone();
+    if let Some(token) = initial_skip.as_deref() {
+        if !delimiter.is_empty()
+            && token.starts_with(prefix)
+            && token[prefix_len..].contains(delimiter)
+        {
+            let after = &token[prefix_len..];
+            if let Some(idx) = after.find(delimiter) {
+                let cp_end = idx + delimiter.len();
+                let cp = format!("{}{}", prefix, &after[..cp_end]);
+                storage_cursor = Some(skip_past_common_prefix(&cp));
+            }
+        }
+    }
+
+    let mut storage_truncated = false;
+    let mut objects: Vec<myfsio_common::types::ObjectMeta> = Vec::new();
+    let mut common_prefixes: Vec<String> = Vec::new();
+    let mut last_emitted_key: Option<String> = None;
+    let mut last_cp: Option<String> = None;
+    let mut emitted: usize = 0;
+
+    'outer: loop {
+        let params = myfsio_common::types::ListParams {
+            max_keys: SCAN_PAGE_SIZE,
+            continuation_token: storage_cursor.clone(),
+            prefix: if prefix.is_empty() {
+                None
+            } else {
+                Some(prefix.to_string())
+            },
+            start_after: None,
+        };
+        let page = state.storage.list_objects(bucket, &params).await?;
+        let page_was_truncated = page.is_truncated;
+        let page_next = page.next_continuation_token.clone();
+
+        let mut skip_cp: Option<String> = None;
+        for obj in page.objects.into_iter() {
+            if !obj.key.starts_with(prefix) {
+                continue;
+            }
+            if let Some(ref active) = skip_cp {
+                if obj.key.starts_with(active.as_str()) {
+                    continue;
+                }
+                skip_cp = None;
+            }
+
+            let after_prefix = &obj.key[prefix_len..];
+            if let Some(idx) = after_prefix.find(delimiter) {
+                let cp_end = idx + delimiter.len();
+                let cp = format!("{}{}", prefix, &after_prefix[..cp_end]);
+                if last_cp.as_deref() == Some(cp.as_str()) {
+                    continue;
+                }
+                if emitted == max_keys {
+                    storage_truncated = true;
+                    break 'outer;
+                }
+                last_cp = Some(cp.clone());
+                last_emitted_key = Some(cp.clone());
+                common_prefixes.push(cp.clone());
+                emitted += 1;
+                skip_cp = Some(cp);
+            } else {
+                if emitted == max_keys {
+                    storage_truncated = true;
+                    break 'outer;
+                }
+                last_emitted_key = Some(obj.key.clone());
+                objects.push(obj);
+                emitted += 1;
+            }
+        }
+
+        if !page_was_truncated || page_next.is_none() {
+            break;
+        }
+        storage_cursor = page_next;
+        if let Some(cp) = last_cp.clone() {
+            if let Some(ref cur) = storage_cursor {
+                if cur.starts_with(cp.as_str()) {
+                    storage_cursor = Some(skip_past_common_prefix(&cp));
+                }
+            }
+        }
+    }
+
+    let is_truncated = storage_truncated;
+    let next_token = if is_truncated { last_emitted_key } else { None };
+
+    Ok(GroupedListing {
+        objects,
+        common_prefixes,
+        is_truncated,
+        next_token,
+    })
+}
+
+fn skip_past_common_prefix(cp: &str) -> String {
+    let mut s = cp.to_string();
+    s.push('\u{10FFFF}');
+    s
 }
 
 pub async fn post_bucket(
@@ -1122,22 +1299,24 @@ fn guessed_content_type(key: &str, explicit: Option<&str>) -> String {
 }
 
 fn is_aws_chunked(headers: &HeaderMap) -> bool {
-    if let Some(enc) = headers
-        .get("content-encoding")
-        .and_then(|v| v.to_str().ok())
-    {
-        if enc.to_ascii_lowercase().contains("aws-chunked") {
-            return true;
-        }
-    }
     if let Some(sha) = headers
         .get("x-amz-content-sha256")
         .and_then(|v| v.to_str().ok())
     {
-        let lower = sha.to_ascii_lowercase();
-        if lower.starts_with("streaming-") {
+        if sha.to_ascii_uppercase().starts_with("STREAMING-") {
             return true;
         }
+    }
+    let content_encoding_says_chunked = headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(|enc| {
+            enc.split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("aws-chunked"))
+        })
+        .unwrap_or(false);
+    if content_encoding_says_chunked && headers.get("x-amz-decoded-content-length").is_some() {
+        return true;
     }
     false
 }
@@ -1195,11 +1374,22 @@ fn insert_standard_object_metadata(
     headers: &HeaderMap,
     metadata: &mut HashMap<String, String>,
 ) -> Result<(), Response> {
+    let was_chunked = is_aws_chunked(headers);
     for (request_header, metadata_key, _) in internal_header_pairs() {
         if let Some(value) = headers.get(*request_header).and_then(|v| v.to_str().ok()) {
             if *request_header == "content-encoding" {
-                if let Some(decoded_encoding) = decoded_content_encoding(value) {
-                    metadata.insert((*metadata_key).to_string(), decoded_encoding);
+                let stored = if was_chunked {
+                    decoded_content_encoding(value)
+                } else {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                };
+                if let Some(stored) = stored {
+                    metadata.insert((*metadata_key).to_string(), stored);
                 }
             } else {
                 metadata.insert((*metadata_key).to_string(), value.to_string());
@@ -1294,12 +1484,21 @@ fn apply_canned_acl_header(
     headers: &HeaderMap,
     metadata: &mut HashMap<String, String>,
 ) -> Result<(), Response> {
-    let Some(raw) = headers.get("x-amz-acl").and_then(|v| v.to_str().ok()) else {
+    let Some(value) = canned_acl_value(headers)? else {
         return Ok(());
+    };
+    let acl = crate::services::acl::create_canned_acl(&value, "myfsio");
+    crate::services::acl::store_object_acl(metadata, &acl);
+    Ok(())
+}
+
+fn canned_acl_value(headers: &HeaderMap) -> Result<Option<String>, Response> {
+    let Some(raw) = headers.get("x-amz-acl").and_then(|v| v.to_str().ok()) else {
+        return Ok(None);
     };
     let value = raw.trim();
     if value.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     if !CANNED_ACL_VALUES
         .iter()
@@ -1310,9 +1509,7 @@ fn apply_canned_acl_header(
             format!("Unsupported canned ACL: {}", value),
         )));
     }
-    let acl = crate::services::acl::create_canned_acl(value, "myfsio");
-    crate::services::acl::store_object_acl(metadata, &acl);
-    Ok(())
+    Ok(Some(value.to_string()))
 }
 
 fn validate_sse_request(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
@@ -5157,9 +5354,46 @@ mod tests {
     }
 
     #[test]
+    fn is_aws_chunked_detection() {
+        // Streaming SigV4 sha header alone => chunked.
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-amz-content-sha256",
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD".parse().unwrap(),
+        );
+        assert!(is_aws_chunked(&h));
+
+        // Content-Encoding aws-chunked + decoded-length => chunked (no streaming sha).
+        let mut h = HeaderMap::new();
+        h.insert("content-encoding", "aws-chunked, gzip".parse().unwrap());
+        h.insert("x-amz-decoded-content-length", "100".parse().unwrap());
+        assert!(is_aws_chunked(&h));
+
+        // Content-Encoding aws-chunked but no decoded-length and no streaming sha
+        // (e.g. user passed it as metadata): NOT chunked, body is plain.
+        let mut h = HeaderMap::new();
+        h.insert("content-encoding", "gzip, aws-chunked".parse().unwrap());
+        h.insert(
+            "x-amz-content-sha256",
+            "abcd".repeat(16).parse().unwrap(),
+        );
+        assert!(!is_aws_chunked(&h));
+
+        // Plain hex sha and gzip-only Content-Encoding: not chunked.
+        let mut h = HeaderMap::new();
+        h.insert("content-encoding", "gzip".parse().unwrap());
+        h.insert("x-amz-content-sha256", "abcd".repeat(16).parse().unwrap());
+        assert!(!is_aws_chunked(&h));
+    }
+
+    #[test]
     fn aws_chunked_wire_encoding_is_not_persisted_as_object_encoding() {
+        // Real streaming sigv4 wire encoding: chunked transport detected via
+        // x-amz-decoded-content-length (matches what real SDKs send), so
+        // aws-chunked is stripped from stored Content-Encoding metadata.
         let mut headers = HeaderMap::new();
         headers.insert("content-encoding", "aws-chunked".parse().unwrap());
+        headers.insert("x-amz-decoded-content-length", "100".parse().unwrap());
         let mut metadata = HashMap::new();
         insert_standard_object_metadata(&headers, &mut metadata).unwrap();
         assert!(!metadata.contains_key("__content_encoding__"));
@@ -5168,6 +5402,25 @@ mod tests {
         let mut metadata = HashMap::new();
         insert_standard_object_metadata(&headers, &mut metadata).unwrap();
         assert_eq!(metadata.get("__content_encoding__").unwrap(), "gzip");
+    }
+
+    #[test]
+    fn user_supplied_aws_chunked_in_metadata_is_preserved_when_body_is_plain() {
+        // No x-amz-decoded-content-length and no streaming sha => server treats
+        // body as plain bytes, so the user-supplied Content-Encoding (which
+        // happens to literally include "aws-chunked") must round-trip verbatim.
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "gzip, aws-chunked".parse().unwrap());
+        headers.insert(
+            "x-amz-content-sha256",
+            "abcd".repeat(16).parse().unwrap(),
+        );
+        let mut metadata = HashMap::new();
+        insert_standard_object_metadata(&headers, &mut metadata).unwrap();
+        assert_eq!(
+            metadata.get("__content_encoding__").map(String::as_str),
+            Some("gzip, aws-chunked")
+        );
     }
 
     #[tokio::test]
@@ -5449,5 +5702,85 @@ mod tests {
         assert!(body.contains("AllUsers"));
         assert!(body.contains("READ"));
         assert!(body.contains("myfsio"));
+    }
+
+    #[tokio::test]
+    async fn arbitrary_delimiter_groups_keys_and_paginates() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("arb").await.unwrap();
+        for key in ["foo", "bar", "baz", "cab"] {
+            state
+                .storage
+                .put_object(
+                    "arb",
+                    key,
+                    Box::pin(std::io::Cursor::new(b"x".to_vec())),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let page = list_with_arbitrary_delimiter(&state, "arb", "", "a", 100, None, None)
+            .await
+            .unwrap();
+        let mut got: Vec<String> = page.objects.iter().map(|o| o.key.clone()).collect();
+        got.sort();
+        assert_eq!(got, vec!["foo".to_string()]);
+        let mut cps = page.common_prefixes.clone();
+        cps.sort();
+        assert_eq!(cps, vec!["ba".to_string(), "ca".to_string()]);
+        assert!(!page.is_truncated);
+        assert!(page.next_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn arbitrary_delimiter_truncation_is_honest_under_max_keys() {
+        let (state, _tmp) = test_state();
+        state.storage.create_bucket("arb2").await.unwrap();
+        for key in ["alpha", "ba/x", "ba/y", "beta", "gamma"] {
+            state
+                .storage
+                .put_object(
+                    "arb2",
+                    key,
+                    Box::pin(std::io::Cursor::new(b"x".to_vec())),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let page1 = list_with_arbitrary_delimiter(&state, "arb2", "", "/", 2, None, None)
+            .await
+            .unwrap();
+        assert!(page1.is_truncated, "max_keys=2 against 4 distinct items must be truncated");
+        let token = page1
+            .next_token
+            .clone()
+            .expect("truncated response must include a continuation token");
+        assert_eq!(
+            page1.objects.iter().map(|o| o.key.clone()).collect::<Vec<_>>(),
+            vec!["alpha".to_string()]
+        );
+        assert_eq!(page1.common_prefixes, vec!["ba/".to_string()]);
+        assert_eq!(token, "ba/");
+
+        let page2 = list_with_arbitrary_delimiter(
+            &state,
+            "arb2",
+            "",
+            "/",
+            10,
+            Some(token),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(page2.common_prefixes.is_empty(), "ba/ must not be re-emitted on resume");
+        let got: Vec<String> = page2.objects.iter().map(|o| o.key.clone()).collect();
+        assert_eq!(got, vec!["beta".to_string(), "gamma".to_string()]);
+        assert!(!page2.is_truncated);
+        assert!(page2.next_token.is_none());
     }
 }

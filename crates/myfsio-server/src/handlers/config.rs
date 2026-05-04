@@ -7,7 +7,8 @@ use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_storage::traits::StorageEngine;
 
 use crate::services::acl::{
-    acl_from_object_metadata, acl_from_xml_strict, acl_to_xml, create_canned_acl, store_object_acl,
+    acl_from_object_metadata, acl_from_xml_strict, acl_to_xml_with_lookup, create_canned_acl,
+    store_object_acl,
 };
 use crate::services::notifications::parse_notification_configurations;
 use crate::services::object_lock::{
@@ -848,19 +849,32 @@ pub async fn get_acl(state: &AppState, bucket: &str) -> Response {
             if let Some(acl) = &config.acl {
                 xml_response(StatusCode::OK, stored_xml(acl))
             } else {
-                let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                let owner = default_owner_for(state);
+                let owner_display = state
+                    .iam
+                    .get_display_name(&owner)
+                    .unwrap_or_else(|| owner.clone());
+                let xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                     <AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                    <Owner><ID>myfsio</ID><DisplayName>myfsio</DisplayName></Owner>\
+                    <Owner><ID>{owner}</ID><DisplayName>{display}</DisplayName></Owner>\
                     <AccessControlList>\
                     <Grant><Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\">\
-                    <ID>myfsio</ID><DisplayName>myfsio</DisplayName></Grantee>\
+                    <ID>{owner}</ID><DisplayName>{display}</DisplayName></Grantee>\
                     <Permission>FULL_CONTROL</Permission></Grant>\
-                    </AccessControlList></AccessControlPolicy>";
-                xml_response(StatusCode::OK, xml.to_string())
+                    </AccessControlList></AccessControlPolicy>",
+                    owner = xml_escape(&owner),
+                    display = xml_escape(&owner_display),
+                );
+                xml_response(StatusCode::OK, xml)
             }
         }
         Err(e) => storage_err(e),
     }
+}
+
+fn default_owner_for(_state: &AppState) -> String {
+    "myfsio".to_string()
 }
 
 pub async fn put_acl(state: &AppState, bucket: &str, body: Body) -> Response {
@@ -1687,7 +1701,7 @@ pub async fn put_object_acl(
             };
             let existing_owner = acl_from_object_metadata(&metadata)
                 .map(|acl| acl.owner)
-                .unwrap_or_else(|| "myfsio".to_string());
+                .unwrap_or_else(|| default_owner_for(state));
 
             let acl = if !body_trimmed.is_empty() {
                 match acl_from_xml_strict(body_trimmed) {
@@ -2024,9 +2038,16 @@ pub async fn get_object_acl(state: &AppState, bucket: &str, key: &str) -> Respon
                 Ok(metadata) => metadata,
                 Err(err) => return storage_err(err),
             };
+            let owner = default_owner_for(state);
             let acl = acl_from_object_metadata(&metadata)
-                .unwrap_or_else(|| create_canned_acl("private", "myfsio"));
-            xml_response(StatusCode::OK, acl_to_xml(&acl))
+                .unwrap_or_else(|| create_canned_acl("private", &owner));
+            let lookup = |id: &str| {
+                state
+                    .iam
+                    .get_display_name(id)
+                    .unwrap_or_else(|| id.to_string())
+            };
+            xml_response(StatusCode::OK, acl_to_xml_with_lookup(&acl, lookup))
         }
         Err(e) => storage_err(e),
     }
