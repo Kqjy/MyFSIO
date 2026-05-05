@@ -279,7 +279,7 @@ pub async fn csrf_layer(
             let rest_stream = frames
                 .map(|res| {
                     res.map(|frame| frame.into_data().unwrap_or_default())
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                        .map_err(std::io::Error::other)
                 });
             axum::body::Body::from_stream(prefix_stream.chain(rest_stream))
         };

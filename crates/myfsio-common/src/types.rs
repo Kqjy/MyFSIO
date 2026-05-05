@@ -227,16 +227,13 @@ pub struct QuotaConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PrincipalKind {
+    #[default]
     User,
     Peer { site_id: String },
 }
 
-impl Default for PrincipalKind {
-    fn default() -> Self {
-        Self::User
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Principal {

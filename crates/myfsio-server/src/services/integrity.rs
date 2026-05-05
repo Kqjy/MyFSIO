@@ -15,9 +15,52 @@ use tokio::sync::{RwLock, Semaphore};
 
 use crate::services::peer_fetch::{HealOutcome, PeerFetcher};
 
-const MAX_ISSUES: usize = 500;
+const MAX_ISSUES_PER_TYPE: usize = 100;
 const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
 const QUARANTINE_DIR: &str = "quarantine";
+const CURSOR_FILE: &str = "integrity_cursor.json";
+
+#[derive(Default, Clone)]
+struct CorruptionCursor {
+    bucket: String,
+    after_key: String,
+}
+
+fn cursor_path_for(storage_root: &Path) -> PathBuf {
+    storage_root.join(SYSTEM_ROOT).join("config").join(CURSOR_FILE)
+}
+
+fn load_cursor(path: &Path) -> CorruptionCursor {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return CorruptionCursor::default();
+    };
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&s) else {
+        return CorruptionCursor::default();
+    };
+    CorruptionCursor {
+        bucket: map
+            .get("bucket")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        after_key: map
+            .get("after_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+fn save_cursor(path: &Path, cursor: &CorruptionCursor) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let v = json!({
+        "bucket": cursor.bucket,
+        "after_key": cursor.after_key,
+    });
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&v).unwrap_or_default());
+}
 
 pub struct IntegrityConfig {
     pub interval_hours: f64,
@@ -89,16 +132,18 @@ struct ScanState {
     stale_versions: u64,
     etag_cache_inconsistencies: u64,
     issues: Vec<Value>,
+    issue_counts: HashMap<String, usize>,
     errors: Vec<String>,
 }
 
 impl ScanState {
-    fn batch_exhausted(&self, batch_size: usize) -> bool {
-        self.objects_scanned >= batch_size as u64
-    }
-
     fn push_issue(&mut self, issue_type: &str, bucket: &str, key: &str, detail: String) {
-        if self.issues.len() < MAX_ISSUES {
+        let count = self
+            .issue_counts
+            .entry(issue_type.to_string())
+            .or_insert(0);
+        if *count < MAX_ISSUES_PER_TYPE {
+            *count += 1;
             self.issues.push(json!({
                 "issue_type": issue_type,
                 "bucket": bucket,
@@ -720,19 +765,55 @@ fn build_result_json(
 
 fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
     let mut state = ScanState::default();
-    let buckets = match list_bucket_names(storage_root) {
+    let mut buckets = match list_bucket_names(storage_root) {
         Ok(b) => b,
         Err(e) => {
             state.errors.push(format!("list buckets: {}", e));
             return state;
         }
     };
+    buckets.sort();
 
     for bucket in &buckets {
-        if state.batch_exhausted(batch_size) {
-            break;
-        }
         state.buckets_scanned += 1;
+        let bucket_path = storage_root.join(bucket);
+        let meta_root = storage_root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        let index_entries = collect_index_entries(&meta_root);
+
+        check_phantom(&mut state, bucket, &bucket_path, &index_entries);
+        check_orphaned(&mut state, bucket, &bucket_path, &index_entries);
+        check_stale_versions(&mut state, storage_root, bucket);
+        check_etag_cache(&mut state, storage_root, bucket, &index_entries);
+    }
+
+    if buckets.is_empty() || batch_size == 0 {
+        return state;
+    }
+
+    let cursor_path = cursor_path_for(storage_root);
+    let cursor = load_cursor(&cursor_path);
+
+    let start_idx = buckets
+        .iter()
+        .position(|b| b == &cursor.bucket)
+        .unwrap_or(0);
+    let mut remaining = batch_size;
+    let mut new_cursor = CorruptionCursor::default();
+    let mut bailed_mid_bucket = false;
+    let mut last_offset_visited: Option<usize> = None;
+
+    for offset in 0..buckets.len() {
+        let idx = (start_idx + offset) % buckets.len();
+        let bucket = &buckets[idx];
+        let after_key: &str = if offset == 0 && bucket == &cursor.bucket {
+            cursor.after_key.as_str()
+        } else {
+            ""
+        };
 
         let bucket_path = storage_root.join(bucket);
         let meta_root = storage_root
@@ -740,16 +821,40 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
             .join(SYSTEM_BUCKETS_DIR)
             .join(bucket)
             .join(BUCKET_META_DIR);
-
         let index_entries = collect_index_entries(&meta_root);
 
-        check_corrupted(&mut state, bucket, &bucket_path, &index_entries, batch_size);
-        check_phantom(&mut state, bucket, &bucket_path, &index_entries, batch_size);
-        check_orphaned(&mut state, bucket, &bucket_path, &index_entries, batch_size);
-        check_stale_versions(&mut state, storage_root, bucket, batch_size);
-        check_etag_cache(&mut state, storage_root, bucket, &index_entries, batch_size);
+        last_offset_visited = Some(offset);
+        let result = check_corrupted(
+            &mut state,
+            bucket,
+            &bucket_path,
+            &index_entries,
+            after_key,
+            &mut remaining,
+        );
+
+        if let Some(k) = result.last_examined {
+            new_cursor = CorruptionCursor {
+                bucket: bucket.clone(),
+                after_key: k,
+            };
+        }
+
+        if !result.finished_bucket {
+            bailed_mid_bucket = true;
+            break;
+        }
+        if remaining == 0 {
+            break;
+        }
     }
 
+    let visited_all_buckets = last_offset_visited == Some(buckets.len() - 1);
+    if visited_all_buckets && !bailed_mid_bucket {
+        new_cursor = CorruptionCursor::default();
+    }
+
+    save_cursor(&cursor_path, &new_cursor);
     state
 }
 
@@ -866,22 +971,43 @@ fn entry_metadata_map(entry: &Value) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+struct CorruptionScanResult {
+    last_examined: Option<String>,
+    finished_bucket: bool,
+}
+
 fn check_corrupted(
     state: &mut ScanState,
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
-    batch_size: usize,
-) {
+    after_key: &str,
+    remaining: &mut usize,
+) -> CorruptionScanResult {
+    if *remaining == 0 {
+        return CorruptionScanResult {
+            last_examined: None,
+            finished_bucket: false,
+        };
+    }
     let mut keys: Vec<&String> = entries.keys().collect();
     keys.sort();
 
-    for full_key in keys {
-        if state.batch_exhausted(batch_size) {
-            return;
+    let start = keys.partition_point(|k| k.as_str() <= after_key);
+    let mut last_examined: Option<String> = None;
+
+    for full_key in &keys[start..] {
+        if *remaining == 0 {
+            return CorruptionScanResult {
+                last_examined,
+                finished_bucket: false,
+            };
         }
-        let info = &entries[full_key];
-        let object_path = bucket_path.join(full_key);
+        *remaining -= 1;
+        last_examined = Some((*full_key).clone());
+
+        let info = &entries[*full_key];
+        let object_path = bucket_path.join(*full_key);
         if !object_path.exists() {
             continue;
         }
@@ -916,6 +1042,10 @@ fn check_corrupted(
                 .push(format!("hash {}/{}: {}", bucket, full_key, e)),
         }
     }
+    CorruptionScanResult {
+        last_examined,
+        finished_bucket: true,
+    }
 }
 
 fn check_phantom(
@@ -923,15 +1053,11 @@ fn check_phantom(
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
-    batch_size: usize,
 ) {
     let mut keys: Vec<&String> = entries.keys().collect();
     keys.sort();
 
     for full_key in keys {
-        if state.batch_exhausted(batch_size) {
-            return;
-        }
         let info = &entries[full_key];
         if metadata_is_corrupted(&entry_metadata_map(&info.entry)) {
             continue;
@@ -955,23 +1081,16 @@ fn check_orphaned(
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
-    batch_size: usize,
 ) {
     let indexed: HashSet<&String> = entries.keys().collect();
     let mut stack: Vec<(PathBuf, String)> = vec![(bucket_path.to_path_buf(), String::new())];
 
     while let Some((dir, prefix)) = stack.pop() {
-        if state.batch_exhausted(batch_size) {
-            return;
-        }
         let rd = match std::fs::read_dir(&dir) {
             Ok(r) => r,
             Err(_) => continue,
         };
         for entry in rd.flatten() {
-            if state.batch_exhausted(batch_size) {
-                return;
-            }
             let name = entry.file_name().to_string_lossy().to_string();
             let ft = match entry.file_type() {
                 Ok(t) => t,
@@ -1008,12 +1127,7 @@ fn check_orphaned(
     }
 }
 
-fn check_stale_versions(
-    state: &mut ScanState,
-    storage_root: &Path,
-    bucket: &str,
-    batch_size: usize,
-) {
+fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str) {
     let versions_root = storage_root
         .join(SYSTEM_ROOT)
         .join(SYSTEM_BUCKETS_DIR)
@@ -1025,9 +1139,6 @@ fn check_stale_versions(
 
     let mut stack: Vec<PathBuf> = vec![versions_root.clone()];
     while let Some(dir) = stack.pop() {
-        if state.batch_exhausted(batch_size) {
-            return;
-        }
         let rd = match std::fs::read_dir(&dir) {
             Ok(r) => r,
             Err(_) => continue,
@@ -1056,9 +1167,6 @@ fn check_stale_versions(
         }
 
         for (stem, path) in &bin_stems {
-            if state.batch_exhausted(batch_size) {
-                return;
-            }
             state.objects_scanned += 1;
             if !json_stems.contains_key(stem) {
                 state.stale_versions += 1;
@@ -1076,9 +1184,6 @@ fn check_stale_versions(
         }
 
         for (stem, path) in &json_stems {
-            if state.batch_exhausted(batch_size) {
-                return;
-            }
             state.objects_scanned += 1;
             if !bin_stems.contains_key(stem) {
                 if manifest_is_delete_marker(path) {
@@ -1120,7 +1225,6 @@ fn check_etag_cache(
     storage_root: &Path,
     bucket: &str,
     entries: &HashMap<String, IndexEntryInfo>,
-    batch_size: usize,
 ) {
     let etag_index_path = storage_root
         .join(SYSTEM_ROOT)
@@ -1140,9 +1244,6 @@ fn check_etag_cache(
     };
 
     for (full_key, cached_val) in cache {
-        if state.batch_exhausted(batch_size) {
-            return;
-        }
         state.objects_scanned += 1;
         let Some(cached_etag) = cached_val.as_str() else {
             continue;
@@ -1431,5 +1532,194 @@ mod tests {
             "unexpected errors: {:?}",
             state.errors
         );
+    }
+
+    fn write_object(root: &Path, bucket: &str, key: &str, bytes: &[u8]) -> String {
+        let etag = md5_hex(bytes);
+        fs::write(root.join(bucket).join(key), bytes).unwrap();
+        etag
+    }
+
+    fn seed_bucket_with_objects(root: &Path, bucket: &str, keys: &[&str]) {
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for k in keys {
+            let etag = write_object(root, bucket, k, k.as_bytes());
+            entries.push((k.to_string(), etag));
+        }
+        let pairs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(k, e)| (k.as_str(), e.as_str()))
+            .collect();
+        write_index(&meta_root, &pairs);
+    }
+
+    #[test]
+    fn cursor_advances_across_runs_when_budget_smaller_than_corpus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_bucket_with_objects(
+            root,
+            "alpha",
+            &["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"],
+        );
+
+        let _ = scan_all_buckets(root, 2);
+        let cursor1 = load_cursor(&cursor_path_for(root));
+        assert_eq!(cursor1.bucket, "alpha");
+        assert_eq!(cursor1.after_key, "b.txt");
+
+        let _ = scan_all_buckets(root, 2);
+        let cursor2 = load_cursor(&cursor_path_for(root));
+        assert_eq!(cursor2.bucket, "alpha");
+        assert_eq!(cursor2.after_key, "d.txt");
+
+        let _ = scan_all_buckets(root, 2);
+        let cursor3 = load_cursor(&cursor_path_for(root));
+        assert_eq!(
+            cursor3.bucket, "",
+            "completing a full sweep should reset the cursor"
+        );
+        assert_eq!(cursor3.after_key, "");
+    }
+
+    #[test]
+    fn cursor_wraps_across_buckets_alphabetically() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_bucket_with_objects(root, "alpha", &["x.txt", "y.txt"]);
+        seed_bucket_with_objects(root, "bravo", &["m.txt", "n.txt"]);
+
+        let _ = scan_all_buckets(root, 3);
+        let c1 = load_cursor(&cursor_path_for(root));
+        assert_eq!(c1.bucket, "bravo");
+        assert_eq!(c1.after_key, "m.txt");
+
+        let _ = scan_all_buckets(root, 3);
+        let c2 = load_cursor(&cursor_path_for(root));
+        assert_eq!(c2.bucket, "", "second run should finish the sweep");
+    }
+
+    #[test]
+    fn cursor_falls_back_when_recorded_bucket_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        seed_bucket_with_objects(root, "alpha", &["a.txt", "b.txt"]);
+        let cursor = CorruptionCursor {
+            bucket: "ghost".to_string(),
+            after_key: "zzz".to_string(),
+        };
+        save_cursor(&cursor_path_for(root), &cursor);
+
+        let state = scan_all_buckets(root, 100);
+        assert!(state.errors.is_empty(), "unexpected errors: {:?}", state.errors);
+        let after = load_cursor(&cursor_path_for(root));
+        assert_eq!(
+            after.bucket, "",
+            "stale cursor should be reset after a complete sweep"
+        );
+    }
+
+    #[test]
+    fn phantom_storm_does_not_starve_corruption_issue_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "noisy";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for i in 0..(MAX_ISSUES_PER_TYPE + 50) {
+            entries.push((
+                format!("phantom-{:04}.txt", i),
+                "deadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            ));
+        }
+        let real_bytes = b"actual rotted contents";
+        fs::write(bucket_path.join("rotted.txt"), real_bytes).unwrap();
+        entries.push((
+            "rotted.txt".to_string(),
+            "00000000000000000000000000000000".to_string(),
+        ));
+
+        let pairs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(k, e)| (k.as_str(), e.as_str()))
+            .collect();
+        write_index(&meta_root, &pairs);
+
+        let state = scan_all_buckets(root, 100_000);
+
+        let phantom_in_list = state
+            .issues
+            .iter()
+            .filter(|i| {
+                i.get("issue_type").and_then(|v| v.as_str()) == Some("phantom_metadata")
+            })
+            .count();
+        let corrupted_in_list = state
+            .issues
+            .iter()
+            .filter(|i| {
+                i.get("issue_type").and_then(|v| v.as_str()) == Some("corrupted_object")
+            })
+            .count();
+
+        assert_eq!(
+            phantom_in_list, MAX_ISSUES_PER_TYPE,
+            "phantom phase should be capped at the per-type limit"
+        );
+        assert_eq!(
+            corrupted_in_list, 1,
+            "corruption issue must still land even after phantom phase saturates its quota"
+        );
+        assert_eq!(state.corrupted_objects, 1);
+    }
+
+    #[test]
+    fn cheap_phases_run_on_every_bucket_regardless_of_corruption_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket_a_path = root.join("alpha");
+        let bucket_b_path = root.join("bravo");
+        let meta_a = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join("alpha")
+            .join(BUCKET_META_DIR);
+        let meta_b = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join("bravo")
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_a_path).unwrap();
+        fs::create_dir_all(&bucket_b_path).unwrap();
+
+        write_index(
+            &meta_a,
+            &[("ghost-a.txt", "deadbeefdeadbeefdeadbeefdeadbeef")],
+        );
+        write_index(
+            &meta_b,
+            &[("ghost-b.txt", "deadbeefdeadbeefdeadbeefdeadbeef")],
+        );
+
+        let state = scan_all_buckets(root, 1);
+        assert_eq!(
+            state.phantom_metadata, 2,
+            "phantom-metadata phase must visit every bucket each run, not be gated by the corruption budget"
+        );
+        assert_eq!(state.buckets_scanned, 2);
     }
 }

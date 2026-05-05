@@ -337,9 +337,7 @@ impl PeerAdminClient {
         idempotency_key: &str,
         correlation_id: &str,
     ) -> Result<RelayResponse, String> {
-        if let Err(e) = self.guard_endpoint(endpoint).await {
-            return Err(e);
-        }
+        self.guard_endpoint(endpoint).await?;
         let url = format!(
             "{}{}",
             endpoint.trim_end_matches('/'),

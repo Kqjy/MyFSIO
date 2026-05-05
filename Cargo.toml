@@ -10,8 +10,13 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
+
+[workspace.lints.clippy]
+result_large_err = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -48,7 +53,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 dashmap = "6"
 crc32fast = "1"
-duckdb = { version = "1", features = ["bundled"] }
+duckdb = { version = "1", features = ["bundled", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
 aws-sdk-s3 = { version = "1", features = ["behavior-version-latest", "rt-tokio"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }

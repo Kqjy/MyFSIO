@@ -334,6 +334,8 @@ fn load_input_table(conn: &Connection, path: &Path, input: &InputFormat) -> Resu
                 .map_err(|e| format!("Failed loading CSV data: {}", e))?;
         }
         InputFormat::Json(cfg) => {
+            conn.execute_batch("LOAD json;")
+                .map_err(|e| format!("Failed loading JSON extension: {}", e))?;
             let format = if cfg.json_type == "LINES" {
                 "newline_delimited"
             } else {
@@ -558,68 +560,6 @@ fn find_disallowed_token(expression: &str) -> Option<&'static str> {
     }
 
     None
-}
-
-#[cfg(test)]
-mod select_denylist_tests {
-    use super::find_disallowed_token;
-
-    #[test]
-    fn allows_plain_select() {
-        assert!(find_disallowed_token("SELECT * FROM s3object").is_none());
-        assert!(find_disallowed_token("SELECT a, b FROM data WHERE c > 1").is_none());
-        assert!(find_disallowed_token("SELECT load FROM data").is_none());
-        assert!(find_disallowed_token("SELECT copy_count FROM data").is_none());
-    }
-
-    #[test]
-    fn allows_columns_named_like_banned_functions() {
-        assert!(find_disallowed_token("SELECT read_csv FROM s3object").is_none());
-        assert!(find_disallowed_token("SELECT read_parquet, read_json FROM data").is_none());
-        assert!(find_disallowed_token("SELECT s.read_blob FROM data s").is_none());
-        assert!(find_disallowed_token("SELECT read_csv AS x FROM data").is_none());
-    }
-
-    #[test]
-    fn allows_keywords_used_as_columns() {
-        assert!(find_disallowed_token("SELECT copy, attach FROM data").is_none());
-        assert!(find_disallowed_token("SELECT load AS l FROM data").is_none());
-    }
-
-    #[test]
-    fn rejects_file_functions() {
-        assert!(find_disallowed_token("SELECT * FROM read_csv_auto('/etc/passwd')").is_some());
-        assert!(find_disallowed_token("select * from read_parquet('x')").is_some());
-        assert!(find_disallowed_token("SELECT read_blob('/etc/hosts')").is_some());
-        assert!(find_disallowed_token("SELECT read_csv ('x')").is_some());
-        assert!(find_disallowed_token("SELECT read_csv\n('x')").is_some());
-    }
-
-    #[test]
-    fn rejects_leading_statements() {
-        assert!(find_disallowed_token("ATTACH 'x.db'").is_some());
-        assert!(find_disallowed_token("INSTALL httpfs").is_some());
-        assert!(find_disallowed_token("LOAD httpfs").is_some());
-        assert!(find_disallowed_token("COPY data TO 'x'").is_some());
-    }
-
-    #[test]
-    fn rejects_chained_statements() {
-        assert!(find_disallowed_token("SELECT 1; ATTACH 'x.db'").is_some());
-        assert!(find_disallowed_token("SELECT 1;\nLOAD httpfs").is_some());
-    }
-
-    #[test]
-    fn ignores_string_literals() {
-        assert!(find_disallowed_token("SELECT 'read_csv' FROM data").is_none());
-        assert!(find_disallowed_token("SELECT 'ATTACH abc' AS x FROM data").is_none());
-    }
-
-    #[test]
-    fn ignores_comments() {
-        assert!(find_disallowed_token("SELECT * FROM data -- read_csv").is_none());
-        assert!(find_disallowed_token("SELECT * /* read_parquet */ FROM data").is_none());
-    }
 }
 
 fn normalize_single_char(value: &str, default_char: char) -> String {
@@ -862,4 +802,66 @@ fn crc32(data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(data);
     hasher.finalize()
+}
+
+#[cfg(test)]
+mod select_denylist_tests {
+    use super::find_disallowed_token;
+
+    #[test]
+    fn allows_plain_select() {
+        assert!(find_disallowed_token("SELECT * FROM s3object").is_none());
+        assert!(find_disallowed_token("SELECT a, b FROM data WHERE c > 1").is_none());
+        assert!(find_disallowed_token("SELECT load FROM data").is_none());
+        assert!(find_disallowed_token("SELECT copy_count FROM data").is_none());
+    }
+
+    #[test]
+    fn allows_columns_named_like_banned_functions() {
+        assert!(find_disallowed_token("SELECT read_csv FROM s3object").is_none());
+        assert!(find_disallowed_token("SELECT read_parquet, read_json FROM data").is_none());
+        assert!(find_disallowed_token("SELECT s.read_blob FROM data s").is_none());
+        assert!(find_disallowed_token("SELECT read_csv AS x FROM data").is_none());
+    }
+
+    #[test]
+    fn allows_keywords_used_as_columns() {
+        assert!(find_disallowed_token("SELECT copy, attach FROM data").is_none());
+        assert!(find_disallowed_token("SELECT load AS l FROM data").is_none());
+    }
+
+    #[test]
+    fn rejects_file_functions() {
+        assert!(find_disallowed_token("SELECT * FROM read_csv_auto('/etc/passwd')").is_some());
+        assert!(find_disallowed_token("select * from read_parquet('x')").is_some());
+        assert!(find_disallowed_token("SELECT read_blob('/etc/hosts')").is_some());
+        assert!(find_disallowed_token("SELECT read_csv ('x')").is_some());
+        assert!(find_disallowed_token("SELECT read_csv\n('x')").is_some());
+    }
+
+    #[test]
+    fn rejects_leading_statements() {
+        assert!(find_disallowed_token("ATTACH 'x.db'").is_some());
+        assert!(find_disallowed_token("INSTALL httpfs").is_some());
+        assert!(find_disallowed_token("LOAD httpfs").is_some());
+        assert!(find_disallowed_token("COPY data TO 'x'").is_some());
+    }
+
+    #[test]
+    fn rejects_chained_statements() {
+        assert!(find_disallowed_token("SELECT 1; ATTACH 'x.db'").is_some());
+        assert!(find_disallowed_token("SELECT 1;\nLOAD httpfs").is_some());
+    }
+
+    #[test]
+    fn ignores_string_literals() {
+        assert!(find_disallowed_token("SELECT 'read_csv' FROM data").is_none());
+        assert!(find_disallowed_token("SELECT 'ATTACH abc' AS x FROM data").is_none());
+    }
+
+    #[test]
+    fn ignores_comments() {
+        assert!(find_disallowed_token("SELECT * FROM data -- read_csv").is_none());
+        assert!(find_disallowed_token("SELECT * /* read_parquet */ FROM data").is_none());
+    }
 }

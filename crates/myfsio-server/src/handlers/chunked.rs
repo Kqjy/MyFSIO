@@ -36,12 +36,8 @@ impl<S> AwsChunkedStream<S> {
     }
 
     fn find_crlf(&self) -> Option<usize> {
-        for i in 0..self.buffer.len().saturating_sub(1) {
-            if self.buffer[i] == b'\r' && self.buffer[i + 1] == b'\n' {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.buffer.len().saturating_sub(1))
+            .find(|&i| self.buffer[i] == b'\r' && self.buffer[i + 1] == b'\n')
     }
 
     fn parse_chunk_size(line: &[u8]) -> std::io::Result<u64> {
@@ -225,7 +221,7 @@ pub fn decode_body(body: axum::body::Body) -> impl AsyncRead + Send + Unpin {
     let stream = tokio_util::io::StreamReader::new(
         http_body_util::BodyStream::new(body)
             .map_ok(|frame| frame.into_data().unwrap_or_default())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+            .map_err(std::io::Error::other),
     );
     AwsChunkedStream::new(stream)
 }
@@ -238,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_oversized_chunk_size_line() {
-        let huge: Vec<u8> = std::iter::repeat(b'A').take(MAX_CHUNK_HEADER_LINE + 16).collect();
+        let huge: Vec<u8> = std::iter::repeat_n(b'A', MAX_CHUNK_HEADER_LINE + 16).collect();
         let cursor = Cursor::new(huge);
         let mut stream = AwsChunkedStream::new(cursor);
         let mut buf = Vec::new();
@@ -259,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_oversized_trailer_line() {
         let mut payload = Vec::from(&b"0\r\n"[..]);
-        payload.extend(std::iter::repeat(b'X').take(MAX_CHUNK_HEADER_LINE + 16));
+        payload.extend(std::iter::repeat_n(b'X', MAX_CHUNK_HEADER_LINE + 16));
         let cursor = Cursor::new(payload);
         let mut stream = AwsChunkedStream::new(cursor);
         let mut buf = Vec::new();

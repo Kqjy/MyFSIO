@@ -351,7 +351,7 @@ mod tests {
         let key = kms.create_key("test key").await.unwrap();
         assert!(key.enabled);
         assert_eq!(key.description, "test key");
-        assert!(key.key_id.len() > 0);
+        assert!(!key.key_id.is_empty());
 
         let keys = kms.list_keys().await;
         assert_eq!(keys.len(), 1);

@@ -96,7 +96,7 @@ fn is_allowed_redirect(target: &str, allowed_hosts: &[String]) -> bool {
         .next()
         .unwrap_or_default()
         .split('@')
-        .last()
+        .next_back()
         .unwrap_or_default()
         .split(':')
         .next()

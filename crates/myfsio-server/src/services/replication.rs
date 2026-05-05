@@ -21,7 +21,7 @@ use crate::services::s3_client::{
     ClientOptions,
 };
 use crate::services::site_registry::SiteRegistry;
-use crate::stores::connections::{ConnectionStore, RemoteConnection};
+use crate::stores::connections::{ConnectionStore, RemoteConnection, ResolvedTuning};
 
 pub const MODE_NEW_ONLY: &str = "new_only";
 pub const MODE_ALL: &str = "all";
@@ -871,6 +871,7 @@ impl ReplicationManager {
             return ReplicateOutcome::Failed;
         }
 
+        let tuning = conn.resolved_tuning();
         let client = build_client(conn, &self.client_options, self.http_client.clone());
 
         if action == "delete" {
@@ -1030,6 +1031,7 @@ impl ReplicationManager {
             file_size,
             self.streaming_threshold_bytes,
             Some(&obj_meta),
+            &tuning,
         )
         .await;
 
@@ -1054,6 +1056,7 @@ impl ReplicationManager {
                             file_size,
                             self.streaming_threshold_bytes,
                             Some(&obj_meta),
+                            &tuning,
                         )
                         .await
                     }
@@ -1481,13 +1484,11 @@ impl ReplicationObjectMeta {
     }
 }
 
-const MULTIPART_MIN_PART_BYTES: u64 = 8 * 1024 * 1024;
 const MULTIPART_MAX_PARTS: u64 = 10_000;
-const MULTIPART_CONCURRENCY: usize = 4;
 
-fn compute_part_size(file_size: u64) -> u64 {
-    let target = file_size.div_ceil(MULTIPART_MAX_PARTS);
-    target.max(MULTIPART_MIN_PART_BYTES)
+fn compute_part_size(file_size: u64, tuning: &ResolvedTuning) -> u64 {
+    let min_for_parts_cap = file_size.div_ceil(MULTIPART_MAX_PARTS);
+    tuning.part_size_bytes.max(min_for_parts_cap)
 }
 
 async fn upload_object(
@@ -1498,9 +1499,10 @@ async fn upload_object(
     file_size: u64,
     streaming_threshold: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
+    tuning: &ResolvedTuning,
 ) -> Result<(), ReplicationUploadError> {
-    if file_size >= streaming_threshold && file_size > MULTIPART_MIN_PART_BYTES {
-        upload_object_multipart(client, bucket, key, path, file_size, obj_meta).await
+    if file_size >= streaming_threshold && file_size > tuning.part_size_bytes {
+        upload_object_multipart(client, bucket, key, path, file_size, obj_meta, tuning).await
     } else {
         upload_object_single(client, bucket, key, path, file_size, streaming_threshold, obj_meta)
             .await
@@ -1548,8 +1550,9 @@ async fn upload_object_multipart(
     path: &Path,
     file_size: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
+    tuning: &ResolvedTuning,
 ) -> Result<(), ReplicationUploadError> {
-    let part_size = compute_part_size(file_size);
+    let part_size = compute_part_size(file_size, tuning);
     let total_parts = file_size.div_ceil(part_size);
     if total_parts == 0 || total_parts > MULTIPART_MAX_PARTS {
         return Err(ReplicationUploadError {
@@ -1587,6 +1590,7 @@ async fn upload_object_multipart(
         file_size,
         part_size,
         total_parts as i32,
+        tuning,
     )
     .await;
 
@@ -1631,8 +1635,6 @@ async fn upload_object_multipart(
     Ok(())
 }
 
-const MULTIPART_PART_BUFFER_BYTES: usize = 64 * 1024;
-
 async fn run_part_uploads(
     client: &aws_sdk_s3::Client,
     bucket: &str,
@@ -1642,13 +1644,18 @@ async fn run_part_uploads(
     file_size: u64,
     part_size: u64,
     total_parts: i32,
+    tuning: &ResolvedTuning,
 ) -> Result<Vec<CompletedPart>, ReplicationUploadError> {
     let mut tasks: JoinSet<Result<CompletedPart, ReplicationUploadError>> = JoinSet::new();
     let mut next_part: i32 = 1;
     let mut parts: Vec<CompletedPart> = Vec::with_capacity(total_parts as usize);
+    let concurrency = tuning.multipart_concurrency.max(1);
+    let buffer_bytes = tuning.part_buffer_bytes;
+    let max_in_place = tuning.mpu_in_place_retries;
+    let lower_sdk_retry = max_in_place > 1;
 
     loop {
-        while tasks.len() < MULTIPART_CONCURRENCY && next_part <= total_parts {
+        while tasks.len() < concurrency && next_part <= total_parts {
             let part_number = next_part;
             let offset = (part_number as u64 - 1) * part_size;
             let length = std::cmp::min(part_size, file_size - offset);
@@ -1658,7 +1665,7 @@ async fn run_part_uploads(
             let upload_id = upload_id.to_string();
             let path = path.to_path_buf();
             tasks.spawn(async move {
-                upload_one_part(
+                upload_one_part_with_retry(
                     &client,
                     &bucket,
                     &key,
@@ -1667,6 +1674,9 @@ async fn run_part_uploads(
                     offset,
                     length,
                     part_number,
+                    buffer_bytes,
+                    max_in_place,
+                    lower_sdk_retry,
                 )
                 .await
             });
@@ -1695,6 +1705,70 @@ async fn run_part_uploads(
     Ok(parts)
 }
 
+async fn upload_one_part_with_retry(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    path: &Path,
+    offset: u64,
+    length: u64,
+    part_number: i32,
+    buffer_bytes: usize,
+    max_in_place: u32,
+    lower_sdk_retry: bool,
+) -> Result<CompletedPart, ReplicationUploadError> {
+    let mut attempt: u32 = 0;
+    loop {
+        match upload_one_part(
+            client,
+            bucket,
+            key,
+            upload_id,
+            path,
+            offset,
+            length,
+            part_number,
+            buffer_bytes,
+            lower_sdk_retry,
+        )
+        .await
+        {
+            Ok(p) => return Ok(p),
+            Err(e) if attempt < max_in_place && is_transient_upload_error(&e) => {
+                let backoff_secs = 1u64 << attempt.min(4);
+                tracing::warn!(
+                    "in-MPU retry part {} (attempt {}/{}) after transient error: {}",
+                    part_number,
+                    attempt + 1,
+                    max_in_place,
+                    e
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn is_transient_upload_error(err: &ReplicationUploadError) -> bool {
+    if err.is_no_such_bucket {
+        return false;
+    }
+    match err.code.as_deref() {
+        None => true,
+        Some(code) => matches!(
+            code,
+            "RequestTimeout"
+                | "SlowDown"
+                | "InternalError"
+                | "ServiceUnavailable"
+                | "BadDigest"
+        ),
+    }
+}
+
 async fn drain_join_set(tasks: &mut JoinSet<Result<CompletedPart, ReplicationUploadError>>) {
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
@@ -1709,12 +1783,14 @@ async fn upload_one_part(
     offset: u64,
     length: u64,
     part_number: i32,
+    buffer_bytes: usize,
+    lower_sdk_retry: bool,
 ) -> Result<CompletedPart, ReplicationUploadError> {
     let body = ByteStream::read_from()
         .path(path)
         .offset(offset)
         .length(Length::Exact(length))
-        .buffer_size(MULTIPART_PART_BUFFER_BYTES)
+        .buffer_size(buffer_bytes)
         .build()
         .await
         .map_err(|e| ReplicationUploadError {
@@ -1730,17 +1806,26 @@ async fn upload_one_part(
             is_no_such_bucket: false,
         })?;
 
-    let resp = client
+    let req = client
         .upload_part()
         .bucket(bucket)
         .key(key)
         .upload_id(upload_id)
         .part_number(part_number)
         .content_length(length as i64)
-        .body(body)
-        .send()
-        .await
-        .map_err(map_sdk_err)?;
+        .body(body);
+
+    let resp = if lower_sdk_retry {
+        let override_cfg = aws_sdk_s3::config::Builder::default()
+            .retry_config(aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(1));
+        req.customize()
+            .config_override(override_cfg)
+            .send()
+            .await
+            .map_err(map_sdk_err)?
+    } else {
+        req.send().await.map_err(map_sdk_err)?
+    };
 
     Ok(CompletedPart::builder()
         .part_number(part_number)
@@ -1976,6 +2061,83 @@ mod tests {
         );
         std::mem::forget(tmp);
         manager
+    }
+
+    #[test]
+    fn is_transient_classifies_transport_errors_as_retryable() {
+        let err = ReplicationUploadError {
+            code: None,
+            message: "connection reset".to_string(),
+            is_no_such_bucket: false,
+        };
+        assert!(is_transient_upload_error(&err));
+    }
+
+    #[test]
+    fn is_transient_classifies_known_5xx_as_retryable() {
+        for code in [
+            "RequestTimeout",
+            "SlowDown",
+            "InternalError",
+            "ServiceUnavailable",
+            "BadDigest",
+        ] {
+            let err = ReplicationUploadError {
+                code: Some(code.to_string()),
+                message: code.to_string(),
+                is_no_such_bucket: false,
+            };
+            assert!(is_transient_upload_error(&err), "expected {} transient", code);
+        }
+    }
+
+    #[test]
+    fn is_transient_classifies_permanent_errors_as_non_retryable() {
+        for code in ["AccessDenied", "EntityTooLarge", "InvalidArgument", "NoSuchKey"] {
+            let err = ReplicationUploadError {
+                code: Some(code.to_string()),
+                message: code.to_string(),
+                is_no_such_bucket: false,
+            };
+            assert!(!is_transient_upload_error(&err), "expected {} non-transient", code);
+        }
+    }
+
+    #[test]
+    fn is_transient_no_such_bucket_is_never_retryable() {
+        let err = ReplicationUploadError {
+            code: None,
+            message: "no such bucket".to_string(),
+            is_no_such_bucket: true,
+        };
+        assert!(!is_transient_upload_error(&err));
+    }
+
+    #[test]
+    fn compute_part_size_uses_tuning_when_under_max_parts() {
+        let tuning = ResolvedTuning {
+            part_size_bytes: 32 * 1024 * 1024,
+            multipart_concurrency: 12,
+            part_buffer_bytes: 2 * 1024 * 1024,
+            mpu_in_place_retries: 5,
+        };
+        let one_gb: u64 = 1024 * 1024 * 1024;
+        assert_eq!(compute_part_size(one_gb, &tuning), 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn compute_part_size_grows_to_keep_total_parts_under_cap() {
+        let tuning = ResolvedTuning {
+            part_size_bytes: 5 * 1024 * 1024,
+            multipart_concurrency: 4,
+            part_buffer_bytes: 1024 * 1024,
+            mpu_in_place_retries: 3,
+        };
+        let huge: u64 = 200 * 1024 * 1024 * 1024;
+        let part_size = compute_part_size(huge, &tuning);
+        let parts = huge.div_ceil(part_size);
+        assert!(parts <= MULTIPART_MAX_PARTS, "{} > {}", parts, MULTIPART_MAX_PARTS);
+        assert!(part_size > 5 * 1024 * 1024);
     }
 
     fn debug_internal(s: &InternalStartRun) -> &'static str {

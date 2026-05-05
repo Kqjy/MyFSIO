@@ -260,8 +260,7 @@ impl IamService {
             }
         };
 
-        let raw = if content.starts_with("MYFSIO_IAM_ENC:") {
-            let encrypted_token = &content["MYFSIO_IAM_ENC:".len()..];
+        let raw = if let Some(encrypted_token) = content.strip_prefix("MYFSIO_IAM_ENC:") {
             match &self.fernet_key {
                 Some(key) => match crate::fernet::decrypt(key, encrypted_token.trim()) {
                     Ok(plaintext) => match String::from_utf8(plaintext) {
@@ -712,6 +711,18 @@ impl IamService {
         Ok(())
     }
 
+    pub fn get_display_name(&self, identifier: &str) -> Option<String> {
+        self.reload_if_needed();
+        let state = self.state.read();
+        let user = state.user_records.get(identifier).or_else(|| {
+            state
+                .key_index
+                .get(identifier)
+                .and_then(|uid| state.user_records.get(uid))
+        })?;
+        Some(user.display_name.clone())
+    }
+
     pub fn get_user_policies(&self, identifier: &str) -> Option<Vec<serde_json::Value>> {
         self.reload_if_needed();
         let state = self.state.read();
@@ -815,8 +826,7 @@ impl IamService {
     fn load_config(&self) -> Result<IamConfig, String> {
         let content = std::fs::read_to_string(&self.config_path)
             .map_err(|e| format!("Failed to read IAM config: {}", e))?;
-        let raw_text = if content.starts_with("MYFSIO_IAM_ENC:") {
-            let encrypted_token = &content["MYFSIO_IAM_ENC:".len()..];
+        let raw_text = if let Some(encrypted_token) = content.strip_prefix("MYFSIO_IAM_ENC:") {
             let key = self.fernet_key.as_ref().ok_or_else(|| {
                 "IAM config is encrypted but no SECRET_KEY configured".to_string()
             })?;

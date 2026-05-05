@@ -861,6 +861,39 @@ pub async fn ui_authorize_list(
     Err("Access denied".to_string())
 }
 
+pub async fn ui_can_see_bucket(
+    state: &AppState,
+    principal: &Principal,
+    bucket: &str,
+) -> bool {
+    let iam_allowed = state
+        .iam
+        .authorize(principal, Some(bucket), "list", None);
+    let policy_decision = evaluate_bucket_policy(
+        state,
+        Some(principal.access_key.as_str()),
+        bucket,
+        "list",
+        None,
+    )
+    .await;
+
+    if matches!(policy_decision, PolicyDecision::Deny) {
+        return false;
+    }
+    if iam_allowed || matches!(policy_decision, PolicyDecision::Allow) {
+        return true;
+    }
+    evaluate_bucket_acl(
+        state,
+        bucket,
+        Some(principal.access_key.as_str()),
+        "list",
+        true,
+    )
+    .await
+}
+
 async fn authorize_action(
     state: &AppState,
     principal: Option<&Principal>,

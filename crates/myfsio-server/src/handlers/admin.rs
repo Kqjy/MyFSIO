@@ -124,7 +124,7 @@ fn validate_region(region: &str) -> Option<String> {
 }
 
 fn validate_priority(priority: i64) -> Option<String> {
-    if priority < 0 || priority > 1000 {
+    if !(0..=1000).contains(&priority) {
         return Some("Priority must be between 0 and 1000".to_string());
     }
     None

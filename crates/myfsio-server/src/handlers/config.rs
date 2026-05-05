@@ -7,7 +7,8 @@ use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_storage::traits::StorageEngine;
 
 use crate::services::acl::{
-    acl_from_object_metadata, acl_to_xml, create_canned_acl, store_object_acl,
+    acl_from_object_metadata, acl_from_xml_strict, acl_to_xml_with_lookup, create_canned_acl,
+    store_object_acl,
 };
 use crate::services::notifications::parse_notification_configurations;
 use crate::services::object_lock::{
@@ -848,19 +849,32 @@ pub async fn get_acl(state: &AppState, bucket: &str) -> Response {
             if let Some(acl) = &config.acl {
                 xml_response(StatusCode::OK, stored_xml(acl))
             } else {
-                let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                let owner = default_owner_for(state);
+                let owner_display = state
+                    .iam
+                    .get_display_name(&owner)
+                    .unwrap_or_else(|| owner.clone());
+                let xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                     <AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                    <Owner><ID>myfsio</ID><DisplayName>myfsio</DisplayName></Owner>\
+                    <Owner><ID>{owner}</ID><DisplayName>{display}</DisplayName></Owner>\
                     <AccessControlList>\
                     <Grant><Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\">\
-                    <ID>myfsio</ID><DisplayName>myfsio</DisplayName></Grantee>\
+                    <ID>{owner}</ID><DisplayName>{display}</DisplayName></Grantee>\
                     <Permission>FULL_CONTROL</Permission></Grant>\
-                    </AccessControlList></AccessControlPolicy>";
-                xml_response(StatusCode::OK, xml.to_string())
+                    </AccessControlList></AccessControlPolicy>",
+                    owner = xml_escape(&owner),
+                    display = xml_escape(&owner_display),
+                );
+                xml_response(StatusCode::OK, xml)
             }
         }
         Err(e) => storage_err(e),
     }
+}
+
+fn default_owner_for(_state: &AppState) -> String {
+    "myfsio".to_string()
 }
 
 pub async fn put_acl(state: &AppState, bucket: &str, body: Body) -> Response {
@@ -940,11 +954,10 @@ pub async fn get_object_lock(state: &AppState, bucket: &str) -> Response {
             if let Some(ol) = &config.object_lock {
                 xml_response(StatusCode::OK, stored_xml(ol))
             } else {
-                let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-                    <ObjectLockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-                    <ObjectLockEnabled>Disabled</ObjectLockEnabled>\
-                    </ObjectLockConfiguration>";
-                xml_response(StatusCode::OK, xml.to_string())
+                xml_response(
+                    StatusCode::NOT_FOUND,
+                    S3Error::from_code(S3ErrorCode::ObjectLockConfigurationNotFoundError).to_xml(),
+                )
             }
         }
         Err(e) => storage_err(e),
@@ -1650,22 +1663,73 @@ pub async fn put_object_acl(
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
-    _body: Body,
+    body: Body,
 ) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return xml_response(
+                StatusCode::BAD_REQUEST,
+                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
+            );
+        }
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let body_trimmed = body_str.trim();
+    let canned_acl_header = headers
+        .get("x-amz-acl")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if !body_trimmed.is_empty() && canned_acl_header.is_some() {
+        return xml_response(
+            StatusCode::BAD_REQUEST,
+            S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Specifying both Canned ACLs and Header Grants is not allowed",
+            )
+            .to_xml(),
+        );
+    }
+
     match state.storage.head_object(bucket, key).await {
         Ok(_) => {
-            let canned_acl = headers
-                .get("x-amz-acl")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("private");
             let mut metadata = match state.storage.get_object_metadata(bucket, key).await {
                 Ok(metadata) => metadata,
                 Err(err) => return storage_err(err),
             };
-            let owner = acl_from_object_metadata(&metadata)
+            let existing_owner = acl_from_object_metadata(&metadata)
                 .map(|acl| acl.owner)
-                .unwrap_or_else(|| "myfsio".to_string());
-            let acl = create_canned_acl(canned_acl, &owner);
+                .unwrap_or_else(|| default_owner_for(state));
+
+            let acl = if !body_trimmed.is_empty() {
+                match acl_from_xml_strict(body_trimmed) {
+                    Some(parsed) => {
+                        if parsed.owner != existing_owner {
+                            return xml_response(
+                                StatusCode::FORBIDDEN,
+                                S3Error::new(
+                                    S3ErrorCode::AccessDenied,
+                                    "The Owner ID in the ACL does not match the existing object owner",
+                                )
+                                .to_xml(),
+                            );
+                        }
+                        parsed
+                    }
+                    None => {
+                        return xml_response(
+                            StatusCode::BAD_REQUEST,
+                            S3Error::from_code(S3ErrorCode::MalformedACLError).to_xml(),
+                        );
+                    }
+                }
+            } else {
+                let canned = canned_acl_header.unwrap_or("private");
+                create_canned_acl(canned, &existing_owner)
+            };
+
             store_object_acl(&mut metadata, &acl);
             match state
                 .storage
@@ -1974,9 +2038,16 @@ pub async fn get_object_acl(state: &AppState, bucket: &str, key: &str) -> Respon
                 Ok(metadata) => metadata,
                 Err(err) => return storage_err(err),
             };
+            let owner = default_owner_for(state);
             let acl = acl_from_object_metadata(&metadata)
-                .unwrap_or_else(|| create_canned_acl("private", "myfsio"));
-            xml_response(StatusCode::OK, acl_to_xml(&acl))
+                .unwrap_or_else(|| create_canned_acl("private", &owner));
+            let lookup = |id: &str| {
+                state
+                    .iam
+                    .get_display_name(id)
+                    .unwrap_or_else(|| id.to_string())
+            };
+            xml_response(StatusCode::OK, acl_to_xml_with_lookup(&acl, lookup))
         }
         Err(e) => storage_err(e),
     }
@@ -1997,14 +2068,16 @@ mod tests {
 
     #[test]
     fn parses_legacy_logging_xml_string() {
-        let mut config = BucketConfig::default();
-        config.logging = Some(serde_json::Value::String(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-            <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-            <LoggingEnabled><TargetBucket>logs</TargetBucket><TargetPrefix>audit/</TargetPrefix></LoggingEnabled>\
-            </BucketLoggingStatus>"
-                .to_string(),
-        ));
+        let config = BucketConfig {
+            logging: Some(serde_json::Value::String(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                <LoggingEnabled><TargetBucket>logs</TargetBucket><TargetPrefix>audit/</TargetPrefix></LoggingEnabled>\
+                </BucketLoggingStatus>"
+                    .to_string(),
+            )),
+            ..Default::default()
+        };
 
         let parsed = legacy_logging_config(&config).expect("expected legacy logging config");
         assert_eq!(parsed.target_bucket, "logs");
@@ -2014,13 +2087,15 @@ mod tests {
 
     #[test]
     fn parses_legacy_logging_json_object() {
-        let mut config = BucketConfig::default();
-        config.logging = Some(serde_json::json!({
-            "LoggingEnabled": {
-                "TargetBucket": "logs",
-                "TargetPrefix": "archive/"
-            }
-        }));
+        let config = BucketConfig {
+            logging: Some(serde_json::json!({
+                "LoggingEnabled": {
+                    "TargetBucket": "logs",
+                    "TargetPrefix": "archive/"
+                }
+            })),
+            ..Default::default()
+        };
 
         let parsed = legacy_logging_config(&config).expect("expected legacy logging config");
         assert_eq!(parsed.target_bucket, "logs");
@@ -2065,8 +2140,8 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
                 if in_tag {
                     let text = e.unescape().unwrap_or_default().to_string();
                     match current_element.as_str() {
-                        "Key" => current_key = text,
-                        "Value" => current_value = text,
+                        "Key" => current_key.push_str(&text),
+                        "Value" => current_value.push_str(&text),
                         _ => {}
                     }
                 }
@@ -2082,6 +2157,7 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
                     }
                     in_tag = false;
                 }
+                current_element.clear();
             }
             Ok(quick_xml::events::Event::Eof) => break,
             Err(_) => break,
@@ -2091,6 +2167,83 @@ fn parse_tagging_xml(xml: &str) -> Vec<myfsio_common::types::Tag> {
     }
 
     tags
+}
+
+#[cfg(test)]
+mod tagging_xml_tests {
+    use super::parse_tagging_xml;
+
+    #[test]
+    fn parse_compact_tagging() {
+        let xml = "<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>";
+        let tags = parse_tagging_xml(xml);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, "env");
+        assert_eq!(tags[0].value, "prod");
+    }
+
+    #[test]
+    fn parse_pretty_printed_tagging() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <TagSet>
+    <Tag>
+      <Key>env</Key>
+      <Value>production</Value>
+    </Tag>
+    <Tag>
+      <Key>team</Key>
+      <Value>storage</Value>
+    </Tag>
+  </TagSet>
+</Tagging>"#;
+        let tags = parse_tagging_xml(xml);
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].key, "env");
+        assert_eq!(tags[0].value, "production");
+        assert_eq!(tags[1].key, "team");
+        assert_eq!(tags[1].value, "storage");
+    }
+
+    #[test]
+    fn parse_pretty_tagging_empty_value() {
+        let xml = r#"<Tagging>
+  <TagSet>
+    <Tag>
+      <Key>only-key</Key>
+      <Value></Value>
+    </Tag>
+  </TagSet>
+</Tagging>"#;
+        let tags = parse_tagging_xml(xml);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, "only-key");
+        assert_eq!(tags[0].value, "");
+    }
+
+    #[test]
+    fn parse_pretty_tagging_preserves_whitespace_only_value() {
+        let xml = r#"<Tagging>
+  <TagSet>
+    <Tag>
+      <Key>spaced</Key>
+      <Value>   </Value>
+    </Tag>
+  </TagSet>
+</Tagging>"#;
+        let tags = parse_tagging_xml(xml);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].key, "spaced");
+        assert_eq!(tags[0].value, "   ");
+    }
+
+    #[test]
+    fn parse_compact_tagging_preserves_leading_and_trailing_spaces() {
+        let xml = "<Tagging><TagSet><Tag><Key>k</Key><Value>  hello  </Value></Tag></TagSet></Tagging>";
+        let tags = parse_tagging_xml(xml);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].value, "  hello  ");
+    }
 }
 
 #[cfg(test)]

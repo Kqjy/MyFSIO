@@ -267,7 +267,7 @@ pub async fn encrypt_stream_chunked_async(
         encrypt_stream_chunked(&input_path, &output_path, &key, &base_nonce, chunk_size)
     })
     .await
-    .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+    .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
 }
 
 pub async fn decrypt_stream_chunked_async(
@@ -284,7 +284,7 @@ pub async fn decrypt_stream_chunked_async(
         decrypt_stream_chunked(&input_path, &output_path, &key, &base_nonce)
     })
     .await
-    .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+    .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
 }
 
 #[cfg(test)]

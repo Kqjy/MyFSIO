@@ -3,6 +3,9 @@ name = "myfsio-storage"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 myfsio-common = { path = "../myfsio-common" }
 myfsio-crypto = { path = "../myfsio-crypto" }

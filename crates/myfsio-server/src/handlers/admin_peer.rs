@@ -209,7 +209,7 @@ pub async fn relay_inbound_layer(
         .unwrap_or_else(|| req.uri().path().to_string());
 
     let (parts_for_replay, request_body) = req.into_parts();
-    let body_bytes = match Body::from(request_body).collect().await {
+    let body_bytes = match request_body.collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => {
             return record_relay_failure(

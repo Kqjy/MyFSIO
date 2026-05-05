@@ -147,7 +147,13 @@ window.ConnectionsManagement = (function() {
       '<button type="button" class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editConnectionModal" ' +
       'data-id="' + window.UICore.escapeHtml(conn.id) + '" data-name="' + window.UICore.escapeHtml(conn.name) + '" ' +
       'data-endpoint="' + window.UICore.escapeHtml(conn.endpoint_url) + '" data-region="' + window.UICore.escapeHtml(conn.region) + '" ' +
-      'data-access="' + window.UICore.escapeHtml(conn.access_key) + '" title="Edit connection">' +
+      'data-access="' + window.UICore.escapeHtml(conn.access_key) + '" ' +
+      'data-tuning-profile="' + window.UICore.escapeHtml(conn.tuning_profile || '') + '" ' +
+      'data-tuning-part-size-mb="' + window.UICore.escapeHtml(conn.tuning_part_size_mb != null ? String(conn.tuning_part_size_mb) : '') + '" ' +
+      'data-tuning-concurrency="' + window.UICore.escapeHtml(conn.tuning_concurrency != null ? String(conn.tuning_concurrency) : '') + '" ' +
+      'data-tuning-buffer-kb="' + window.UICore.escapeHtml(conn.tuning_buffer_kb != null ? String(conn.tuning_buffer_kb) : '') + '" ' +
+      'data-tuning-in-place-retries="' + window.UICore.escapeHtml(conn.tuning_in_place_retries != null ? String(conn.tuning_in_place_retries) : '') + '" ' +
+      'title="Edit connection">' +
       '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">' +
       '<path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/></svg></button>' +
       '<button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#deleteConnectionModal" ' +
@@ -188,6 +194,11 @@ window.ConnectionsManagement = (function() {
         document.getElementById('edit_secret_key').value = '';
         document.getElementById('edit_secret_key').placeholder = '(unchanged — leave blank to keep current)';
         document.getElementById('edit_secret_key').required = false;
+        document.getElementById('edit_tuning_profile').value = button.getAttribute('data-tuning-profile') || '';
+        document.getElementById('edit_tuning_part_size_mb').value = button.getAttribute('data-tuning-part-size-mb') || '';
+        document.getElementById('edit_tuning_concurrency').value = button.getAttribute('data-tuning-concurrency') || '';
+        document.getElementById('edit_tuning_buffer_kb').value = button.getAttribute('data-tuning-buffer-kb') || '';
+        document.getElementById('edit_tuning_in_place_retries').value = button.getAttribute('data-tuning-in-place-retries') || '';
         document.getElementById('editTestResult').innerHTML = '';
 
         var form = document.getElementById('editConnectionForm');
@@ -290,6 +301,11 @@ window.ConnectionsManagement = (function() {
                 editBtn.setAttribute('data-endpoint', data.connection.endpoint_url);
                 editBtn.setAttribute('data-region', data.connection.region);
                 editBtn.setAttribute('data-access', data.connection.access_key);
+                editBtn.setAttribute('data-tuning-profile', data.connection.tuning_profile || '');
+                editBtn.setAttribute('data-tuning-part-size-mb', data.connection.tuning_part_size_mb != null ? String(data.connection.tuning_part_size_mb) : '');
+                editBtn.setAttribute('data-tuning-concurrency', data.connection.tuning_concurrency != null ? String(data.connection.tuning_concurrency) : '');
+                editBtn.setAttribute('data-tuning-buffer-kb', data.connection.tuning_buffer_kb != null ? String(data.connection.tuning_buffer_kb) : '');
+                editBtn.setAttribute('data-tuning-in-place-retries', data.connection.tuning_in_place_retries != null ? String(data.connection.tuning_in_place_retries) : '');
               }
 
               var deleteBtn = row.querySelector('[data-bs-target="#deleteConnectionModal"]');
