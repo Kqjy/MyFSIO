@@ -38,14 +38,11 @@ impl Acl {
             }
         }
         for grant in &self.grants {
-            if grant.grantee == GRANTEE_ALL_USERS {
+            let matches_grantee = grant.grantee == GRANTEE_ALL_USERS
+                || (grant.grantee == GRANTEE_AUTHENTICATED_USERS && is_authenticated)
+                || principal_id.is_some_and(|pid| grant.grantee == pid);
+            if matches_grantee {
                 actions.extend(permission_to_actions(&grant.permission));
-            } else if grant.grantee == GRANTEE_AUTHENTICATED_USERS && is_authenticated {
-                actions.extend(permission_to_actions(&grant.permission));
-            } else if let Some(principal_id) = principal_id {
-                if grant.grantee == principal_id {
-                    actions.extend(permission_to_actions(&grant.permission));
-                }
             }
         }
         actions
@@ -92,7 +89,7 @@ pub fn create_canned_acl(canned_acl: &str, owner: &str) -> Acl {
                 },
             ],
         },
-        "bucket-owner-read" | "bucket-owner-full-control" | "private" | _ => Acl {
+        _ => Acl {
             owner: owner.to_string(),
             grants: vec![owner_grant],
         },
@@ -345,7 +342,7 @@ fn validate_unique_children(node: &roxmltree::Node, allowed: &[&str]) -> bool {
         let Some(slot) = allowed.iter().find(|a| **a == name).copied() else {
             return false;
         };
-        if seen.iter().any(|s| *s == slot) {
+        if seen.contains(&slot) {
             return false;
         }
         seen.push(slot);

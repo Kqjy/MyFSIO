@@ -3,6 +3,9 @@ name = "myfsio-crypto"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 myfsio-common = { path = "../myfsio-common" }
 md-5 = { workspace = true }

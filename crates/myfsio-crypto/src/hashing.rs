@@ -68,21 +68,21 @@ pub async fn md5_file_async(path: &Path) -> std::io::Result<String> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || md5_file(&path))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 pub async fn sha256_file_async(path: &Path) -> std::io::Result<String> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || sha256_file(&path))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 pub async fn md5_sha256_file_async(path: &Path) -> std::io::Result<(String, String)> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || md5_sha256_file(&path))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 #[cfg(test)]

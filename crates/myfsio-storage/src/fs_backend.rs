@@ -632,7 +632,7 @@ impl FsStorageBackend {
             let file = std::fs::File::create(&tmp_path)?;
             let mut writer = std::io::BufWriter::new(file);
             serde_json::to_writer(&mut writer, data)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             let file = writer.into_inner()?;
             if sync {
                 file.sync_all()?;
@@ -706,11 +706,11 @@ impl FsStorageBackend {
         index_data.insert(
             entry_name,
             serde_json::to_value(entry)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                .map_err(std::io::Error::other)?,
         );
 
         let json_val = serde_json::to_value(&index_data)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         Self::atomic_write_json_sync(&index_path, &json_val, true)?;
 
         let cache_key = (bucket_name.to_string(), key.to_string());
@@ -740,7 +740,7 @@ impl FsStorageBackend {
                 let _ = std::fs::remove_file(&index_path);
             } else {
                 let json_val = serde_json::to_value(&index_data)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                 Self::atomic_write_json_sync(&index_path, &json_val, true)?;
             }
         }
@@ -794,7 +794,7 @@ impl FsStorageBackend {
 
         let mut entry = HashMap::new();
         let meta_value = serde_json::to_value(metadata)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         entry.insert("metadata".to_string(), meta_value);
         self.write_index_entry_sync(bucket_name, key, &entry)?;
 
@@ -881,8 +881,7 @@ impl FsStorageBackend {
             }
             Err(join_err) => {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(StorageError::Io(std::io::Error::other(
                     join_err,
                 )));
             }
@@ -984,7 +983,7 @@ impl FsStorageBackend {
     ) -> std::io::Result<()> {
         let config_path = self.bucket_config_path(bucket_name);
         let json_val = serde_json::to_value(config)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         Self::atomic_write_json_sync(&config_path, &json_val, true)?;
         if config.policy.is_none() {
             self.remove_legacy_bucket_policy_sync(bucket_name)?;
@@ -3368,8 +3367,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             Err(join) => {
                 let _ = tokio::fs::remove_file(&tmp_file).await;
-                return Err(StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(StorageError::Io(std::io::Error::other(
                     join,
                 )));
             }
@@ -3635,8 +3633,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             Err(join) => {
                 let _ = std::fs::remove_file(&tmp_path);
-                return Err(StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(StorageError::Io(std::io::Error::other(
                     join,
                 )));
             }
@@ -4770,7 +4767,7 @@ mod tests {
                 let mut i: u32 = 0;
                 while !stop.load(Ordering::Relaxed) {
                     let fill = b'a' + ((w + i) % 20) as u8;
-                    let size = if i % 2 == 0 { 1024 } else { 2048 };
+                    let size = if i.is_multiple_of(2) { 1024 } else { 2048 };
                     let body = vec![fill; size];
                     let data: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
                     let _ = b.put_object("snap-bkt", "sz", data, None).await;
@@ -4872,7 +4869,7 @@ mod tests {
                             let fill = buf[0];
                             let all_match = buf.iter().all(|b| *b == fill);
                             let expected_etag =
-                                format!("{:x}", Md5::digest(&vec![fill; SIZE as usize]));
+                                format!("{:x}", Md5::digest(vec![fill; SIZE as usize]));
                             let etag_ok = meta.etag.as_deref() == Some(expected_etag.as_str());
                             reads.fetch_add(1, Ordering::Relaxed);
                             if !(all_match && etag_ok) {
@@ -4911,8 +4908,8 @@ mod tests {
         backend.create_bucket("mp-bkt").await.unwrap();
 
         const SIZE: u64 = 64 * 1024;
-        let etag_a = format!("{:x}", Md5::digest(&vec![b'a'; SIZE as usize]));
-        let etag_b = format!("{:x}", Md5::digest(&vec![b'b'; SIZE as usize]));
+        let etag_a = format!("{:x}", Md5::digest(vec![b'a'; SIZE as usize]));
+        let etag_b = format!("{:x}", Md5::digest(vec![b'b'; SIZE as usize]));
 
         let data: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'a'; SIZE as usize]));
         backend
@@ -5080,7 +5077,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let mut i: u8 = 0;
                 while !stop.load(Ordering::Relaxed) {
-                    let fill = b'a'.wrapping_add((w * 8 + i) as u8);
+                    let fill = b'a'.wrapping_add(w * 8 + i  );
                     let body = vec![fill; SIZE];
                     let data: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
                     let _ = b.put_object("race-bucket", "hot", data, None).await;

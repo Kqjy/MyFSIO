@@ -190,9 +190,7 @@ impl LifecycleService {
         } else {
             rule.expiration_date
         };
-        let Some(cutoff) = cutoff else {
-            return None;
-        };
+        let cutoff = cutoff?;
 
         let params = myfsio_common::types::ListParams {
             max_keys: 10_000,
@@ -264,9 +262,7 @@ impl LifecycleService {
         rule: &ParsedLifecycleRule,
         result: &mut BucketLifecycleResult,
     ) -> Option<String> {
-        let Some(days) = rule.noncurrent_days else {
-            return None;
-        };
+        let days = rule.noncurrent_days?;
         let cutoff = Utc::now() - Duration::days(days as i64);
         let versions_root = version_root_for_bucket(&self.storage_root, bucket);
         if !versions_root.exists() {
@@ -369,9 +365,7 @@ impl LifecycleService {
         rule: &ParsedLifecycleRule,
         result: &mut BucketLifecycleResult,
     ) -> Option<String> {
-        let Some(days) = rule.abort_incomplete_multipart_days else {
-            return None;
-        };
+        let days = rule.abort_incomplete_multipart_days?;
         let cutoff = Utc::now() - Duration::days(days as i64);
         match self.storage.list_multipart_uploads(bucket).await {
             Ok(uploads) => {

@@ -2068,14 +2068,16 @@ mod tests {
 
     #[test]
     fn parses_legacy_logging_xml_string() {
-        let mut config = BucketConfig::default();
-        config.logging = Some(serde_json::Value::String(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-            <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
-            <LoggingEnabled><TargetBucket>logs</TargetBucket><TargetPrefix>audit/</TargetPrefix></LoggingEnabled>\
-            </BucketLoggingStatus>"
-                .to_string(),
-        ));
+        let config = BucketConfig {
+            logging: Some(serde_json::Value::String(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                <BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                <LoggingEnabled><TargetBucket>logs</TargetBucket><TargetPrefix>audit/</TargetPrefix></LoggingEnabled>\
+                </BucketLoggingStatus>"
+                    .to_string(),
+            )),
+            ..Default::default()
+        };
 
         let parsed = legacy_logging_config(&config).expect("expected legacy logging config");
         assert_eq!(parsed.target_bucket, "logs");
@@ -2085,13 +2087,15 @@ mod tests {
 
     #[test]
     fn parses_legacy_logging_json_object() {
-        let mut config = BucketConfig::default();
-        config.logging = Some(serde_json::json!({
-            "LoggingEnabled": {
-                "TargetBucket": "logs",
-                "TargetPrefix": "archive/"
-            }
-        }));
+        let config = BucketConfig {
+            logging: Some(serde_json::json!({
+                "LoggingEnabled": {
+                    "TargetBucket": "logs",
+                    "TargetPrefix": "archive/"
+                }
+            })),
+            ..Default::default()
+        };
 
         let parsed = legacy_logging_config(&config).expect("expected legacy logging config");
         assert_eq!(parsed.target_bucket, "logs");

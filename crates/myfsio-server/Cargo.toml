@@ -3,6 +3,9 @@ name = "myfsio-server"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 myfsio-common = { path = "../myfsio-common" }
 myfsio-auth = { path = "../myfsio-auth" }

@@ -247,7 +247,7 @@ impl EncryptionService {
             encrypt_stream_chunked(&ip, &op, &ak, &n, Some(chunk_size))
         })
         .await
-        .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+        .map_err(|e| CryptoError::Io(std::io::Error::other(e)))??;
 
         Ok(EncryptionMetadata {
             algorithm: ctx.algorithm.as_str().to_string(),
@@ -324,7 +324,7 @@ impl EncryptionService {
         let op = output_path.to_owned();
         tokio::task::spawn_blocking(move || decrypt_stream_chunked(&ip, &op, &data_key, &nonce))
             .await
-            .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))??;
+            .map_err(|e| CryptoError::Io(std::io::Error::other(e)))??;
 
         Ok(())
     }
@@ -362,7 +362,7 @@ impl EncryptionService {
             )
         })
         .await
-        .map_err(|e| CryptoError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+        .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
     }
 }
 

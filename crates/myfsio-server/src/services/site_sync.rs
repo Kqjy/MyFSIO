@@ -284,7 +284,7 @@ impl SiteSyncWorker {
                 if remote_objects.contains_key(&key) {
                     continue;
                 }
-                if local_objects.get(&key).is_none() {
+                if !local_objects.contains_key(&key) {
                     continue;
                 }
                 let tracked = match sync_state.synced_objects.get(&key) {
@@ -430,10 +430,10 @@ impl SiteSyncWorker {
                 };
                 let last_modified = obj
                     .last_modified()
-                    .and_then(|t| {
+                    .map(|t| {
                         let secs = t.secs();
                         let nanos = t.subsec_nanos();
-                        Some(secs as f64 + nanos as f64 / 1_000_000_000.0)
+                        secs as f64 + nanos as f64 / 1_000_000_000.0
                     })
                     .unwrap_or(0.0);
                 let etag = obj.e_tag().unwrap_or("").trim_matches('"').to_string();

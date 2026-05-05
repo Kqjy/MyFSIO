@@ -3,6 +3,9 @@ name = "myfsio-auth"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 myfsio-common = { path = "../myfsio-common" }
 hmac = { workspace = true }

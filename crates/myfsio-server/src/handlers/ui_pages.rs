@@ -1247,7 +1247,6 @@ pub async fn sites_dashboard(
 
     let peers_with_stats: Vec<Value> = peers
         .iter()
-        .cloned()
         .map(|peer| {
             let connection_id = peer
                 .get("connection_id")
@@ -3927,6 +3926,6 @@ mod connection_form_tests {
         let stored = tuning.multipart_concurrency.expect("concurrency persisted");
         assert!(stored > 0, "must not wrap to 0; got {stored}");
         let resolved = tuning.resolve().multipart_concurrency;
-        assert!(resolved >= 1 && resolved <= 64, "got {resolved}");
+        assert!((1..=64).contains(&resolved), "got {resolved}");
     }
 }

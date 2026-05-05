@@ -13,6 +13,11 @@ members = [
 version = "0.5.3"
 edition = "2021"
 
+[workspace.lints.clippy]
+result_large_err = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8" }

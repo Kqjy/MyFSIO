@@ -22,10 +22,10 @@ pub fn is_reserved_bucket_name(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
-    if INTERNAL_FOLDERS.iter().any(|folder| *folder == name) {
+    if INTERNAL_FOLDERS.contains(&name) {
         return true;
     }
-    if RESERVED_ROUTE_PREFIXES.iter().any(|prefix| *prefix == name) {
+    if RESERVED_ROUTE_PREFIXES.contains(&name) {
         return true;
     }
     false
@@ -145,7 +145,7 @@ pub fn validate_object_key(
 
 pub fn validate_bucket_name(bucket_name: &str) -> Option<String> {
     let len = bucket_name.len();
-    if len < 3 || len > 63 {
+    if !(3..=63).contains(&len) {
         return Some("Bucket name must be between 3 and 63 characters".to_string());
     }
 

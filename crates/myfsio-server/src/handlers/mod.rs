@@ -55,7 +55,7 @@ async fn open_self_deleting(path: std::path::PathBuf) -> std::io::Result<tokio::
                 .open(&path)
         })
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))??;
+        .map_err(std::io::Error::other)??;
         Ok(tokio::fs::File::from_std(file))
     }
 }
@@ -2021,7 +2021,7 @@ pub async fn put_object(
     } else {
         let stream = tokio_util::io::StreamReader::new(
             body.into_data_stream()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+                .map_err(std::io::Error::other),
         );
         Box::pin(stream)
     };
@@ -2061,11 +2061,11 @@ pub async fn put_object(
                                 .unwrap_or(0);
 
                             let mut enc_metadata = enc_meta.to_metadata_map();
-                            let all_meta =
-                                match state.storage.get_object_metadata(&bucket, &key).await {
-                                    Ok(m) => m,
-                                    Err(_) => HashMap::new(),
-                                };
+                            let all_meta: HashMap<String, String> = state
+                                .storage
+                                .get_object_metadata(&bucket, &key)
+                                .await
+                                .unwrap_or_default();
                             for (k, v) in &all_meta {
                                 enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
                             }
@@ -2877,7 +2877,7 @@ async fn upload_part_handler_with_chunking(
     } else {
         let stream = tokio_util::io::StreamReader::new(
             body.into_data_stream()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
+                .map_err(std::io::Error::other),
         );
         Box::pin(stream)
     };
@@ -3539,7 +3539,7 @@ async fn copy_object_handler(
 
     let same_object = src_bucket == dst_bucket
         && src_key == dst_key
-        && src_version_id.as_deref().unwrap_or("") == "";
+        && src_version_id.as_deref().unwrap_or("").is_empty();
     if same_object && !replace_metadata && !replace_tagging {
         return s3_error_response(S3Error::new(
             S3ErrorCode::InvalidRequest,
@@ -3595,10 +3595,9 @@ async fn copy_object_handler(
             .map(|s| s.as_str());
         match src_alg {
             Some("AES256") => {
-                let is_sse_c = source_meta
+                let is_sse_c = !source_meta
                     .internal_metadata
-                    .get("x-amz-encrypted-data-key")
-                    .is_none();
+                    .contains_key("x-amz-encrypted-data-key");
                 if !is_sse_c && state.encryption.is_some() {
                     dst_enc_ctx = Some(myfsio_crypto::encryption::EncryptionContext {
                         algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
@@ -4780,7 +4779,7 @@ async fn compute_plaintext_md5(path: &std::path::Path) -> std::io::Result<String
         Ok(format!("{:x}", hasher.finalize()))
     })
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+    .map_err(std::io::Error::other)?
 }
 
 const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
@@ -4889,7 +4888,7 @@ async fn post_object_form_handler(
 
     let stream = http_body_util::BodyStream::new(body)
         .map_ok(|frame| frame.into_data().unwrap_or_default())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        .map_err(std::io::Error::other);
     let mut multipart = multer::Multipart::new(stream, boundary);
 
     let mut fields: HashMap<String, String> = HashMap::new();
@@ -4918,11 +4917,8 @@ async fn post_object_form_handler(
                 }
             }
         } else if !name.is_empty() {
-            match field.text().await {
-                Ok(t) => {
-                    fields.insert(name, t);
-                }
-                Err(_) => {}
+            if let Ok(t) = field.text().await {
+                fields.insert(name, t);
             }
         }
     }
@@ -5095,7 +5091,7 @@ async fn post_object_form_handler(
     for (k, v) in &fields {
         let lower = k.to_ascii_lowercase();
         if let Some(meta_key) = lower.strip_prefix("x-amz-meta-") {
-            if !meta_key.is_empty() && !(meta_key.starts_with("__") && meta_key.ends_with("__")) {
+            if !(meta_key.is_empty() || meta_key.starts_with("__") && meta_key.ends_with("__")) {
                 metadata.insert(meta_key.to_string(), v.clone());
             }
         }

@@ -89,7 +89,7 @@ impl AccessLoggingService {
             }),
         };
         let json = serde_json::to_string_pretty(&stored)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&path, json)?;
         self.cache.write().insert(bucket.to_string(), Some(config));
         Ok(())

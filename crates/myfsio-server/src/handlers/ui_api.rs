@@ -522,7 +522,7 @@ fn read_version_manifests_for_object(
         entries.push(manifest);
     }
 
-    entries.sort_by(|a, b| manifest_timestamp(b).cmp(&manifest_timestamp(a)));
+    entries.sort_by_key(|b| std::cmp::Reverse(manifest_timestamp(b)));
     Ok(entries)
 }
 
@@ -2490,7 +2490,7 @@ pub async fn upload_object(
 
     let stream = BodyStream::new(body)
         .map_ok(|frame| frame.into_data().unwrap_or_default())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        .map_err(std::io::Error::other);
     let mut multipart = multer::Multipart::new(stream, boundary);
 
     let mut object_key: Option<String> = None;
@@ -3225,16 +3225,14 @@ async fn object_presign_json(
     let credential = format!("{}/{}/{}/s3/aws4_request", access_key, date_stamp, region);
 
     let canonical_uri = format!("/{}/{}", bucket, encode_object_key(key));
-    let mut query_params = vec![
-        (
+    let mut query_params = [(
             "X-Amz-Algorithm".to_string(),
             "AWS4-HMAC-SHA256".to_string(),
         ),
         ("X-Amz-Credential".to_string(), credential.clone()),
         ("X-Amz-Date".to_string(), amz_date.clone()),
         ("X-Amz-Expires".to_string(), expires.to_string()),
-        ("X-Amz-SignedHeaders".to_string(), "host".to_string()),
-    ];
+        ("X-Amz-SignedHeaders".to_string(), "host".to_string())];
     query_params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
     let canonical_query = query_params
@@ -4161,8 +4159,8 @@ pub async fn archived_objects(
         if live_exists {
             continue;
         }
-        versions.sort_by(|a, b| manifest_timestamp(b).cmp(&manifest_timestamp(a)));
-        let latest = versions.first().map(|record| manifest_to_json(record));
+        versions.sort_by_key(|b| std::cmp::Reverse(manifest_timestamp(b)));
+        let latest = versions.first().map(manifest_to_json);
         objects.push(json!({
             "key": key,
             "versions": versions.len(),
