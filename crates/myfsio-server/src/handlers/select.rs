@@ -722,27 +722,7 @@ fn require_xml_content_type(headers: &HeaderMap) -> Option<Response> {
 }
 
 fn s3_error_response(err: S3Error) -> Response {
-    let status =
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let resource = if err.resource.is_empty() {
-        "/".to_string()
-    } else {
-        err.resource.clone()
-    };
-    let code_str = err.code.as_str();
-    let body = err
-        .with_resource(resource)
-        .with_request_id(uuid::Uuid::new_v4().simple().to_string())
-        .to_xml();
-    (
-        status,
-        [
-            ("content-type", "application/xml"),
-            ("x-amz-error-code", code_str),
-        ],
-        body,
-    )
-        .into_response()
+    crate::s3_response::s3_error_response(err)
 }
 
 fn build_stats_xml(bytes_scanned: usize, bytes_returned: usize) -> String {

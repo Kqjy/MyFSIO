@@ -16,6 +16,8 @@ pub struct ObjectMeta {
     pub version_id: Option<String>,
     #[serde(default)]
     pub is_delete_marker: bool,
+    #[serde(default)]
+    pub owner: Option<String>,
     #[serde(default, skip_serializing)]
     pub internal_metadata: HashMap<String, String>,
 }
@@ -32,6 +34,7 @@ impl ObjectMeta {
             metadata: HashMap::new(),
             version_id: None,
             is_delete_marker: false,
+            owner: None,
             internal_metadata: HashMap::new(),
         }
     }
@@ -189,6 +192,10 @@ pub struct BucketConfig {
     pub policy: Option<serde_json::Value>,
     #[serde(default)]
     pub replication: Option<serde_json::Value>,
+    #[serde(default)]
+    pub ownership_controls: Option<serde_json::Value>,
+    #[serde(default)]
+    pub public_access_block: Option<serde_json::Value>,
 }
 
 impl BucketConfig {

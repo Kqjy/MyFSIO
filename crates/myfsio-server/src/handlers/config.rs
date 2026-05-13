@@ -29,15 +29,11 @@ fn stored_xml(value: &serde_json::Value) -> String {
 }
 
 fn storage_err(err: myfsio_storage::error::StorageError) -> Response {
-    let s3err = S3Error::from(err);
-    let status =
-        StatusCode::from_u16(s3err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (
-        status,
-        [("content-type", "application/xml")],
-        s3err.to_xml(),
-    )
-        .into_response()
+    crate::s3_response::s3_error_response(S3Error::from(err))
+}
+
+fn xml_error_response(err: S3Error) -> Response {
+    crate::s3_response::s3_error_response(err)
 }
 
 fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
@@ -50,13 +46,39 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
 }
 
 fn custom_xml_error(status: StatusCode, code: &str, message: &str) -> Response {
+    use myfsio_common::error::S3ErrorCode::*;
+    let mapped = match code {
+        "AccessDenied" => Some(AccessDenied),
+        "InvalidArgument" => Some(InvalidArgument),
+        "InvalidRequest" => Some(InvalidRequest),
+        "MalformedXML" => Some(MalformedXML),
+        "MalformedACLError" => Some(MalformedACLError),
+        "NotImplemented" => Some(NotImplemented),
+        "NoSuchBucket" => Some(NoSuchBucket),
+        "NoSuchKey" => Some(NoSuchKey),
+        "InvalidTag" => Some(InvalidTag),
+        _ => None,
+    };
+    if let Some(known) = mapped {
+        return crate::s3_response::s3_error_response(S3Error::new(known, message));
+    }
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
     let xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-         <Error><Code>{}</Code><Message>{}</Message><Resource></Resource><RequestId></RequestId></Error>",
+         <Error><Code>{}</Code><Message>{}</Message><Resource>/</Resource><RequestId>{}</RequestId></Error>",
         xml_escape(code),
         xml_escape(message),
+        xml_escape(&request_id),
     );
-    xml_response(status, xml)
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("content-type", "application/xml".parse().unwrap());
+    if let Ok(v) = axum::http::HeaderValue::from_str(code) {
+        headers.insert("x-amz-error-code", v);
+    }
+    if let Ok(v) = axum::http::HeaderValue::from_str(&request_id) {
+        headers.insert("x-amz-request-id", v);
+    }
+    (status, headers, xml).into_response()
 }
 
 pub async fn get_versioning(state: &AppState, bucket: &str) -> Response {
@@ -94,10 +116,7 @@ pub async fn put_versioning(state: &AppState, bucket: &str, body: Body) -> Respo
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
-            );
+            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
         }
     };
 
@@ -105,22 +124,15 @@ pub async fn put_versioning(state: &AppState, bucket: &str, body: Body) -> Respo
     let doc = match roxmltree::Document::parse(&xml_str) {
         Ok(d) => d,
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
-            );
+            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
         }
     };
     let root = doc.root_element();
     if root.tag_name().name() != "VersioningConfiguration" {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(
-                S3ErrorCode::MalformedXML,
-                "Expected <VersioningConfiguration> root element",
-            )
-            .to_xml(),
-        );
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::MalformedXML,
+            "Expected <VersioningConfiguration> root element",
+        ));
     }
     let status_text = root
         .children()
@@ -131,14 +143,10 @@ pub async fn put_versioning(state: &AppState, bucket: &str, body: Body) -> Respo
         Some("Enabled") => myfsio_common::types::VersioningStatus::Enabled,
         Some("Suspended") => myfsio_common::types::VersioningStatus::Suspended,
         _ => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(
-                    S3ErrorCode::MalformedXML,
-                    "VersioningConfiguration Status must be Enabled or Suspended",
-                )
-                .to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "VersioningConfiguration Status must be Enabled or Suspended",
+            ));
         }
     };
 
@@ -172,10 +180,7 @@ pub async fn put_tagging(state: &AppState, bucket: &str, body: Body) -> Response
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
-            );
+            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
         }
     };
 
@@ -213,14 +218,10 @@ pub async fn get_cors(state: &AppState, bucket: &str) -> Response {
             if let Some(cors) = &config.cors {
                 xml_response(StatusCode::OK, stored_xml(cors))
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::new(
-                        S3ErrorCode::NoSuchCORSConfiguration,
-                        "The CORS configuration does not exist",
-                    )
-                    .to_xml(),
-                )
+                xml_error_response(S3Error::new(
+                    S3ErrorCode::NoSuchCORSConfiguration,
+                    "The CORS configuration does not exist",
+                ))
             }
         }
         Err(e) => storage_err(e),
@@ -403,11 +404,9 @@ pub async fn get_encryption(state: &AppState, bucket: &str) -> Response {
             if let Some(enc) = &config.encryption {
                 xml_response(StatusCode::OK, render_encryption_xml(enc))
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::from_code(S3ErrorCode::ServerSideEncryptionConfigurationNotFoundError)
-                        .to_xml(),
-                )
+                xml_error_response(S3Error::from_code(
+                    S3ErrorCode::ServerSideEncryptionConfigurationNotFoundError,
+                ))
             }
         }
         Err(e) => storage_err(e),
@@ -418,40 +417,27 @@ pub async fn put_encryption(state: &AppState, bucket: &str, body: Body) -> Respo
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
-            );
+            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
         }
     };
     let xml_str = String::from_utf8_lossy(&body_bytes);
     let (algorithm, kms_key_id) = match parse_encryption_xml(&xml_str) {
         Ok(parsed) => parsed,
         Err(err) => {
-            let status =
-                StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::BAD_REQUEST);
-            return xml_response(status, err.to_xml());
+            return xml_error_response(err);
         }
     };
     if !state.config.encryption_enabled {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(
-                S3ErrorCode::InvalidArgument,
-                "Server-side encryption is not enabled on this server (set ENCRYPTION_ENABLED=true)",
-            )
-            .to_xml(),
-        );
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Server-side encryption is not enabled on this server (set ENCRYPTION_ENABLED=true)",
+        ));
     }
     if algorithm == "aws:kms" && !state.config.kms_enabled {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(
-                S3ErrorCode::InvalidArgument,
-                "KMS support is not enabled on this server (set KMS_ENABLED=true)",
-            )
-            .to_xml(),
-        );
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "KMS support is not enabled on this server (set KMS_ENABLED=true)",
+        ));
     }
 
     let mut stored = serde_json::Map::new();
@@ -498,10 +484,7 @@ pub async fn get_lifecycle(state: &AppState, bucket: &str) -> Response {
             if let Some(lc) = &config.lifecycle {
                 xml_response(StatusCode::OK, stored_xml(lc))
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::from_code(S3ErrorCode::NoSuchLifecycleConfiguration).to_xml(),
-                )
+                xml_error_response(S3Error::from_code(S3ErrorCode::NoSuchLifecycleConfiguration))
             }
         }
         Err(e) => storage_err(e),
@@ -515,10 +498,7 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
     };
     let raw = String::from_utf8_lossy(&body_bytes).to_string();
     if let Err(message) = validate_lifecycle_days(&raw) {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(S3ErrorCode::InvalidArgument, message).to_xml(),
-        );
+        return xml_error_response(S3Error::new(S3ErrorCode::InvalidArgument, message));
     }
     let value = serde_json::Value::String(raw);
 
@@ -593,10 +573,10 @@ pub async fn get_quota(state: &AppState, bucket: &str) -> Response {
                     }),
                 )
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::new(S3ErrorCode::NoSuchKey, "No quota configuration found").to_xml(),
-                )
+                xml_error_response(S3Error::new(
+                    S3ErrorCode::NoSuchKey,
+                    "No quota configuration found",
+                ))
             }
         }
         Err(e) => storage_err(e),
@@ -607,24 +587,20 @@ pub async fn put_quota(state: &AppState, bucket: &str, body: Body) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::InvalidArgument, "Invalid quota payload").to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Invalid quota payload",
+            ));
         }
     };
 
     let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(
-                    S3ErrorCode::InvalidArgument,
-                    "Request body must be valid JSON",
-                )
-                .to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Request body must be valid JSON",
+            ));
         }
     };
 
@@ -632,14 +608,10 @@ pub async fn put_quota(state: &AppState, bucket: &str, body: Body) -> Response {
     let max_objects = payload.get("max_objects").and_then(|v| v.as_u64());
 
     if max_size.is_none() && max_objects.is_none() {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(
-                S3ErrorCode::InvalidArgument,
-                "At least one of max_size_bytes or max_objects is required",
-            )
-            .to_xml(),
-        );
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "At least one of max_size_bytes or max_objects is required",
+        ));
     }
 
     match state.storage.get_bucket_config(bucket).await {
@@ -676,10 +648,7 @@ pub async fn get_policy(state: &AppState, bucket: &str) -> Response {
             if let Some(policy) = &config.policy {
                 json_response(StatusCode::OK, policy.clone())
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::from_code(S3ErrorCode::NoSuchBucketPolicy).to_xml(),
-                )
+                xml_error_response(S3Error::from_code(S3ErrorCode::NoSuchBucketPolicy))
             }
         }
         Err(e) => storage_err(e),
@@ -690,20 +659,20 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::MalformedXML, "Failed to read policy body").to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "Failed to read policy body",
+            ));
         }
     };
 
     let policy: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::InvalidArgument, "Policy document must be JSON").to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::InvalidArgument,
+                "Policy document must be JSON",
+            ));
         }
     };
 
@@ -756,14 +725,10 @@ pub async fn get_replication(state: &AppState, bucket: &str) -> Response {
             if let Some(replication) = &config.replication {
                 xml_response(StatusCode::OK, stored_xml(replication))
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::new(
-                        S3ErrorCode::ReplicationConfigurationNotFoundError,
-                        "The replication configuration was not found",
-                    )
-                    .to_xml(),
-                )
+                xml_error_response(S3Error::new(
+                    S3ErrorCode::ReplicationConfigurationNotFoundError,
+                    "The replication configuration was not found",
+                ))
             }
         }
         Err(e) => storage_err(e),
@@ -774,18 +739,18 @@ pub async fn put_replication(state: &AppState, bucket: &str, body: Body) -> Resp
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::MalformedXML, "Failed to read replication body").to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "Failed to read replication body",
+            ));
         }
     };
 
     if body_bytes.is_empty() {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(S3ErrorCode::MalformedXML, "Request body is required").to_xml(),
-        );
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::MalformedXML,
+            "Request body is required",
+        ));
     }
 
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
@@ -902,14 +867,10 @@ pub async fn get_website(state: &AppState, bucket: &str) -> Response {
             if let Some(ws) = &config.website {
                 xml_response(StatusCode::OK, stored_xml(ws))
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::new(
-                        S3ErrorCode::NoSuchWebsiteConfiguration,
-                        "The specified bucket does not have a website configuration",
-                    )
-                    .to_xml(),
-                )
+                xml_error_response(S3Error::new(
+                    S3ErrorCode::NoSuchWebsiteConfiguration,
+                    "The specified bucket does not have a website configuration",
+                ))
             }
         }
         Err(e) => storage_err(e),
@@ -948,16 +909,128 @@ pub async fn delete_website(state: &AppState, bucket: &str) -> Response {
     }
 }
 
+pub async fn get_ownership_controls(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => {
+            if let Some(value) = &config.ownership_controls {
+                xml_response(StatusCode::OK, stored_xml(value))
+            } else {
+                let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                    <OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                    <Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule>\
+                    </OwnershipControls>";
+                xml_response(StatusCode::OK, xml.to_string())
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn put_ownership_controls(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "Failed to read OwnershipControls body",
+            ));
+        }
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+    if roxmltree::Document::parse(&body_str).is_err() {
+        return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
+    }
+    let value = serde_json::Value::String(body_str);
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.ownership_controls = Some(value);
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_ownership_controls(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.ownership_controls = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn get_public_access_block(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => {
+            if let Some(value) = &config.public_access_block {
+                xml_response(StatusCode::OK, stored_xml(value))
+            } else {
+                xml_error_response(S3Error::new(
+                    S3ErrorCode::NoSuchPublicAccessBlockConfiguration,
+                    "The public access block configuration was not found",
+                ))
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn put_public_access_block(state: &AppState, bucket: &str, body: Body) -> Response {
+    let body_bytes = match http_body_util::BodyExt::collect(body).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::MalformedXML,
+                "Failed to read PublicAccessBlock body",
+            ));
+        }
+    };
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+    if roxmltree::Document::parse(&body_str).is_err() {
+        return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
+    }
+    let value = serde_json::Value::String(body_str);
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.public_access_block = Some(value);
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::OK.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
+pub async fn delete_public_access_block(state: &AppState, bucket: &str) -> Response {
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(mut config) => {
+            config.public_access_block = None;
+            match state.storage.set_bucket_config(bucket, &config).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => storage_err(e),
+            }
+        }
+        Err(e) => storage_err(e),
+    }
+}
+
 pub async fn get_object_lock(state: &AppState, bucket: &str) -> Response {
     match state.storage.get_bucket_config(bucket).await {
         Ok(config) => {
             if let Some(ol) = &config.object_lock {
                 xml_response(StatusCode::OK, stored_xml(ol))
             } else {
-                xml_response(
-                    StatusCode::NOT_FOUND,
-                    S3Error::from_code(S3ErrorCode::ObjectLockConfigurationNotFoundError).to_xml(),
-                )
+                xml_error_response(S3Error::from_code(
+                    S3ErrorCode::ObjectLockConfigurationNotFoundError,
+                ))
             }
         }
         Err(e) => storage_err(e),
@@ -1299,18 +1372,8 @@ pub async fn delete_logging(state: &AppState, bucket: &str) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-fn s3_error_response(code: S3ErrorCode, message: &str, status: StatusCode) -> Response {
-    let err = S3Error::new(code, message.to_string());
-    let code_str = code.as_str();
-    (
-        status,
-        [
-            ("content-type", "application/xml"),
-            ("x-amz-error-code", code_str),
-        ],
-        err.to_xml(),
-    )
-        .into_response()
+fn s3_error_response(code: S3ErrorCode, message: &str, _status: StatusCode) -> Response {
+    crate::s3_response::s3_error_response(S3Error::new(code, message.to_string()))
 }
 
 pub async fn list_object_versions(
@@ -1605,43 +1668,36 @@ pub async fn put_object_tagging(state: &AppState, bucket: &str, key: &str, body:
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
-            );
+            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
         }
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
     let tags = parse_tagging_xml(&xml_str);
     if tags.len() > state.config.object_tag_limit {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(
-                S3ErrorCode::InvalidTag,
-                format!("Maximum {} tags allowed", state.config.object_tag_limit),
-            )
-            .to_xml(),
-        );
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidTag,
+            format!("Maximum {} tags allowed", state.config.object_tag_limit),
+        ));
     }
     for tag in &tags {
         if tag.key.is_empty() || tag.key.len() > 128 {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::InvalidTag, "Tag key length must be 1-128").to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::InvalidTag,
+                "Tag key length must be 1-128",
+            ));
         }
         if tag.value.len() > 256 {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::InvalidTag, "Tag value length must be 0-256").to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::InvalidTag,
+                "Tag value length must be 0-256",
+            ));
         }
         if tag.key.contains('=') {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::new(S3ErrorCode::InvalidTag, "Tag keys must not contain '='").to_xml(),
-            );
+            return xml_error_response(S3Error::new(
+                S3ErrorCode::InvalidTag,
+                "Tag keys must not contain '='",
+            ));
         }
     }
 
@@ -1668,10 +1724,7 @@ pub async fn put_object_acl(
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(collected) => collected.to_bytes(),
         Err(_) => {
-            return xml_response(
-                StatusCode::BAD_REQUEST,
-                S3Error::from_code(S3ErrorCode::MalformedXML).to_xml(),
-            );
+            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
         }
     };
     let body_str = String::from_utf8_lossy(&body_bytes);
@@ -1683,14 +1736,10 @@ pub async fn put_object_acl(
         .filter(|s| !s.is_empty());
 
     if !body_trimmed.is_empty() && canned_acl_header.is_some() {
-        return xml_response(
-            StatusCode::BAD_REQUEST,
-            S3Error::new(
-                S3ErrorCode::InvalidRequest,
-                "Specifying both Canned ACLs and Header Grants is not allowed",
-            )
-            .to_xml(),
-        );
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "Specifying both Canned ACLs and Header Grants is not allowed",
+        ));
     }
 
     match state.storage.head_object(bucket, key).await {
@@ -1707,22 +1756,17 @@ pub async fn put_object_acl(
                 match acl_from_xml_strict(body_trimmed) {
                     Some(parsed) => {
                         if parsed.owner != existing_owner {
-                            return xml_response(
-                                StatusCode::FORBIDDEN,
-                                S3Error::new(
-                                    S3ErrorCode::AccessDenied,
-                                    "The Owner ID in the ACL does not match the existing object owner",
-                                )
-                                .to_xml(),
-                            );
+                            return xml_error_response(S3Error::new(
+                                S3ErrorCode::AccessDenied,
+                                "The Owner ID in the ACL does not match the existing object owner",
+                            ));
                         }
                         parsed
                     }
                     None => {
-                        return xml_response(
-                            StatusCode::BAD_REQUEST,
-                            S3Error::from_code(S3ErrorCode::MalformedACLError).to_xml(),
-                        );
+                        return xml_error_response(S3Error::from_code(
+                            S3ErrorCode::MalformedACLError,
+                        ));
                     }
                 }
             } else {

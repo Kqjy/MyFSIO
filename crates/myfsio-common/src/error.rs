@@ -35,6 +35,7 @@ pub enum S3ErrorCode {
     NoSuchVersion,
     NoSuchTagSet,
     NoSuchWebsiteConfiguration,
+    NoSuchPublicAccessBlockConfiguration,
     NotImplemented,
     ObjectCorrupted,
     PreconditionFailed,
@@ -83,6 +84,7 @@ impl S3ErrorCode {
             Self::NoSuchVersion => 404,
             Self::NoSuchTagSet => 404,
             Self::NoSuchWebsiteConfiguration => 404,
+            Self::NoSuchPublicAccessBlockConfiguration => 404,
             Self::NotImplemented => 501,
             Self::ObjectCorrupted => 422,
             Self::PreconditionFailed => 412,
@@ -131,6 +133,7 @@ impl S3ErrorCode {
             Self::NoSuchVersion => "NoSuchVersion",
             Self::NoSuchTagSet => "NoSuchTagSet",
             Self::NoSuchWebsiteConfiguration => "NoSuchWebsiteConfiguration",
+            Self::NoSuchPublicAccessBlockConfiguration => "NoSuchPublicAccessBlockConfiguration",
             Self::NotImplemented => "NotImplemented",
             Self::ObjectCorrupted => "ObjectCorrupted",
             Self::PreconditionFailed => "PreconditionFailed",
@@ -183,6 +186,7 @@ impl S3ErrorCode {
             Self::NoSuchVersion => "The specified version does not exist",
             Self::NoSuchTagSet => "The TagSet does not exist",
             Self::NoSuchWebsiteConfiguration => "The specified bucket does not have a website configuration",
+            Self::NoSuchPublicAccessBlockConfiguration => "The public access block configuration was not found",
             Self::NotImplemented => "A header or query parameter you provided implies functionality that is not implemented",
             Self::ObjectCorrupted => "The stored object is corrupted and cannot be served",
             Self::PreconditionFailed => "At least one of the preconditions you specified did not hold",
@@ -233,6 +237,13 @@ impl S3Error {
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = request_id.into();
         self
+    }
+
+    pub fn ensure_request_id(&mut self) -> &str {
+        if self.request_id.is_empty() {
+            self.request_id = uuid::Uuid::new_v4().simple().to_string();
+        }
+        &self.request_id
     }
 
     pub fn http_status(&self) -> u16 {

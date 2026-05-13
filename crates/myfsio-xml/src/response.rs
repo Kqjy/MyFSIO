@@ -158,6 +158,45 @@ pub fn list_objects_v2_xml_with_encoding(
     owner_id: Option<&str>,
     owner_display_name: Option<&str>,
 ) -> String {
+    list_objects_v2_xml_full(
+        bucket_name,
+        prefix,
+        delimiter,
+        max_keys,
+        objects,
+        common_prefixes,
+        is_truncated,
+        continuation_token,
+        next_continuation_token,
+        key_count,
+        encoding_type,
+        fetch_owner,
+        start_after,
+        owner_id,
+        owner_display_name,
+        &std::collections::HashMap::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_objects_v2_xml_full(
+    bucket_name: &str,
+    prefix: &str,
+    delimiter: &str,
+    max_keys: usize,
+    objects: &[ObjectMeta],
+    common_prefixes: &[String],
+    is_truncated: bool,
+    continuation_token: Option<&str>,
+    next_continuation_token: Option<&str>,
+    key_count: usize,
+    encoding_type: Option<&str>,
+    fetch_owner: bool,
+    start_after: Option<&str>,
+    owner_id: Option<&str>,
+    owner_display_name: Option<&str>,
+    owner_display_map: &std::collections::HashMap<String, String>,
+) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
     writer
@@ -198,8 +237,8 @@ pub fn list_objects_v2_xml_with_encoding(
         }
     }
 
-    let owner_id_value = owner_id.unwrap_or("myfsio");
-    let owner_display_value = owner_display_name.unwrap_or(owner_id_value);
+    let default_owner_id = owner_id.unwrap_or("myfsio");
+    let default_owner_display = owner_display_name.unwrap_or(default_owner_id);
 
     for obj in objects {
         writer
@@ -221,11 +260,22 @@ pub fn list_objects_v2_xml_with_encoding(
             obj.storage_class.as_deref().unwrap_or("STANDARD"),
         );
         if fetch_owner {
+            let obj_owner_id = obj.owner.as_deref().unwrap_or(default_owner_id);
+            let obj_owner_display = owner_display_map
+                .get(obj_owner_id)
+                .map(String::as_str)
+                .unwrap_or_else(|| {
+                    if obj.owner.is_none() {
+                        default_owner_display
+                    } else {
+                        obj_owner_id
+                    }
+                });
             writer
                 .write_event(Event::Start(BytesStart::new("Owner")))
                 .unwrap();
-            write_text_element(&mut writer, "ID", owner_id_value);
-            write_text_element(&mut writer, "DisplayName", owner_display_value);
+            write_text_element(&mut writer, "ID", obj_owner_id);
+            write_text_element(&mut writer, "DisplayName", obj_owner_display);
             writer
                 .write_event(Event::End(BytesEnd::new("Owner")))
                 .unwrap();
@@ -289,6 +339,70 @@ pub fn list_objects_v1_xml_with_encoding(
     next_marker: Option<&str>,
     encoding_type: Option<&str>,
 ) -> String {
+    list_objects_v1_xml_with_owner(
+        bucket_name,
+        prefix,
+        marker,
+        delimiter,
+        max_keys,
+        objects,
+        common_prefixes,
+        is_truncated,
+        next_marker,
+        encoding_type,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_objects_v1_xml_with_owner(
+    bucket_name: &str,
+    prefix: &str,
+    marker: &str,
+    delimiter: &str,
+    max_keys: usize,
+    objects: &[ObjectMeta],
+    common_prefixes: &[String],
+    is_truncated: bool,
+    next_marker: Option<&str>,
+    encoding_type: Option<&str>,
+    owner_id: Option<&str>,
+    owner_display_name: Option<&str>,
+) -> String {
+    list_objects_v1_xml_full(
+        bucket_name,
+        prefix,
+        marker,
+        delimiter,
+        max_keys,
+        objects,
+        common_prefixes,
+        is_truncated,
+        next_marker,
+        encoding_type,
+        owner_id,
+        owner_display_name,
+        &std::collections::HashMap::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn list_objects_v1_xml_full(
+    bucket_name: &str,
+    prefix: &str,
+    marker: &str,
+    delimiter: &str,
+    max_keys: usize,
+    objects: &[ObjectMeta],
+    common_prefixes: &[String],
+    is_truncated: bool,
+    next_marker: Option<&str>,
+    encoding_type: Option<&str>,
+    owner_id: Option<&str>,
+    owner_display_name: Option<&str>,
+    owner_display_map: &std::collections::HashMap<String, String>,
+) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
     writer
@@ -339,6 +453,9 @@ pub fn list_objects_v1_xml_with_encoding(
         }
     }
 
+    let default_owner_id = owner_id.unwrap_or("myfsio");
+    let default_owner_display = owner_display_name.unwrap_or(default_owner_id);
+
     for obj in objects {
         writer
             .write_event(Event::Start(BytesStart::new("Contents")))
@@ -353,6 +470,30 @@ pub fn list_objects_v1_xml_with_encoding(
             write_text_element(&mut writer, "ETag", &format!("\"{}\"", etag));
         }
         write_text_element(&mut writer, "Size", &obj.size.to_string());
+        let obj_owner_id = obj.owner.as_deref().unwrap_or(default_owner_id);
+        let obj_owner_display = owner_display_map
+            .get(obj_owner_id)
+            .map(String::as_str)
+            .unwrap_or_else(|| {
+                if obj.owner.is_none() {
+                    default_owner_display
+                } else {
+                    obj_owner_id
+                }
+            });
+        writer
+            .write_event(Event::Start(BytesStart::new("Owner")))
+            .unwrap();
+        write_text_element(&mut writer, "ID", obj_owner_id);
+        write_text_element(&mut writer, "DisplayName", obj_owner_display);
+        writer
+            .write_event(Event::End(BytesEnd::new("Owner")))
+            .unwrap();
+        write_text_element(
+            &mut writer,
+            "StorageClass",
+            obj.storage_class.as_deref().unwrap_or("STANDARD"),
+        );
         writer
             .write_event(Event::End(BytesEnd::new("Contents")))
             .unwrap();
@@ -736,5 +877,68 @@ mod tests {
         assert!(xml.contains("<Key>file.txt</Key>"));
         assert!(xml.contains("<Size>1024</Size>"));
         assert!(xml.contains("<Marker></Marker>"));
+    }
+
+    #[test]
+    fn test_list_v1_uses_per_object_owner_with_canonical_fallback() {
+        let mut explicit = ObjectMeta::new("explicit.txt".to_string(), 1, Utc::now());
+        explicit.owner = Some("alice".to_string());
+        let legacy = ObjectMeta::new("legacy.txt".to_string(), 1, Utc::now());
+
+        let mut display_map = std::collections::HashMap::new();
+        display_map.insert("alice".to_string(), "Alice A.".to_string());
+
+        let xml = list_objects_v1_xml_full(
+            "my-bucket",
+            "",
+            "",
+            "",
+            1000,
+            &[explicit, legacy],
+            &[],
+            false,
+            None,
+            None,
+            Some("myfsio"),
+            Some("MyFSIO Service"),
+            &display_map,
+        );
+        assert!(xml.contains("<ID>alice</ID>"));
+        assert!(xml.contains("<DisplayName>Alice A.</DisplayName>"));
+        assert!(xml.contains("<ID>myfsio</ID>"));
+        assert!(xml.contains("<DisplayName>MyFSIO Service</DisplayName>"));
+    }
+
+    #[test]
+    fn test_list_v2_uses_per_object_owner_with_canonical_fallback() {
+        let mut explicit = ObjectMeta::new("explicit.txt".to_string(), 1, Utc::now());
+        explicit.owner = Some("alice".to_string());
+        let legacy = ObjectMeta::new("legacy.txt".to_string(), 1, Utc::now());
+
+        let mut display_map = std::collections::HashMap::new();
+        display_map.insert("alice".to_string(), "Alice A.".to_string());
+
+        let xml = list_objects_v2_xml_full(
+            "my-bucket",
+            "",
+            "",
+            1000,
+            &[explicit, legacy],
+            &[],
+            false,
+            None,
+            None,
+            2,
+            None,
+            true,
+            None,
+            Some("myfsio"),
+            Some("MyFSIO Service"),
+            &display_map,
+        );
+        assert!(xml.contains("<ID>alice</ID>"));
+        assert!(xml.contains("<DisplayName>Alice A.</DisplayName>"));
+        assert!(xml.contains("<ID>myfsio</ID>"));
+        assert!(xml.contains("<DisplayName>MyFSIO Service</DisplayName>"));
     }
 }

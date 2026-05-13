@@ -70,28 +70,39 @@ fn parse_max_keys(raw: &str) -> Result<usize, Response> {
     }
 }
 
-fn s3_error_response(err: S3Error) -> Response {
-    let status =
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let resource = if err.resource.is_empty() {
-        "/".to_string()
-    } else {
-        err.resource.clone()
-    };
-    let code_str = err.code.as_str();
-    let body = err
-        .with_resource(resource)
-        .with_request_id(uuid::Uuid::new_v4().simple().to_string())
-        .to_xml();
-    (
-        status,
-        [
-            ("content-type", "application/xml"),
-            ("x-amz-error-code", code_str),
-        ],
-        body,
-    )
-        .into_response()
+pub(crate) fn s3_error_response(err: S3Error) -> Response {
+    crate::s3_response::s3_error_response(err)
+}
+
+pub(crate) const CANONICAL_DEFAULT_OWNER_ID: &str = "myfsio";
+
+fn canonical_default_owner(state: &AppState) -> (String, String) {
+    let id = CANONICAL_DEFAULT_OWNER_ID.to_string();
+    let display = state
+        .iam
+        .get_display_name(&id)
+        .unwrap_or_else(|| id.clone());
+    (id, display)
+}
+
+fn build_owner_display_map(
+    state: &AppState,
+    objects: &[myfsio_common::types::ObjectMeta],
+) -> HashMap<String, String> {
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for obj in objects {
+        if let Some(owner) = obj.owner.as_deref() {
+            if seen.contains_key(owner) {
+                continue;
+            }
+            let display = state
+                .iam
+                .get_display_name(owner)
+                .unwrap_or_else(|| owner.to_string());
+            seen.insert(owner.to_string(), display);
+        }
+    }
+    seen
 }
 
 fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
@@ -110,20 +121,13 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
     } = &err
     {
         let s3_err = S3Error::from_code(S3ErrorCode::NoSuchKey)
-            .with_resource(format!("/{}/{}", bucket, key))
-            .with_request_id(uuid::Uuid::new_v4().simple().to_string());
-        let status =
-            StatusCode::from_u16(s3_err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let mut resp_headers = HeaderMap::new();
-        resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+            .with_resource(format!("/{}/{}", bucket, key));
+        let mut extra = HeaderMap::new();
+        extra.insert("x-amz-delete-marker", "true".parse().unwrap());
         if let Ok(vid) = version_id.parse() {
-            resp_headers.insert("x-amz-version-id", vid);
+            extra.insert("x-amz-version-id", vid);
         }
-        resp_headers.insert("content-type", "application/xml".parse().unwrap());
-        if let Ok(code_hdr) = s3_err.code.as_str().parse() {
-            resp_headers.insert("x-amz-error-code", code_hdr);
-        }
-        return (status, resp_headers, s3_err.to_xml()).into_response();
+        return crate::s3_response::s3_error_response_with_headers(s3_err, extra);
     }
     s3_error_response(S3Error::from(err))
 }
@@ -416,6 +420,12 @@ pub async fn create_bucket(
     if query.object_lock.is_some() {
         return config::put_object_lock(&state, &bucket, body).await;
     }
+    if query.ownership_controls.is_some() {
+        return config::put_ownership_controls(&state, &bucket, body).await;
+    }
+    if query.public_access_block.is_some() {
+        return config::put_public_access_block(&state, &bucket, body).await;
+    }
     if query.notification.is_some() {
         return config::put_notification(&state, &bucket, body).await;
     }
@@ -520,6 +530,10 @@ pub struct BucketQuery {
     pub website: Option<String>,
     #[serde(rename = "object-lock")]
     pub object_lock: Option<String>,
+    #[serde(rename = "ownershipControls")]
+    pub ownership_controls: Option<String>,
+    #[serde(rename = "publicAccessBlock")]
+    pub public_access_block: Option<String>,
     pub notification: Option<String>,
     pub logging: Option<String>,
     pub versions: Option<String>,
@@ -545,6 +559,8 @@ const SUPPORTED_BUCKET_SUBRESOURCES: &[&str] = &[
     "replication",
     "website",
     "object-lock",
+    "ownershipControls",
+    "publicAccessBlock",
     "notification",
     "logging",
     "quota",
@@ -614,6 +630,9 @@ pub async fn get_bucket(
     Query(query): Query<BucketQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let (owner_id, owner_display) = canonical_default_owner(&state);
+    let owner_id_ref = owner_id.as_str();
+    let owner_display_ref = owner_display.as_str();
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
         if host_bucket != bucket {
             return get_object(
@@ -668,6 +687,12 @@ pub async fn get_bucket(
     }
     if query.object_lock.is_some() {
         return config::get_object_lock(&state, &bucket).await;
+    }
+    if query.ownership_controls.is_some() {
+        return config::get_ownership_controls(&state, &bucket).await;
+    }
+    if query.public_access_block.is_some() {
+        return config::get_public_access_block(&state, &bucket).await;
     }
     if query.notification.is_some() {
         return config::get_notification(&state, &bucket).await;
@@ -759,11 +784,11 @@ pub async fn get_bucket(
                 encoding_type,
                 fetch_owner,
                 start_after_v2.as_deref(),
-                None,
-                None,
+                Some(owner_id_ref),
+                Some(owner_display_ref),
             )
         } else {
-            myfsio_xml::response::list_objects_v1_xml(
+            myfsio_xml::response::list_objects_v1_xml_with_owner(
                 &bucket,
                 &prefix,
                 &marker,
@@ -773,6 +798,9 @@ pub async fn get_bucket(
                 &[],
                 false,
                 None,
+                None,
+                Some(owner_id_ref),
+                Some(owner_display_ref),
             )
         };
         return (StatusCode::OK, [("content-type", "application/xml")], xml).into_response();
@@ -799,11 +827,12 @@ pub async fn get_bucket(
                 } else {
                     None
                 };
+                let owner_map = build_owner_display_map(&state, &result.objects);
                 let xml = if is_v2 {
                     let next_token = next_marker
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v2_xml_full(
                         &bucket,
                         &prefix,
                         &delimiter,
@@ -817,11 +846,12 @@ pub async fn get_bucket(
                         encoding_type,
                         fetch_owner,
                         start_after_v2.as_deref(),
-                        None,
-                        None,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v1_xml_full(
                         &bucket,
                         &prefix,
                         &marker,
@@ -832,6 +862,9 @@ pub async fn get_bucket(
                         result.is_truncated,
                         next_marker.as_deref(),
                         encoding_type,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -847,12 +880,13 @@ pub async fn get_bucket(
         };
         match state.storage.list_objects_shallow(&bucket, &params).await {
             Ok(result) => {
+                let owner_map = build_owner_display_map(&state, &result.objects);
                 let xml = if is_v2 {
                     let next_token = result
                         .next_continuation_token
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v2_xml_full(
                         &bucket,
                         &params.prefix,
                         &delimiter,
@@ -866,11 +900,12 @@ pub async fn get_bucket(
                         encoding_type,
                         fetch_owner,
                         start_after_v2.as_deref(),
-                        None,
-                        None,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v1_xml_full(
                         &bucket,
                         &params.prefix,
                         &marker,
@@ -881,6 +916,9 @@ pub async fn get_bucket(
                         result.is_truncated,
                         result.next_continuation_token.as_deref(),
                         encoding_type,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -900,12 +938,13 @@ pub async fn get_bucket(
         .await
         {
             Ok(grouped) => {
+                let owner_map = build_owner_display_map(&state, &grouped.objects);
                 let xml = if is_v2 {
                     let next_token = grouped
                         .next_token
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v2_xml_full(
                         &bucket,
                         &prefix,
                         &delimiter,
@@ -919,11 +958,12 @@ pub async fn get_bucket(
                         encoding_type,
                         fetch_owner,
                         start_after_v2.as_deref(),
-                        None,
-                        None,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v1_xml_full(
                         &bucket,
                         &prefix,
                         &marker,
@@ -934,6 +974,9 @@ pub async fn get_bucket(
                         grouped.is_truncated,
                         grouped.next_token.as_deref(),
                         encoding_type,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -1157,6 +1200,12 @@ pub async fn delete_bucket(
     if query.object_lock.is_some() {
         return config::delete_object_lock(&state, &bucket).await;
     }
+    if query.ownership_controls.is_some() {
+        return config::delete_ownership_controls(&state, &bucket).await;
+    }
+    if query.public_access_block.is_some() {
+        return config::delete_public_access_block(&state, &bucket).await;
+    }
     if query.notification.is_some() {
         return config::delete_notification(&state, &bucket).await;
     }
@@ -1171,17 +1220,10 @@ pub async fn delete_bucket(
         || query.location.is_some()
         || query.policy_status.is_some()
     {
-        let body = S3Error::new(
+        return s3_error_response(S3Error::new(
             S3ErrorCode::MethodNotAllowed,
             "DELETE is not supported on this bucket subresource",
-        )
-        .to_xml();
-        return (
-            StatusCode::METHOD_NOT_ALLOWED,
-            [("content-type", "application/xml")],
-            body,
-        )
-            .into_response();
+        ));
     }
 
     match state.storage.delete_bucket(&bucket).await {

@@ -48,20 +48,7 @@ fn wrap_body_for_sha256_verification(req: &mut Request) -> Option<Response> {
                 "Streaming SigV4 chunk-signature validation is not yet implemented; \
                  resend with x-amz-content-sha256: UNSIGNED-PAYLOAD or disable STRICT_STREAMING_SIGV4",
             );
-            let status = StatusCode::from_u16(err.http_status())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let code_str = err.code.as_str();
-            return Some(
-                (
-                    status,
-                    [
-                        ("content-type", "application/xml"),
-                        ("x-amz-error-code", code_str),
-                    ],
-                    err.to_xml(),
-                )
-                    .into_response(),
-            );
+            return Some(crate::s3_response::s3_error_response(err));
         }
         tracing::warn!(
             payload_type = %upper,
@@ -1767,23 +1754,7 @@ fn urlencoding_decode(s: &str) -> String {
 }
 
 fn error_response(err: S3Error, resource: &str) -> Response {
-    let status =
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let request_id = uuid::Uuid::new_v4().simple().to_string();
-    let code_str = err.code.as_str();
-    let body = err
-        .with_resource(resource.to_string())
-        .with_request_id(request_id)
-        .to_xml();
-    (
-        status,
-        [
-            ("content-type", "application/xml"),
-            ("x-amz-error-code", code_str),
-        ],
-        body,
-    )
-        .into_response()
+    crate::s3_response::s3_error_response(err.with_resource(resource.to_string()))
 }
 
 #[cfg(test)]
