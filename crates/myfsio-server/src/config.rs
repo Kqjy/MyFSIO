@@ -66,6 +66,7 @@ pub struct ServerConfig {
     pub replication_healer_enabled: bool,
     pub replication_healer_interval_secs: u64,
     pub replication_healer_max_attempts: u32,
+    pub replication_part_stall_timeout_secs: u64,
     pub site_sync_enabled: bool,
     pub site_sync_interval_secs: u64,
     pub site_sync_batch_size: usize,
@@ -228,6 +229,8 @@ impl ServerConfig {
             parse_u64_env("REPLICATION_HEALER_INTERVAL_SECONDS", 60);
         let replication_healer_max_attempts =
             parse_u64_env("REPLICATION_HEALER_MAX_ATTEMPTS", 12) as u32;
+        let replication_part_stall_timeout_secs =
+            parse_u64_env("REPLICATION_PART_STALL_TIMEOUT_SECONDS", 300);
 
         let site_sync_enabled = parse_bool_env("SITE_SYNC_ENABLED", false);
         let site_sync_interval_secs = parse_u64_env("SITE_SYNC_INTERVAL_SECONDS", 60);
@@ -358,6 +361,7 @@ impl ServerConfig {
             replication_healer_enabled,
             replication_healer_interval_secs,
             replication_healer_max_attempts,
+            replication_part_stall_timeout_secs,
             site_sync_enabled,
             site_sync_interval_secs,
             site_sync_batch_size,
@@ -458,6 +462,7 @@ impl Default for ServerConfig {
             replication_healer_enabled: true,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
+            replication_part_stall_timeout_secs: 300,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,

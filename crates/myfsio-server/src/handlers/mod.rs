@@ -5356,6 +5356,7 @@ mod tests {
             replication_healer_enabled: false,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
+            replication_part_stall_timeout_secs: 300,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,

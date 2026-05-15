@@ -699,6 +699,10 @@ async fn test_ui_replication_endpoints_are_wired_and_operational() {
             bucket_name: bucket_name.to_string(),
             action: "put".to_string(),
             last_error_code: Some("SlowDown".to_string()),
+            pending_upload_id: None,
+            pending_source_size: None,
+            pending_source_etag: None,
+            pending_part_size: None,
         },
     );
     state.replication.failures.add(
@@ -711,6 +715,10 @@ async fn test_ui_replication_endpoints_are_wired_and_operational() {
             bucket_name: bucket_name.to_string(),
             action: "put".to_string(),
             last_error_code: None,
+            pending_upload_id: None,
+            pending_source_size: None,
+            pending_source_etag: None,
+            pending_part_size: None,
         },
     );
 

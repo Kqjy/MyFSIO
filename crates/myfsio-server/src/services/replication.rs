@@ -6,7 +6,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
-use aws_smithy_types::byte_stream::Length;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -91,6 +90,39 @@ pub struct ReplicationFailure {
     pub action: String,
     #[serde(default)]
     pub last_error_code: Option<String>,
+    #[serde(default)]
+    pub pending_upload_id: Option<String>,
+    #[serde(default)]
+    pub pending_source_size: Option<u64>,
+    #[serde(default)]
+    pub pending_source_etag: Option<String>,
+    #[serde(default)]
+    pub pending_part_size: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingMpuRef {
+    pub upload_id: String,
+    pub source_size: u64,
+    pub source_etag: String,
+    pub part_size: u64,
+}
+
+impl PendingMpuRef {
+    fn matches_source(&self, current_size: u64, current_etag: Option<&str>) -> bool {
+        Some(self.source_etag.as_str()) == current_etag && self.source_size == current_size
+    }
+}
+
+impl ReplicationFailure {
+    fn pending_mpu_if_complete(&self) -> Option<PendingMpuRef> {
+        Some(PendingMpuRef {
+            upload_id: self.pending_upload_id.clone()?,
+            source_size: self.pending_source_size?,
+            source_etag: self.pending_source_etag.clone()?,
+            part_size: self.pending_part_size?,
+        })
+    }
 }
 
 pub struct ReplicationFailureStore {
@@ -178,10 +210,39 @@ impl ReplicationFailureStore {
             existing.timestamp = failure.timestamp;
             existing.error_message = failure.error_message.clone();
             existing.last_error_code = failure.last_error_code.clone();
+            if failure.pending_upload_id.is_some() {
+                existing.pending_upload_id = failure.pending_upload_id.clone();
+                existing.pending_source_size = failure.pending_source_size;
+                existing.pending_source_etag = failure.pending_source_etag.clone();
+                existing.pending_part_size = failure.pending_part_size;
+            }
         } else {
             failures.insert(0, failure);
         }
         self.save(bucket, failures);
+    }
+
+    pub fn clear_pending_mpu(&self, bucket: &str, object_key: &str) -> bool {
+        let mut failures = self.load(bucket);
+        let mut changed = false;
+        for f in failures.iter_mut() {
+            if f.object_key == object_key
+                && (f.pending_upload_id.is_some()
+                    || f.pending_source_size.is_some()
+                    || f.pending_source_etag.is_some()
+                    || f.pending_part_size.is_some())
+            {
+                f.pending_upload_id = None;
+                f.pending_source_size = None;
+                f.pending_source_etag = None;
+                f.pending_part_size = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.save(bucket, failures);
+        }
+        changed
     }
 
     pub fn remove(&self, bucket: &str, object_key: &str) -> bool {
@@ -343,6 +404,7 @@ pub struct ReplicationManager {
     rules: Mutex<HashMap<String, ReplicationRule>>,
     client_options: ClientOptions,
     streaming_threshold_bytes: u64,
+    part_stall_timeout: Duration,
     pub failures: Arc<ReplicationFailureStore>,
     semaphore: Arc<Semaphore>,
     allow_internal_endpoints: bool,
@@ -371,6 +433,7 @@ impl ReplicationManager {
         streaming_threshold_bytes: u64,
         max_failures_per_bucket: usize,
         allow_internal_endpoints: bool,
+        part_stall_timeout: Duration,
     ) -> Self {
         let rules_path = storage_root
             .join(".myfsio.sys")
@@ -395,6 +458,7 @@ impl ReplicationManager {
             rules: Mutex::new(rules),
             client_options,
             streaming_threshold_bytes,
+            part_stall_timeout,
             failures,
             semaphore: Arc::new(Semaphore::new(4)),
             allow_internal_endpoints,
@@ -836,6 +900,10 @@ impl ReplicationManager {
                                 bucket_name: bucket.to_string(),
                                 action: action.to_string(),
                                 last_error_code: Some("BidirectionalLoopGuard".to_string()),
+                                pending_upload_id: None,
+                                pending_source_size: None,
+                                pending_source_etag: None,
+                                pending_part_size: None,
                             },
                         );
                         self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
@@ -864,6 +932,10 @@ impl ReplicationManager {
                     bucket_name: bucket.to_string(),
                     action: action.to_string(),
                     last_error_code: Some("InternalEndpointBlocked".to_string()),
+                    pending_upload_id: None,
+                    pending_source_size: None,
+                    pending_source_etag: None,
+                    pending_part_size: None,
                 },
             );
             self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
@@ -913,6 +985,10 @@ impl ReplicationManager {
                             bucket_name: bucket.to_string(),
                             action: "delete".to_string(),
                             last_error_code: code,
+                            pending_upload_id: None,
+                            pending_source_size: None,
+                            pending_source_etag: None,
+                            pending_part_size: None,
                         },
                     );
                     return ReplicateOutcome::Failed;
@@ -1023,6 +1099,34 @@ impl ReplicationManager {
         self.set_replication_status(bucket, object_key, REPLICATION_STATUS_PENDING)
             .await;
 
+        let source_etag: Option<String> = stored_meta
+            .get("__etag__")
+            .map(|s| s.trim_matches('"').to_string())
+            .filter(|s| !s.is_empty());
+
+        let resume = self
+            .failures
+            .get(bucket, object_key)
+            .and_then(|f| f.pending_mpu_if_complete())
+            .and_then(|pending| {
+                if pending.matches_source(file_size, source_etag.as_deref()) {
+                    Some(pending)
+                } else {
+                    tracing::info!(
+                        "Discarding stale resume upload_id {} for {}/{}: source identity changed (saved size={}, etag={}; current size={}, etag={})",
+                        pending.upload_id,
+                        bucket,
+                        object_key,
+                        pending.source_size,
+                        pending.source_etag,
+                        file_size,
+                        source_etag.as_deref().unwrap_or("<none>"),
+                    );
+                    self.failures.clear_pending_mpu(bucket, object_key);
+                    None
+                }
+            });
+
         let upload_result = upload_object(
             &client,
             &rule.target_bucket,
@@ -1032,6 +1136,9 @@ impl ReplicationManager {
             self.streaming_threshold_bytes,
             Some(&obj_meta),
             &tuning,
+            resume.as_ref(),
+            source_etag.as_deref(),
+            self.part_stall_timeout,
         )
         .await;
 
@@ -1057,6 +1164,9 @@ impl ReplicationManager {
                             self.streaming_threshold_bytes,
                             Some(&obj_meta),
                             &tuning,
+                            None,
+                            source_etag.as_deref(),
+                            self.part_stall_timeout,
                         )
                         .await
                     }
@@ -1082,8 +1192,22 @@ impl ReplicationManager {
             }
             Err(err) => {
                 let code = err.code.clone();
+                let clears_pending = err.clears_pending;
+                let (pending_upload_id, pending_source_size, pending_source_etag, pending_part_size) =
+                    match err.pending_mpu.clone() {
+                        Some(p) => (
+                            Some(p.upload_id),
+                            Some(p.source_size),
+                            Some(p.source_etag),
+                            Some(p.part_size),
+                        ),
+                        None => (None, None, None, None),
+                    };
                 let msg = err.to_string();
                 tracing::error!("Replication failed {}/{}: {}", bucket, object_key, msg);
+                if clears_pending {
+                    self.failures.clear_pending_mpu(bucket, object_key);
+                }
                 self.failures.add(
                     bucket,
                     ReplicationFailure {
@@ -1094,6 +1218,10 @@ impl ReplicationManager {
                         bucket_name: bucket.to_string(),
                         action: action.to_string(),
                         last_error_code: code,
+                        pending_upload_id,
+                        pending_source_size,
+                        pending_source_etag,
+                        pending_part_size,
                     },
                 );
                 self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
@@ -1404,6 +1532,8 @@ pub struct ReplicationUploadError {
     pub code: Option<String>,
     pub message: String,
     pub is_no_such_bucket: bool,
+    pub pending_mpu: Option<PendingMpuRef>,
+    pub clears_pending: bool,
 }
 
 impl std::fmt::Display for ReplicationUploadError {
@@ -1428,7 +1558,13 @@ where
         code,
         message: dbg,
         is_no_such_bucket,
+        pending_mpu: None,
+        clears_pending: false,
     }
+}
+
+fn is_no_such_upload_message(msg: &str) -> bool {
+    msg.contains("NoSuchUpload")
 }
 
 fn sdk_error_code<E, R>(err: &aws_sdk_s3::error::SdkError<E, R>) -> Option<String>
@@ -1500,9 +1636,24 @@ async fn upload_object(
     streaming_threshold: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
     tuning: &ResolvedTuning,
+    resume: Option<&PendingMpuRef>,
+    source_etag: Option<&str>,
+    stall_timeout: Duration,
 ) -> Result<(), ReplicationUploadError> {
     if file_size >= streaming_threshold && file_size > tuning.part_size_bytes {
-        upload_object_multipart(client, bucket, key, path, file_size, obj_meta, tuning).await
+        upload_object_multipart(
+            client,
+            bucket,
+            key,
+            path,
+            file_size,
+            obj_meta,
+            tuning,
+            resume,
+            source_etag,
+            stall_timeout,
+        )
+        .await
     } else {
         upload_object_single(client, bucket, key, path, file_size, streaming_threshold, obj_meta)
             .await
@@ -1530,18 +1681,31 @@ async fn upload_object_single(
                 code: None,
                 message: format!("failed to open {} for upload: {}", path.display(), e),
                 is_no_such_bucket: false,
+                pending_mpu: None,
+                clears_pending: false,
             })?
     } else {
         let bytes = tokio::fs::read(path).await.map_err(|e| ReplicationUploadError {
             code: None,
             message: format!("failed to read {}: {}", path.display(), e),
             is_no_such_bucket: false,
+            pending_mpu: None,
+            clears_pending: false,
         })?;
         ByteStream::from(bytes)
     };
 
     req.body(body).send().await.map(|_| ()).map_err(map_sdk_err)
 }
+
+#[derive(Debug, Clone)]
+struct PartPlan {
+    part_number: i32,
+    offset: u64,
+    length: u64,
+}
+
+const MPU_MAX_RESUME_PASSES: usize = 2;
 
 async fn upload_object_multipart(
     client: &aws_sdk_s3::Client,
@@ -1551,6 +1715,9 @@ async fn upload_object_multipart(
     file_size: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
     tuning: &ResolvedTuning,
+    resume: Option<&PendingMpuRef>,
+    source_etag: Option<&str>,
+    stall_timeout: Duration,
 ) -> Result<(), ReplicationUploadError> {
     let part_size = compute_part_size(file_size, tuning);
     let total_parts = file_size.div_ceil(part_size);
@@ -1562,41 +1729,157 @@ async fn upload_object_multipart(
                 key, file_size, total_parts, part_size
             ),
             is_no_such_bucket: false,
+            pending_mpu: None,
+            clears_pending: false,
         });
     }
 
-    let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
-    if let Some(meta) = obj_meta {
-        create_req = apply_meta_to_create_mpu(create_req, meta);
-    }
-    let create_resp = create_req.send().await.map_err(map_sdk_err)?;
-    let upload_id = match create_resp.upload_id() {
-        Some(s) => s.to_string(),
-        None => {
-            return Err(ReplicationUploadError {
-                code: None,
-                message: "CreateMultipartUpload returned no UploadId".to_string(),
-                is_no_such_bucket: false,
-            })
-        }
+    let pending_for_error = |upload_id: String| -> Option<PendingMpuRef> {
+        let etag = source_etag?;
+        Some(PendingMpuRef {
+            upload_id,
+            source_size: file_size,
+            source_etag: etag.to_string(),
+            part_size,
+        })
     };
 
-    let parts_result = run_part_uploads(
-        client,
-        bucket,
-        key,
-        &upload_id,
-        path,
-        file_size,
-        part_size,
-        total_parts as i32,
-        tuning,
-    )
-    .await;
+    let validated_resume = match resume {
+        Some(pending) if pending.part_size == part_size => Some(pending),
+        Some(pending) => {
+            tracing::info!(
+                "Discarding resume upload_id {} for {}/{}: part_size changed (saved={}, current={}); aborting orphaned MPU",
+                pending.upload_id,
+                bucket,
+                key,
+                pending.part_size,
+                part_size,
+            );
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&pending.upload_id)
+                .send()
+                .await;
+            None
+        }
+        None => None,
+    };
+    let part_size_changed = resume.is_some() && validated_resume.is_none();
 
-    let parts = match parts_result {
-        Ok(p) => p,
-        Err(e) => {
+    let resolution = resolve_upload_id_for_resume(client, bucket, key, obj_meta, validated_resume)
+        .await
+        .map_err(|mut e| {
+            if part_size_changed {
+                e.clears_pending = true;
+            }
+            e
+        })?;
+    let upload_id = resolution.upload_id;
+    let already_completed = resolution.completed;
+    let stale_pending_resolved = part_size_changed || resolution.stale_resolved;
+
+    let mut completed_parts: Vec<CompletedPart> = already_completed
+        .iter()
+        .map(|(num, etag)| {
+            CompletedPart::builder()
+                .part_number(*num)
+                .e_tag(etag.clone())
+                .build()
+        })
+        .collect();
+
+    if !already_completed.is_empty() {
+        tracing::info!(
+            "Resuming MPU for {}/{} (upload_id={}): {} of {} parts already on target",
+            bucket,
+            key,
+            upload_id,
+            already_completed.len(),
+            total_parts
+        );
+    }
+
+    let mut remaining: Vec<PartPlan> = (1..=total_parts as i32)
+        .filter(|n| !already_completed.contains_key(n))
+        .map(|part_number| {
+            let offset = (part_number as u64 - 1) * part_size;
+            let length = std::cmp::min(part_size, file_size - offset);
+            PartPlan {
+                part_number,
+                offset,
+                length,
+            }
+        })
+        .collect();
+
+    let mut last_error: Option<ReplicationUploadError> = None;
+    for pass in 0..MPU_MAX_RESUME_PASSES {
+        if remaining.is_empty() {
+            break;
+        }
+        let pass_result = run_part_pass(
+            client,
+            bucket,
+            key,
+            &upload_id,
+            path,
+            &remaining,
+            tuning,
+            stall_timeout,
+        )
+        .await;
+        match pass_result {
+            PartPassOutcome::AllDone(mut done) => {
+                completed_parts.append(&mut done);
+                remaining.clear();
+            }
+            PartPassOutcome::Partial {
+                mut done,
+                failed,
+                last_error: err,
+            } => {
+                completed_parts.append(&mut done);
+                last_error = Some(err);
+                tracing::warn!(
+                    "MPU pass {}: {} of {} part(s) failed for {}/{}, will retry next pass",
+                    pass,
+                    failed.len(),
+                    remaining.len(),
+                    bucket,
+                    key
+                );
+                remaining = failed;
+                if pass + 1 < MPU_MAX_RESUME_PASSES {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+            PartPassOutcome::Permanent(mut err) => {
+                let _ = client
+                    .abort_multipart_upload()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(&upload_id)
+                    .send()
+                    .await;
+                err.clears_pending = true;
+                return Err(err);
+            }
+        }
+    }
+
+    if !remaining.is_empty() {
+        let err = last_error.unwrap_or_else(|| ReplicationUploadError {
+            code: Some("PartialUpload".to_string()),
+            message: "multipart upload incomplete".to_string(),
+            is_no_such_bucket: false,
+            pending_mpu: None,
+            clears_pending: false,
+        });
+        let pending = pending_for_error(upload_id.clone());
+        let aborted = pending.is_none();
+        if aborted {
             let _ = client
                 .abort_multipart_upload()
                 .bucket(bucket)
@@ -1604,12 +1887,31 @@ async fn upload_object_multipart(
                 .upload_id(&upload_id)
                 .send()
                 .await;
-            return Err(e);
         }
-    };
+        return Err(ReplicationUploadError {
+            code: err.code.or_else(|| Some("PartialUpload".to_string())),
+            message: format!(
+                "MPU incomplete for {}/{}: {} part(s) still failing after {} pass(es); {}: {}",
+                bucket,
+                key,
+                remaining.len(),
+                MPU_MAX_RESUME_PASSES,
+                if pending.is_some() {
+                    "preserving upload_id for resume"
+                } else {
+                    "no source-identity available, aborting MPU"
+                },
+                err.message
+            ),
+            is_no_such_bucket: false,
+            pending_mpu: pending,
+            clears_pending: aborted || stale_pending_resolved,
+        });
+    }
 
+    completed_parts.sort_by_key(|p| p.part_number().unwrap_or(0));
     let completed = CompletedMultipartUpload::builder()
-        .set_parts(Some(parts))
+        .set_parts(Some(completed_parts))
         .build();
 
     if let Err(e) = client
@@ -1621,88 +1923,271 @@ async fn upload_object_multipart(
         .send()
         .await
     {
-        let mapped = map_sdk_err(e);
-        let _ = client
-            .abort_multipart_upload()
-            .bucket(bucket)
-            .key(key)
-            .upload_id(&upload_id)
-            .send()
-            .await;
-        return Err(mapped);
+        let mut mapped = map_sdk_err(e);
+        if is_no_such_upload_message(&mapped.message) {
+            mapped.clears_pending = true;
+            return Err(mapped);
+        }
+        if !is_transient_upload_error(&mapped) {
+            tracing::error!(
+                "CompleteMultipartUpload returned permanent error for {}/{} (upload_id={}, code={:?}); aborting MPU and not preserving for retry: {}",
+                bucket,
+                key,
+                upload_id,
+                mapped.code,
+                mapped.message
+            );
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+            mapped.clears_pending = true;
+            return Err(mapped);
+        }
+        let pending = pending_for_error(upload_id.clone());
+        let aborted = pending.is_none();
+        if aborted {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+        }
+        return Err(ReplicationUploadError {
+            pending_mpu: pending,
+            clears_pending: aborted || stale_pending_resolved,
+            ..mapped
+        });
     }
 
     Ok(())
 }
 
-async fn run_part_uploads(
+struct ResumeResolution {
+    upload_id: String,
+    completed: HashMap<i32, String>,
+    stale_resolved: bool,
+}
+
+async fn resolve_upload_id_for_resume(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    obj_meta: Option<&ReplicationObjectMeta>,
+    resume: Option<&PendingMpuRef>,
+) -> Result<ResumeResolution, ReplicationUploadError> {
+    let mut stale_resolved = false;
+    if let Some(pending) = resume {
+        match list_completed_parts(client, bucket, key, &pending.upload_id).await {
+            Ok(parts) => {
+                return Ok(ResumeResolution {
+                    upload_id: pending.upload_id.clone(),
+                    completed: parts,
+                    stale_resolved: false,
+                });
+            }
+            Err(err) if is_no_such_upload_message(&err.message) => {
+                tracing::info!(
+                    "Resume upload_id {} for {}/{} no longer valid ({}), starting fresh",
+                    pending.upload_id,
+                    bucket,
+                    key,
+                    err.message
+                );
+                stale_resolved = true;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
+    if let Some(meta) = obj_meta {
+        create_req = apply_meta_to_create_mpu(create_req, meta);
+    }
+    let create_resp = create_req.send().await.map_err(|e| {
+        let mut mapped = map_sdk_err(e);
+        if stale_resolved {
+            mapped.clears_pending = true;
+        }
+        mapped
+    })?;
+    let upload_id = create_resp
+        .upload_id()
+        .map(|s| s.to_string())
+        .ok_or_else(|| ReplicationUploadError {
+            code: None,
+            message: "CreateMultipartUpload returned no UploadId".to_string(),
+            is_no_such_bucket: false,
+            pending_mpu: None,
+            clears_pending: stale_resolved,
+        })?;
+    Ok(ResumeResolution {
+        upload_id,
+        completed: HashMap::new(),
+        stale_resolved,
+    })
+}
+
+async fn list_completed_parts(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+) -> Result<HashMap<i32, String>, ReplicationUploadError> {
+    let mut parts = HashMap::new();
+    let mut marker: Option<i32> = None;
+    loop {
+        let mut req = client
+            .list_parts()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(upload_id);
+        if let Some(m) = marker {
+            req = req.part_number_marker(m.to_string());
+        }
+        let resp = req.send().await.map_err(map_sdk_err)?;
+        for p in resp.parts() {
+            if let (Some(num), Some(etag)) = (p.part_number(), p.e_tag()) {
+                parts.insert(num, etag.to_string());
+            }
+        }
+        if !resp.is_truncated().unwrap_or(false) {
+            break;
+        }
+        marker = resp.next_part_number_marker().and_then(|s| s.parse().ok());
+        if marker.is_none() {
+            break;
+        }
+    }
+    Ok(parts)
+}
+
+enum PartPassOutcome {
+    AllDone(Vec<CompletedPart>),
+    Partial {
+        done: Vec<CompletedPart>,
+        failed: Vec<PartPlan>,
+        last_error: ReplicationUploadError,
+    },
+    Permanent(ReplicationUploadError),
+}
+
+async fn run_part_pass(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     key: &str,
     upload_id: &str,
     path: &Path,
-    file_size: u64,
-    part_size: u64,
-    total_parts: i32,
+    plan: &[PartPlan],
     tuning: &ResolvedTuning,
-) -> Result<Vec<CompletedPart>, ReplicationUploadError> {
-    let mut tasks: JoinSet<Result<CompletedPart, ReplicationUploadError>> = JoinSet::new();
-    let mut next_part: i32 = 1;
-    let mut parts: Vec<CompletedPart> = Vec::with_capacity(total_parts as usize);
+    stall_timeout: Duration,
+) -> PartPassOutcome {
     let concurrency = tuning.multipart_concurrency.max(1);
     let buffer_bytes = tuning.part_buffer_bytes;
     let max_in_place = tuning.mpu_in_place_retries;
     let lower_sdk_retry = max_in_place > 1;
+    let mut tasks: JoinSet<(PartPlan, Result<CompletedPart, ReplicationUploadError>)> =
+        JoinSet::new();
+    let mut idx = 0usize;
+    let mut done: Vec<CompletedPart> = Vec::new();
+    let mut failed: Vec<PartPlan> = Vec::new();
+    let mut permanent: Option<ReplicationUploadError> = None;
+    let mut last_error: Option<ReplicationUploadError> = None;
 
     loop {
-        while tasks.len() < concurrency && next_part <= total_parts {
-            let part_number = next_part;
-            let offset = (part_number as u64 - 1) * part_size;
-            let length = std::cmp::min(part_size, file_size - offset);
+        while permanent.is_none() && tasks.len() < concurrency && idx < plan.len() {
+            let p = plan[idx].clone();
             let client = client.clone();
             let bucket = bucket.to_string();
             let key = key.to_string();
             let upload_id = upload_id.to_string();
             let path = path.to_path_buf();
             tasks.spawn(async move {
-                upload_one_part_with_retry(
+                let res = upload_one_part_with_retry(
                     &client,
                     &bucket,
                     &key,
                     &upload_id,
                     &path,
-                    offset,
-                    length,
-                    part_number,
+                    p.offset,
+                    p.length,
+                    p.part_number,
                     buffer_bytes,
                     max_in_place,
                     lower_sdk_retry,
+                    stall_timeout,
                 )
-                .await
+                .await;
+                (p, res)
             });
-            next_part += 1;
+            idx += 1;
         }
 
         match tasks.join_next().await {
-            Some(Ok(Ok(part))) => parts.push(part),
-            Some(Ok(Err(e))) => {
-                drain_join_set(&mut tasks).await;
-                return Err(e);
+            Some(Ok((_, Ok(part)))) => done.push(part),
+            Some(Ok((p, Err(e)))) => {
+                if !is_transient_upload_error(&e) {
+                    if permanent.is_none() {
+                        permanent = Some(e.clone());
+                        tasks.abort_all();
+                    }
+                } else {
+                    failed.push(p);
+                }
+                last_error = Some(e);
             }
             Some(Err(join_err)) => {
-                drain_join_set(&mut tasks).await;
-                return Err(ReplicationUploadError {
-                    code: None,
-                    message: format!("part upload task panicked: {}", join_err),
-                    is_no_such_bucket: false,
-                });
+                if join_err.is_cancelled() {
+                    last_error.get_or_insert_with(|| ReplicationUploadError {
+                        code: Some("PartCancelled".to_string()),
+                        message: format!("part upload task cancelled: {}", join_err),
+                        is_no_such_bucket: false,
+                        pending_mpu: None,
+                        clears_pending: false,
+                    });
+                } else {
+                    tracing::error!("Part upload task panicked: {}", join_err);
+                    let err = ReplicationUploadError {
+                        code: Some("PartTaskPanic".to_string()),
+                        message: format!("part upload task panicked: {}", join_err),
+                        is_no_such_bucket: false,
+                        pending_mpu: None,
+                        clears_pending: false,
+                    };
+                    last_error = Some(err.clone());
+                    if permanent.is_none() {
+                        permanent = Some(err);
+                        tasks.abort_all();
+                    }
+                }
             }
             None => break,
         }
     }
 
-    parts.sort_by_key(|p| p.part_number().unwrap_or(0));
-    Ok(parts)
+    if let Some(perm) = permanent {
+        return PartPassOutcome::Permanent(perm);
+    }
+    if failed.is_empty() {
+        PartPassOutcome::AllDone(done)
+    } else {
+        PartPassOutcome::Partial {
+            done,
+            failed,
+            last_error: last_error.unwrap_or_else(|| ReplicationUploadError {
+                code: Some("PartialUpload".to_string()),
+                message: "one or more parts failed".to_string(),
+                is_no_such_bucket: false,
+                pending_mpu: None,
+                clears_pending: false,
+            }),
+        }
+    }
 }
 
 async fn upload_one_part_with_retry(
@@ -1717,6 +2202,7 @@ async fn upload_one_part_with_retry(
     buffer_bytes: usize,
     max_in_place: u32,
     lower_sdk_retry: bool,
+    stall_timeout: Duration,
 ) -> Result<CompletedPart, ReplicationUploadError> {
     let mut attempt: u32 = 0;
     loop {
@@ -1731,6 +2217,7 @@ async fn upload_one_part_with_retry(
             part_number,
             buffer_bytes,
             lower_sdk_retry,
+            stall_timeout,
         )
         .await
         {
@@ -1765,13 +2252,10 @@ fn is_transient_upload_error(err: &ReplicationUploadError) -> bool {
                 | "InternalError"
                 | "ServiceUnavailable"
                 | "BadDigest"
+                | "BodyStalled"
+                | "PartialUpload"
         ),
     }
-}
-
-async fn drain_join_set(tasks: &mut JoinSet<Result<CompletedPart, ReplicationUploadError>>) {
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
 }
 
 async fn upload_one_part(
@@ -1785,13 +2269,10 @@ async fn upload_one_part(
     part_number: i32,
     buffer_bytes: usize,
     lower_sdk_retry: bool,
+    stall_timeout: Duration,
 ) -> Result<CompletedPart, ReplicationUploadError> {
-    let body = ByteStream::read_from()
-        .path(path)
-        .offset(offset)
-        .length(Length::Exact(length))
-        .buffer_size(buffer_bytes)
-        .build()
+    let progress = ProgressTracker::new();
+    let body = build_progress_body(path, offset, length, buffer_bytes, progress.clone())
         .await
         .map_err(|e| ReplicationUploadError {
             code: None,
@@ -1804,6 +2285,8 @@ async fn upload_one_part(
                 e
             ),
             is_no_such_bucket: false,
+            pending_mpu: None,
+            clears_pending: false,
         })?;
 
     let req = client
@@ -1815,22 +2298,149 @@ async fn upload_one_part(
         .content_length(length as i64)
         .body(body);
 
-    let resp = if lower_sdk_retry {
-        let override_cfg = aws_sdk_s3::config::Builder::default()
-            .retry_config(aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(1));
-        req.customize()
-            .config_override(override_cfg)
-            .send()
-            .await
-            .map_err(map_sdk_err)?
-    } else {
-        req.send().await.map_err(map_sdk_err)?
+    let send_fut = async {
+        if lower_sdk_retry {
+            let override_cfg = aws_sdk_s3::config::Builder::default()
+                .retry_config(aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(1));
+            req.customize()
+                .config_override(override_cfg)
+                .send()
+                .await
+                .map_err(map_sdk_err)
+        } else {
+            req.send().await.map_err(map_sdk_err)
+        }
+    };
+
+    let watchdog = body_stall_watchdog(progress.clone(), stall_timeout);
+
+    tokio::pin!(send_fut);
+    tokio::pin!(watchdog);
+
+    let resp = tokio::select! {
+        biased;
+        result = &mut send_fut => result?,
+        _ = &mut watchdog => {
+            return Err(ReplicationUploadError {
+                code: Some("BodyStalled".to_string()),
+                message: format!(
+                    "part {} upload stalled: no body progress for > {:?} (bytes read so far: {})",
+                    part_number,
+                    stall_timeout,
+                    progress.bytes_read()
+                ),
+                is_no_such_bucket: false,
+                pending_mpu: None,
+                clears_pending: false,
+            });
+        }
     };
 
     Ok(CompletedPart::builder()
         .part_number(part_number)
         .set_e_tag(resp.e_tag().map(|s| s.to_string()))
         .build())
+}
+
+async fn build_progress_body(
+    path: &Path,
+    offset: u64,
+    length: u64,
+    buffer_bytes: usize,
+    progress: Arc<ProgressTracker>,
+) -> std::io::Result<ByteStream> {
+    use tokio::io::AsyncSeekExt;
+    let mut file = tokio::fs::File::open(path).await?;
+    if offset > 0 {
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+    }
+    let limited = tokio::io::AsyncReadExt::take(file, length);
+    let progress_reader = ProgressReader::new(limited, progress);
+    let cap = buffer_bytes.max(64 * 1024);
+    let stream = tokio_util::io::ReaderStream::with_capacity(progress_reader, cap);
+    use futures::stream::TryStreamExt;
+    let framed = stream.map_ok(http_body::Frame::data);
+    let body = http_body_util::StreamBody::new(framed);
+    let mapped = http_body_util::BodyExt::map_err(
+        body,
+        |e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) },
+    );
+    let sdk_body = aws_smithy_types::body::SdkBody::from_body_1_x(mapped);
+    Ok(ByteStream::new(sdk_body))
+}
+
+async fn body_stall_watchdog(progress: Arc<ProgressTracker>, stall_timeout: Duration) {
+    let stall_micros = stall_timeout.as_micros() as u64;
+    let check = Duration::from_millis(500).min(stall_timeout.max(Duration::from_millis(500)) / 4);
+    loop {
+        tokio::time::sleep(check).await;
+        let last = progress.last_progress_micros();
+        let now = now_micros();
+        if now.saturating_sub(last) > stall_micros {
+            return;
+        }
+    }
+}
+
+struct ProgressTracker {
+    last_progress_micros: AtomicU64,
+    bytes_read: AtomicU64,
+}
+
+impl ProgressTracker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            last_progress_micros: AtomicU64::new(now_micros()),
+            bytes_read: AtomicU64::new(0),
+        })
+    }
+    fn record(&self, n: usize) {
+        self.last_progress_micros
+            .store(now_micros(), Ordering::Relaxed);
+        self.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+    }
+    fn last_progress_micros(&self) -> u64 {
+        self.last_progress_micros.load(Ordering::Relaxed)
+    }
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+}
+
+struct ProgressReader<R> {
+    inner: R,
+    progress: Arc<ProgressTracker>,
+}
+
+impl<R> ProgressReader<R> {
+    fn new(inner: R, progress: Arc<ProgressTracker>) -> Self {
+        Self { inner, progress }
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ProgressReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &result {
+            let n = buf.filled().len() - before;
+            if n > 0 {
+                self.progress.record(n);
+            }
+        }
+        result
+    }
+}
+
+fn now_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 fn apply_meta_to_put_object(
@@ -2058,19 +2668,41 @@ mod tests {
             10 * 1024 * 1024,
             5000,
             true,
+            Duration::from_secs(300),
         );
         std::mem::forget(tmp);
         manager
     }
 
+    fn empty_failure(key: &str) -> ReplicationFailure {
+        ReplicationFailure {
+            object_key: key.into(),
+            error_message: "x".into(),
+            timestamp: 0.0,
+            failure_count: 1,
+            bucket_name: "b".into(),
+            action: "write".into(),
+            last_error_code: None,
+            pending_upload_id: None,
+            pending_source_size: None,
+            pending_source_etag: None,
+            pending_part_size: None,
+        }
+    }
+
+    fn upload_err(code: Option<&str>, transient_msg: &str) -> ReplicationUploadError {
+        ReplicationUploadError {
+            code: code.map(|s| s.to_string()),
+            message: transient_msg.to_string(),
+            is_no_such_bucket: false,
+            pending_mpu: None,
+            clears_pending: false,
+        }
+    }
+
     #[test]
     fn is_transient_classifies_transport_errors_as_retryable() {
-        let err = ReplicationUploadError {
-            code: None,
-            message: "connection reset".to_string(),
-            is_no_such_bucket: false,
-        };
-        assert!(is_transient_upload_error(&err));
+        assert!(is_transient_upload_error(&upload_err(None, "connection reset")));
     }
 
     #[test]
@@ -2081,25 +2713,35 @@ mod tests {
             "InternalError",
             "ServiceUnavailable",
             "BadDigest",
+            "BodyStalled",
+            "PartialUpload",
         ] {
-            let err = ReplicationUploadError {
-                code: Some(code.to_string()),
-                message: code.to_string(),
-                is_no_such_bucket: false,
-            };
-            assert!(is_transient_upload_error(&err), "expected {} transient", code);
+            assert!(
+                is_transient_upload_error(&upload_err(Some(code), code)),
+                "expected {} transient",
+                code
+            );
         }
     }
 
     #[test]
     fn is_transient_classifies_permanent_errors_as_non_retryable() {
-        for code in ["AccessDenied", "EntityTooLarge", "InvalidArgument", "NoSuchKey"] {
-            let err = ReplicationUploadError {
-                code: Some(code.to_string()),
-                message: code.to_string(),
-                is_no_such_bucket: false,
-            };
-            assert!(!is_transient_upload_error(&err), "expected {} non-transient", code);
+        for code in [
+            "AccessDenied",
+            "EntityTooLarge",
+            "InvalidArgument",
+            "NoSuchKey",
+            "InvalidPart",
+            "EntityTooSmall",
+            "InvalidPartOrder",
+            "MalformedXML",
+            "PartTaskPanic",
+        ] {
+            assert!(
+                !is_transient_upload_error(&upload_err(Some(code), code)),
+                "expected {} non-transient",
+                code
+            );
         }
     }
 
@@ -2109,8 +2751,172 @@ mod tests {
             code: None,
             message: "no such bucket".to_string(),
             is_no_such_bucket: true,
+            pending_mpu: None,
+            clears_pending: false,
         };
         assert!(!is_transient_upload_error(&err));
+    }
+
+    fn failure_with_pending(
+        key: &str,
+        upload_id: &str,
+        size: u64,
+        etag: &str,
+        part_size: u64,
+    ) -> ReplicationFailure {
+        let mut f = empty_failure(key);
+        f.pending_upload_id = Some(upload_id.into());
+        f.pending_source_size = Some(size);
+        f.pending_source_etag = Some(etag.into());
+        f.pending_part_size = Some(part_size);
+        f
+    }
+
+    #[test]
+    fn failure_store_preserves_pending_upload_id_when_new_failure_has_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
+        store.add("b", failure_with_pending("k", "upload-1", 2048, "etag-1", 256));
+        store.add("b", empty_failure("k"));
+        let got = store.get("b", "k").expect("present");
+        assert_eq!(got.pending_upload_id.as_deref(), Some("upload-1"));
+        assert_eq!(got.pending_source_size, Some(2048));
+        assert_eq!(got.pending_source_etag.as_deref(), Some("etag-1"));
+        assert_eq!(got.pending_part_size, Some(256));
+        assert_eq!(got.failure_count, 2);
+    }
+
+    #[test]
+    fn failure_store_overwrites_pending_upload_id_and_identity_when_new_failure_has_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
+        store.add("b", failure_with_pending("k", "upload-1", 2048, "etag-1", 256));
+        store.add("b", failure_with_pending("k", "upload-2", 4096, "etag-2", 512));
+        let got = store.get("b", "k").expect("present");
+        assert_eq!(got.pending_upload_id.as_deref(), Some("upload-2"));
+        assert_eq!(got.pending_source_size, Some(4096));
+        assert_eq!(got.pending_source_etag.as_deref(), Some("etag-2"));
+        assert_eq!(got.pending_part_size, Some(512));
+    }
+
+    #[test]
+    fn pending_mpu_if_complete_requires_all_four_fields() {
+        let mut f = empty_failure("k");
+        assert!(f.pending_mpu_if_complete().is_none());
+        f.pending_upload_id = Some("u".into());
+        assert!(f.pending_mpu_if_complete().is_none());
+        f.pending_source_size = Some(1);
+        assert!(f.pending_mpu_if_complete().is_none());
+        f.pending_source_etag = Some("e".into());
+        assert!(f.pending_mpu_if_complete().is_none());
+        f.pending_part_size = Some(8 * 1024 * 1024);
+        let pending = f.pending_mpu_if_complete().expect("complete");
+        assert_eq!(pending.upload_id, "u");
+        assert_eq!(pending.source_size, 1);
+        assert_eq!(pending.source_etag, "e");
+        assert_eq!(pending.part_size, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn pending_mpu_ref_matches_source_only_when_size_and_etag_match() {
+        let pending = PendingMpuRef {
+            upload_id: "u".into(),
+            source_size: 100,
+            source_etag: "abc".into(),
+            part_size: 8 * 1024 * 1024,
+        };
+        assert!(pending.matches_source(100, Some("abc")));
+        assert!(!pending.matches_source(101, Some("abc")));
+        assert!(!pending.matches_source(100, Some("xyz")));
+        assert!(!pending.matches_source(100, None));
+    }
+
+    #[test]
+    fn clear_pending_mpu_only_touches_identity_fields() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
+        let mut f = failure_with_pending("k", "u", 1, "e", 256);
+        f.failure_count = 7;
+        store.add("b", f);
+        assert!(store.clear_pending_mpu("b", "k"));
+        let got = store.get("b", "k").expect("still present");
+        assert!(got.pending_upload_id.is_none());
+        assert!(got.pending_source_size.is_none());
+        assert!(got.pending_source_etag.is_none());
+        assert!(got.pending_part_size.is_none());
+        assert_eq!(got.failure_count, 7);
+        assert!(!store.clear_pending_mpu("b", "k"));
+    }
+
+    #[test]
+    fn upload_error_default_does_not_clear_pending() {
+        let err = upload_err(Some("RequestTimeout"), "RequestTimeout");
+        assert!(!err.clears_pending);
+    }
+
+    #[tokio::test]
+    async fn watchdog_fires_when_no_bytes_ever_read() {
+        let progress = ProgressTracker::new();
+        let result = tokio::time::timeout(
+            Duration::from_millis(1500),
+            body_stall_watchdog(progress, Duration::from_millis(300)),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "watchdog must fire when zero bytes ever flow"
+        );
+    }
+
+    #[tokio::test]
+    async fn watchdog_does_not_fire_while_progress_continues() {
+        let progress = ProgressTracker::new();
+        let driver = {
+            let progress = progress.clone();
+            tokio::spawn(async move {
+                for _ in 0..6 {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    progress.record(1024);
+                }
+            })
+        };
+        let result = tokio::time::timeout(
+            Duration::from_millis(900),
+            body_stall_watchdog(progress, Duration::from_millis(500)),
+        )
+        .await;
+        let _ = driver.await;
+        assert!(
+            result.is_err(),
+            "watchdog must not fire while bytes are still flowing"
+        );
+    }
+
+    #[tokio::test]
+    async fn watchdog_fires_after_progress_then_stalls() {
+        let progress = ProgressTracker::new();
+        progress.record(1024);
+        let result = tokio::time::timeout(
+            Duration::from_millis(1500),
+            body_stall_watchdog(progress, Duration::from_millis(300)),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "watchdog must fire once progress stops for the timeout window"
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_tracker_records_byte_reads() {
+        use tokio::io::AsyncReadExt;
+        let progress = ProgressTracker::new();
+        let data: &[u8] = b"hello world";
+        let mut reader = ProgressReader::new(data, progress.clone());
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, b"hello world");
+        assert_eq!(progress.bytes_read(), 11);
     }
 
     #[test]
