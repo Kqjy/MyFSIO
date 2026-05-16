@@ -10,7 +10,8 @@ use myfsio_storage::traits::StorageEngine;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{RwLock, Semaphore};
 
@@ -90,10 +91,24 @@ pub struct IntegrityService {
     storage_root: PathBuf,
     config: IntegrityConfig,
     peer_fetcher: Option<Arc<PeerFetcher>>,
-    running: Arc<RwLock<bool>>,
-    started_at: Arc<RwLock<Option<Instant>>>,
+    running: Arc<AtomicBool>,
+    started_at: Arc<StdMutex<Option<Instant>>>,
     history: Arc<RwLock<Vec<Value>>>,
     history_path: PathBuf,
+}
+
+struct RunGuard {
+    running: Arc<AtomicBool>,
+    started_at: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.started_at.lock() {
+            *guard = None;
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -182,21 +197,20 @@ impl IntegrityService {
             storage_root: storage_root.to_path_buf(),
             config,
             peer_fetcher,
-            running: Arc::new(RwLock::new(false)),
-            started_at: Arc::new(RwLock::new(None)),
+            running: Arc::new(AtomicBool::new(false)),
+            started_at: Arc::new(StdMutex::new(None)),
             history: Arc::new(RwLock::new(history)),
             history_path,
         }
     }
 
     pub async fn status(&self) -> Value {
-        let running = *self.running.read().await;
+        let running = self.running.load(Ordering::SeqCst);
         let scan_elapsed_seconds = self
             .started_at
-            .read()
-            .await
-            .as_ref()
-            .map(|started| started.elapsed().as_secs_f64());
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|started| started.elapsed().as_secs_f64()));
         json!({
             "enabled": true,
             "running": running,
@@ -218,16 +232,51 @@ impl IntegrityService {
         json!({ "executions": executions })
     }
 
-    pub async fn run_now(&self, dry_run: bool, auto_heal: bool) -> Result<Value, String> {
+    fn try_claim(&self) -> Result<(), String> {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
         {
-            let mut running = self.running.write().await;
-            if *running {
-                return Err("Integrity check already running".to_string());
-            }
-            *running = true;
+            return Err("Integrity check already running".to_string());
         }
-        *self.started_at.write().await = Some(Instant::now());
+        if let Ok(mut guard) = self.started_at.lock() {
+            *guard = Some(Instant::now());
+        }
+        Ok(())
+    }
 
+    pub async fn run_now(self: Arc<Self>, dry_run: bool, auto_heal: bool) -> Result<Value, String> {
+        self.try_claim()?;
+        let svc = self.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = RunGuard {
+                running: svc.running.clone(),
+                started_at: svc.started_at.clone(),
+            };
+            svc.execute(dry_run, auto_heal).await
+        });
+        handle
+            .await
+            .unwrap_or_else(|e| Err(format!("integrity task aborted: {}", e)))
+    }
+
+    pub fn start_run(self: Arc<Self>, dry_run: bool, auto_heal: bool) -> Result<(), String> {
+        self.try_claim()?;
+        let svc = self.clone();
+        tokio::spawn(async move {
+            let _guard = RunGuard {
+                running: svc.running.clone(),
+                started_at: svc.started_at.clone(),
+            };
+            if let Err(e) = svc.execute(dry_run, auto_heal).await {
+                tracing::warn!("Integrity check failed: {}", e);
+            }
+        });
+        Ok(())
+    }
+
+    async fn execute(&self, dry_run: bool, auto_heal: bool) -> Result<Value, String> {
         let start = Instant::now();
         let storage_root = self.storage_root.clone();
         let batch_size = self.config.batch_size;
@@ -247,9 +296,6 @@ impl IntegrityService {
         };
 
         let elapsed = start.elapsed().as_secs_f64();
-
-        *self.running.write().await = false;
-        *self.started_at.write().await = None;
 
         let result_json = build_result_json(scan_state, heal_stats, elapsed);
 
@@ -366,7 +412,7 @@ impl IntegrityService {
             loop {
                 timer.tick().await;
                 tracing::info!("Integrity check starting");
-                match self.run_now(dry_run, auto_heal).await {
+                match Arc::clone(&self).run_now(dry_run, auto_heal).await {
                     Ok(result) => tracing::info!("Integrity check complete: {:?}", result),
                     Err(e) => tracing::warn!("Integrity check failed: {}", e),
                 }

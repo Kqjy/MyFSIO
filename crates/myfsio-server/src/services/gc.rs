@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::RwLock;
 
@@ -29,10 +30,24 @@ impl Default for GcConfig {
 pub struct GcService {
     storage_root: PathBuf,
     config: GcConfig,
-    running: Arc<RwLock<bool>>,
-    started_at: Arc<RwLock<Option<Instant>>>,
+    running: Arc<AtomicBool>,
+    started_at: Arc<StdMutex<Option<Instant>>>,
     history: Arc<RwLock<Vec<Value>>>,
     history_path: PathBuf,
+}
+
+struct RunGuard {
+    running: Arc<AtomicBool>,
+    started_at: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.started_at.lock() {
+            *guard = None;
+        }
+    }
 }
 
 impl GcService {
@@ -55,21 +70,20 @@ impl GcService {
         Self {
             storage_root,
             config,
-            running: Arc::new(RwLock::new(false)),
-            started_at: Arc::new(RwLock::new(None)),
+            running: Arc::new(AtomicBool::new(false)),
+            started_at: Arc::new(StdMutex::new(None)),
             history: Arc::new(RwLock::new(history)),
             history_path,
         }
     }
 
     pub async fn status(&self) -> Value {
-        let running = *self.running.read().await;
+        let running = self.running.load(Ordering::SeqCst);
         let scan_elapsed_seconds = self
             .started_at
-            .read()
-            .await
-            .as_ref()
-            .map(|started| started.elapsed().as_secs_f64());
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|started| started.elapsed().as_secs_f64()));
         json!({
             "enabled": true,
             "running": running,
@@ -91,22 +105,54 @@ impl GcService {
         json!({ "executions": executions })
     }
 
-    pub async fn run_now(&self, dry_run: bool) -> Result<Value, String> {
+    fn try_claim(&self) -> Result<(), String> {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
         {
-            let mut running = self.running.write().await;
-            if *running {
-                return Err("GC already running".to_string());
-            }
-            *running = true;
+            return Err("GC already running".to_string());
         }
-        *self.started_at.write().await = Some(Instant::now());
+        if let Ok(mut guard) = self.started_at.lock() {
+            *guard = Some(Instant::now());
+        }
+        Ok(())
+    }
 
+    pub async fn run_now(self: Arc<Self>, dry_run: bool) -> Result<Value, String> {
+        self.try_claim()?;
+        let svc = self.clone();
+        let handle = tokio::spawn(async move {
+            let _guard = RunGuard {
+                running: svc.running.clone(),
+                started_at: svc.started_at.clone(),
+            };
+            svc.execute(dry_run).await
+        });
+        handle
+            .await
+            .unwrap_or_else(|e| Err(format!("GC task aborted: {}", e)))
+    }
+
+    pub fn start_run(self: Arc<Self>, dry_run: bool) -> Result<(), String> {
+        self.try_claim()?;
+        let svc = self.clone();
+        tokio::spawn(async move {
+            let _guard = RunGuard {
+                running: svc.running.clone(),
+                started_at: svc.started_at.clone(),
+            };
+            if let Err(e) = svc.execute(dry_run).await {
+                tracing::warn!("GC cycle failed: {}", e);
+            }
+        });
+        Ok(())
+    }
+
+    async fn execute(&self, dry_run: bool) -> Result<Value, String> {
         let start = Instant::now();
         let result = self.execute_gc(dry_run || self.config.dry_run).await;
         let elapsed = start.elapsed().as_secs_f64();
-
-        *self.running.write().await = false;
-        *self.started_at.write().await = None;
 
         let mut result_json = result.clone();
         if let Some(obj) = result_json.as_object_mut() {
@@ -334,7 +380,7 @@ impl GcService {
             loop {
                 timer.tick().await;
                 tracing::info!("GC cycle starting");
-                match self.run_now(false).await {
+                match Arc::clone(&self).run_now(false).await {
                     Ok(result) => tracing::info!("GC cycle complete: {:?}", result),
                     Err(e) => tracing::warn!("GC cycle failed: {}", e),
                 }
@@ -375,14 +421,14 @@ mod tests {
         std::fs::write(&file_path, b"temporary").unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-        let service = GcService::new(
+        let service = Arc::new(GcService::new(
             tmp.path().to_path_buf(),
             GcConfig {
                 temp_file_max_age_hours: 0.0,
                 dry_run: true,
                 ..GcConfig::default()
             },
-        );
+        ));
 
         let result = service.run_now(false).await.unwrap();
 

@@ -8232,9 +8232,6 @@ async fn test_upload_part_copy_with_version_id_null() {
 
     let complete_xml = format!(
         "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
-        // The CopyPartResult ETag is the MD5 of the copied bytes — for "legacy-null-bytes"
-        // we don't need to verify the exact value here; we just need the complete to succeed.
-        // List the parts to get the etag.
         list_first_part_etag(&app, "null-mpcp-dst", "recovered", &upload_id).await,
     );
     let resp = app

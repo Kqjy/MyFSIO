@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::path::{Component, Path as FsPath, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Extension, Path, Query, State};
@@ -140,11 +140,6 @@ async fn authorize_ui_list_prefix(
     bucket: &str,
     prefix: &str,
 ) -> Result<(), Response> {
-    // ListBucket has split semantics: IAM honors the per-prefix scope, but
-    // bucket policies on the bucket ARN (arn:aws:s3:::bucket) only match
-    // when object_key is None. Passing the prefix to both checks would make
-    // `Deny ListBucket` policies neutral and let an IAM allow slip through.
-    // Use the dedicated middleware helper that splits the two evaluations.
     let access_key = match session.read(|s| s.user_id.clone()) {
         Some(k) => k,
         None => {
@@ -1525,7 +1520,6 @@ pub async fn bucket_stats_json(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    // Bucket-wide aggregate — require unrestricted list scope.
     if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
         return resp;
     }
@@ -2599,10 +2593,6 @@ pub async fn upload_object(
         Err(response) => return response,
     };
 
-    // Authorize against the actual object key — IamService::authorize only
-    // evaluates prefix scoping when an object key is provided, so checking
-    // bucket-level write earlier would let a prefix-scoped user upload outside
-    // their allowed prefix.
     if let Err(resp) =
         ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
     {
@@ -3894,10 +3884,6 @@ pub async fn bulk_delete_objects(
         );
     }
 
-    // Folder-style entries (`foo/`) require a list to expand into concrete
-    // keys. Authorize list against each folder prefix individually so a
-    // prefix-scoped user can only expand folders inside their allowed
-    // prefix.
     for entry in &cleaned {
         if entry.ends_with('/') {
             if let Err(resp) =
@@ -3932,10 +3918,6 @@ pub async fn bulk_delete_objects(
     let mut errors = Vec::new();
 
     for key in keys {
-        // Authorize each concrete key. Prefix-scoped IAM policies are only
-        // evaluated when an object key is supplied to IamService::authorize,
-        // so a single bucket-level check up-front would let users delete keys
-        // outside their allowed prefix.
         if let Err(message) =
             authorize_bulk_key(&state, &session, &bucket_name, &key).await
         {
@@ -4029,9 +4011,6 @@ pub async fn bulk_download_objects(
         );
     }
 
-    // Folder-style entries (`foo/`) require a list to expand. Authorize list
-    // against each folder prefix so a prefix-scoped user can only expand
-    // folders inside their allowed prefix.
     for entry in &cleaned {
         if entry.ends_with('/') {
             if let Err(resp) =
@@ -4056,8 +4035,6 @@ pub async fn bulk_download_objects(
     let mut total_bytes = 0u64;
     let mut archive_entries = Vec::new();
     for key in keys {
-        // Authorize each concrete key — IamService::authorize only honors
-        // prefix scoping when an object key is supplied.
         if let Err(message) =
             authorize_bulk_key_for(&state, &session, &bucket_name, &key, "read").await
         {
@@ -4104,7 +4081,6 @@ pub async fn archived_objects(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    // Walks the whole bucket's archive tree — require unrestricted list scope.
     if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
         return resp;
     }
@@ -4254,8 +4230,12 @@ pub async fn gc_run_ui(
         .get("dry_run")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    match gc.run_now(dry_run).await {
-        Ok(result) => Json(result).into_response(),
+    match Arc::clone(gc).start_run(dry_run) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({"status": "started", "running": true})),
+        )
+            .into_response(),
         Err(err) => json_error(StatusCode::CONFLICT, err),
     }
 }
@@ -4303,8 +4283,12 @@ pub async fn integrity_run_ui(
         .get("auto_heal")
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    match checker.run_now(dry_run, auto_heal).await {
-        Ok(result) => Json(result).into_response(),
+    match Arc::clone(checker).start_run(dry_run, auto_heal) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({"status": "started", "scanning": true})),
+        )
+            .into_response(),
         Err(err) => json_error(StatusCode::CONFLICT, err),
     }
 }

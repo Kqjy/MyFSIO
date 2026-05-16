@@ -2160,10 +2160,6 @@ pub async fn put_object(
                         }
                         Err(e) => {
                             let _ = tokio::fs::remove_file(&enc_tmp).await;
-                            // Plaintext made it onto the live object path before
-                            // encryption was attempted; remove it so we never
-                            // leave plaintext at the canonical key location when
-                            // the caller asked for SSE.
                             let _ = state.storage.delete_object(&bucket, &key).await;
                             return s3_error_response(S3Error::new(
                                 myfsio_common::error::S3ErrorCode::InternalError,
@@ -2272,12 +2268,6 @@ pub async fn get_object(
 
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
 
-    // Take a single snapshot of the live object BEFORE deciding whether it's
-    // encrypted. If we sniffed encryption from head_meta first, a PUT could
-    // flip the object's encryption state between head and snapshot — leaving
-    // us either serving ciphertext through the raw path or failing because
-    // the snapshot no longer has encryption metadata. All decisions must
-    // come from this snapshot.
     let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
     let _ = tokio::fs::create_dir_all(&tmp_dir).await;
     let snap_link = tmp_dir.join(format!("src-{}", uuid::Uuid::new_v4()));
@@ -2334,10 +2324,6 @@ pub async fn get_object(
         }
     }
 
-    // Evaluate preconditions against the served snapshot's metadata. A HEAD
-    // taken earlier could disagree with the snapshot if a concurrent PUT
-    // landed in between, causing us to serve a body that doesn't satisfy
-    // the caller's If-Match / If-None-Match / time conditions.
     if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
         let _ = tokio::fs::remove_file(&snap_link).await;
         return resp;
@@ -2366,8 +2352,6 @@ pub async fn get_object(
                 let decrypt_res = enc_svc
                     .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
                     .await;
-                // Hardlink served its purpose; the decrypted plaintext is in
-                // dec_tmp now.
                 let _ = tokio::fs::remove_file(&snap_link).await;
                 if let Err(e) = decrypt_res {
                     let _ = tokio::fs::remove_file(&dec_tmp).await;
@@ -2387,9 +2371,6 @@ pub async fn get_object(
                 (file, file_size, Some(enc_info.algorithm.as_str()))
             }
             (Some(_), None) => {
-                // Snapshot is encrypted but the server has no encryption
-                // service configured to decrypt it. Serving ciphertext as
-                // plaintext would be actively wrong; refuse explicitly.
                 let _ = tokio::fs::remove_file(&snap_link).await;
                 return s3_error_response(S3Error::new(
                     myfsio_common::error::S3ErrorCode::InternalError,
@@ -2397,9 +2378,6 @@ pub async fn get_object(
                 ));
             }
             (None, _) => {
-                // Raw path: stream directly from the hardlink, which becomes
-                // self-deleting on open (kernel keeps the inode alive via our
-                // fd).
                 let file = match open_self_deleting(snap_link.clone()).await {
                     Ok(f) => f,
                     Err(e) => {
@@ -3026,13 +3004,6 @@ async fn complete_multipart_handler(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    // The storage backend always finalizes to the key recorded in the upload
-    // manifest, regardless of which {key} the caller put in the URL. If those
-    // disagree, every post-complete step here (SSE encrypt-in-place,
-    // archived-null lock check, tagging, replication signal) would address
-    // the wrong path while the actual object lands somewhere else. Reject
-    // the request the way AWS S3 does instead of finalizing to one key and
-    // then operating on another.
     let manifest_key = match state.storage.list_multipart_uploads(bucket).await {
         Ok(uploads) => uploads
             .into_iter()
@@ -3173,10 +3144,6 @@ async fn complete_multipart_handler(
             };
             apply_pending_multipart_tagging(state, bucket, key).await;
 
-            // The pending-SSE markers were written into the multipart manifest
-            // at initiate time and only become visible on the object after
-            // complete_multipart copies the manifest's metadata down. So this
-            // lookup MUST run after complete, not before.
             let pending_sse = read_pending_multipart_sse(state, bucket, key).await;
 
             let mut sse_alg_response: Option<String> = None;
@@ -4165,7 +4132,7 @@ async fn serve_range_from_snapshot(
                         key,
                         query,
                         Some(enc_info.algorithm.as_str()),
-                        /* already_trimmed */ true,
+                        true,
                         parts_count,
                     )
                     .await;
@@ -4220,7 +4187,7 @@ async fn serve_range_from_snapshot(
         key,
         query,
         enc_header,
-        /* already_trimmed */ false,
+        false,
         parts_count,
     )
     .await
@@ -5389,7 +5356,6 @@ mod tests {
 
     #[test]
     fn is_aws_chunked_detection() {
-        // Streaming SigV4 sha header alone => chunked.
         let mut h = HeaderMap::new();
         h.insert(
             "x-amz-content-sha256",
@@ -5397,14 +5363,11 @@ mod tests {
         );
         assert!(is_aws_chunked(&h));
 
-        // Content-Encoding aws-chunked + decoded-length => chunked (no streaming sha).
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "aws-chunked, gzip".parse().unwrap());
         h.insert("x-amz-decoded-content-length", "100".parse().unwrap());
         assert!(is_aws_chunked(&h));
 
-        // Content-Encoding aws-chunked but no decoded-length and no streaming sha
-        // (e.g. user passed it as metadata): NOT chunked, body is plain.
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "gzip, aws-chunked".parse().unwrap());
         h.insert(
@@ -5413,7 +5376,6 @@ mod tests {
         );
         assert!(!is_aws_chunked(&h));
 
-        // Plain hex sha and gzip-only Content-Encoding: not chunked.
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "gzip".parse().unwrap());
         h.insert("x-amz-content-sha256", "abcd".repeat(16).parse().unwrap());
@@ -5422,9 +5384,6 @@ mod tests {
 
     #[test]
     fn aws_chunked_wire_encoding_is_not_persisted_as_object_encoding() {
-        // Real streaming sigv4 wire encoding: chunked transport detected via
-        // x-amz-decoded-content-length (matches what real SDKs send), so
-        // aws-chunked is stripped from stored Content-Encoding metadata.
         let mut headers = HeaderMap::new();
         headers.insert("content-encoding", "aws-chunked".parse().unwrap());
         headers.insert("x-amz-decoded-content-length", "100".parse().unwrap());

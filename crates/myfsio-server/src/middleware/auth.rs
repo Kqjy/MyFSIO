@@ -50,11 +50,15 @@ fn wrap_body_for_sha256_verification(req: &mut Request) -> Option<Response> {
             );
             return Some(crate::s3_response::s3_error_response(err));
         }
-        tracing::warn!(
-            payload_type = %upper,
-            "Accepting streaming SigV4 request without per-chunk signature validation. \
-             Set STRICT_STREAMING_SIGV4=true to reject these requests until full validation lands."
-        );
+        static STREAMING_SIGV4_WARN: std::sync::Once = std::sync::Once::new();
+        STREAMING_SIGV4_WARN.call_once(|| {
+            tracing::warn!(
+                payload_type = %upper,
+                "Accepting streaming SigV4 requests without per-chunk signature validation. \
+                 Set STRICT_STREAMING_SIGV4=true to reject these requests until full validation lands. \
+                 (This warning is emitted once per process; subsequent streaming uploads are accepted silently.)"
+            );
+        });
         return None;
     }
 

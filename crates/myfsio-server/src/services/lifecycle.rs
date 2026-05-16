@@ -757,7 +757,6 @@ mod tests {
 
     #[test]
     fn xml_tags_outside_filter_are_ignored() {
-        // a stray <Tag> nested under an action must not be picked up as a filter tag
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
             <LifecycleConfiguration>
               <Rule>
