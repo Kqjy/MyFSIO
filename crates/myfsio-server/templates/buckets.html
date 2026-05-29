@@ -197,15 +197,16 @@
     }
     accessFilterInputs.forEach(input => input.addEventListener('change', applyFilters));
 
+    applyFilters();
+
     const viewGrid = document.getElementById('view-grid');
     const viewList = document.getElementById('view-list');
     const container = document.getElementById('buckets-container');
-    const items = document.querySelectorAll('.bucket-item');
     const cards = document.querySelectorAll('.bucket-card');
 
     function setView(view) {
       if (view === 'list') {
-        items.forEach(item => {
+        bucketItems.forEach(item => {
           item.classList.remove('col-md-6', 'col-xl-4');
           item.classList.add('col-12');
         });
@@ -215,7 +216,7 @@
         });
         localStorage.setItem('bucket-view-pref', 'list');
       } else {
-        items.forEach(item => {
+        bucketItems.forEach(item => {
           item.classList.remove('col-12');
           item.classList.add('col-md-6', 'col-xl-4');
         });

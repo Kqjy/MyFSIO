@@ -82,7 +82,8 @@ fn render_buckets() {
             "summary": {"human_size": "0 B", "objects": 0},
             "detail_url": "/ui/buckets/b1",
             "access_badge": "bg-secondary",
-            "access_label": "Private"
+            "access_label": "Private",
+            "access_kind": "private"
         }]),
     );
     render_or_panic("buckets.html", &ctx);
