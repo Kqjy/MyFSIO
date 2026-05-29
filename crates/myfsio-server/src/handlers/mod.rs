@@ -3941,8 +3941,8 @@ async fn delete_objects_handler(
                         }
                     }
                     None => match state.storage.head_object(&bucket, &obj.key).await {
-                        Ok(_)
-                        | Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => {
+                        Ok(meta) => run_can_delete(&meta.internal_metadata),
+                        Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => {
                             match state.storage.get_object_metadata(&bucket, &obj.key).await {
                                 Ok(metadata) => run_can_delete(&metadata),
                                 Err(err) => Err(to_err(err)),

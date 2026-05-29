@@ -343,18 +343,30 @@ fn config_website_to_ui(value: Option<&Value>) -> Value {
 fn bucket_access_descriptor(
     policy: Option<&Value>,
     bucket_name: &str,
-) -> (&'static str, &'static str) {
+) -> (&'static str, &'static str, &'static str) {
     let Some(policy) = policy else {
-        return ("Private", "bg-secondary-subtle text-secondary-emphasis");
+        return (
+            "Private",
+            "bg-secondary-subtle text-secondary-emphasis",
+            "private",
+        );
     };
 
     let default_policy = default_public_policy(bucket_name);
     let default_policy_value: Value = serde_json::from_str(&default_policy).unwrap_or(Value::Null);
     if *policy == default_policy_value {
-        return ("Public Read", "bg-warning-subtle text-warning-emphasis");
+        return (
+            "Public Read",
+            "bg-warning-subtle text-warning-emphasis",
+            "public",
+        );
     }
 
-    ("Custom policy", "bg-info-subtle text-info-emphasis")
+    (
+        "Custom policy",
+        "bg-info-subtle text-info-emphasis",
+        "custom",
+    )
 }
 
 pub async fn buckets_overview(
@@ -395,7 +407,8 @@ pub async fn buckets_overview(
             .await
             .ok()
             .and_then(|cfg| cfg.policy);
-        let (access_label, access_badge) = bucket_access_descriptor(policy.as_ref(), &b.name);
+        let (access_label, access_badge, access_kind) =
+            bucket_access_descriptor(policy.as_ref(), &b.name);
 
         items.push(json!({
             "meta": {
@@ -409,6 +422,7 @@ pub async fn buckets_overview(
             "detail_url": format!("/ui/buckets/{}", b.name),
             "access_badge": access_badge,
             "access_label": access_label,
+            "access_kind": access_kind,
         }));
     }
 
