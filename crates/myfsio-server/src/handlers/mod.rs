@@ -1139,7 +1139,12 @@ pub async fn post_bucket(
     }
 
     if query.delete.is_some() {
-        return delete_objects_handler(&state, &bucket, peer_marker, body).await;
+        let bypass_governance = headers
+            .get("x-amz-bypass-governance-retention")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        return delete_objects_handler(&state, &bucket, peer_marker, bypass_governance, body).await;
     }
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
@@ -1753,20 +1758,34 @@ fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Res
 async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Bytes, Response> {
     if aws_chunked {
         let mut reader = chunked::decode_body(body);
-        let mut data = Vec::new();
-        reader.read_to_end(&mut data).await.map_err(|_| {
-            s3_error_response(S3Error::new(
-                S3ErrorCode::InvalidRequest,
-                "Failed to read aws-chunked request body",
-            ))
-        })?;
+        let mut data: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 65_536];
+        loop {
+            let n = reader.read(&mut buf).await.map_err(|_| {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidRequest,
+                    "Failed to read aws-chunked request body",
+                ))
+            })?;
+            if n == 0 {
+                break;
+            }
+            if data.len() + n > MAX_BUFFERED_UPLOAD_BYTES {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::EntityTooLarge,
+                    "Object exceeds the maximum size for a buffered upload",
+                )));
+            }
+            data.extend_from_slice(&buf[..n]);
+        }
         return Ok(bytes::Bytes::from(data));
     }
 
-    http_body_util::BodyExt::collect(body)
-        .await
-        .map(|collected| collected.to_bytes())
-        .map_err(|err| {
+    use futures::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut data: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| {
             if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(&err) {
                 bad_digest_response(message)
             } else {
@@ -1775,7 +1794,16 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
                     "Failed to read request body",
                 ))
             }
-        })
+        })?;
+        if data.len() + chunk.len() > MAX_BUFFERED_UPLOAD_BYTES {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::EntityTooLarge,
+                "Object exceeds the maximum size for a buffered upload",
+            )));
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(bytes::Bytes::from(data))
 }
 
 fn parse_tagging_header(value: &str) -> Result<Vec<myfsio_common::types::Tag>, Response> {
@@ -1939,6 +1967,12 @@ pub async fn put_object(
 
     if let Some(ref upload_id) = query.upload_id {
         if let Some(part_number) = query.part_number {
+            if !(1..=10000).contains(&part_number) {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Part number must be an integer between 1 and 10000",
+                ));
+            }
             if let Some(copy_source) = headers
                 .get("x-amz-copy-source")
                 .and_then(|v| v.to_str().ok())
@@ -2112,6 +2146,10 @@ pub async fn put_object(
                                 enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                             enc_metadata.insert("__size__".to_string(), enc_size.to_string());
+                            if let Some(ref ck) = enc_ctx.customer_key {
+                                enc_metadata
+                                    .insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
+                            }
                             let _ = state
                                 .storage
                                 .put_object_metadata(&bucket, &key, &enc_metadata)
@@ -2336,7 +2374,8 @@ pub async fn get_object(
         match (enc_info.as_ref(), state.encryption.as_ref()) {
             (Some(enc_info), Some(enc_svc)) => {
                 if enc_info.algorithm == "AES256" && enc_info.encrypted_data_key.is_none() {
-                    if let Err(resp) = require_sse_c_key_match(&headers, enc_info) {
+                    if let Err(resp) = require_sse_c_key_match(&headers, &snap_meta.internal_metadata)
+                    {
                         let _ = tokio::fs::remove_file(&snap_link).await;
                         return resp;
                     }
@@ -2573,7 +2612,7 @@ pub async fn head_object(
             );
             if let Some(ref info) = enc_info {
                 if info.algorithm == "AES256" && info.encrypted_data_key.is_none() {
-                    if let Err(resp) = require_sse_c_key_match(&headers, info) {
+                    if let Err(resp) = require_sse_c_key_match(&headers, &meta.internal_metadata) {
                         return resp;
                     }
                 }
@@ -3192,6 +3231,9 @@ async fn complete_multipart_handler(
                             enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
                         }
                         enc_metadata.insert("__size__".to_string(), enc_size.to_string());
+                        if let Some(ref ck) = enc_ctx.customer_key {
+                            enc_metadata.insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
+                        }
                         let _ = state
                             .storage
                             .put_object_metadata(bucket, key, &enc_metadata)
@@ -3874,6 +3916,7 @@ async fn delete_objects_handler(
     state: &AppState,
     bucket: &str,
     peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    bypass_governance: bool,
     body: Body,
 ) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
@@ -3914,6 +3957,7 @@ async fn delete_objects_handler(
         .map(|obj| {
             let state = state.clone();
             let bucket = bucket.to_string();
+            let bypass = bypass_governance;
             async move {
                 let key = obj.key.clone();
                 let requested_vid = obj.version_id.clone();
@@ -3923,7 +3967,7 @@ async fn delete_objects_handler(
                 };
                 let run_can_delete =
                     |metadata: &HashMap<String, String>| -> Result<(), (String, String)> {
-                        object_lock::can_delete_object(metadata, false)
+                        object_lock::can_delete_object(metadata, bypass)
                             .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m))
                     };
                 let lock_check: Result<(), (String, String)> = match obj.version_id.as_deref() {
@@ -4095,10 +4139,17 @@ async fn serve_range_from_snapshot(
                         Some(r) => r,
                         None => {
                             let _ = tokio::fs::remove_file(&snap_link).await;
-                            return s3_error_response(S3Error::new(
-                                myfsio_common::error::S3ErrorCode::InvalidRange,
-                                format!("Range not satisfiable for size {}", plaintext_size),
-                            ));
+                            let mut extra = HeaderMap::new();
+                            if let Ok(v) = format!("bytes */{}", plaintext_size).parse() {
+                                extra.insert(axum::http::header::CONTENT_RANGE, v);
+                            }
+                            return crate::s3_response::s3_error_response_with_headers(
+                                S3Error::new(
+                                    myfsio_common::error::S3ErrorCode::InvalidRange,
+                                    format!("Range not satisfiable for size {}", plaintext_size),
+                                ),
+                                extra,
+                            );
                         }
                     };
 
@@ -4170,10 +4221,17 @@ async fn serve_range_from_snapshot(
         Some(r) => r,
         None => {
             let _ = tokio::fs::remove_file(&body_path).await;
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InvalidRange,
-                format!("Range not satisfiable for size {}", plaintext_size),
-            ));
+            let mut extra = HeaderMap::new();
+            if let Ok(v) = format!("bytes */{}", plaintext_size).parse() {
+                extra.insert(axum::http::header::CONTENT_RANGE, v);
+            }
+            return crate::s3_response::s3_error_response_with_headers(
+                S3Error::new(
+                    myfsio_common::error::S3ErrorCode::InvalidRange,
+                    format!("Range not satisfiable for size {}", plaintext_size),
+                ),
+                extra,
+            );
         }
     };
 
@@ -4702,6 +4760,18 @@ async fn resolve_encryption_context(
     Ok(None)
 }
 
+const SSE_C_KEY_MD5_META: &str = "x-amz-server-side-encryption-customer-key-MD5";
+const MAX_BUFFERED_UPLOAD_BYTES: usize = 5 * 1024 * 1024 * 1024;
+
+fn sse_c_key_md5(key: &[u8]) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
+    hasher.update(key);
+    B64.encode(hasher.finalize())
+}
+
 fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
@@ -4758,16 +4828,27 @@ fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
 
 fn require_sse_c_key_match(
     headers: &HeaderMap,
-    _enc_info: &myfsio_crypto::encryption::EncryptionMetadata,
+    stored_metadata: &HashMap<String, String>,
 ) -> Result<(), Response> {
-    match extract_sse_c_key(headers) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(s3_error_response(S3Error::new(
-            S3ErrorCode::InvalidRequest,
-            "Object was created with SSE-C; the SSE-C customer key headers are required",
-        ))),
-        Err(resp) => Err(resp),
+    let provided = match extract_sse_c_key(headers) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Object was created with SSE-C; the SSE-C customer key headers are required",
+            )))
+        }
+        Err(resp) => return Err(resp),
+    };
+    if let Some(stored_md5) = stored_metadata.get(SSE_C_KEY_MD5_META) {
+        if !constant_time_eq(sse_c_key_md5(&provided).as_bytes(), stored_md5.as_bytes()) {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "The SSE-C customer key does not match the key used to encrypt this object",
+            )));
+        }
     }
+    Ok(())
 }
 
 async fn compute_plaintext_md5(path: &std::path::Path) -> std::io::Result<String> {
@@ -4904,7 +4985,7 @@ async fn post_object_form_handler(
     let mut file_bytes: Option<bytes::Bytes> = None;
     let mut file_name: Option<String> = None;
 
-    while let Some(field) = match multipart.next_field().await {
+    while let Some(mut field) = match multipart.next_field().await {
         Ok(f) => f,
         Err(e) => {
             return s3_error_response(S3Error::new(
@@ -4916,15 +4997,28 @@ async fn post_object_form_handler(
         let name = field.name().map(|s| s.to_string()).unwrap_or_default();
         if name.eq_ignore_ascii_case("file") {
             file_name = field.file_name().map(|s| s.to_string());
-            match field.bytes().await {
-                Ok(b) => file_bytes = Some(b),
-                Err(e) => {
-                    return s3_error_response(S3Error::new(
-                        S3ErrorCode::InternalError,
-                        format!("Failed to read file: {}", e),
-                    ));
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if buf.len() + chunk.len() > MAX_BUFFERED_UPLOAD_BYTES {
+                            return s3_error_response(S3Error::new(
+                                S3ErrorCode::EntityTooLarge,
+                                "Uploaded file exceeds the maximum allowed size",
+                            ));
+                        }
+                        buf.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return s3_error_response(S3Error::new(
+                            S3ErrorCode::InternalError,
+                            format!("Failed to read file: {}", e),
+                        ));
+                    }
                 }
             }
+            file_bytes = Some(bytes::Bytes::from(buf));
         } else if !name.is_empty() {
             if let Ok(t) = field.text().await {
                 fields.insert(name, t);

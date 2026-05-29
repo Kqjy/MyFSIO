@@ -175,10 +175,37 @@ impl ReplicationFailureStore {
         }
         let trimmed = &failures[..failures.len().min(self.max_failures_per_bucket)];
         let data = serde_json::json!({ "failures": trimmed });
-        let _ = std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        );
+        let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
+        let mut tmp = path.clone();
+        tmp.set_extension("json.tmp");
+        if std::fs::write(&tmp, serialized.as_bytes()).is_ok()
+            && std::fs::rename(&tmp, &path).is_err()
+        {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    fn mutate<R>(
+        &self,
+        bucket: &str,
+        f: impl FnOnce(&mut Vec<ReplicationFailure>) -> (bool, R),
+    ) -> R {
+        let mut cache = self.cache.lock();
+        if !cache.contains_key(bucket) {
+            let loaded = self.load_from_disk(bucket);
+            cache.insert(bucket.to_string(), loaded);
+        }
+        let failures = cache
+            .get_mut(bucket)
+            .expect("bucket entry was just inserted");
+        let (changed, result) = f(failures);
+        if changed {
+            if failures.len() > self.max_failures_per_bucket {
+                failures.truncate(self.max_failures_per_bucket);
+            }
+            self.save_to_disk(bucket, failures);
+        }
+        result
     }
 
     pub fn load(&self, bucket: &str) -> Vec<ReplicationFailure> {
@@ -201,63 +228,56 @@ impl ReplicationFailureStore {
     }
 
     pub fn add(&self, bucket: &str, failure: ReplicationFailure) {
-        let mut failures = self.load(bucket);
-        if let Some(existing) = failures
-            .iter_mut()
-            .find(|f| f.object_key == failure.object_key)
-        {
-            existing.failure_count += 1;
-            existing.timestamp = failure.timestamp;
-            existing.error_message = failure.error_message.clone();
-            existing.last_error_code = failure.last_error_code.clone();
-            if failure.pending_upload_id.is_some() {
-                existing.pending_upload_id = failure.pending_upload_id.clone();
-                existing.pending_source_size = failure.pending_source_size;
-                existing.pending_source_etag = failure.pending_source_etag.clone();
-                existing.pending_part_size = failure.pending_part_size;
+        self.mutate(bucket, |failures| {
+            if let Some(existing) = failures
+                .iter_mut()
+                .find(|f| f.object_key == failure.object_key)
+            {
+                existing.failure_count += 1;
+                existing.timestamp = failure.timestamp;
+                existing.error_message = failure.error_message.clone();
+                existing.last_error_code = failure.last_error_code.clone();
+                if failure.pending_upload_id.is_some() {
+                    existing.pending_upload_id = failure.pending_upload_id.clone();
+                    existing.pending_source_size = failure.pending_source_size;
+                    existing.pending_source_etag = failure.pending_source_etag.clone();
+                    existing.pending_part_size = failure.pending_part_size;
+                }
+            } else {
+                failures.insert(0, failure);
             }
-        } else {
-            failures.insert(0, failure);
-        }
-        self.save(bucket, failures);
+            (true, ())
+        });
     }
 
     pub fn clear_pending_mpu(&self, bucket: &str, object_key: &str) -> bool {
-        let mut failures = self.load(bucket);
-        let mut changed = false;
-        for f in failures.iter_mut() {
-            if f.object_key == object_key
-                && (f.pending_upload_id.is_some()
-                    || f.pending_source_size.is_some()
-                    || f.pending_source_etag.is_some()
-                    || f.pending_part_size.is_some())
-            {
-                f.pending_upload_id = None;
-                f.pending_source_size = None;
-                f.pending_source_etag = None;
-                f.pending_part_size = None;
-                changed = true;
+        self.mutate(bucket, |failures| {
+            let mut changed = false;
+            for f in failures.iter_mut() {
+                if f.object_key == object_key
+                    && (f.pending_upload_id.is_some()
+                        || f.pending_source_size.is_some()
+                        || f.pending_source_etag.is_some()
+                        || f.pending_part_size.is_some())
+                {
+                    f.pending_upload_id = None;
+                    f.pending_source_size = None;
+                    f.pending_source_etag = None;
+                    f.pending_part_size = None;
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            self.save(bucket, failures);
-        }
-        changed
+            (changed, changed)
+        })
     }
 
     pub fn remove(&self, bucket: &str, object_key: &str) -> bool {
-        let failures = self.load(bucket);
-        let before = failures.len();
-        let after: Vec<_> = failures
-            .into_iter()
-            .filter(|f| f.object_key != object_key)
-            .collect();
-        if after.len() != before {
-            self.save(bucket, after);
-            true
-        } else {
-            false
-        }
+        self.mutate(bucket, |failures| {
+            let before = failures.len();
+            failures.retain(|f| f.object_key != object_key);
+            let changed = failures.len() != before;
+            (changed, changed)
+        })
     }
 
     pub fn clear(&self, bucket: &str) {
@@ -328,6 +348,68 @@ impl BatchRun {
             && self.in_flight.load(Ordering::Acquire) == 0
             && self.completed.load(Ordering::Acquire) + self.failed.load(Ordering::Acquire)
                 >= self.total_queued.load(Ordering::Acquire)
+    }
+}
+
+struct InFlightGuard {
+    run: Option<Arc<BatchRun>>,
+    manager: Option<Arc<ReplicationManager>>,
+    live_in_flight: Arc<AtomicUsize>,
+    live_replicated_total: Arc<AtomicU64>,
+    live_failed_total: Arc<AtomicU64>,
+    outcome: ReplicateOutcome,
+}
+
+impl InFlightGuard {
+    fn enter(
+        run: Option<Arc<BatchRun>>,
+        manager: Option<Arc<ReplicationManager>>,
+        live_in_flight: Arc<AtomicUsize>,
+        live_replicated_total: Arc<AtomicU64>,
+        live_failed_total: Arc<AtomicU64>,
+    ) -> Self {
+        live_in_flight.fetch_add(1, Ordering::Relaxed);
+        if let Some(run) = run.as_ref() {
+            run.in_flight.fetch_add(1, Ordering::Relaxed);
+        }
+        Self {
+            run,
+            manager,
+            live_in_flight,
+            live_replicated_total,
+            live_failed_total,
+            outcome: ReplicateOutcome::Failed,
+        }
+    }
+
+    fn complete(&mut self, outcome: ReplicateOutcome) {
+        self.outcome = outcome;
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Some(run) = self.run.as_ref() {
+            run.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.live_in_flight.fetch_sub(1, Ordering::Relaxed);
+        match self.outcome {
+            ReplicateOutcome::Succeeded | ReplicateOutcome::Skipped => {
+                if let Some(run) = self.run.as_ref() {
+                    run.completed.fetch_add(1, Ordering::Relaxed);
+                }
+                self.live_replicated_total.fetch_add(1, Ordering::Relaxed);
+            }
+            ReplicateOutcome::Failed => {
+                if let Some(run) = self.run.as_ref() {
+                    run.failed.fetch_add(1, Ordering::Relaxed);
+                }
+                self.live_failed_total.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let (Some(manager), Some(run)) = (self.manager.as_ref(), self.run.as_ref()) {
+            manager.maybe_finalize_run(run);
+        }
     }
 }
 
@@ -609,24 +691,20 @@ impl ReplicationManager {
             }
         };
         let manager = self.clone();
-        let live_in_flight = self.live_in_flight.clone();
-        let live_replicated_total = self.live_replicated_total.clone();
-        let live_failed_total = self.live_failed_total.clone();
-        live_in_flight.fetch_add(1, Ordering::Relaxed);
+        let guard = InFlightGuard::enter(
+            None,
+            None,
+            self.live_in_flight.clone(),
+            self.live_replicated_total.clone(),
+            self.live_failed_total.clone(),
+        );
         tokio::spawn(async move {
             let _permit = permit;
+            let mut guard = guard;
             let outcome = manager
                 .replicate_task(&bucket, &key, &rule, &connection, &action)
                 .await;
-            live_in_flight.fetch_sub(1, Ordering::Relaxed);
-            match outcome {
-                ReplicateOutcome::Succeeded | ReplicateOutcome::Skipped => {
-                    live_replicated_total.fetch_add(1, Ordering::Relaxed);
-                }
-                ReplicateOutcome::Failed => {
-                    live_failed_total.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            guard.complete(outcome);
         });
     }
 
@@ -653,16 +731,18 @@ impl ReplicationManager {
             }
         };
         let manager = self.clone();
-        let live_in_flight = self.live_in_flight.clone();
-        let live_replicated_total = self.live_replicated_total.clone();
-        let live_failed_total = self.live_failed_total.clone();
-        let manager_for_finalize = self.clone();
         let run_for_task = run.clone();
-        live_in_flight.fetch_add(1, Ordering::Relaxed);
-        run_for_task.in_flight.fetch_add(1, Ordering::Relaxed);
+        let guard = InFlightGuard::enter(
+            Some(run.clone()),
+            Some(self.clone()),
+            self.live_in_flight.clone(),
+            self.live_replicated_total.clone(),
+            self.live_failed_total.clone(),
+        );
         let bucket = run_for_task.bucket.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let mut guard = guard;
             let outcome = manager
                 .replicate_task(&bucket, &key, &rule, &connection, &action)
                 .await;
@@ -670,19 +750,7 @@ impl ReplicationManager {
                 let mut last = run_for_task.last_object.lock();
                 *last = Some(key.clone());
             }
-            run_for_task.in_flight.fetch_sub(1, Ordering::Relaxed);
-            live_in_flight.fetch_sub(1, Ordering::Relaxed);
-            match outcome {
-                ReplicateOutcome::Succeeded | ReplicateOutcome::Skipped => {
-                    run_for_task.completed.fetch_add(1, Ordering::Relaxed);
-                    live_replicated_total.fetch_add(1, Ordering::Relaxed);
-                }
-                ReplicateOutcome::Failed => {
-                    run_for_task.failed.fetch_add(1, Ordering::Relaxed);
-                    live_failed_total.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            manager_for_finalize.maybe_finalize_run(&run_for_task);
+            guard.complete(outcome);
         });
     }
 
@@ -1548,12 +1616,13 @@ where
     R: std::fmt::Debug,
 {
     let dbg = format!("{:?}", err);
-    let is_no_such_bucket = dbg.contains("NoSuchBucket");
     let code = if let aws_sdk_s3::error::SdkError::ServiceError(svc) = &err {
         svc.err().code().map(|c| c.to_string())
     } else {
         None
     };
+    let is_no_such_bucket =
+        code.as_deref() == Some("NoSuchBucket") || (code.is_none() && dbg.contains("NoSuchBucket"));
     ReplicationUploadError {
         code,
         message: dbg,
@@ -2582,6 +2651,71 @@ mod tests {
         assert_eq!(total, 100);
         assert_eq!(in_flight, 0);
         assert!(run.is_finished());
+    }
+
+    #[test]
+    fn failure_store_concurrent_add_preserves_all_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ReplicationFailureStore::new(tmp.path().to_path_buf(), 1000));
+        let mut handles = Vec::new();
+        for i in 0..64 {
+            let store = store.clone();
+            handles.push(std::thread::spawn(move || {
+                store.add("bucket", empty_failure(&format!("key-{}", i)));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(store.count("bucket"), 64);
+    }
+
+    #[test]
+    fn inflight_guard_counts_failed_on_drop_without_complete() {
+        let run = Arc::new(BatchRun::new("b".to_string(), BatchRunKind::ResumeAll));
+        run.total_queued.store(1, Ordering::Relaxed);
+        let live = Arc::new(AtomicUsize::new(0));
+        let repl = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicU64::new(0));
+        {
+            let _guard = InFlightGuard::enter(
+                Some(run.clone()),
+                None,
+                live.clone(),
+                repl.clone(),
+                failed.clone(),
+            );
+            assert_eq!(run.in_flight.load(Ordering::Relaxed), 1);
+            assert_eq!(live.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(run.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(live.load(Ordering::Relaxed), 0);
+        assert_eq!(run.failed.load(Ordering::Relaxed), 1);
+        assert_eq!(failed.load(Ordering::Relaxed), 1);
+        assert_eq!(run.completed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn inflight_guard_counts_completed_after_complete() {
+        let run = Arc::new(BatchRun::new("b".to_string(), BatchRunKind::ResumeAll));
+        let live = Arc::new(AtomicUsize::new(0));
+        let repl = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicU64::new(0));
+        {
+            let mut guard = InFlightGuard::enter(
+                Some(run.clone()),
+                None,
+                live.clone(),
+                repl.clone(),
+                failed.clone(),
+            );
+            guard.complete(ReplicateOutcome::Succeeded);
+        }
+        assert_eq!(run.completed.load(Ordering::Relaxed), 1);
+        assert_eq!(repl.load(Ordering::Relaxed), 1);
+        assert_eq!(run.failed.load(Ordering::Relaxed), 0);
+        assert_eq!(run.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(live.load(Ordering::Relaxed), 0);
     }
 
     #[test]

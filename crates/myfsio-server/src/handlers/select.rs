@@ -280,7 +280,9 @@ fn execute_select_query(path: PathBuf, request: SelectRequest) -> Result<Vec<Vec
     load_input_table(&conn, &path, &request.input_format)?;
 
     conn.execute_batch(
-        "SET enable_external_access=false; \
+        "SET memory_limit='256MB'; \
+         SET max_memory='256MB'; \
+         SET enable_external_access=false; \
          SET lock_configuration=true;",
     )
     .map_err(|e| format!("DuckDB lockdown failed: {}", e))?;
@@ -566,6 +568,16 @@ fn normalize_single_char(value: &str, default_char: char) -> String {
     value.chars().next().unwrap_or(default_char).to_string()
 }
 
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 fn collect_csv_chunks(
     rows: &mut duckdb::Rows<'_>,
     col_count: usize,
@@ -606,7 +618,8 @@ fn collect_csv_chunks(
         buffer.push_str(&record_delimiter);
 
         while buffer.len() >= CHUNK_SIZE {
-            let rest = buffer.split_off(CHUNK_SIZE);
+            let split_at = floor_char_boundary(&buffer, CHUNK_SIZE);
+            let rest = buffer.split_off(split_at);
             chunks.push(buffer.into_bytes());
             buffer = rest;
         }
@@ -646,7 +659,8 @@ fn collect_json_chunks(
         buffer.push_str(&record_delimiter);
 
         while buffer.len() >= CHUNK_SIZE {
-            let rest = buffer.split_off(CHUNK_SIZE);
+            let split_at = floor_char_boundary(&buffer, CHUNK_SIZE);
+            let rest = buffer.split_off(split_at);
             chunks.push(buffer.into_bytes());
             buffer = rest;
         }

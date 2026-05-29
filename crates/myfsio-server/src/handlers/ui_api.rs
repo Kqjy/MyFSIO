@@ -103,6 +103,11 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
+fn reject_invalid_bucket(bucket: &str) -> Option<Response> {
+    myfsio_storage::validation::validate_bucket_name(bucket)
+        .map(|_| json_error(StatusCode::BAD_REQUEST, "Invalid bucket name"))
+}
+
 async fn ensure_ui_authorized(
     state: &AppState,
     session: &SessionHandle,
@@ -4367,6 +4372,9 @@ pub async fn replication_status(
     Extension(_session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
     let Some(rule) = state.replication.get_rule(&bucket_name) else {
         return json_error(StatusCode::NOT_FOUND, "No replication rule");
     };
@@ -4461,6 +4469,9 @@ pub async fn replication_failures(
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationFailuresQuery>,
 ) -> Response {
+    if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let offset = q.offset.unwrap_or(0);
     let failures = state
@@ -4500,6 +4511,9 @@ async fn retry_replication_failure_key(
     bucket_name: &str,
     object_key: &str,
 ) -> Response {
+    if let Some(resp) = reject_invalid_bucket(bucket_name) {
+        return resp;
+    }
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
     }
@@ -4523,6 +4537,9 @@ pub async fn retry_all_replication_failures(
     Extension(_session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
     let result = state.replication.clone().retry_all(&bucket_name).await;
     if let Some(kind) = result.conflict {
         let body = json!({
@@ -4568,6 +4585,9 @@ fn dismiss_replication_failure_key(
     bucket_name: &str,
     object_key: &str,
 ) -> Response {
+    if let Some(resp) = reject_invalid_bucket(bucket_name) {
+        return resp;
+    }
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
     }
@@ -4587,6 +4607,9 @@ pub async fn clear_replication_failures(
     Extension(_session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
     state.replication.clear_failures(&bucket_name);
     json_ok(json!({ "status": "cleared" }))
 }

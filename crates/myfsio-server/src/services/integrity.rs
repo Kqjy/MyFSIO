@@ -7,6 +7,7 @@ use myfsio_storage::fs_backend::{
     META_KEY_CORRUPTED_AT, META_KEY_CORRUPTION_DETAIL, META_KEY_QUARANTINE_PATH,
 };
 use myfsio_storage::traits::StorageEngine;
+use myfsio_crypto::encryption::EncryptionMetadata;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ const MAX_ISSUES_PER_TYPE: usize = 100;
 const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
 const QUARANTINE_DIR: &str = "quarantine";
 const CURSOR_FILE: &str = "integrity_cursor.json";
+const STALE_VERSION_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Default, Clone)]
 struct CorruptionCursor {
@@ -62,6 +64,19 @@ fn save_cursor(path: &Path, cursor: &CorruptionCursor) {
         "after_key": cursor.after_key,
     });
     let _ = std::fs::write(path, serde_json::to_string_pretty(&v).unwrap_or_default());
+}
+
+fn recently_modified(path: &Path, grace: std::time::Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    match mtime.elapsed() {
+        Ok(elapsed) => elapsed < grace,
+        Err(_) => true,
+    }
 }
 
 pub struct IntegrityConfig {
@@ -249,11 +264,12 @@ impl IntegrityService {
     pub async fn run_now(self: Arc<Self>, dry_run: bool, auto_heal: bool) -> Result<Value, String> {
         self.try_claim()?;
         let svc = self.clone();
+        let guard = RunGuard {
+            running: self.running.clone(),
+            started_at: self.started_at.clone(),
+        };
         let handle = tokio::spawn(async move {
-            let _guard = RunGuard {
-                running: svc.running.clone(),
-                started_at: svc.started_at.clone(),
-            };
+            let _guard = guard;
             svc.execute(dry_run, auto_heal).await
         });
         handle
@@ -264,11 +280,12 @@ impl IntegrityService {
     pub fn start_run(self: Arc<Self>, dry_run: bool, auto_heal: bool) -> Result<(), String> {
         self.try_claim()?;
         let svc = self.clone();
+        let guard = RunGuard {
+            running: self.running.clone(),
+            started_at: self.started_at.clone(),
+        };
         tokio::spawn(async move {
-            let _guard = RunGuard {
-                running: svc.running.clone(),
-                started_at: svc.started_at.clone(),
-            };
+            let _guard = guard;
             if let Err(e) = svc.execute(dry_run, auto_heal).await {
                 tracing::warn!("Integrity check failed: {}", e);
             }
@@ -485,11 +502,40 @@ async fn heal_corrupted(
 
     {
         let _guard = storage.lock_object_write(bucket, key);
-        if live_path.exists() {
-            if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
-                tracing::error!("Heal {}/{}: quarantine rename failed: {}", bucket, key, e);
+        if !live_path.exists() {
+            return HealStatus::Skipped;
+        }
+        let current = collect_all_metadata(storage_root, bucket);
+        let current_meta = current
+            .get(key)
+            .map(|info| entry_metadata_map(&info.entry))
+            .unwrap_or_default();
+        let current_stored = current_meta.get("__etag__").cloned().unwrap_or_default();
+        if current_stored.is_empty()
+            || metadata_is_corrupted(&current_meta)
+            || EncryptionMetadata::is_encrypted(&current_meta)
+            || is_multipart_etag(&current_stored)
+        {
+            return HealStatus::Skipped;
+        }
+        match myfsio_crypto::hashing::md5_file(&live_path) {
+            Ok(current_actual) if current_actual == current_stored => {
+                tracing::info!(
+                    "Heal {}/{}: object no longer mismatches under lock; skipping quarantine",
+                    bucket,
+                    key
+                );
+                return HealStatus::Skipped;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Heal {}/{}: re-hash before quarantine failed: {}", bucket, key, e);
                 return HealStatus::Failed;
             }
+        }
+        if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
+            tracing::error!("Heal {}/{}: quarantine rename failed: {}", bucket, key, e);
+            return HealStatus::Failed;
         }
     }
 
@@ -605,6 +651,9 @@ async fn heal_stale_version(storage_root: &Path, bucket: &str, key: &str) -> Hea
         .join(BUCKET_VERSIONS_DIR);
     let src = versions_root.join(key);
     if !src.exists() {
+        return HealStatus::Skipped;
+    }
+    if recently_modified(&src, STALE_VERSION_GRACE) {
         return HealStatus::Skipped;
     }
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
@@ -1102,7 +1151,9 @@ fn check_corrupted(
         if metadata_is_corrupted(&meta_map) {
             continue;
         }
-        state.objects_scanned += 1;
+        if EncryptionMetadata::is_encrypted(&meta_map) {
+            continue;
+        }
 
         let Some(stored) = stored_etag(&info.entry) else {
             continue;
@@ -1204,7 +1255,6 @@ fn check_orphaned(
                 } else {
                     format!("{}/{}", prefix, name)
                 };
-                state.objects_scanned += 1;
                 if !indexed.contains(&full_key) {
                     state.orphaned_objects += 1;
                     state.push_issue(
@@ -1259,7 +1309,6 @@ fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str
         }
 
         for (stem, path) in &bin_stems {
-            state.objects_scanned += 1;
             if !json_stems.contains_key(stem) {
                 state.stale_versions += 1;
                 let key = path
@@ -1276,7 +1325,6 @@ fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str
         }
 
         for (stem, path) in &json_stems {
-            state.objects_scanned += 1;
             if !bin_stems.contains_key(stem) {
                 if manifest_is_delete_marker(path) {
                     continue;
@@ -1336,7 +1384,6 @@ fn check_etag_cache(
     };
 
     for (full_key, cached_val) in cache {
-        state.objects_scanned += 1;
         let Some(cached_etag) = cached_val.as_str() else {
             continue;
         };
@@ -1381,6 +1428,46 @@ mod tests {
             serde_json::to_string(&Value::Object(map)).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn encrypted_objects_are_not_flagged_corrupted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "encbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        fs::write(bucket_path.join("secret.bin"), b"ciphertext-bytes-on-disk").unwrap();
+
+        let mut map = Map::new();
+        map.insert(
+            "secret.bin".to_string(),
+            json!({
+                "metadata": {
+                    "__etag__": "00000000000000000000000000000000",
+                    "x-amz-server-side-encryption": "AES256",
+                    "x-amz-encryption-nonce": "abc",
+                }
+            }),
+        );
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&Value::Object(map)).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000);
+        assert_eq!(
+            state.corrupted_objects, 0,
+            "encrypted objects must be skipped by the corruption scan"
+        );
     }
 
     #[test]

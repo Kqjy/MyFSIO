@@ -166,7 +166,8 @@ pub async fn get_tagging(state: &AppState, bucket: &str) -> Response {
             for tag in &config.tags {
                 xml.push_str(&format!(
                     "<Tag><Key>{}</Key><Value>{}</Value></Tag>",
-                    tag.key, tag.value
+                    xml_escape(&tag.key),
+                    xml_escape(&tag.value)
                 ));
             }
             xml.push_str("</TagSet></Tagging>");
@@ -1654,7 +1655,8 @@ pub async fn get_object_tagging(
             for tag in &tags {
                 xml.push_str(&format!(
                     "<Tag><Key>{}</Key><Value>{}</Value></Tag>",
-                    tag.key, tag.value
+                    xml_escape(&tag.key),
+                    xml_escape(&tag.value)
                 ));
             }
             xml.push_str("</TagSet></Tagging>");
