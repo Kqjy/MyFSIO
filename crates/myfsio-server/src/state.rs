@@ -269,6 +269,7 @@ impl AppState {
                     auto_heal: config.integrity_auto_heal,
                     dry_run: config.integrity_dry_run,
                     heal_concurrency: config.integrity_heal_concurrency,
+                    scan_pacing_ms: config.integrity_scan_pacing_ms,
                     quarantine_retention_days: config.integrity_quarantine_retention_days,
                 },
                 integrity_peer_fetcher,

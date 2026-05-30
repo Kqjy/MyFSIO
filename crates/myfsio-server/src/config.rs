@@ -44,6 +44,7 @@ pub struct ServerConfig {
     pub integrity_auto_heal: bool,
     pub integrity_dry_run: bool,
     pub integrity_heal_concurrency: usize,
+    pub integrity_scan_pacing_ms: u64,
     pub integrity_quarantine_retention_days: u64,
     pub metrics_enabled: bool,
     pub metrics_history_enabled: bool,
@@ -192,7 +193,8 @@ impl ServerConfig {
         let integrity_batch_size = parse_usize_env("INTEGRITY_BATCH_SIZE", 10_000);
         let integrity_auto_heal = parse_bool_env("INTEGRITY_AUTO_HEAL", false);
         let integrity_dry_run = parse_bool_env("INTEGRITY_DRY_RUN", false);
-        let integrity_heal_concurrency = parse_usize_env("INTEGRITY_HEAL_CONCURRENCY", 4);
+        let integrity_heal_concurrency = parse_usize_env("INTEGRITY_HEAL_CONCURRENCY", 1);
+        let integrity_scan_pacing_ms = parse_u64_env("INTEGRITY_SCAN_PACING_MS", 0);
         let integrity_quarantine_retention_days =
             parse_u64_env("INTEGRITY_QUARANTINE_RETENTION_DAYS", 7);
 
@@ -339,6 +341,7 @@ impl ServerConfig {
             integrity_auto_heal,
             integrity_dry_run,
             integrity_heal_concurrency,
+            integrity_scan_pacing_ms,
             integrity_quarantine_retention_days,
             metrics_enabled,
             metrics_history_enabled,
@@ -439,7 +442,8 @@ impl Default for ServerConfig {
             integrity_batch_size: 10_000,
             integrity_auto_heal: false,
             integrity_dry_run: false,
-            integrity_heal_concurrency: 4,
+            integrity_heal_concurrency: 1,
+            integrity_scan_pacing_ms: 0,
             integrity_quarantine_retention_days: 7,
             metrics_enabled: false,
             metrics_history_enabled: false,

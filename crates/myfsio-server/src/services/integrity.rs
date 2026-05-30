@@ -24,6 +24,32 @@ const QUARANTINE_DIR: &str = "quarantine";
 const CURSOR_FILE: &str = "integrity_cursor.json";
 const STALE_VERSION_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
 
+struct Pacer {
+    every: usize,
+    pause: std::time::Duration,
+    count: usize,
+}
+
+impl Pacer {
+    fn new(pacing_ms: u64) -> Self {
+        Self {
+            every: 100,
+            pause: std::time::Duration::from_millis(pacing_ms),
+            count: 0,
+        }
+    }
+
+    fn tick(&mut self) {
+        if self.pause.is_zero() {
+            return;
+        }
+        self.count += 1;
+        if self.count.is_multiple_of(self.every) {
+            std::thread::sleep(self.pause);
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct CorruptionCursor {
     bucket: String,
@@ -85,6 +111,7 @@ pub struct IntegrityConfig {
     pub auto_heal: bool,
     pub dry_run: bool,
     pub heal_concurrency: usize,
+    pub scan_pacing_ms: u64,
     pub quarantine_retention_days: u64,
 }
 
@@ -95,7 +122,8 @@ impl Default for IntegrityConfig {
             batch_size: 10_000,
             auto_heal: false,
             dry_run: false,
-            heal_concurrency: 4,
+            heal_concurrency: 1,
+            scan_pacing_ms: 0,
             quarantine_retention_days: 7,
         }
     }
@@ -297,8 +325,9 @@ impl IntegrityService {
         let start = Instant::now();
         let storage_root = self.storage_root.clone();
         let batch_size = self.config.batch_size;
+        let pacing_ms = self.config.scan_pacing_ms;
         let scan_state =
-            tokio::task::spawn_blocking(move || scan_all_buckets(&storage_root, batch_size))
+            tokio::task::spawn_blocking(move || scan_all_buckets(&storage_root, batch_size, pacing_ms))
                 .await
                 .unwrap_or_else(|e| {
                     let mut st = ScanState::default();
@@ -854,8 +883,9 @@ fn build_result_json(
     })
 }
 
-fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
+fn scan_all_buckets(storage_root: &Path, batch_size: usize, pacing_ms: u64) -> ScanState {
     let mut state = ScanState::default();
+    let mut pacer = Pacer::new(pacing_ms);
     let mut buckets = match list_bucket_names(storage_root) {
         Ok(b) => b,
         Err(e) => {
@@ -870,9 +900,9 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
         let bucket_path = storage_root.join(bucket);
         let index_entries = collect_all_metadata(storage_root, bucket);
 
-        check_phantom(&mut state, bucket, &bucket_path, &index_entries);
-        check_orphaned(&mut state, bucket, &bucket_path, &index_entries);
-        check_stale_versions(&mut state, storage_root, bucket);
+        check_phantom(&mut state, bucket, &bucket_path, &index_entries, &mut pacer);
+        check_orphaned(&mut state, bucket, &bucket_path, &index_entries, &mut pacer);
+        check_stale_versions(&mut state, storage_root, bucket, &mut pacer);
         check_etag_cache(&mut state, storage_root, bucket, &index_entries);
     }
 
@@ -912,6 +942,7 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
             &index_entries,
             after_key,
             &mut remaining,
+            &mut pacer,
         );
 
         if let Some(k) = result.last_examined {
@@ -1119,6 +1150,7 @@ fn check_corrupted(
     entries: &HashMap<String, IndexEntryInfo>,
     after_key: &str,
     remaining: &mut usize,
+    pacer: &mut Pacer,
 ) -> CorruptionScanResult {
     if *remaining == 0 {
         return CorruptionScanResult {
@@ -1141,6 +1173,7 @@ fn check_corrupted(
         }
         *remaining -= 1;
         last_examined = Some((*full_key).clone());
+        pacer.tick();
 
         let info = &entries[*full_key];
         let object_path = resolve_data_path(bucket_path, full_key);
@@ -1191,11 +1224,13 @@ fn check_phantom(
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
+    pacer: &mut Pacer,
 ) {
     let mut keys: Vec<&String> = entries.keys().collect();
     keys.sort();
 
     for full_key in keys {
+        pacer.tick();
         let info = &entries[full_key];
         if metadata_is_corrupted(&entry_metadata_map(&info.entry)) {
             continue;
@@ -1219,6 +1254,7 @@ fn check_orphaned(
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
+    pacer: &mut Pacer,
 ) {
     let indexed: HashSet<&String> = entries.keys().collect();
     let mut stack: Vec<(PathBuf, String)> = vec![(bucket_path.to_path_buf(), String::new())];
@@ -1245,6 +1281,7 @@ fn check_orphaned(
                 };
                 stack.push((entry.path(), new_prefix));
             } else if ft.is_file() {
+                pacer.tick();
                 let full_key = if name == KEY_DATA_MARKER_FILE {
                     if prefix.is_empty() {
                         continue;
@@ -1269,7 +1306,12 @@ fn check_orphaned(
     }
 }
 
-fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str) {
+fn check_stale_versions(
+    state: &mut ScanState,
+    storage_root: &Path,
+    bucket: &str,
+    pacer: &mut Pacer,
+) {
     let versions_root = storage_root
         .join(SYSTEM_ROOT)
         .join(SYSTEM_BUCKETS_DIR)
@@ -1309,6 +1351,7 @@ fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str
         }
 
         for (stem, path) in &bin_stems {
+            pacer.tick();
             if !json_stems.contains_key(stem) {
                 state.stale_versions += 1;
                 let key = path
@@ -1325,6 +1368,7 @@ fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str
         }
 
         for (stem, path) in &json_stems {
+            pacer.tick();
             if !bin_stems.contains_key(stem) {
                 if manifest_is_delete_marker(path) {
                     continue;
@@ -1463,7 +1507,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.corrupted_objects, 0,
             "encrypted objects must be skipped by the corruption scan"
@@ -1522,7 +1566,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
 
         assert_eq!(state.corrupted_objects, 1, "corrupted");
         assert_eq!(state.phantom_metadata, 1, "phantom");
@@ -1562,7 +1606,7 @@ mod tests {
         write_index(&meta_root, &[("folder", &outer_etag)]);
         write_index(&meta_root.join("folder"), &[("file", &inner_etag)]);
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
 
         assert_eq!(
             state.corrupted_objects, 0,
@@ -1585,7 +1629,7 @@ mod tests {
     fn skips_system_root_as_bucket() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(SYSTEM_ROOT).join("config")).unwrap();
-        let state = scan_all_buckets(tmp.path(), 100);
+        let state = scan_all_buckets(tmp.path(), 100, 0);
         assert_eq!(state.buckets_scanned, 0);
     }
 
@@ -1623,7 +1667,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.corrupted_objects, 0,
             "poisoned entries must not re-flag"
@@ -1671,7 +1715,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.stale_versions, 1,
             "delete-marker manifest must not be flagged; only the data-bearing orphan should count"
@@ -1717,7 +1761,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.phantom_metadata, 0,
             "poisoned entries with quarantined files must not be reported as phantom metadata"
@@ -1745,7 +1789,7 @@ mod tests {
             &[("multi.bin", "deadbeefdeadbeefdeadbeefdeadbeef-3")],
         );
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.corrupted_objects, 0,
             "multipart-style ETags must not be checked against whole-body MD5"
@@ -1793,17 +1837,17 @@ mod tests {
             &["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"],
         );
 
-        let _ = scan_all_buckets(root, 2);
+        let _ = scan_all_buckets(root, 2, 0);
         let cursor1 = load_cursor(&cursor_path_for(root));
         assert_eq!(cursor1.bucket, "alpha");
         assert_eq!(cursor1.after_key, "b.txt");
 
-        let _ = scan_all_buckets(root, 2);
+        let _ = scan_all_buckets(root, 2, 0);
         let cursor2 = load_cursor(&cursor_path_for(root));
         assert_eq!(cursor2.bucket, "alpha");
         assert_eq!(cursor2.after_key, "d.txt");
 
-        let _ = scan_all_buckets(root, 2);
+        let _ = scan_all_buckets(root, 2, 0);
         let cursor3 = load_cursor(&cursor_path_for(root));
         assert_eq!(
             cursor3.bucket, "",
@@ -1819,12 +1863,12 @@ mod tests {
         seed_bucket_with_objects(root, "alpha", &["x.txt", "y.txt"]);
         seed_bucket_with_objects(root, "bravo", &["m.txt", "n.txt"]);
 
-        let _ = scan_all_buckets(root, 3);
+        let _ = scan_all_buckets(root, 3, 0);
         let c1 = load_cursor(&cursor_path_for(root));
         assert_eq!(c1.bucket, "bravo");
         assert_eq!(c1.after_key, "m.txt");
 
-        let _ = scan_all_buckets(root, 3);
+        let _ = scan_all_buckets(root, 3, 0);
         let c2 = load_cursor(&cursor_path_for(root));
         assert_eq!(c2.bucket, "", "second run should finish the sweep");
     }
@@ -1840,7 +1884,7 @@ mod tests {
         };
         save_cursor(&cursor_path_for(root), &cursor);
 
-        let state = scan_all_buckets(root, 100);
+        let state = scan_all_buckets(root, 100, 0);
         assert!(state.errors.is_empty(), "unexpected errors: {:?}", state.errors);
         let after = load_cursor(&cursor_path_for(root));
         assert_eq!(
@@ -1882,7 +1926,7 @@ mod tests {
             .collect();
         write_index(&meta_root, &pairs);
 
-        let state = scan_all_buckets(root, 100_000);
+        let state = scan_all_buckets(root, 100_000, 0);
 
         let phantom_in_list = state
             .issues
@@ -1938,7 +1982,7 @@ mod tests {
             &[("ghost-b.txt", "deadbeefdeadbeefdeadbeefdeadbeef")],
         );
 
-        let state = scan_all_buckets(root, 1);
+        let state = scan_all_buckets(root, 1, 0);
         assert_eq!(
             state.phantom_metadata, 2,
             "phantom-metadata phase must visit every bucket each run, not be gated by the corruption budget"
@@ -1973,7 +2017,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.orphaned_objects, 0,
             "legacy per-key .meta.json must count as indexed metadata"
@@ -2008,7 +2052,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.corrupted_objects, 0,
             "aggregate index must win over legacy per-key file"
@@ -2036,7 +2080,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.orphaned_objects, 0,
             "legacy <bucket>/.meta/<key>.meta.json must also count as indexed"
