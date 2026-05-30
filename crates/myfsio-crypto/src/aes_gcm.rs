@@ -1,10 +1,11 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use hkdf::Hkdf;
+use rand::RngCore;
 use sha2::Sha256;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const DEFAULT_CHUNK_SIZE: usize = 65536;
@@ -252,6 +253,178 @@ pub fn decrypt_stream_chunked_range(
     Ok(bytes_written)
 }
 
+pub const PART_BLOCK_PLAIN_SIZE_LEN: usize = 8;
+pub const PART_BLOCK_SALT_LEN: usize = 16;
+pub const PART_BLOCK_PREFIX_LEN: usize = PART_BLOCK_PLAIN_SIZE_LEN + PART_BLOCK_SALT_LEN;
+
+pub fn derive_part_base_nonce(
+    odk: &[u8; 32],
+    part_number: u32,
+    salt: &[u8],
+) -> Result<[u8; 12], CryptoError> {
+    let hkdf = Hkdf::<Sha256>::new(Some(odk), b"mpu_part_nonce");
+    let mut info = Vec::with_capacity(4 + salt.len());
+    info.extend_from_slice(&part_number.to_be_bytes());
+    info.extend_from_slice(salt);
+    let mut okm = [0u8; 12];
+    hkdf.expand(&info, &mut okm)
+        .map_err(|e| CryptoError::HkdfFailed(e.to_string()))?;
+    Ok(okm)
+}
+
+pub fn encrypt_part_block(
+    input_path: &Path,
+    output_path: &Path,
+    odk: &[u8; 32],
+    part_number: u32,
+    chunk_size: Option<usize>,
+) -> Result<(u64, u32), CryptoError> {
+    let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
+
+    let mut salt = [0u8; PART_BLOCK_SALT_LEN];
+    rand::thread_rng().fill_bytes(&mut salt);
+    let base_nonce = derive_part_base_nonce(odk, part_number, &salt)?;
+
+    let key_arr: [u8; 32] = *odk;
+    let cipher = Aes256Gcm::new(&key_arr.into());
+
+    let mut infile = File::open(input_path)?;
+    let plaintext_size = infile.metadata()?.len();
+    let mut outfile = File::create(output_path)?;
+
+    outfile.write_all(&plaintext_size.to_be_bytes())?;
+    outfile.write_all(&salt)?;
+    outfile.write_all(&[0u8; HEADER_SIZE])?;
+
+    let mut buf = vec![0u8; chunk_size];
+    let mut chunk_index: u32 = 0;
+
+    loop {
+        let n = read_exact_chunk(&mut infile, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+
+        let nonce_bytes = derive_chunk_nonce(&base_nonce, chunk_index)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let encrypted = cipher
+            .encrypt(nonce, &buf[..n])
+            .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
+
+        let size = encrypted.len() as u32;
+        outfile.write_all(&size.to_be_bytes())?;
+        outfile.write_all(&encrypted)?;
+
+        chunk_index += 1;
+    }
+
+    outfile.seek(SeekFrom::Start(PART_BLOCK_PREFIX_LEN as u64))?;
+    outfile.write_all(&chunk_index.to_be_bytes())?;
+
+    Ok((plaintext_size, chunk_index))
+}
+
+pub fn read_part_block_plain_size(
+    object_path: &Path,
+    block_offset: u64,
+) -> Result<u64, CryptoError> {
+    let mut f = File::open(object_path)?;
+    f.seek(SeekFrom::Start(block_offset))?;
+    let mut prefix = [0u8; PART_BLOCK_PLAIN_SIZE_LEN];
+    f.read_exact(&mut prefix)?;
+    Ok(u64::from_be_bytes(prefix))
+}
+
+pub fn read_part_block_salt(
+    object_path: &Path,
+    block_offset: u64,
+) -> Result<[u8; PART_BLOCK_SALT_LEN], CryptoError> {
+    let mut f = File::open(object_path)?;
+    f.seek(SeekFrom::Start(block_offset + PART_BLOCK_PLAIN_SIZE_LEN as u64))?;
+    let mut salt = [0u8; PART_BLOCK_SALT_LEN];
+    f.read_exact(&mut salt)?;
+    Ok(salt)
+}
+
+fn envelope_tmp_path(output_path: &Path) -> PathBuf {
+    let mut name = output_path.as_os_str().to_owned();
+    name.push(".env");
+    PathBuf::from(name)
+}
+
+fn extract_part_envelope(
+    object_path: &Path,
+    block_offset: u64,
+    block_len: u64,
+    env_tmp: &Path,
+) -> Result<(), CryptoError> {
+    let min_len = (PART_BLOCK_PREFIX_LEN + HEADER_SIZE) as u64;
+    if block_len < min_len {
+        return Err(CryptoError::EncryptionFailed(format!(
+            "part block length {} smaller than minimum {}",
+            block_len, min_len
+        )));
+    }
+    let mut f = File::open(object_path)?;
+    f.seek(SeekFrom::Start(block_offset + PART_BLOCK_PREFIX_LEN as u64))?;
+    let env_len = block_len - PART_BLOCK_PREFIX_LEN as u64;
+    let mut limited = f.take(env_len);
+    let mut out = File::create(env_tmp)?;
+    std::io::copy(&mut limited, &mut out)?;
+    out.flush()?;
+    Ok(())
+}
+
+pub fn decrypt_part_block(
+    object_path: &Path,
+    output_path: &Path,
+    block_offset: u64,
+    block_len: u64,
+    odk: &[u8; 32],
+    part_number: u32,
+) -> Result<u64, CryptoError> {
+    let salt = read_part_block_salt(object_path, block_offset)?;
+    let base_nonce = derive_part_base_nonce(odk, part_number, &salt)?;
+    let env_tmp = envelope_tmp_path(output_path);
+    extract_part_envelope(object_path, block_offset, block_len, &env_tmp)?;
+    let res = decrypt_stream_chunked(&env_tmp, output_path, odk, &base_nonce);
+    let _ = std::fs::remove_file(&env_tmp);
+    res?;
+    Ok(std::fs::metadata(output_path)?.len())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decrypt_part_block_range(
+    object_path: &Path,
+    output_path: &Path,
+    block_offset: u64,
+    block_len: u64,
+    odk: &[u8; 32],
+    part_number: u32,
+    chunk_plain_size: usize,
+    part_plaintext_size: u64,
+    plain_start: u64,
+    plain_end_inclusive: u64,
+) -> Result<u64, CryptoError> {
+    let salt = read_part_block_salt(object_path, block_offset)?;
+    let base_nonce = derive_part_base_nonce(odk, part_number, &salt)?;
+    let env_tmp = envelope_tmp_path(output_path);
+    extract_part_envelope(object_path, block_offset, block_len, &env_tmp)?;
+    let res = decrypt_stream_chunked_range(
+        &env_tmp,
+        output_path,
+        odk,
+        &base_nonce,
+        chunk_plain_size,
+        part_plaintext_size,
+        plain_start,
+        plain_end_inclusive,
+    );
+    let _ = std::fs::remove_file(&env_tmp);
+    res
+}
+
 pub async fn encrypt_stream_chunked_async(
     input_path: &Path,
     output_path: &Path,
@@ -338,7 +511,10 @@ mod tests {
     }
 
     fn write_file(path: &Path, data: &[u8]) {
-        std::fs::File::create(path).unwrap().write_all(data).unwrap();
+        std::fs::File::create(path)
+            .unwrap()
+            .write_all(data)
+            .unwrap();
     }
 
     fn make_encrypted_file(
@@ -541,5 +717,200 @@ mod tests {
         let wrong_key = [0x43u8; 32];
         let result = decrypt_stream_chunked(&encrypted, &decrypted, &wrong_key, &nonce);
         assert!(matches!(result, Err(CryptoError::DecryptionFailed(_))));
+    }
+
+    #[test]
+    fn test_derive_part_base_nonce_deterministic_and_distinct() {
+        let odk = [0x5au8; 32];
+        let salt_a = [0x10u8; PART_BLOCK_SALT_LEN];
+        let salt_b = [0x20u8; PART_BLOCK_SALT_LEN];
+        let a1 = derive_part_base_nonce(&odk, 1, &salt_a).unwrap();
+        let a1b = derive_part_base_nonce(&odk, 1, &salt_a).unwrap();
+        let a2 = derive_part_base_nonce(&odk, 2, &salt_a).unwrap();
+        assert_eq!(a1, a1b);
+        assert_ne!(a1, a2);
+        let same_part_other_salt = derive_part_base_nonce(&odk, 1, &salt_b).unwrap();
+        assert_ne!(
+            a1, same_part_other_salt,
+            "same part number with a different salt must produce a distinct nonce"
+        );
+        let other = derive_part_base_nonce(&[0x5bu8; 32], 1, &salt_a).unwrap();
+        assert_ne!(a1, other);
+    }
+
+    fn make_part_block(
+        dir: &Path,
+        data: &[u8],
+        odk: &[u8; 32],
+        part_number: u32,
+        chunk: usize,
+    ) -> (std::path::PathBuf, u64) {
+        let input = dir.join(format!("plain-{}.bin", part_number));
+        let block = dir.join(format!("block-{}.bin", part_number));
+        write_file(&input, data);
+        let (plain_size, _) =
+            encrypt_part_block(&input, &block, odk, part_number, Some(chunk)).unwrap();
+        assert_eq!(plain_size, data.len() as u64);
+        let block_len = std::fs::metadata(&block).unwrap().len();
+        (block, block_len)
+    }
+
+    #[test]
+    fn test_part_block_roundtrip_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let odk = [0x77u8; 32];
+        let (block, block_len) = make_part_block(dir.path(), &data, &odk, 3, 1024);
+
+        let prefix_size = read_part_block_plain_size(&block, 0).unwrap();
+        assert_eq!(prefix_size, data.len() as u64);
+
+        let out = dir.path().join("dec.bin");
+        let n = decrypt_part_block(&block, &out, 0, block_len, &odk, 3).unwrap();
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), data);
+    }
+
+    #[test]
+    fn test_part_block_roundtrip_at_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_a = vec![0xABu8; 1500];
+        let data_b: Vec<u8> = (0..3333u32).map(|i| (i % 97) as u8).collect();
+        let odk = [0x21u8; 32];
+        let (block_a, len_a) = make_part_block(dir.path(), &data_a, &odk, 1, 512);
+        let (block_b, len_b) = make_part_block(dir.path(), &data_b, &odk, 2, 512);
+
+        let object = dir.path().join("object.bin");
+        {
+            let mut o = File::create(&object).unwrap();
+            o.write_all(&std::fs::read(&block_a).unwrap()).unwrap();
+            o.write_all(&std::fs::read(&block_b).unwrap()).unwrap();
+        }
+
+        let prefix_b = read_part_block_plain_size(&object, len_a).unwrap();
+        assert_eq!(prefix_b, data_b.len() as u64);
+
+        let out = dir.path().join("dec_b.bin");
+        let n = decrypt_part_block(&object, &out, len_a, len_b, &odk, 2).unwrap();
+        assert_eq!(n, data_b.len() as u64);
+        assert_eq!(std::fs::read(&out).unwrap(), data_b);
+    }
+
+    #[test]
+    fn test_part_block_range_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..6000u32).map(|i| (i % 211) as u8).collect();
+        let odk = [0x34u8; 32];
+        let (block, block_len) = make_part_block(dir.path(), &data, &odk, 7, 512);
+
+        for (s, e) in [
+            (0u64, 0u64),
+            (100, 399),
+            (500, 2999),
+            (5000, 5999),
+            (0, 5999),
+        ] {
+            let out = dir.path().join(format!("r-{}-{}.bin", s, e));
+            let n = decrypt_part_block_range(
+                &block,
+                &out,
+                0,
+                block_len,
+                &odk,
+                7,
+                512,
+                data.len() as u64,
+                s,
+                e,
+            )
+            .unwrap();
+            assert_eq!(n, e - s + 1);
+            assert_eq!(std::fs::read(&out).unwrap(), &data[s as usize..=e as usize]);
+        }
+    }
+
+    #[test]
+    fn test_part_block_wrong_key_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"per-part-secret".repeat(80);
+        let odk = [0x44u8; 32];
+        let (block, block_len) = make_part_block(dir.path(), &data, &odk, 1, 256);
+
+        let wrong = [0x45u8; 32];
+        let out = dir.path().join("bad.bin");
+        let r = decrypt_part_block(&block, &out, 0, block_len, &wrong, 1);
+        assert!(matches!(r, Err(CryptoError::DecryptionFailed(_))));
+
+        let r2 = decrypt_part_block_range(
+            &block,
+            &out,
+            0,
+            block_len,
+            &wrong,
+            1,
+            256,
+            data.len() as u64,
+            0,
+            data.len() as u64 - 1,
+        );
+        assert!(matches!(r2, Err(CryptoError::DecryptionFailed(_))));
+    }
+
+    #[test]
+    fn test_part_block_replacement_uses_distinct_salt_and_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let odk = [0x99u8; 32];
+
+        let input = dir.path().join("plain.bin");
+        write_file(&input, &data);
+        let block1 = dir.path().join("block1.bin");
+        let block2 = dir.path().join("block2.bin");
+        encrypt_part_block(&input, &block1, &odk, 5, Some(1024)).unwrap();
+        encrypt_part_block(&input, &block2, &odk, 5, Some(1024)).unwrap();
+
+        let b1 = std::fs::read(&block1).unwrap();
+        let b2 = std::fs::read(&block2).unwrap();
+
+        let salt1 = &b1[PART_BLOCK_PLAIN_SIZE_LEN..PART_BLOCK_PREFIX_LEN];
+        let salt2 = &b2[PART_BLOCK_PLAIN_SIZE_LEN..PART_BLOCK_PREFIX_LEN];
+        assert_ne!(
+            salt1, salt2,
+            "re-encrypting the same part must use a fresh random salt"
+        );
+        assert_ne!(
+            &b1[PART_BLOCK_PREFIX_LEN..],
+            &b2[PART_BLOCK_PREFIX_LEN..],
+            "same plaintext under the same key/part number must not reuse the AES-GCM nonce stream"
+        );
+
+        let out1 = dir.path().join("d1.bin");
+        let out2 = dir.path().join("d2.bin");
+        decrypt_part_block(&block1, &out1, 0, b1.len() as u64, &odk, 5).unwrap();
+        decrypt_part_block(&block2, &out2, 0, b2.len() as u64, &odk, 5).unwrap();
+        assert_eq!(std::fs::read(&out1).unwrap(), data);
+        assert_eq!(std::fs::read(&out2).unwrap(), data);
+    }
+
+    #[test]
+    fn test_part_block_envelope_matches_stream_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..2048u32).map(|i| i as u8).collect();
+        let odk = [0x66u8; 32];
+
+        let input = dir.path().join("p.bin");
+        let block = dir.path().join("block.bin");
+        write_file(&input, &data);
+        encrypt_part_block(&input, &block, &odk, 1, Some(512)).unwrap();
+
+        let block_bytes = std::fs::read(&block).unwrap();
+        let salt = &block_bytes[PART_BLOCK_PLAIN_SIZE_LEN..PART_BLOCK_PREFIX_LEN];
+        let base_nonce = derive_part_base_nonce(&odk, 1, salt).unwrap();
+        let envelope = dir.path().join("env.bin");
+        write_file(&envelope, &block_bytes[PART_BLOCK_PREFIX_LEN..]);
+
+        let out = dir.path().join("via_stream.bin");
+        decrypt_stream_chunked(&envelope, &out, &odk, &base_nonce).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), data);
     }
 }

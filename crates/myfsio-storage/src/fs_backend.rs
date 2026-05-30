@@ -3885,6 +3885,51 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Ok(uploads)
     }
 
+    async fn get_multipart_metadata(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+    ) -> StorageResult<HashMap<String, String>> {
+        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        if !manifest_path.exists() {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let manifest: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
+        let metadata = manifest
+            .get("metadata")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<HashMap<String, String>>()
+            })
+            .unwrap_or_default();
+        Ok(metadata)
+    }
+
+    async fn get_multipart_part_path(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+    ) -> StorageResult<PathBuf> {
+        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        if !manifest_path.exists() {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+        let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
+        if !part_file.is_file() {
+            return Err(StorageError::InvalidObjectKey(format!(
+                "Part {} not found",
+                part_number
+            )));
+        }
+        Ok(part_file)
+    }
+
     async fn get_bucket_config(&self, bucket: &str) -> StorageResult<BucketConfig> {
         self.require_bucket(bucket)?;
         Ok(self.read_bucket_config_sync(bucket))

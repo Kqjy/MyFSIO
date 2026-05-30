@@ -203,6 +203,19 @@ pub trait StorageEngine: Send + Sync {
     async fn list_multipart_uploads(&self, bucket: &str)
         -> StorageResult<Vec<MultipartUploadInfo>>;
 
+    async fn get_multipart_metadata(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+    ) -> StorageResult<HashMap<String, String>>;
+
+    async fn get_multipart_part_path(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+    ) -> StorageResult<PathBuf>;
+
     async fn get_bucket_config(&self, bucket: &str) -> StorageResult<BucketConfig>;
     async fn set_bucket_config(&self, bucket: &str, config: &BucketConfig) -> StorageResult<()>;
 

@@ -5,9 +5,62 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::aes_gcm::{
-    decrypt_stream_chunked, decrypt_stream_chunked_range, encrypt_stream_chunked, CryptoError,
+    decrypt_part_block, decrypt_part_block_range, decrypt_stream_chunked,
+    decrypt_stream_chunked_range, encrypt_part_block, encrypt_stream_chunked,
+    read_part_block_plain_size, CryptoError,
 };
 use crate::kms::KmsService;
+
+pub fn wrap_key_with(wrapping_key: &[u8; 32], data_key: &[u8; 32]) -> Result<String, CryptoError> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    let cipher = Aes256Gcm::new(wrapping_key.into());
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let encrypted = cipher
+        .encrypt(nonce, data_key.as_slice())
+        .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
+
+    let mut combined = Vec::with_capacity(12 + encrypted.len());
+    combined.extend_from_slice(&nonce_bytes);
+    combined.extend_from_slice(&encrypted);
+    Ok(B64.encode(&combined))
+}
+
+pub fn unwrap_key_with(
+    wrapping_key: &[u8; 32],
+    wrapped_b64: &str,
+) -> Result<[u8; 32], CryptoError> {
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+
+    let combined = B64
+        .decode(wrapped_b64)
+        .map_err(|e| CryptoError::EncryptionFailed(format!("Bad wrapped key encoding: {}", e)))?;
+    if combined.len() < 12 {
+        return Err(CryptoError::EncryptionFailed(
+            "Wrapped key too short".to_string(),
+        ));
+    }
+
+    let (nonce_bytes, ciphertext) = combined.split_at(12);
+    let cipher = Aes256Gcm::new(wrapping_key.into());
+    let nonce = Nonce::from_slice(nonce_bytes);
+
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| CryptoError::DecryptionFailed(0))?;
+
+    if plaintext.len() != 32 {
+        return Err(CryptoError::InvalidKeySize(plaintext.len()));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&plaintext);
+    Ok(key)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SseAlgorithm {
@@ -143,51 +196,104 @@ impl EncryptionService {
     }
 
     pub fn wrap_data_key(&self, data_key: &[u8; 32]) -> Result<String, CryptoError> {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-
-        let cipher = Aes256Gcm::new((&self.master_key).into());
-        let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let encrypted = cipher
-            .encrypt(nonce, data_key.as_slice())
-            .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
-
-        let mut combined = Vec::with_capacity(12 + encrypted.len());
-        combined.extend_from_slice(&nonce_bytes);
-        combined.extend_from_slice(&encrypted);
-        Ok(B64.encode(&combined))
+        wrap_key_with(&self.master_key, data_key)
     }
 
     pub fn unwrap_data_key(&self, wrapped_b64: &str) -> Result<[u8; 32], CryptoError> {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+        unwrap_key_with(&self.master_key, wrapped_b64)
+    }
 
-        let combined = B64.decode(wrapped_b64).map_err(|e| {
-            CryptoError::EncryptionFailed(format!("Bad wrapped key encoding: {}", e))
-        })?;
-        if combined.len() < 12 {
-            return Err(CryptoError::EncryptionFailed(
-                "Wrapped key too short".to_string(),
-            ));
-        }
-
-        let (nonce_bytes, ciphertext) = combined.split_at(12);
-        let cipher = Aes256Gcm::new((&self.master_key).into());
-        let nonce = Nonce::from_slice(nonce_bytes);
-
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| CryptoError::DecryptionFailed(0))?;
-
-        if plaintext.len() != 32 {
-            return Err(CryptoError::InvalidKeySize(plaintext.len()));
-        }
+    pub fn generate_odk(&self) -> [u8; 32] {
         let mut key = [0u8; 32];
-        key.copy_from_slice(&plaintext);
-        Ok(key)
+        rand::thread_rng().fill_bytes(&mut key);
+        key
+    }
+
+    pub async fn encrypt_mpu_part(
+        &self,
+        plain_path: &Path,
+        block_out: &Path,
+        odk: [u8; 32],
+        part_number: u32,
+        chunk_size: usize,
+    ) -> Result<u64, CryptoError> {
+        let pp = plain_path.to_owned();
+        let bo = block_out.to_owned();
+        let (plain_size, _chunks) = tokio::task::spawn_blocking(move || {
+            encrypt_part_block(&pp, &bo, &odk, part_number, Some(chunk_size))
+        })
+        .await
+        .map_err(|e| CryptoError::Io(std::io::Error::other(e)))??;
+        Ok(plain_size)
+    }
+
+    pub async fn decrypt_mpu_part(
+        &self,
+        object_path: &Path,
+        output_path: &Path,
+        block_offset: u64,
+        block_len: u64,
+        odk: [u8; 32],
+        part_number: u32,
+    ) -> Result<u64, CryptoError> {
+        let op = object_path.to_owned();
+        let outp = output_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            decrypt_part_block(&op, &outp, block_offset, block_len, &odk, part_number)
+        })
+        .await
+        .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn decrypt_mpu_part_range(
+        &self,
+        object_path: &Path,
+        output_path: &Path,
+        block_offset: u64,
+        block_len: u64,
+        odk: [u8; 32],
+        part_number: u32,
+        chunk_size: usize,
+        part_plaintext_size: u64,
+        plain_start: u64,
+        plain_end_inclusive: u64,
+    ) -> Result<u64, CryptoError> {
+        let op = object_path.to_owned();
+        let outp = output_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            decrypt_part_block_range(
+                &op,
+                &outp,
+                block_offset,
+                block_len,
+                &odk,
+                part_number,
+                chunk_size,
+                part_plaintext_size,
+                plain_start,
+                plain_end_inclusive,
+            )
+        })
+        .await
+        .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
+    }
+
+    pub async fn read_mpu_part_plain_sizes(
+        &self,
+        object_path: &Path,
+        block_offsets: Vec<u64>,
+    ) -> Result<Vec<u64>, CryptoError> {
+        let op = object_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut sizes = Vec::with_capacity(block_offsets.len());
+            for off in block_offsets {
+                sizes.push(read_part_block_plain_size(&op, off)?);
+            }
+            Ok(sizes)
+        })
+        .await
+        .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
     }
 
     pub async fn encrypt_object(
@@ -382,6 +488,81 @@ mod tests {
         let wrapped = svc.wrap_data_key(&dk).unwrap();
         let unwrapped = svc.unwrap_data_key(&wrapped).unwrap();
         assert_eq!(dk, unwrapped);
+    }
+
+    #[test]
+    fn test_wrap_key_with_roundtrip_and_wrong_key() {
+        let wrapping = [0x11u8; 32];
+        let dk = [0x99u8; 32];
+        let wrapped = wrap_key_with(&wrapping, &dk).unwrap();
+        assert_eq!(unwrap_key_with(&wrapping, &wrapped).unwrap(), dk);
+
+        let wrong = [0x12u8; 32];
+        assert!(matches!(
+            unwrap_key_with(&wrong, &wrapped),
+            Err(CryptoError::DecryptionFailed(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_mpu_part_encrypt_decrypt_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = EncryptionService::new(test_master_key(), None);
+        let odk = svc.generate_odk();
+
+        let data_a = vec![0xCDu8; 1500];
+        let data_b: Vec<u8> = (0..3000u32).map(|i| (i % 131) as u8).collect();
+        let plain_a = dir.path().join("a.plain");
+        let plain_b = dir.path().join("b.plain");
+        std::fs::write(&plain_a, &data_a).unwrap();
+        std::fs::write(&plain_b, &data_b).unwrap();
+
+        let block_a = dir.path().join("a.block");
+        let block_b = dir.path().join("b.block");
+        svc.encrypt_mpu_part(&plain_a, &block_a, odk, 1, 512)
+            .await
+            .unwrap();
+        svc.encrypt_mpu_part(&plain_b, &block_b, odk, 2, 512)
+            .await
+            .unwrap();
+
+        let object = dir.path().join("object.bin");
+        let mut bytes = std::fs::read(&block_a).unwrap();
+        bytes.extend_from_slice(&std::fs::read(&block_b).unwrap());
+        std::fs::write(&object, &bytes).unwrap();
+        let len_a = std::fs::metadata(&block_a).unwrap().len();
+        let len_b = std::fs::metadata(&block_b).unwrap().len();
+
+        let sizes = svc
+            .read_mpu_part_plain_sizes(&object, vec![0, len_a])
+            .await
+            .unwrap();
+        assert_eq!(sizes, vec![data_a.len() as u64, data_b.len() as u64]);
+
+        let out_b = dir.path().join("b.dec");
+        svc.decrypt_mpu_part(&object, &out_b, len_a, len_b, odk, 2)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&out_b).unwrap(), data_b);
+
+        let out_b_range = dir.path().join("b.range");
+        let n = svc
+            .decrypt_mpu_part_range(
+                &object,
+                &out_b_range,
+                len_a,
+                len_b,
+                odk,
+                2,
+                512,
+                data_b.len() as u64,
+                10,
+                1500,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1491);
+        assert_eq!(std::fs::read(&out_b_range).unwrap(), &data_b[10..=1500]);
     }
 
     #[tokio::test]
