@@ -1830,7 +1830,11 @@ impl FsStorageBackend {
         params: &ListParams,
     ) -> StorageResult<ListObjectsResult> {
         self.require_bucket(bucket_name)?;
-        if let Some(ref prefix) = params.prefix {
+        let prefix = params
+            .prefix
+            .as_deref()
+            .map(|p| p.trim_start_matches(['/', '\\']));
+        if let Some(prefix) = prefix {
             if !prefix.is_empty() {
                 validate_list_prefix(prefix)?;
             }
@@ -1838,7 +1842,7 @@ impl FsStorageBackend {
 
         let listing = self.get_full_listing_sync(bucket_name)?;
 
-        let (slice_start, slice_end) = match params.prefix.as_deref() {
+        let (slice_start, slice_end) = match prefix {
             Some(p) if !p.is_empty() => slice_range_for_prefix(&listing[..], |e| &e.0, p),
             _ => (0, listing.len()),
         };
@@ -2072,22 +2076,15 @@ impl FsStorageBackend {
     ) -> StorageResult<ShallowListResult> {
         self.require_bucket(bucket_name)?;
 
-        if params.prefix.starts_with('/') || params.prefix.starts_with('\\') {
-            return Ok(ShallowListResult {
-                objects: Vec::new(),
-                common_prefixes: Vec::new(),
-                is_truncated: false,
-                next_continuation_token: None,
-            });
-        }
+        let prefix = params.prefix.trim_start_matches(['/', '\\']);
 
-        let rel_dir: PathBuf = if params.prefix.is_empty() {
+        let rel_dir: PathBuf = if prefix.is_empty() {
             PathBuf::new()
         } else {
-            validate_list_prefix(&params.prefix)?;
-            let encoded_prefix = fs_encode_key(&params.prefix);
+            validate_list_prefix(prefix)?;
+            let encoded_prefix = fs_encode_key(prefix);
             let prefix_path = Path::new(&encoded_prefix);
-            if params.prefix.ends_with(&params.delimiter) {
+            if prefix.ends_with(&params.delimiter) {
                 prefix_path.to_path_buf()
             } else {
                 prefix_path.parent().unwrap_or(Path::new("")).to_path_buf()
@@ -2096,9 +2093,8 @@ impl FsStorageBackend {
 
         let cached = self.get_shallow_sync(bucket_name, &rel_dir, &params.delimiter)?;
 
-        let (file_start, file_end) =
-            slice_range_for_prefix(&cached.files, |o| &o.key, &params.prefix);
-        let (dir_start, dir_end) = slice_range_for_prefix(&cached.dirs, |s| s, &params.prefix);
+        let (file_start, file_end) = slice_range_for_prefix(&cached.files, |o| &o.key, prefix);
+        let (dir_start, dir_end) = slice_range_for_prefix(&cached.dirs, |s| s, prefix);
         let files = &cached.files[file_start..file_end];
         let dirs = &cached.dirs[dir_start..dir_end];
 

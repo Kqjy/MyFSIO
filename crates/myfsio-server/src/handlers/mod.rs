@@ -1901,6 +1901,14 @@ fn parse_copy_source(copy_source: &str) -> Result<(String, String, Option<String
     Ok((bucket, key, version_id))
 }
 
+fn normalize_object_key(key: String) -> String {
+    if key.starts_with(['/', '\\']) {
+        key.trim_start_matches(['/', '\\']).to_string()
+    } else {
+        key
+    }
+}
+
 pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
@@ -1910,6 +1918,7 @@ pub async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     let owner_id = principal
         .as_ref()
@@ -2250,6 +2259,7 @@ pub async fn get_object(
     Query(query): Query<ObjectQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let key = normalize_object_key(key);
     if query.tagging.is_some() {
         return config::get_object_tagging(
             &state,
@@ -2493,6 +2503,7 @@ pub async fn post_object(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.uploads.is_some() {
         return initiate_multipart_handler(&state, &bucket, &key, &headers).await;
@@ -2525,6 +2536,7 @@ pub async fn delete_object(
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
+    let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
         if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
@@ -2608,6 +2620,7 @@ pub async fn head_object(
     Query(query): Query<ObjectQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let key = normalize_object_key(key);
     let version_id = query.version_id.as_deref();
     let result = match version_id {
         Some(version_id) => {
