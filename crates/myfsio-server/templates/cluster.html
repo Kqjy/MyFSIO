@@ -495,7 +495,7 @@
                 var stamp = document.getElementById("cluster-updated-at");
                 if (stamp) stamp.textContent = "updated " + new Date().toLocaleTimeString();
             })
-            .catch(function () { /* silent — keep last good state */ })
+            .catch(function () {})
             .finally(function () {
                 if (icon) icon.classList.remove("spin");
                 if (btn) btn.disabled = false;

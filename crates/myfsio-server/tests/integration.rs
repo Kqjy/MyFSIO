@@ -699,6 +699,10 @@ async fn test_ui_replication_endpoints_are_wired_and_operational() {
             bucket_name: bucket_name.to_string(),
             action: "put".to_string(),
             last_error_code: Some("SlowDown".to_string()),
+            pending_upload_id: None,
+            pending_source_size: None,
+            pending_source_etag: None,
+            pending_part_size: None,
         },
     );
     state.replication.failures.add(
@@ -711,6 +715,10 @@ async fn test_ui_replication_endpoints_are_wired_and_operational() {
             bucket_name: bucket_name.to_string(),
             action: "put".to_string(),
             last_error_code: None,
+            pending_upload_id: None,
+            pending_source_size: None,
+            pending_source_etag: None,
+            pending_part_size: None,
         },
     );
 
@@ -8224,9 +8232,6 @@ async fn test_upload_part_copy_with_version_id_null() {
 
     let complete_xml = format!(
         "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
-        // The CopyPartResult ETag is the MD5 of the copied bytes — for "legacy-null-bytes"
-        // we don't need to verify the exact value here; we just need the complete to succeed.
-        // List the parts to get the etag.
         list_first_part_etag(&app, "null-mpcp-dst", "recovered", &upload_id).await,
     );
     let resp = app
@@ -8757,4 +8762,883 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         StatusCode::FORBIDDEN,
         "outbound connection access key must NOT grant cluster overview when not configured as the peer's inbound key"
     );
+}
+
+async fn test_app_sse_c() -> (axum::Router, tempfile::TempDir) {
+    test_app_sse_c_with_min(1).await
+}
+
+async fn test_app_sse_c_with_min(min_part_size: u64) -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+
+    let iam_json = serde_json::json!({
+        "version": 2,
+        "users": [{
+            "user_id": "u-test1234",
+            "display_name": "admin",
+            "enabled": true,
+            "access_keys": [{
+                "access_key": TEST_ACCESS_KEY,
+                "secret_key": TEST_SECRET_KEY,
+                "status": "active"
+            }],
+            "policies": [{ "bucket": "*", "actions": ["*"], "prefix": "*" }]
+        }]
+    });
+    std::fs::write(iam_path.join("iam.json"), iam_json.to_string()).unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        region: "us-east-1".to_string(),
+        iam_config_path: iam_path.join("iam.json"),
+        sigv4_timestamp_tolerance_secs: 900,
+        presigned_url_min_expiry: 1,
+        presigned_url_max_expiry: 604800,
+        secret_key: None,
+        encryption_enabled: true,
+        kms_enabled: false,
+        gc_enabled: false,
+        integrity_enabled: false,
+        metrics_enabled: false,
+        metrics_history_enabled: false,
+        metrics_interval_minutes: 5,
+        metrics_retention_hours: 24,
+        metrics_history_interval_minutes: 5,
+        metrics_history_retention_hours: 24,
+        lifecycle_enabled: false,
+        website_hosting_enabled: false,
+        replication_connect_timeout_secs: 5,
+        replication_read_timeout_secs: 30,
+        replication_max_retries: 2,
+        replication_streaming_threshold_bytes: 10_485_760,
+        replication_max_failures_per_bucket: 50,
+        replication_healer_enabled: false,
+        replication_healer_interval_secs: 60,
+        replication_healer_max_attempts: 12,
+        site_sync_enabled: false,
+        site_sync_interval_secs: 60,
+        site_sync_batch_size: 100,
+        site_sync_connect_timeout_secs: 10,
+        site_sync_read_timeout_secs: 120,
+        site_sync_max_retries: 2,
+        site_sync_clock_skew_tolerance: 1.0,
+        ui_enabled: false,
+        templates_dir: std::path::PathBuf::from("templates"),
+        static_dir: std::path::PathBuf::from("static"),
+        multipart_min_part_size: min_part_size,
+        encryption_chunk_size_bytes: 16384,
+        allow_legacy_header_auth: true,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new_with_encryption(config).await;
+    let app = myfsio_server::create_router(state);
+    (app, tmp)
+}
+
+fn sse_c_triplet(key: &[u8; 32]) -> (String, String) {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use md5::{Digest, Md5};
+    let key_b64 = B64.encode(key);
+    let mut hasher = Md5::new();
+    hasher.update(key);
+    let md5_b64 = B64.encode(hasher.finalize());
+    (key_b64, md5_b64)
+}
+
+fn sse_c_request(method: Method, uri: &str, key: Option<&[u8; 32]>, body: Body) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY);
+    if let Some(k) = key {
+        let (key_b64, md5_b64) = sse_c_triplet(k);
+        builder = builder
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", key_b64)
+            .header("x-amz-server-side-encryption-customer-key-MD5", md5_b64);
+    }
+    builder.body(body).unwrap()
+}
+
+fn extract_upload_id(body: &str) -> String {
+    body.split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+fn etag_from_response(resp: &axum::response::Response) -> String {
+    resp.headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string()
+}
+
+#[tokio::test]
+async fn test_sse_c_multipart_roundtrip_and_security() {
+    let (app, tmp) = test_app_sse_c().await;
+    let app = app.into_service();
+
+    let key = [0x37u8; 32];
+    let wrong_key = [0x38u8; 32];
+    let (key_b64, md5_b64) = sse_c_triplet(&key);
+
+    let bucket = "ssec-mp";
+    let object = "secret/big.bin";
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, &format!("/{bucket}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+
+    let part1: Vec<u8> = (0..40000u32).map(|i| (i % 256) as u8).collect();
+    let part2: Vec<u8> = (0..1234u32).map(|i| ((i * 7) % 256) as u8).collect();
+    let mut full = part1.clone();
+    full.extend_from_slice(&part2);
+    let total = full.len() as u64;
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploads"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption-customer-algorithm")
+            .unwrap(),
+        "AES256"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption-customer-key-MD5")
+            .unwrap(),
+        md5_b64.as_str()
+    );
+    let init_body = String::from_utf8(body_bytes(resp).await).unwrap();
+    let upload_id = extract_upload_id(&init_body);
+
+    let manifest_path = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("multipart")
+        .join(bucket)
+        .join(&upload_id)
+        .join("manifest.json");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(
+        !manifest.contains(&key_b64),
+        "manifest must never contain the raw SSE-C customer key"
+    );
+    assert!(manifest.contains("__mpu_sse_c__"));
+    assert!(manifest.contains("__mpu_wrapped_odk__"));
+    assert!(!manifest.contains("__pending_sse_c_customer_key__"));
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=1"),
+            Some(&key),
+            Body::from(part1.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag1 = etag_from_response(&resp);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=2"),
+            Some(&key),
+            Body::from(part2.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag2 = etag_from_response(&resp);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=3"),
+            None,
+            Body::from(vec![0u8; 10]),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "uploading a part to an SSE-C upload without the key must be rejected"
+    );
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{etag1}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{etag2}\"</ETag></Part></CompleteMultipartUpload>"
+    );
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploadId={upload_id}"),
+            None,
+            Body::from(complete_xml),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = std::fs::read(tmp.path().join(bucket).join("secret").join("big.bin")).unwrap();
+    assert_ne!(stored, full, "object must be encrypted at rest");
+    assert!(
+        stored.len() as u64 > total,
+        "stored ciphertext should be larger than plaintext"
+    );
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::GET,
+            &format!("/{bucket}/{object}"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-length").unwrap(),
+        total.to_string().as_str()
+    );
+    assert_eq!(body_bytes(resp).await, full);
+
+    for (s, e) in [
+        (0u64, 0u64),
+        (16000, 17000),
+        (39000, 40500),
+        (total - 1, total - 1),
+        (0, total - 1),
+    ] {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/{bucket}/{object}"))
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .header("range", format!("bytes={s}-{e}"))
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", key_b64.clone())
+            .header(
+                "x-amz-server-side-encryption-customer-key-MD5",
+                md5_b64.clone(),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PARTIAL_CONTENT,
+            "range {s}-{e} should be 206"
+        );
+        assert_eq!(
+            resp.headers().get("content-range").unwrap(),
+            format!("bytes {s}-{e}/{total}").as_str()
+        );
+        assert_eq!(
+            body_bytes(resp).await,
+            full[s as usize..=e as usize].to_vec(),
+            "range {s}-{e} body mismatch"
+        );
+    }
+
+    for (pn, expected, range) in [
+        (
+            1u32,
+            part1.clone(),
+            format!("bytes 0-{}/{}", part1.len() - 1, total),
+        ),
+        (
+            2u32,
+            part2.clone(),
+            format!("bytes {}-{}/{}", part1.len(), total - 1, total),
+        ),
+    ] {
+        let resp = tower::ServiceExt::oneshot(
+            app.clone(),
+            sse_c_request(
+                Method::GET,
+                &format!("/{bucket}/{object}?partNumber={pn}"),
+                Some(&key),
+                Body::empty(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT, "partNumber {pn}");
+        assert_eq!(
+            resp.headers().get("x-amz-mp-parts-count").unwrap(),
+            "2",
+            "partNumber {pn} parts-count"
+        );
+        assert_eq!(
+            resp.headers().get("content-range").unwrap(),
+            range.as_str(),
+            "partNumber {pn} content-range"
+        );
+        assert_eq!(body_bytes(resp).await, expected, "partNumber {pn} body");
+    }
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::GET,
+            &format!("/{bucket}/{object}"),
+            Some(&wrong_key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "wrong key GET → 403");
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::GET, &format!("/{bucket}/{object}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "missing key GET → 400"
+    );
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::HEAD,
+            &format!("/{bucket}/{object}"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-length").unwrap(),
+        total.to_string().as_str()
+    );
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::HEAD,
+            &format!("/{bucket}/{object}"),
+            Some(&wrong_key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "wrong key HEAD → 403");
+
+    let _ = app;
+}
+
+#[tokio::test]
+async fn test_sse_c_multipart_part_replacement_roundtrips() {
+    let (app, tmp) = test_app_sse_c().await;
+    let app = app.into_service();
+
+    let key = [0x4cu8; 32];
+    let bucket = "ssec-replace";
+    let object = "doc.bin";
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, &format!("/{bucket}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploads"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload_id = extract_upload_id(&String::from_utf8(body_bytes(resp).await).unwrap());
+
+    let part1_v1: Vec<u8> = vec![0xA1u8; 20000];
+    let part1_v2: Vec<u8> = (0..20000u32).map(|i| (i % 256) as u8).collect();
+    let part2: Vec<u8> = (0..1234u32).map(|i| ((i * 5) % 256) as u8).collect();
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=1"),
+            Some(&key),
+            Body::from(part1_v1.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=1"),
+            Some(&key),
+            Body::from(part1_v2.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag1 = etag_from_response(&resp);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=2"),
+            Some(&key),
+            Body::from(part2.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag2 = etag_from_response(&resp);
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{etag1}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{etag2}\"</ETag></Part></CompleteMultipartUpload>"
+    );
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploadId={upload_id}"),
+            None,
+            Body::from(complete_xml),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut expected = part1_v2.clone();
+    expected.extend_from_slice(&part2);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::GET,
+            &format!("/{bucket}/{object}"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_bytes(resp).await,
+        expected,
+        "after replacing part 1, GET must return the replacement bytes decrypted correctly"
+    );
+
+    let _ = tmp;
+}
+
+#[tokio::test]
+async fn test_sse_c_multipart_upload_part_copy_rejected() {
+    let (app, _tmp) = test_app_sse_c().await;
+    let app = app.into_service();
+
+    let key = [0x5du8; 32];
+    let (key_b64, md5_b64) = sse_c_triplet(&key);
+
+    let src_bucket = "ssec-copy-src";
+    let dst_bucket = "ssec-copy-dst";
+    let src_key = "source.bin";
+    let dst_key = "dest.bin";
+
+    for b in [src_bucket, dst_bucket] {
+        tower::ServiceExt::oneshot(
+            app.clone(),
+            signed_request(Method::PUT, &format!("/{b}"), Body::empty()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(
+            Method::PUT,
+            &format!("/{src_bucket}/{src_key}"),
+            Body::from(vec![0x7eu8; 8192]),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{dst_bucket}/{dst_key}?uploads"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload_id = extract_upload_id(&String::from_utf8(body_bytes(resp).await).unwrap());
+
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri(format!(
+            "/{dst_bucket}/{dst_key}?uploadId={upload_id}&partNumber=1"
+        ))
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .header("x-amz-copy-source", format!("/{src_bucket}/{src_key}"))
+        .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+        .header("x-amz-server-side-encryption-customer-key", key_b64)
+        .header("x-amz-server-side-encryption-customer-key-MD5", md5_b64)
+        .body(Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "UploadPartCopy into an SSE-C multipart upload must be rejected, not stored unencrypted"
+    );
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains("NotImplemented"),
+        "expected NotImplemented error, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_sse_c_multipart_min_part_size_uses_plaintext() {
+    let min_part_size: u64 = 140;
+    let (app, _tmp) = test_app_sse_c_with_min(min_part_size).await;
+    let app = app.into_service();
+
+    let key = [0x6eu8; 32];
+    let bucket = "ssec-minsize";
+    let object = "small.bin";
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, &format!("/{bucket}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploads"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload_id = extract_upload_id(&String::from_utf8(body_bytes(resp).await).unwrap());
+
+    let part1 = vec![0x11u8; 100];
+    let part2 = vec![0x22u8; 50];
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=1"),
+            Some(&key),
+            Body::from(part1.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "part upload succeeds; the ciphertext block exceeds the minimum even though the plaintext does not"
+    );
+    let etag1 = etag_from_response(&resp);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=2"),
+            Some(&key),
+            Body::from(part2.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag2 = etag_from_response(&resp);
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{etag1}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{etag2}\"</ETag></Part></CompleteMultipartUpload>"
+    );
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploadId={upload_id}"),
+            None,
+            Body::from(complete_xml),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-final part whose plaintext is below the minimum must be rejected even if its ciphertext is not"
+    );
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains("EntityTooSmall"),
+        "expected EntityTooSmall error, got: {body}"
+    );
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::GET,
+            &format!("/{bucket}/{object}"),
+            Some(&key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "the rejected object must not have been left behind"
+    );
+}
+
+async fn drive_failed_small_sse_c_mpu(
+    app: &axum::routing::RouterIntoService<Body>,
+    bucket: &str,
+    object: &str,
+    key: &[u8; 32],
+) {
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploads"),
+            Some(key),
+            Body::empty(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload_id = extract_upload_id(&String::from_utf8(body_bytes(resp).await).unwrap());
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=1"),
+            Some(key),
+            Body::from(vec![0x11u8; 100]),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag1 = etag_from_response(&resp);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}?uploadId={upload_id}&partNumber=2"),
+            Some(key),
+            Body::from(vec![0x22u8; 50]),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag2 = etag_from_response(&resp);
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{etag1}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{etag2}\"</ETag></Part></CompleteMultipartUpload>"
+    );
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(
+            Method::POST,
+            &format!("/{bucket}/{object}?uploadId={upload_id}"),
+            None,
+            Body::from(complete_xml),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "completion with an undersized plaintext part must fail before publishing"
+    );
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(body.contains("EntityTooSmall"), "expected EntityTooSmall, got: {body}");
+}
+
+#[tokio::test]
+async fn test_sse_c_multipart_failed_completion_preserves_existing_object() {
+    let (app, _tmp) = test_app_sse_c_with_min(140).await;
+    let app = app.into_service();
+
+    let key = [0x7fu8; 32];
+    let bucket = "ssec-overwrite";
+    let object = "important.bin";
+    let original = b"ORIGINAL-DATA-MUST-SURVIVE".to_vec();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, &format!("/{bucket}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}"),
+            Body::from(original.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    drive_failed_small_sse_c_mpu(&app, bucket, object, &key).await;
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::GET, &format!("/{bucket}/{object}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a failed SSE-C completion must not delete the pre-existing object"
+    );
+    assert_eq!(body_bytes(resp).await, original);
+}
+
+#[tokio::test]
+async fn test_sse_c_multipart_failed_completion_preserves_versioned_object() {
+    let (app, _tmp) = test_app_sse_c_with_min(140).await;
+    let app = app.into_service();
+
+    let key = [0x80u8; 32];
+    let bucket = "ssec-overwrite-ver";
+    let object = "important.bin";
+    let original = b"VERSIONED-ORIGINAL-MUST-SURVIVE".to_vec();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, &format!("/{bucket}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(
+            Method::PUT,
+            &format!("/{bucket}?versioning"),
+            Body::from("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>"),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(
+            Method::PUT,
+            &format!("/{bucket}/{object}"),
+            Body::from(original.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    drive_failed_small_sse_c_mpu(&app, bucket, object, &key).await;
+
+    let resp = tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::GET, &format!("/{bucket}/{object}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a failed SSE-C completion must not hide the prior version behind a delete marker"
+    );
+    assert_eq!(body_bytes(resp).await, original);
 }

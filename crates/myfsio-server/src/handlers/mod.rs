@@ -70,28 +70,39 @@ fn parse_max_keys(raw: &str) -> Result<usize, Response> {
     }
 }
 
-fn s3_error_response(err: S3Error) -> Response {
-    let status =
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let resource = if err.resource.is_empty() {
-        "/".to_string()
-    } else {
-        err.resource.clone()
-    };
-    let code_str = err.code.as_str();
-    let body = err
-        .with_resource(resource)
-        .with_request_id(uuid::Uuid::new_v4().simple().to_string())
-        .to_xml();
-    (
-        status,
-        [
-            ("content-type", "application/xml"),
-            ("x-amz-error-code", code_str),
-        ],
-        body,
-    )
-        .into_response()
+pub(crate) fn s3_error_response(err: S3Error) -> Response {
+    crate::s3_response::s3_error_response(err)
+}
+
+pub(crate) const CANONICAL_DEFAULT_OWNER_ID: &str = "myfsio";
+
+fn canonical_default_owner(state: &AppState) -> (String, String) {
+    let id = CANONICAL_DEFAULT_OWNER_ID.to_string();
+    let display = state
+        .iam
+        .get_display_name(&id)
+        .unwrap_or_else(|| id.clone());
+    (id, display)
+}
+
+fn build_owner_display_map(
+    state: &AppState,
+    objects: &[myfsio_common::types::ObjectMeta],
+) -> HashMap<String, String> {
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for obj in objects {
+        if let Some(owner) = obj.owner.as_deref() {
+            if seen.contains_key(owner) {
+                continue;
+            }
+            let display = state
+                .iam
+                .get_display_name(owner)
+                .unwrap_or_else(|| owner.to_string());
+            seen.insert(owner.to_string(), display);
+        }
+    }
+    seen
 }
 
 fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
@@ -110,20 +121,13 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
     } = &err
     {
         let s3_err = S3Error::from_code(S3ErrorCode::NoSuchKey)
-            .with_resource(format!("/{}/{}", bucket, key))
-            .with_request_id(uuid::Uuid::new_v4().simple().to_string());
-        let status =
-            StatusCode::from_u16(s3_err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let mut resp_headers = HeaderMap::new();
-        resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
+            .with_resource(format!("/{}/{}", bucket, key));
+        let mut extra = HeaderMap::new();
+        extra.insert("x-amz-delete-marker", "true".parse().unwrap());
         if let Ok(vid) = version_id.parse() {
-            resp_headers.insert("x-amz-version-id", vid);
+            extra.insert("x-amz-version-id", vid);
         }
-        resp_headers.insert("content-type", "application/xml".parse().unwrap());
-        if let Ok(code_hdr) = s3_err.code.as_str().parse() {
-            resp_headers.insert("x-amz-error-code", code_hdr);
-        }
-        return (status, resp_headers, s3_err.to_xml()).into_response();
+        return crate::s3_response::s3_error_response_with_headers(s3_err, extra);
     }
     s3_error_response(S3Error::from(err))
 }
@@ -416,6 +420,12 @@ pub async fn create_bucket(
     if query.object_lock.is_some() {
         return config::put_object_lock(&state, &bucket, body).await;
     }
+    if query.ownership_controls.is_some() {
+        return config::put_ownership_controls(&state, &bucket, body).await;
+    }
+    if query.public_access_block.is_some() {
+        return config::put_public_access_block(&state, &bucket, body).await;
+    }
     if query.notification.is_some() {
         return config::put_notification(&state, &bucket, body).await;
     }
@@ -520,6 +530,10 @@ pub struct BucketQuery {
     pub website: Option<String>,
     #[serde(rename = "object-lock")]
     pub object_lock: Option<String>,
+    #[serde(rename = "ownershipControls")]
+    pub ownership_controls: Option<String>,
+    #[serde(rename = "publicAccessBlock")]
+    pub public_access_block: Option<String>,
     pub notification: Option<String>,
     pub logging: Option<String>,
     pub versions: Option<String>,
@@ -545,6 +559,8 @@ const SUPPORTED_BUCKET_SUBRESOURCES: &[&str] = &[
     "replication",
     "website",
     "object-lock",
+    "ownershipControls",
+    "publicAccessBlock",
     "notification",
     "logging",
     "quota",
@@ -614,6 +630,9 @@ pub async fn get_bucket(
     Query(query): Query<BucketQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let (owner_id, owner_display) = canonical_default_owner(&state);
+    let owner_id_ref = owner_id.as_str();
+    let owner_display_ref = owner_display.as_str();
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
         if host_bucket != bucket {
             return get_object(
@@ -668,6 +687,12 @@ pub async fn get_bucket(
     }
     if query.object_lock.is_some() {
         return config::get_object_lock(&state, &bucket).await;
+    }
+    if query.ownership_controls.is_some() {
+        return config::get_ownership_controls(&state, &bucket).await;
+    }
+    if query.public_access_block.is_some() {
+        return config::get_public_access_block(&state, &bucket).await;
     }
     if query.notification.is_some() {
         return config::get_notification(&state, &bucket).await;
@@ -759,11 +784,11 @@ pub async fn get_bucket(
                 encoding_type,
                 fetch_owner,
                 start_after_v2.as_deref(),
-                None,
-                None,
+                Some(owner_id_ref),
+                Some(owner_display_ref),
             )
         } else {
-            myfsio_xml::response::list_objects_v1_xml(
+            myfsio_xml::response::list_objects_v1_xml_with_owner(
                 &bucket,
                 &prefix,
                 &marker,
@@ -773,6 +798,9 @@ pub async fn get_bucket(
                 &[],
                 false,
                 None,
+                None,
+                Some(owner_id_ref),
+                Some(owner_display_ref),
             )
         };
         return (StatusCode::OK, [("content-type", "application/xml")], xml).into_response();
@@ -799,11 +827,12 @@ pub async fn get_bucket(
                 } else {
                     None
                 };
+                let owner_map = build_owner_display_map(&state, &result.objects);
                 let xml = if is_v2 {
                     let next_token = next_marker
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v2_xml_full(
                         &bucket,
                         &prefix,
                         &delimiter,
@@ -817,11 +846,12 @@ pub async fn get_bucket(
                         encoding_type,
                         fetch_owner,
                         start_after_v2.as_deref(),
-                        None,
-                        None,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v1_xml_full(
                         &bucket,
                         &prefix,
                         &marker,
@@ -832,6 +862,9 @@ pub async fn get_bucket(
                         result.is_truncated,
                         next_marker.as_deref(),
                         encoding_type,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -847,12 +880,13 @@ pub async fn get_bucket(
         };
         match state.storage.list_objects_shallow(&bucket, &params).await {
             Ok(result) => {
+                let owner_map = build_owner_display_map(&state, &result.objects);
                 let xml = if is_v2 {
                     let next_token = result
                         .next_continuation_token
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v2_xml_full(
                         &bucket,
                         &params.prefix,
                         &delimiter,
@@ -866,11 +900,12 @@ pub async fn get_bucket(
                         encoding_type,
                         fetch_owner,
                         start_after_v2.as_deref(),
-                        None,
-                        None,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v1_xml_full(
                         &bucket,
                         &params.prefix,
                         &marker,
@@ -881,6 +916,9 @@ pub async fn get_bucket(
                         result.is_truncated,
                         result.next_continuation_token.as_deref(),
                         encoding_type,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -900,12 +938,13 @@ pub async fn get_bucket(
         .await
         {
             Ok(grouped) => {
+                let owner_map = build_owner_display_map(&state, &grouped.objects);
                 let xml = if is_v2 {
                     let next_token = grouped
                         .next_token
                         .as_deref()
                         .map(|s| URL_SAFE.encode(s.as_bytes()));
-                    myfsio_xml::response::list_objects_v2_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v2_xml_full(
                         &bucket,
                         &prefix,
                         &delimiter,
@@ -919,11 +958,12 @@ pub async fn get_bucket(
                         encoding_type,
                         fetch_owner,
                         start_after_v2.as_deref(),
-                        None,
-                        None,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 } else {
-                    myfsio_xml::response::list_objects_v1_xml_with_encoding(
+                    myfsio_xml::response::list_objects_v1_xml_full(
                         &bucket,
                         &prefix,
                         &marker,
@@ -934,6 +974,9 @@ pub async fn get_bucket(
                         grouped.is_truncated,
                         grouped.next_token.as_deref(),
                         encoding_type,
+                        Some(owner_id_ref),
+                        Some(owner_display_ref),
+                        &owner_map,
                     )
                 };
                 (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
@@ -1096,7 +1139,12 @@ pub async fn post_bucket(
     }
 
     if query.delete.is_some() {
-        return delete_objects_handler(&state, &bucket, peer_marker, body).await;
+        let bypass_governance = headers
+            .get("x-amz-bypass-governance-retention")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        return delete_objects_handler(&state, &bucket, peer_marker, bypass_governance, body).await;
     }
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
@@ -1157,6 +1205,12 @@ pub async fn delete_bucket(
     if query.object_lock.is_some() {
         return config::delete_object_lock(&state, &bucket).await;
     }
+    if query.ownership_controls.is_some() {
+        return config::delete_ownership_controls(&state, &bucket).await;
+    }
+    if query.public_access_block.is_some() {
+        return config::delete_public_access_block(&state, &bucket).await;
+    }
     if query.notification.is_some() {
         return config::delete_notification(&state, &bucket).await;
     }
@@ -1171,17 +1225,10 @@ pub async fn delete_bucket(
         || query.location.is_some()
         || query.policy_status.is_some()
     {
-        let body = S3Error::new(
+        return s3_error_response(S3Error::new(
             S3ErrorCode::MethodNotAllowed,
             "DELETE is not supported on this bucket subresource",
-        )
-        .to_xml();
-        return (
-            StatusCode::METHOD_NOT_ALLOWED,
-            [("content-type", "application/xml")],
-            body,
-        )
-            .into_response();
+        ));
     }
 
     match state.storage.delete_bucket(&bucket).await {
@@ -1711,20 +1758,34 @@ fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Res
 async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Bytes, Response> {
     if aws_chunked {
         let mut reader = chunked::decode_body(body);
-        let mut data = Vec::new();
-        reader.read_to_end(&mut data).await.map_err(|_| {
-            s3_error_response(S3Error::new(
-                S3ErrorCode::InvalidRequest,
-                "Failed to read aws-chunked request body",
-            ))
-        })?;
+        let mut data: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 65_536];
+        loop {
+            let n = reader.read(&mut buf).await.map_err(|_| {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidRequest,
+                    "Failed to read aws-chunked request body",
+                ))
+            })?;
+            if n == 0 {
+                break;
+            }
+            if data.len() + n > MAX_BUFFERED_UPLOAD_BYTES {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::EntityTooLarge,
+                    "Object exceeds the maximum size for a buffered upload",
+                )));
+            }
+            data.extend_from_slice(&buf[..n]);
+        }
         return Ok(bytes::Bytes::from(data));
     }
 
-    http_body_util::BodyExt::collect(body)
-        .await
-        .map(|collected| collected.to_bytes())
-        .map_err(|err| {
+    use futures::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut data: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| {
             if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(&err) {
                 bad_digest_response(message)
             } else {
@@ -1733,7 +1794,16 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
                     "Failed to read request body",
                 ))
             }
-        })
+        })?;
+        if data.len() + chunk.len() > MAX_BUFFERED_UPLOAD_BYTES {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::EntityTooLarge,
+                "Object exceeds the maximum size for a buffered upload",
+            )));
+        }
+        data.extend_from_slice(&chunk);
+    }
+    Ok(bytes::Bytes::from(data))
 }
 
 fn parse_tagging_header(value: &str) -> Result<Vec<myfsio_common::types::Tag>, Response> {
@@ -1831,6 +1901,14 @@ fn parse_copy_source(copy_source: &str) -> Result<(String, String, Option<String
     Ok((bucket, key, version_id))
 }
 
+fn normalize_object_key(key: String) -> String {
+    if key.starts_with(['/', '\\']) {
+        key.trim_start_matches(['/', '\\']).to_string()
+    } else {
+        key
+    }
+}
+
 pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
@@ -1840,6 +1918,7 @@ pub async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     let owner_id = principal
         .as_ref()
@@ -1897,6 +1976,12 @@ pub async fn put_object(
 
     if let Some(ref upload_id) = query.upload_id {
         if let Some(part_number) = query.part_number {
+            if !(1..=10000).contains(&part_number) {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Part number must be an integer between 1 and 10000",
+                ));
+            }
             if let Some(copy_source) = headers
                 .get("x-amz-copy-source")
                 .and_then(|v| v.to_str().ok())
@@ -1920,6 +2005,7 @@ pub async fn put_object(
                 &bucket,
                 upload_id,
                 part_number,
+                &headers,
                 body,
                 is_aws_chunked(&headers),
             )
@@ -2070,6 +2156,10 @@ pub async fn put_object(
                                 enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
                             }
                             enc_metadata.insert("__size__".to_string(), enc_size.to_string());
+                            if let Some(ref ck) = enc_ctx.customer_key {
+                                enc_metadata
+                                    .insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
+                            }
                             let _ = state
                                 .storage
                                 .put_object_metadata(&bucket, &key, &enc_metadata)
@@ -2118,10 +2208,6 @@ pub async fn put_object(
                         }
                         Err(e) => {
                             let _ = tokio::fs::remove_file(&enc_tmp).await;
-                            // Plaintext made it onto the live object path before
-                            // encryption was attempted; remove it so we never
-                            // leave plaintext at the canonical key location when
-                            // the caller asked for SSE.
                             let _ = state.storage.delete_object(&bucket, &key).await;
                             return s3_error_response(S3Error::new(
                                 myfsio_common::error::S3ErrorCode::InternalError,
@@ -2173,6 +2259,7 @@ pub async fn get_object(
     Query(query): Query<ObjectQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let key = normalize_object_key(key);
     if query.tagging.is_some() {
         return config::get_object_tagging(
             &state,
@@ -2230,12 +2317,6 @@ pub async fn get_object(
 
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
 
-    // Take a single snapshot of the live object BEFORE deciding whether it's
-    // encrypted. If we sniffed encryption from head_meta first, a PUT could
-    // flip the object's encryption state between head and snapshot — leaving
-    // us either serving ciphertext through the raw path or failing because
-    // the snapshot no longer has encryption metadata. All decisions must
-    // come from this snapshot.
     let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
     let _ = tokio::fs::create_dir_all(&tmp_dir).await;
     let snap_link = tmp_dir.join(format!("src-{}", uuid::Uuid::new_v4()));
@@ -2257,6 +2338,23 @@ pub async fn get_object(
         Ok(m) => m,
         Err(e) => return storage_err_response(e),
     };
+
+    if mpu_is_sse_c(&snap_meta.internal_metadata) {
+        if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return resp;
+        }
+        return serve_mpu_sse_c(
+            &state,
+            snap_link,
+            snap_meta,
+            &headers,
+            &query,
+            None,
+            query.part_number,
+        )
+        .await;
+    }
 
     if let Some(part_number) = query.part_number {
         match resolve_part_view(&snap_meta, part_number) {
@@ -2292,10 +2390,6 @@ pub async fn get_object(
         }
     }
 
-    // Evaluate preconditions against the served snapshot's metadata. A HEAD
-    // taken earlier could disagree with the snapshot if a concurrent PUT
-    // landed in between, causing us to serve a body that doesn't satisfy
-    // the caller's If-Match / If-None-Match / time conditions.
     if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
         let _ = tokio::fs::remove_file(&snap_link).await;
         return resp;
@@ -2308,7 +2402,8 @@ pub async fn get_object(
         match (enc_info.as_ref(), state.encryption.as_ref()) {
             (Some(enc_info), Some(enc_svc)) => {
                 if enc_info.algorithm == "AES256" && enc_info.encrypted_data_key.is_none() {
-                    if let Err(resp) = require_sse_c_key_match(&headers, enc_info) {
+                    if let Err(resp) = require_sse_c_key_match(&headers, &snap_meta.internal_metadata)
+                    {
                         let _ = tokio::fs::remove_file(&snap_link).await;
                         return resp;
                     }
@@ -2324,8 +2419,6 @@ pub async fn get_object(
                 let decrypt_res = enc_svc
                     .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
                     .await;
-                // Hardlink served its purpose; the decrypted plaintext is in
-                // dec_tmp now.
                 let _ = tokio::fs::remove_file(&snap_link).await;
                 if let Err(e) = decrypt_res {
                     let _ = tokio::fs::remove_file(&dec_tmp).await;
@@ -2345,9 +2438,6 @@ pub async fn get_object(
                 (file, file_size, Some(enc_info.algorithm.as_str()))
             }
             (Some(_), None) => {
-                // Snapshot is encrypted but the server has no encryption
-                // service configured to decrypt it. Serving ciphertext as
-                // plaintext would be actively wrong; refuse explicitly.
                 let _ = tokio::fs::remove_file(&snap_link).await;
                 return s3_error_response(S3Error::new(
                     myfsio_common::error::S3ErrorCode::InternalError,
@@ -2355,9 +2445,6 @@ pub async fn get_object(
                 ));
             }
             (None, _) => {
-                // Raw path: stream directly from the hardlink, which becomes
-                // self-deleting on open (kernel keeps the inode alive via our
-                // fd).
                 let file = match open_self_deleting(snap_link.clone()).await {
                     Ok(f) => f,
                     Err(e) => {
@@ -2416,6 +2503,7 @@ pub async fn post_object(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.uploads.is_some() {
         return initiate_multipart_handler(&state, &bucket, &key, &headers).await;
@@ -2448,6 +2536,7 @@ pub async fn delete_object(
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
+    let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
         if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
@@ -2531,6 +2620,7 @@ pub async fn head_object(
     Query(query): Query<ObjectQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let key = normalize_object_key(key);
     let version_id = query.version_id.as_deref();
     let result = match version_id {
         Some(version_id) => {
@@ -2548,12 +2638,16 @@ pub async fn head_object(
                 return resp;
             }
 
+            if mpu_is_sse_c(&meta.internal_metadata) {
+                return head_mpu_sse_c(&meta, &headers, &query);
+            }
+
             let enc_info = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(
                 &meta.internal_metadata,
             );
             if let Some(ref info) = enc_info {
                 if info.algorithm == "AES256" && info.encrypted_data_key.is_none() {
-                    if let Err(resp) = require_sse_c_key_match(&headers, info) {
+                    if let Err(resp) = require_sse_c_key_match(&headers, &meta.internal_metadata) {
                         return resp;
                     }
                 }
@@ -2618,6 +2712,110 @@ pub async fn head_object(
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+fn head_mpu_sse_c(
+    meta: &myfsio_common::types::ObjectMeta,
+    headers: &HeaderMap,
+    query: &ObjectQuery,
+) -> Response {
+    if let Err(resp) = require_sse_c_key_match(headers, &meta.internal_metadata) {
+        return resp;
+    }
+
+    let total = meta
+        .internal_metadata
+        .get(MPU_PLAINTEXT_SIZE)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let mut h = HeaderMap::new();
+    let mut parts_count: Option<u32> = None;
+    let mut content_range: Option<String> = None;
+    let content_len: u64;
+
+    if let Some(pn) = query.part_number {
+        let plain_sizes = meta
+            .internal_metadata
+            .get(MPU_PART_PLAIN_SIZES)
+            .and_then(|r| myfsio_storage::fs_backend::parse_part_sizes(r));
+        let part_numbers = meta
+            .internal_metadata
+            .get(MPU_PART_NUMBERS)
+            .and_then(|r| parse_u32_csv(r));
+        let (Some(plain_sizes), Some(part_numbers)) = (plain_sizes, part_numbers) else {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "SSE-C multipart object metadata is incomplete or inconsistent",
+            ));
+        };
+        if plain_sizes.len() != part_numbers.len() {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "SSE-C multipart object metadata is incomplete or inconsistent",
+            ));
+        }
+        let Some(idx) = part_numbers.iter().position(|x| *x == pn) else {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidPart,
+                format!("partNumber {} does not exist for this object", pn),
+            ));
+        };
+        parts_count = Some(part_numbers.len() as u32);
+        let start: u64 = plain_sizes.iter().take(idx).sum();
+        let len = plain_sizes[idx];
+        content_len = len;
+        if len > 0 {
+            content_range = Some(format!("bytes {}-{}/{}", start, start + len - 1, total));
+        }
+    } else {
+        content_len = total;
+    }
+
+    h.insert("content-length", content_len.to_string().parse().unwrap());
+    if let Some(cr) = content_range {
+        if let Ok(value) = cr.parse() {
+            h.insert("content-range", value);
+        }
+    }
+    if let Some(ref etag) = meta.etag {
+        h.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+    }
+    insert_content_type(&mut h, &meta.key, meta.content_type.as_deref());
+    h.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    h.insert("accept-ranges", "bytes".parse().unwrap());
+    apply_sse_c_response_headers(&mut h, &meta.internal_metadata);
+    apply_stored_response_headers(&mut h, &meta.internal_metadata);
+    if query.part_number.is_none() {
+        apply_stored_checksum_headers(&mut h, &meta.internal_metadata);
+    }
+    if let Some(ref requested_version) = query.version_id {
+        if let Ok(value) = requested_version.parse() {
+            h.insert("x-amz-version-id", value);
+        }
+    } else if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            h.insert("x-amz-version-id", value);
+        }
+    }
+    apply_user_metadata(&mut h, &meta.metadata);
+    if let Some(count) = parts_count {
+        h.insert("x-amz-mp-parts-count", count.to_string().parse().unwrap());
+    }
+
+    let status = if query.part_number.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    (status, h).into_response()
 }
 
 struct PartView {
@@ -2759,6 +2957,49 @@ const MULTIPART_PENDING_SSE_ALG: &str = "__pending_sse_algorithm__";
 const MULTIPART_PENDING_SSE_KMS_KEY: &str = "__pending_sse_kms_key_id__";
 const MULTIPART_PENDING_SSE_C_KEY: &str = "__pending_sse_c_customer_key__";
 
+const MPU_SSE_C_MARKER: &str = "__mpu_sse_c__";
+const MPU_WRAPPED_ODK: &str = "__mpu_wrapped_odk__";
+const MPU_CHUNK_SIZE: &str = "__mpu_chunk_size__";
+const MPU_PART_NUMBERS: &str = "__mpu_part_numbers__";
+const MPU_PART_PLAIN_SIZES: &str = "__mpu_part_plain_sizes__";
+const MPU_PLAINTEXT_SIZE: &str = "__mpu_plaintext_size__";
+const SSE_C_ALGORITHM_HEADER: &str = "x-amz-server-side-encryption-customer-algorithm";
+const SSE_C_KEY_MD5_HEADER: &str = "x-amz-server-side-encryption-customer-key-MD5";
+
+fn mpu_is_sse_c(metadata: &HashMap<String, String>) -> bool {
+    metadata
+        .get(MPU_SSE_C_MARKER)
+        .map(|v| v == "true")
+        .unwrap_or(false)
+}
+
+fn parse_u32_csv(raw: &str) -> Option<Vec<u32>> {
+    let mut out = Vec::new();
+    for tok in raw.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            return None;
+        }
+        out.push(tok.parse::<u32>().ok()?);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn apply_sse_c_response_headers(headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
+    if let Ok(value) = "AES256".parse() {
+        headers.insert(SSE_C_ALGORITHM_HEADER, value);
+    }
+    if let Some(md5) = metadata.get(SSE_C_KEY_MD5_META) {
+        if let Ok(value) = md5.parse() {
+            headers.insert(SSE_C_KEY_MD5_HEADER, value);
+        }
+    }
+}
+
 async fn initiate_multipart_handler(
     state: &AppState,
     bucket: &str,
@@ -2777,20 +3018,48 @@ async fn initiate_multipart_handler(
         Err(resp) => return resp,
     };
     if let Some(ref ctx) = resolved_enc_ctx {
-        metadata.insert(
-            MULTIPART_PENDING_SSE_ALG.to_string(),
-            ctx.algorithm.as_str().to_string(),
-        );
-        if let Some(ref kid) = ctx.kms_key_id {
-            metadata.insert(MULTIPART_PENDING_SSE_KMS_KEY.to_string(), kid.clone());
-        }
-        if let Some(ref ck) = ctx.customer_key {
-            use base64::engine::general_purpose::STANDARD as B64;
-            use base64::Engine;
+        if ctx.algorithm == myfsio_crypto::encryption::SseAlgorithm::CustomerProvided {
+            let Some(ck) = ctx.customer_key.as_ref() else {
+                return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
+            };
+            let Some(enc_svc) = state.encryption.as_ref() else {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "Server-side encryption is not enabled on this server",
+                ));
+            };
+            if ck.len() != 32 {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InvalidArgument,
+                    "SSE-C customer key must decode to 32 bytes",
+                ));
+            }
+            let mut ck_arr = [0u8; 32];
+            ck_arr.copy_from_slice(ck);
+            let odk = enc_svc.generate_odk();
+            let wrapped = match myfsio_crypto::encryption::wrap_key_with(&ck_arr, &odk) {
+                Ok(w) => w,
+                Err(_) => return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError)),
+            };
+            metadata.insert(MPU_SSE_C_MARKER.to_string(), "true".to_string());
+            metadata.insert(MPU_WRAPPED_ODK.to_string(), wrapped);
             metadata.insert(
-                MULTIPART_PENDING_SSE_C_KEY.to_string(),
-                B64.encode(ck),
+                MPU_CHUNK_SIZE.to_string(),
+                state.config.encryption_chunk_size_bytes.to_string(),
             );
+            metadata.insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
+            metadata.insert(
+                "x-amz-server-side-encryption".to_string(),
+                "AES256".to_string(),
+            );
+        } else {
+            metadata.insert(
+                MULTIPART_PENDING_SSE_ALG.to_string(),
+                ctx.algorithm.as_str().to_string(),
+            );
+            if let Some(ref kid) = ctx.kms_key_id {
+                metadata.insert(MULTIPART_PENDING_SSE_KMS_KEY.to_string(), kid.clone());
+            }
         }
     }
     if let Some(value) = headers.get("x-amz-tagging").and_then(|v| v.to_str().ok()) {
@@ -2817,13 +3086,24 @@ async fn initiate_multipart_handler(
             let mut headers = HeaderMap::new();
             headers.insert("content-type", "application/xml".parse().unwrap());
             if let Some(ref ctx) = resolved_enc_ctx {
-                if let Ok(alg) = ctx.algorithm.as_str().parse() {
-                    headers.insert("x-amz-server-side-encryption", alg);
-                }
-                if let Some(ref kid) = ctx.kms_key_id {
-                    if let Ok(value) = kid.parse() {
-                        headers
-                            .insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+                if ctx.algorithm == myfsio_crypto::encryption::SseAlgorithm::CustomerProvided {
+                    if let Ok(value) = "AES256".parse() {
+                        headers.insert(SSE_C_ALGORITHM_HEADER, value);
+                    }
+                    if let Some(ref ck) = ctx.customer_key {
+                        if let Ok(value) = sse_c_key_md5(ck).parse() {
+                            headers.insert(SSE_C_KEY_MD5_HEADER, value);
+                        }
+                    }
+                } else {
+                    if let Ok(alg) = ctx.algorithm.as_str().parse() {
+                        headers.insert("x-amz-server-side-encryption", alg);
+                    }
+                    if let Some(ref kid) = ctx.kms_key_id {
+                        if let Ok(value) = kid.parse() {
+                            headers
+                                .insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+                        }
                     }
                 }
             }
@@ -2869,9 +3149,29 @@ async fn upload_part_handler_with_chunking(
     bucket: &str,
     upload_id: &str,
     part_number: u32,
+    headers: &HeaderMap,
     body: Body,
     aws_chunked: bool,
 ) -> Response {
+    let pending = match state.storage.get_multipart_metadata(bucket, upload_id).await {
+        Ok(m) => m,
+        Err(e) => return storage_err_response(e),
+    };
+
+    if mpu_is_sse_c(&pending) {
+        return upload_part_sse_c(
+            state,
+            bucket,
+            upload_id,
+            part_number,
+            headers,
+            body,
+            aws_chunked,
+            &pending,
+        )
+        .await;
+    }
+
     let boxed: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
         Box::pin(chunked::decode_body(body))
     } else {
@@ -2896,6 +3196,140 @@ async fn upload_part_handler_with_chunking(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn upload_part_sse_c(
+    state: &AppState,
+    bucket: &str,
+    upload_id: &str,
+    part_number: u32,
+    headers: &HeaderMap,
+    body: Body,
+    aws_chunked: bool,
+    pending: &HashMap<String, String>,
+) -> Response {
+    let Some(enc_svc) = state.encryption.as_ref() else {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Object is encrypted but encryption service is disabled",
+        ));
+    };
+
+    let customer_key = match extract_sse_c_key(headers) {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "This multipart upload uses SSE-C; the SSE-C customer key headers are required on each part",
+            ))
+        }
+        Err(resp) => return resp,
+    };
+
+    if let Some(stored_md5) = pending.get(SSE_C_KEY_MD5_META) {
+        if !constant_time_eq(sse_c_key_md5(&customer_key).as_bytes(), stored_md5.as_bytes()) {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "The SSE-C customer key does not match the key used to initiate this upload",
+            ));
+        }
+    }
+
+    let Some(wrapped_odk) = pending.get(MPU_WRAPPED_ODK) else {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Multipart upload is missing its wrapped data key",
+        ));
+    };
+
+    let mut ck_arr = [0u8; 32];
+    ck_arr.copy_from_slice(&customer_key);
+    let odk = match myfsio_crypto::encryption::unwrap_key_with(&ck_arr, wrapped_odk) {
+        Ok(k) => k,
+        Err(_) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "The SSE-C customer key does not match the key used to initiate this upload",
+            ))
+        }
+    };
+
+    let chunk_size = pending
+        .get(MPU_CHUNK_SIZE)
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(state.config.encryption_chunk_size_bytes);
+
+    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
+    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
+    let plain_tmp = tmp_dir.join(format!("mpu-plain-{}", uuid::Uuid::new_v4()));
+    let block_tmp = tmp_dir.join(format!("mpu-block-{}", uuid::Uuid::new_v4()));
+
+    let boxed: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
+        Box::pin(chunked::decode_body(body))
+    } else {
+        Box::pin(tokio_util::io::StreamReader::new(
+            body.into_data_stream().map_err(std::io::Error::other),
+        ))
+    };
+
+    if let Err(resp) = drain_stream_to_file(boxed, &plain_tmp).await {
+        let _ = tokio::fs::remove_file(&plain_tmp).await;
+        return resp;
+    }
+
+    if let Err(e) = enc_svc
+        .encrypt_mpu_part(&plain_tmp, &block_tmp, odk, part_number, chunk_size)
+        .await
+    {
+        let _ = tokio::fs::remove_file(&plain_tmp).await;
+        let _ = tokio::fs::remove_file(&block_tmp).await;
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            format!("Failed to encrypt multipart part: {}", e),
+        ));
+    }
+    let _ = tokio::fs::remove_file(&plain_tmp).await;
+
+    let block_file = match tokio::fs::File::open(&block_tmp).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&block_tmp).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    };
+    let boxed_block: myfsio_storage::traits::AsyncReadStream = Box::pin(block_file);
+
+    let result = state
+        .storage
+        .upload_part(bucket, upload_id, part_number, boxed_block)
+        .await;
+    let _ = tokio::fs::remove_file(&block_tmp).await;
+
+    match result {
+        Ok(etag) => {
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+            apply_sse_c_response_headers(&mut resp_headers, pending);
+            (StatusCode::OK, resp_headers).into_response()
+        }
+        Err(e) => storage_err_response(e),
+    }
+}
+
+async fn drain_stream_to_file(
+    mut stream: myfsio_storage::traits::AsyncReadStream,
+    path: &std::path::Path,
+) -> Result<u64, Response> {
+    let mut file = match tokio::fs::File::create(path).await {
+        Ok(f) => f,
+        Err(e) => return Err(storage_err_response(myfsio_storage::error::StorageError::Io(e))),
+    };
+    let copied = tokio::io::copy(&mut stream, &mut file)
+        .await
+        .map_err(|e| storage_err_response(myfsio_storage::error::StorageError::Io(e)))?;
+    Ok(copied)
+}
+
 async fn upload_part_copy_handler(
     state: &AppState,
     dst_bucket: &str,
@@ -2905,6 +3339,22 @@ async fn upload_part_copy_handler(
     range_header: Option<&str>,
     headers: &HeaderMap,
 ) -> Response {
+    match state
+        .storage
+        .get_multipart_metadata(dst_bucket, upload_id)
+        .await
+    {
+        Ok(pending) => {
+            if mpu_is_sse_c(&pending) {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::NotImplemented,
+                    "UploadPartCopy is not supported for SSE-C multipart uploads; upload the part bytes directly with UploadPart instead",
+                ));
+            }
+        }
+        Err(e) => return storage_err_response(e),
+    }
+
     let (src_bucket, src_key, src_version_id) = match parse_copy_source(copy_source) {
         Ok(parts) => parts,
         Err(response) => return response,
@@ -2984,13 +3434,6 @@ async fn complete_multipart_handler(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    // The storage backend always finalizes to the key recorded in the upload
-    // manifest, regardless of which {key} the caller put in the URL. If those
-    // disagree, every post-complete step here (SSE encrypt-in-place,
-    // archived-null lock check, tagging, replication signal) would address
-    // the wrong path while the actual object lands somewhere else. Reject
-    // the request the way AWS S3 does instead of finalizing to one key and
-    // then operating on another.
     let manifest_key = match state.storage.list_multipart_uploads(bucket).await {
         Ok(uploads) => uploads
             .into_iter()
@@ -3075,6 +3518,26 @@ async fn complete_multipart_handler(
         .collect();
     let min_part_size: u64 = state.config.multipart_min_part_size;
     let total_parts = parsed.parts.len();
+
+    let pending_manifest = state
+        .storage
+        .get_multipart_metadata(bucket, upload_id)
+        .await
+        .unwrap_or_default();
+    let sse_c_enc_svc = if mpu_is_sse_c(&pending_manifest) {
+        match state.encryption.as_ref() {
+            Some(svc) => Some(svc),
+            None => {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InternalError,
+                    "Object is encrypted but encryption service is disabled",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     for (idx, p) in parsed.parts.iter().enumerate() {
         let stored = match stored_map.get(&p.part_number) {
             Some(s) => s,
@@ -3094,14 +3557,38 @@ async fn complete_multipart_handler(
             ));
         }
         let is_final = idx + 1 == total_parts;
-        if !is_final && stored.1 < min_part_size {
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::EntityTooSmall,
-                format!(
-                    "Part {} is smaller than the minimum allowed size of {} bytes",
-                    p.part_number, min_part_size
-                ),
-            ));
+        if !is_final {
+            let effective_size = match sse_c_enc_svc {
+                Some(enc_svc) => {
+                    let part_path = match state
+                        .storage
+                        .get_multipart_part_path(bucket, upload_id, p.part_number)
+                        .await
+                    {
+                        Ok(path) => path,
+                        Err(e) => return storage_err_response(e),
+                    };
+                    match enc_svc.read_mpu_part_plain_sizes(&part_path, vec![0]).await {
+                        Ok(sizes) => sizes.first().copied().unwrap_or(stored.1),
+                        Err(e) => {
+                            return s3_error_response(S3Error::new(
+                                S3ErrorCode::InternalError,
+                                format!("Failed to read SSE-C part size: {}", e),
+                            ));
+                        }
+                    }
+                }
+                None => stored.1,
+            };
+            if effective_size < min_part_size {
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::EntityTooSmall,
+                    format!(
+                        "Part {} is smaller than the minimum allowed size of {} bytes",
+                        p.part_number, min_part_size
+                    ),
+                ));
+            }
         }
     }
 
@@ -3131,10 +3618,6 @@ async fn complete_multipart_handler(
             };
             apply_pending_multipart_tagging(state, bucket, key).await;
 
-            // The pending-SSE markers were written into the multipart manifest
-            // at initiate time and only become visible on the object after
-            // complete_multipart copies the manifest's metadata down. So this
-            // lookup MUST run after complete, not before.
             let pending_sse = read_pending_multipart_sse(state, bucket, key).await;
 
             let mut sse_alg_response: Option<String> = None;
@@ -3183,6 +3666,9 @@ async fn complete_multipart_handler(
                             enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
                         }
                         enc_metadata.insert("__size__".to_string(), enc_size.to_string());
+                        if let Some(ref ck) = enc_ctx.customer_key {
+                            enc_metadata.insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
+                        }
                         let _ = state
                             .storage
                             .put_object_metadata(bucket, key, &enc_metadata)
@@ -3197,6 +3683,24 @@ async fn complete_multipart_handler(
                             S3ErrorCode::InternalError,
                             format!("Encryption failed during multipart complete: {}", e),
                         ));
+                    }
+                }
+            }
+
+            let mut sse_c_md5_response: Option<String> = None;
+            let post_complete_meta = state
+                .storage
+                .get_object_metadata(bucket, key)
+                .await
+                .unwrap_or_default();
+            if mpu_is_sse_c(&post_complete_meta) {
+                match finalize_mpu_sse_c_metadata(state, bucket, key, &parts, post_complete_meta)
+                    .await
+                {
+                    Ok(md5) => sse_c_md5_response = md5,
+                    Err(resp) => {
+                        let _ = state.storage.delete_object(bucket, key).await;
+                        return resp;
                     }
                 }
             }
@@ -3232,10 +3736,96 @@ async fn complete_multipart_handler(
                         .insert("x-amz-server-side-encryption-aws-kms-key-id", value);
                 }
             }
+            if let Some(md5) = sse_c_md5_response {
+                if let Ok(value) = "AES256".parse() {
+                    resp_headers.insert(SSE_C_ALGORITHM_HEADER, value);
+                }
+                if let Ok(value) = md5.parse() {
+                    resp_headers.insert(SSE_C_KEY_MD5_HEADER, value);
+                }
+            }
             (StatusCode::OK, resp_headers, xml).into_response()
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+async fn finalize_mpu_sse_c_metadata(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    parts: &[PartInfo],
+    mut all_meta: HashMap<String, String>,
+) -> Result<Option<String>, Response> {
+    let Some(enc_svc) = state.encryption.as_ref() else {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Object is encrypted but encryption service is disabled",
+        )));
+    };
+
+    let part_sizes = match all_meta
+        .get(myfsio_storage::fs_backend::META_KEY_PART_SIZES)
+        .and_then(|raw| myfsio_storage::fs_backend::parse_part_sizes(raw))
+    {
+        Some(sizes) => sizes,
+        None => {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "Multipart object is missing its part-size manifest",
+            )))
+        }
+    };
+    if part_sizes.len() != parts.len() {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Multipart part count does not match stored block sizes",
+        )));
+    }
+
+    let mut offsets = Vec::with_capacity(part_sizes.len());
+    let mut acc: u64 = 0;
+    for sz in &part_sizes {
+        offsets.push(acc);
+        acc += sz;
+    }
+
+    let obj_path = match state.storage.get_object_path(bucket, key).await {
+        Ok(p) => p,
+        Err(e) => return Err(storage_err_response(e)),
+    };
+    let plain_sizes = match enc_svc.read_mpu_part_plain_sizes(&obj_path, offsets).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                format!("Failed to read multipart part sizes: {}", e),
+            )))
+        }
+    };
+    let total: u64 = plain_sizes.iter().sum();
+
+    let part_numbers = parts
+        .iter()
+        .map(|p| p.part_number.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let plain_sizes_csv = myfsio_storage::fs_backend::encode_part_sizes(&plain_sizes);
+
+    all_meta.insert(MPU_PART_NUMBERS.to_string(), part_numbers);
+    all_meta.insert(MPU_PART_PLAIN_SIZES.to_string(), plain_sizes_csv);
+    all_meta.insert(MPU_PLAINTEXT_SIZE.to_string(), total.to_string());
+    all_meta
+        .entry("x-amz-server-side-encryption".to_string())
+        .or_insert_with(|| "AES256".to_string());
+
+    let md5 = all_meta.get(SSE_C_KEY_MD5_META).cloned();
+
+    if let Err(e) = state.storage.put_object_metadata(bucket, key, &all_meta).await {
+        return Err(storage_err_response(e));
+    }
+
+    Ok(md5)
 }
 
 async fn apply_pending_multipart_tagging(state: &AppState, bucket: &str, key: &str) {
@@ -3865,6 +4455,7 @@ async fn delete_objects_handler(
     state: &AppState,
     bucket: &str,
     peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    bypass_governance: bool,
     body: Body,
 ) -> Response {
     let body_bytes = match http_body_util::BodyExt::collect(body).await {
@@ -3905,6 +4496,7 @@ async fn delete_objects_handler(
         .map(|obj| {
             let state = state.clone();
             let bucket = bucket.to_string();
+            let bypass = bypass_governance;
             async move {
                 let key = obj.key.clone();
                 let requested_vid = obj.version_id.clone();
@@ -3914,7 +4506,7 @@ async fn delete_objects_handler(
                 };
                 let run_can_delete =
                     |metadata: &HashMap<String, String>| -> Result<(), (String, String)> {
-                        object_lock::can_delete_object(metadata, false)
+                        object_lock::can_delete_object(metadata, bypass)
                             .map_err(|m| (S3ErrorCode::AccessDenied.as_str().to_string(), m))
                     };
                 let lock_check: Result<(), (String, String)> = match obj.version_id.as_deref() {
@@ -3932,8 +4524,8 @@ async fn delete_objects_handler(
                         }
                     }
                     None => match state.storage.head_object(&bucket, &obj.key).await {
-                        Ok(_)
-                        | Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => {
+                        Ok(meta) => run_can_delete(&meta.internal_metadata),
+                        Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => {
                             match state.storage.get_object_metadata(&bucket, &obj.key).await {
                                 Ok(metadata) => run_can_delete(&metadata),
                                 Err(err) => Err(to_err(err)),
@@ -4064,6 +4656,10 @@ async fn serve_range_from_snapshot(
         return resp;
     }
 
+    if mpu_is_sse_c(&meta.internal_metadata) {
+        return serve_mpu_sse_c(state, snap_link, meta, headers, query, Some(range_str), None).await;
+    }
+
     let enc_info =
         myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata);
 
@@ -4086,10 +4682,17 @@ async fn serve_range_from_snapshot(
                         Some(r) => r,
                         None => {
                             let _ = tokio::fs::remove_file(&snap_link).await;
-                            return s3_error_response(S3Error::new(
-                                myfsio_common::error::S3ErrorCode::InvalidRange,
-                                format!("Range not satisfiable for size {}", plaintext_size),
-                            ));
+                            let mut extra = HeaderMap::new();
+                            if let Ok(v) = format!("bytes */{}", plaintext_size).parse() {
+                                extra.insert(axum::http::header::CONTENT_RANGE, v);
+                            }
+                            return crate::s3_response::s3_error_response_with_headers(
+                                S3Error::new(
+                                    myfsio_common::error::S3ErrorCode::InvalidRange,
+                                    format!("Range not satisfiable for size {}", plaintext_size),
+                                ),
+                                extra,
+                            );
                         }
                     };
 
@@ -4123,7 +4726,7 @@ async fn serve_range_from_snapshot(
                         key,
                         query,
                         Some(enc_info.algorithm.as_str()),
-                        /* already_trimmed */ true,
+                        true,
                         parts_count,
                     )
                     .await;
@@ -4161,10 +4764,17 @@ async fn serve_range_from_snapshot(
         Some(r) => r,
         None => {
             let _ = tokio::fs::remove_file(&body_path).await;
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InvalidRange,
-                format!("Range not satisfiable for size {}", plaintext_size),
-            ));
+            let mut extra = HeaderMap::new();
+            if let Ok(v) = format!("bytes */{}", plaintext_size).parse() {
+                extra.insert(axum::http::header::CONTENT_RANGE, v);
+            }
+            return crate::s3_response::s3_error_response_with_headers(
+                S3Error::new(
+                    myfsio_common::error::S3ErrorCode::InvalidRange,
+                    format!("Range not satisfiable for size {}", plaintext_size),
+                ),
+                extra,
+            );
         }
     };
 
@@ -4178,7 +4788,7 @@ async fn serve_range_from_snapshot(
         key,
         query,
         enc_header,
-        /* already_trimmed */ false,
+        false,
         parts_count,
     )
     .await
@@ -4264,6 +4874,297 @@ async fn stream_partial_content(
     }
 
     (StatusCode::PARTIAL_CONTENT, headers, body).into_response()
+}
+
+async fn serve_mpu_sse_c(
+    state: &AppState,
+    snap_link: std::path::PathBuf,
+    meta: myfsio_common::types::ObjectMeta,
+    headers: &HeaderMap,
+    query: &ObjectQuery,
+    range_str: Option<&str>,
+    part_number: Option<u32>,
+) -> Response {
+    let key = meta.key.as_str();
+    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
+
+    let Some(enc_svc) = state.encryption.as_ref() else {
+        let _ = tokio::fs::remove_file(&snap_link).await;
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Object is encrypted but encryption service is disabled",
+        ));
+    };
+
+    if let Err(resp) = require_sse_c_key_match(headers, &meta.internal_metadata) {
+        let _ = tokio::fs::remove_file(&snap_link).await;
+        return resp;
+    }
+    let customer_key = match extract_sse_c_key(headers) {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Object was created with SSE-C; the SSE-C customer key headers are required",
+            ));
+        }
+        Err(resp) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return resp;
+        }
+    };
+
+    let Some(wrapped_odk) = meta.internal_metadata.get(MPU_WRAPPED_ODK).cloned() else {
+        let _ = tokio::fs::remove_file(&snap_link).await;
+        return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
+    };
+    let mut ck_arr = [0u8; 32];
+    ck_arr.copy_from_slice(&customer_key);
+    let odk = match myfsio_crypto::encryption::unwrap_key_with(&ck_arr, &wrapped_odk) {
+        Ok(k) => k,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "The SSE-C customer key does not match the key used to encrypt this object",
+            ));
+        }
+    };
+
+    let chunk_size = meta
+        .internal_metadata
+        .get(MPU_CHUNK_SIZE)
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(state.config.encryption_chunk_size_bytes);
+
+    let block_sizes = meta
+        .internal_metadata
+        .get(myfsio_storage::fs_backend::META_KEY_PART_SIZES)
+        .and_then(|r| myfsio_storage::fs_backend::parse_part_sizes(r));
+    let plain_sizes = meta
+        .internal_metadata
+        .get(MPU_PART_PLAIN_SIZES)
+        .and_then(|r| myfsio_storage::fs_backend::parse_part_sizes(r));
+    let part_numbers = meta
+        .internal_metadata
+        .get(MPU_PART_NUMBERS)
+        .and_then(|r| parse_u32_csv(r));
+
+    let (block_sizes, plain_sizes, part_numbers) = match (block_sizes, plain_sizes, part_numbers) {
+        (Some(b), Some(p), Some(n))
+            if b.len() == p.len() && p.len() == n.len() && !b.is_empty() =>
+        {
+            (b, p, n)
+        }
+        _ => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "SSE-C multipart object metadata is incomplete or inconsistent",
+            ));
+        }
+    };
+
+    let n_parts = block_sizes.len();
+    let mut block_offsets = Vec::with_capacity(n_parts);
+    let mut plain_offsets = Vec::with_capacity(n_parts);
+    let mut boff = 0u64;
+    let mut poff = 0u64;
+    for i in 0..n_parts {
+        block_offsets.push(boff);
+        plain_offsets.push(poff);
+        boff += block_sizes[i];
+        poff += plain_sizes[i];
+    }
+    let total = poff;
+
+    let mut parts_count_header: Option<u32> = None;
+    let (start, end, is_full) = if let Some(pn) = part_number {
+        let Some(idx) = part_numbers.iter().position(|x| *x == pn) else {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidPart,
+                format!("partNumber {} does not exist for this object", pn),
+            ));
+        };
+        parts_count_header = Some(n_parts as u32);
+        let psize = plain_sizes[idx];
+        if psize == 0 {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            let mut h = HeaderMap::new();
+            h.insert("content-length", "0".parse().unwrap());
+            if let Some(ref etag) = meta.etag {
+                h.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+            }
+            insert_content_type(&mut h, key, meta.content_type.as_deref());
+            h.insert(
+                "last-modified",
+                meta.last_modified
+                    .format("%a, %d %b %Y %H:%M:%S GMT")
+                    .to_string()
+                    .parse()
+                    .unwrap(),
+            );
+            h.insert("accept-ranges", "bytes".parse().unwrap());
+            h.insert("x-amz-mp-parts-count", n_parts.to_string().parse().unwrap());
+            apply_sse_c_response_headers(&mut h, &meta.internal_metadata);
+            apply_stored_response_headers(&mut h, &meta.internal_metadata);
+            apply_user_metadata(&mut h, &meta.metadata);
+            apply_response_overrides(&mut h, query);
+            return (StatusCode::PARTIAL_CONTENT, h).into_response();
+        }
+        let s = plain_offsets[idx];
+        (s, s + psize - 1, false)
+    } else if let Some(rs) = range_str {
+        match parse_range(rs, total) {
+            Some(r) => (r.0, r.1, false),
+            None => {
+                let _ = tokio::fs::remove_file(&snap_link).await;
+                let mut extra = HeaderMap::new();
+                if let Ok(v) = format!("bytes */{}", total).parse() {
+                    extra.insert(axum::http::header::CONTENT_RANGE, v);
+                }
+                return crate::s3_response::s3_error_response_with_headers(
+                    S3Error::new(
+                        S3ErrorCode::InvalidRange,
+                        format!("Range not satisfiable for size {}", total),
+                    ),
+                    extra,
+                );
+            }
+        }
+    } else if total == 0 {
+        (0, 0, true)
+    } else {
+        (0, total - 1, true)
+    };
+
+    let dec_tmp = tmp_dir.join(format!("mpu-dec-{}", uuid::Uuid::new_v4()));
+    let mut dec_file = match tokio::fs::File::create(&dec_tmp).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    };
+
+    for i in 0..n_parts {
+        if plain_sizes[i] == 0 {
+            continue;
+        }
+        let p_start = plain_offsets[i];
+        let p_end = p_start + plain_sizes[i] - 1;
+        if end < p_start || start > p_end {
+            continue;
+        }
+        let ov_start = start.max(p_start);
+        let ov_end = end.min(p_end);
+        let local_start = ov_start - p_start;
+        let local_end = ov_end - p_start;
+
+        let part_tmp = tmp_dir.join(format!("mpu-decpart-{}", uuid::Uuid::new_v4()));
+        let dec_res = enc_svc
+            .decrypt_mpu_part_range(
+                &snap_link,
+                &part_tmp,
+                block_offsets[i],
+                block_sizes[i],
+                odk,
+                part_numbers[i],
+                chunk_size,
+                plain_sizes[i],
+                local_start,
+                local_end,
+            )
+            .await;
+        if let Err(e) = dec_res {
+            let _ = tokio::fs::remove_file(&part_tmp).await;
+            let _ = tokio::fs::remove_file(&dec_tmp).await;
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                format!("Decryption failed: {}", e),
+            ));
+        }
+        let append_res = async {
+            let mut s = tokio::fs::File::open(&part_tmp).await?;
+            tokio::io::copy(&mut s, &mut dec_file).await
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&part_tmp).await;
+        if let Err(e) = append_res {
+            let _ = tokio::fs::remove_file(&dec_tmp).await;
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    }
+    drop(dec_file);
+    let _ = tokio::fs::remove_file(&snap_link).await;
+
+    let file = match open_self_deleting(dec_tmp.clone()).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&dec_tmp).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    };
+    let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+
+    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
+    let stream = ReaderStream::with_capacity(file, stream_cap);
+    let body = Body::from_stream(stream);
+
+    let mut h = HeaderMap::new();
+    h.insert("content-length", file_size.to_string().parse().unwrap());
+    if !is_full {
+        h.insert(
+            "content-range",
+            format!("bytes {}-{}/{}", start, end, total)
+                .parse()
+                .unwrap(),
+        );
+    }
+    if let Some(ref etag) = meta.etag {
+        h.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+    }
+    insert_content_type(&mut h, key, meta.content_type.as_deref());
+    h.insert(
+        "last-modified",
+        meta.last_modified
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    h.insert("accept-ranges", "bytes".parse().unwrap());
+    apply_sse_c_response_headers(&mut h, &meta.internal_metadata);
+    apply_stored_response_headers(&mut h, &meta.internal_metadata);
+    if is_full {
+        apply_stored_checksum_headers(&mut h, &meta.internal_metadata);
+    }
+    if let Some(ref requested_version) = query.version_id {
+        if let Ok(value) = requested_version.parse() {
+            h.insert("x-amz-version-id", value);
+        }
+    } else if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            h.insert("x-amz-version-id", value);
+        }
+    }
+    apply_user_metadata(&mut h, &meta.metadata);
+    apply_response_overrides(&mut h, query);
+    if let Some(count) = parts_count_header {
+        h.insert("x-amz-mp-parts-count", count.to_string().parse().unwrap());
+    }
+
+    let status = if is_full {
+        StatusCode::OK
+    } else {
+        StatusCode::PARTIAL_CONTENT
+    };
+    (status, h, body).into_response()
 }
 
 fn evaluate_get_preconditions(
@@ -4693,6 +5594,18 @@ async fn resolve_encryption_context(
     Ok(None)
 }
 
+const SSE_C_KEY_MD5_META: &str = "x-amz-server-side-encryption-customer-key-MD5";
+const MAX_BUFFERED_UPLOAD_BYTES: usize = 5 * 1024 * 1024 * 1024;
+
+fn sse_c_key_md5(key: &[u8]) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
+    hasher.update(key);
+    B64.encode(hasher.finalize())
+}
+
 fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
@@ -4749,16 +5662,27 @@ fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
 
 fn require_sse_c_key_match(
     headers: &HeaderMap,
-    _enc_info: &myfsio_crypto::encryption::EncryptionMetadata,
+    stored_metadata: &HashMap<String, String>,
 ) -> Result<(), Response> {
-    match extract_sse_c_key(headers) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(s3_error_response(S3Error::new(
-            S3ErrorCode::InvalidRequest,
-            "Object was created with SSE-C; the SSE-C customer key headers are required",
-        ))),
-        Err(resp) => Err(resp),
+    let provided = match extract_sse_c_key(headers) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Object was created with SSE-C; the SSE-C customer key headers are required",
+            )))
+        }
+        Err(resp) => return Err(resp),
+    };
+    if let Some(stored_md5) = stored_metadata.get(SSE_C_KEY_MD5_META) {
+        if !constant_time_eq(sse_c_key_md5(&provided).as_bytes(), stored_md5.as_bytes()) {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "The SSE-C customer key does not match the key used to encrypt this object",
+            )));
+        }
     }
+    Ok(())
 }
 
 async fn compute_plaintext_md5(path: &std::path::Path) -> std::io::Result<String> {
@@ -4895,7 +5819,7 @@ async fn post_object_form_handler(
     let mut file_bytes: Option<bytes::Bytes> = None;
     let mut file_name: Option<String> = None;
 
-    while let Some(field) = match multipart.next_field().await {
+    while let Some(mut field) = match multipart.next_field().await {
         Ok(f) => f,
         Err(e) => {
             return s3_error_response(S3Error::new(
@@ -4907,15 +5831,28 @@ async fn post_object_form_handler(
         let name = field.name().map(|s| s.to_string()).unwrap_or_default();
         if name.eq_ignore_ascii_case("file") {
             file_name = field.file_name().map(|s| s.to_string());
-            match field.bytes().await {
-                Ok(b) => file_bytes = Some(b),
-                Err(e) => {
-                    return s3_error_response(S3Error::new(
-                        S3ErrorCode::InternalError,
-                        format!("Failed to read file: {}", e),
-                    ));
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if buf.len() + chunk.len() > MAX_BUFFERED_UPLOAD_BYTES {
+                            return s3_error_response(S3Error::new(
+                                S3ErrorCode::EntityTooLarge,
+                                "Uploaded file exceeds the maximum allowed size",
+                            ));
+                        }
+                        buf.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return s3_error_response(S3Error::new(
+                            S3ErrorCode::InternalError,
+                            format!("Failed to read file: {}", e),
+                        ));
+                    }
                 }
             }
+            file_bytes = Some(bytes::Bytes::from(buf));
         } else if !name.is_empty() {
             if let Ok(t) = field.text().await {
                 fields.insert(name, t);
@@ -5314,6 +6251,7 @@ mod tests {
             replication_healer_enabled: false,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
+            replication_part_stall_timeout_secs: 300,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,
@@ -5346,7 +6284,6 @@ mod tests {
 
     #[test]
     fn is_aws_chunked_detection() {
-        // Streaming SigV4 sha header alone => chunked.
         let mut h = HeaderMap::new();
         h.insert(
             "x-amz-content-sha256",
@@ -5354,14 +6291,11 @@ mod tests {
         );
         assert!(is_aws_chunked(&h));
 
-        // Content-Encoding aws-chunked + decoded-length => chunked (no streaming sha).
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "aws-chunked, gzip".parse().unwrap());
         h.insert("x-amz-decoded-content-length", "100".parse().unwrap());
         assert!(is_aws_chunked(&h));
 
-        // Content-Encoding aws-chunked but no decoded-length and no streaming sha
-        // (e.g. user passed it as metadata): NOT chunked, body is plain.
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "gzip, aws-chunked".parse().unwrap());
         h.insert(
@@ -5370,7 +6304,6 @@ mod tests {
         );
         assert!(!is_aws_chunked(&h));
 
-        // Plain hex sha and gzip-only Content-Encoding: not chunked.
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "gzip".parse().unwrap());
         h.insert("x-amz-content-sha256", "abcd".repeat(16).parse().unwrap());
@@ -5379,9 +6312,6 @@ mod tests {
 
     #[test]
     fn aws_chunked_wire_encoding_is_not_persisted_as_object_encoding() {
-        // Real streaming sigv4 wire encoding: chunked transport detected via
-        // x-amz-decoded-content-length (matches what real SDKs send), so
-        // aws-chunked is stripped from stored Content-Encoding metadata.
         let mut headers = HeaderMap::new();
         headers.insert("content-encoding", "aws-chunked".parse().unwrap());
         headers.insert("x-amz-decoded-content-length", "100".parse().unwrap());

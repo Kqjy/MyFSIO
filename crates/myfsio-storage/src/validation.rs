@@ -133,6 +133,7 @@ pub fn validate_object_key(
 
     for part in &non_empty_parts {
         if *part == ".__myfsio_dirobj__"
+            || *part == ".__myfsio_keydata__"
             || *part == ".__myfsio_empty__"
             || part.starts_with("_index.json")
         {

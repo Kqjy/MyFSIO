@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use std::collections::HashMap;
+use std::sync::Arc;
 use myfsio_common::types::Principal;
 use myfsio_storage::traits::StorageEngine;
 
@@ -1358,7 +1359,7 @@ pub async fn gc_run(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    match gc.run_now(dry_run).await {
+    match Arc::clone(gc).run_now(dry_run).await {
         Ok(result) => json_response(StatusCode::OK, result),
         Err(e) => json_error("Conflict", &e, StatusCode::CONFLICT),
     }
@@ -1425,7 +1426,7 @@ pub async fn integrity_run(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    match checker.run_now(dry_run, auto_heal).await {
+    match Arc::clone(checker).run_now(dry_run, auto_heal).await {
         Ok(result) => json_response(StatusCode::OK, result),
         Err(e) => json_error("Conflict", &e, StatusCode::CONFLICT),
     }

@@ -166,19 +166,12 @@ fn apply_rule_headers(headers: &mut axum::http::HeaderMap, rule: &CorsRule, orig
 }
 
 fn cors_preflight_denied_response() -> Response {
-    let body = S3Error::new(
+    crate::s3_response::s3_error_response(S3Error::new(
         S3ErrorCode::AccessDenied,
         "CORSResponse: This CORS request is not allowed. \
          This is usually because the evaluation of Origin, request method / Access-Control-Request-Method \
          or Access-Control-Request-Headers are not whitelisted by the resource's CORS spec.",
-    )
-    .to_xml();
-    (
-        StatusCode::FORBIDDEN,
-        [("content-type", "application/xml")],
-        body,
-    )
-        .into_response()
+    ))
 }
 
 fn strip_cors_response_headers(headers: &mut HeaderMap) {

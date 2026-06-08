@@ -1,15 +1,18 @@
 use myfsio_common::constants::{
-    BUCKET_META_DIR, BUCKET_VERSIONS_DIR, INDEX_FILE, SYSTEM_BUCKETS_DIR, SYSTEM_ROOT,
+    BUCKET_META_DIR, BUCKET_VERSIONS_DIR, DIR_MARKER_FILE, INDEX_FILE, KEY_DATA_MARKER_FILE,
+    SYSTEM_BUCKETS_DIR, SYSTEM_ROOT,
 };
 use myfsio_storage::fs_backend::{
     is_multipart_etag, metadata_is_corrupted, FsStorageBackend, META_KEY_CORRUPTED,
     META_KEY_CORRUPTED_AT, META_KEY_CORRUPTION_DETAIL, META_KEY_QUARANTINE_PATH,
 };
 use myfsio_storage::traits::StorageEngine;
+use myfsio_crypto::encryption::EncryptionMetadata;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{RwLock, Semaphore};
 
@@ -19,6 +22,33 @@ const MAX_ISSUES_PER_TYPE: usize = 100;
 const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
 const QUARANTINE_DIR: &str = "quarantine";
 const CURSOR_FILE: &str = "integrity_cursor.json";
+const STALE_VERSION_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+struct Pacer {
+    every: usize,
+    pause: std::time::Duration,
+    count: usize,
+}
+
+impl Pacer {
+    fn new(pacing_ms: u64) -> Self {
+        Self {
+            every: 100,
+            pause: std::time::Duration::from_millis(pacing_ms),
+            count: 0,
+        }
+    }
+
+    fn tick(&mut self) {
+        if self.pause.is_zero() {
+            return;
+        }
+        self.count += 1;
+        if self.count.is_multiple_of(self.every) {
+            std::thread::sleep(self.pause);
+        }
+    }
+}
 
 #[derive(Default, Clone)]
 struct CorruptionCursor {
@@ -62,12 +92,26 @@ fn save_cursor(path: &Path, cursor: &CorruptionCursor) {
     let _ = std::fs::write(path, serde_json::to_string_pretty(&v).unwrap_or_default());
 }
 
+fn recently_modified(path: &Path, grace: std::time::Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    match mtime.elapsed() {
+        Ok(elapsed) => elapsed < grace,
+        Err(_) => true,
+    }
+}
+
 pub struct IntegrityConfig {
     pub interval_hours: f64,
     pub batch_size: usize,
     pub auto_heal: bool,
     pub dry_run: bool,
     pub heal_concurrency: usize,
+    pub scan_pacing_ms: u64,
     pub quarantine_retention_days: u64,
 }
 
@@ -78,7 +122,8 @@ impl Default for IntegrityConfig {
             batch_size: 10_000,
             auto_heal: false,
             dry_run: false,
-            heal_concurrency: 4,
+            heal_concurrency: 1,
+            scan_pacing_ms: 0,
             quarantine_retention_days: 7,
         }
     }
@@ -89,10 +134,24 @@ pub struct IntegrityService {
     storage_root: PathBuf,
     config: IntegrityConfig,
     peer_fetcher: Option<Arc<PeerFetcher>>,
-    running: Arc<RwLock<bool>>,
-    started_at: Arc<RwLock<Option<Instant>>>,
+    running: Arc<AtomicBool>,
+    started_at: Arc<StdMutex<Option<Instant>>>,
     history: Arc<RwLock<Vec<Value>>>,
     history_path: PathBuf,
+}
+
+struct RunGuard {
+    running: Arc<AtomicBool>,
+    started_at: Arc<StdMutex<Option<Instant>>>,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.started_at.lock() {
+            *guard = None;
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -181,21 +240,20 @@ impl IntegrityService {
             storage_root: storage_root.to_path_buf(),
             config,
             peer_fetcher,
-            running: Arc::new(RwLock::new(false)),
-            started_at: Arc::new(RwLock::new(None)),
+            running: Arc::new(AtomicBool::new(false)),
+            started_at: Arc::new(StdMutex::new(None)),
             history: Arc::new(RwLock::new(history)),
             history_path,
         }
     }
 
     pub async fn status(&self) -> Value {
-        let running = *self.running.read().await;
+        let running = self.running.load(Ordering::SeqCst);
         let scan_elapsed_seconds = self
             .started_at
-            .read()
-            .await
-            .as_ref()
-            .map(|started| started.elapsed().as_secs_f64());
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|started| started.elapsed().as_secs_f64()));
         json!({
             "enabled": true,
             "running": running,
@@ -217,21 +275,59 @@ impl IntegrityService {
         json!({ "executions": executions })
     }
 
-    pub async fn run_now(&self, dry_run: bool, auto_heal: bool) -> Result<Value, String> {
+    fn try_claim(&self) -> Result<(), String> {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
         {
-            let mut running = self.running.write().await;
-            if *running {
-                return Err("Integrity check already running".to_string());
-            }
-            *running = true;
+            return Err("Integrity check already running".to_string());
         }
-        *self.started_at.write().await = Some(Instant::now());
+        if let Ok(mut guard) = self.started_at.lock() {
+            *guard = Some(Instant::now());
+        }
+        Ok(())
+    }
 
+    pub async fn run_now(self: Arc<Self>, dry_run: bool, auto_heal: bool) -> Result<Value, String> {
+        self.try_claim()?;
+        let svc = self.clone();
+        let guard = RunGuard {
+            running: self.running.clone(),
+            started_at: self.started_at.clone(),
+        };
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            svc.execute(dry_run, auto_heal).await
+        });
+        handle
+            .await
+            .unwrap_or_else(|e| Err(format!("integrity task aborted: {}", e)))
+    }
+
+    pub fn start_run(self: Arc<Self>, dry_run: bool, auto_heal: bool) -> Result<(), String> {
+        self.try_claim()?;
+        let svc = self.clone();
+        let guard = RunGuard {
+            running: self.running.clone(),
+            started_at: self.started_at.clone(),
+        };
+        tokio::spawn(async move {
+            let _guard = guard;
+            if let Err(e) = svc.execute(dry_run, auto_heal).await {
+                tracing::warn!("Integrity check failed: {}", e);
+            }
+        });
+        Ok(())
+    }
+
+    async fn execute(&self, dry_run: bool, auto_heal: bool) -> Result<Value, String> {
         let start = Instant::now();
         let storage_root = self.storage_root.clone();
         let batch_size = self.config.batch_size;
+        let pacing_ms = self.config.scan_pacing_ms;
         let scan_state =
-            tokio::task::spawn_blocking(move || scan_all_buckets(&storage_root, batch_size))
+            tokio::task::spawn_blocking(move || scan_all_buckets(&storage_root, batch_size, pacing_ms))
                 .await
                 .unwrap_or_else(|e| {
                     let mut st = ScanState::default();
@@ -246,9 +342,6 @@ impl IntegrityService {
         };
 
         let elapsed = start.elapsed().as_secs_f64();
-
-        *self.running.write().await = false;
-        *self.started_at.write().await = None;
 
         let result_json = build_result_json(scan_state, heal_stats, elapsed);
 
@@ -365,7 +458,7 @@ impl IntegrityService {
             loop {
                 timer.tick().await;
                 tracing::info!("Integrity check starting");
-                match self.run_now(dry_run, auto_heal).await {
+                match Arc::clone(&self).run_now(dry_run, auto_heal).await {
                     Ok(result) => tracing::info!("Integrity check complete: {:?}", result),
                     Err(e) => tracing::warn!("Integrity check failed: {}", e),
                 }
@@ -425,7 +518,7 @@ async fn heal_corrupted(
     let stored_etag = parse_stored_etag(detail);
     let actual_etag = parse_actual_etag(detail);
 
-    let live_path = storage_root.join(bucket).join(key);
+    let live_path = resolve_data_path(&storage_root.join(bucket), key);
     let quarantine_rel = quarantine_relative_path(bucket, key);
     let quarantine_full = storage_root.join(&quarantine_rel);
 
@@ -438,11 +531,40 @@ async fn heal_corrupted(
 
     {
         let _guard = storage.lock_object_write(bucket, key);
-        if live_path.exists() {
-            if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
-                tracing::error!("Heal {}/{}: quarantine rename failed: {}", bucket, key, e);
+        if !live_path.exists() {
+            return HealStatus::Skipped;
+        }
+        let current = collect_all_metadata(storage_root, bucket);
+        let current_meta = current
+            .get(key)
+            .map(|info| entry_metadata_map(&info.entry))
+            .unwrap_or_default();
+        let current_stored = current_meta.get("__etag__").cloned().unwrap_or_default();
+        if current_stored.is_empty()
+            || metadata_is_corrupted(&current_meta)
+            || EncryptionMetadata::is_encrypted(&current_meta)
+            || is_multipart_etag(&current_stored)
+        {
+            return HealStatus::Skipped;
+        }
+        match myfsio_crypto::hashing::md5_file(&live_path) {
+            Ok(current_actual) if current_actual == current_stored => {
+                tracing::info!(
+                    "Heal {}/{}: object no longer mismatches under lock; skipping quarantine",
+                    bucket,
+                    key
+                );
+                return HealStatus::Skipped;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Heal {}/{}: re-hash before quarantine failed: {}", bucket, key, e);
                 return HealStatus::Failed;
             }
+        }
+        if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
+            tracing::error!("Heal {}/{}: quarantine rename failed: {}", bucket, key, e);
+            return HealStatus::Failed;
         }
     }
 
@@ -560,6 +682,9 @@ async fn heal_stale_version(storage_root: &Path, bucket: &str, key: &str) -> Hea
     if !src.exists() {
         return HealStatus::Skipped;
     }
+    if recently_modified(&src, STALE_VERSION_GRACE) {
+        return HealStatus::Skipped;
+    }
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let dst = storage_root
         .join(SYSTEM_ROOT)
@@ -607,12 +732,7 @@ async fn heal_etag_cache(
         return HealStatus::Skipped;
     }
 
-    let meta_root = storage_root
-        .join(SYSTEM_ROOT)
-        .join(SYSTEM_BUCKETS_DIR)
-        .join(bucket)
-        .join(BUCKET_META_DIR);
-    let entries = collect_index_entries(&meta_root);
+    let entries = collect_all_metadata(storage_root, bucket);
     let canonical = entries.get(key).and_then(|info| stored_etag(&info.entry));
 
     let mut cache: HashMap<String, Value> = match std::fs::read_to_string(&etag_index_path)
@@ -763,8 +883,9 @@ fn build_result_json(
     })
 }
 
-fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
+fn scan_all_buckets(storage_root: &Path, batch_size: usize, pacing_ms: u64) -> ScanState {
     let mut state = ScanState::default();
+    let mut pacer = Pacer::new(pacing_ms);
     let mut buckets = match list_bucket_names(storage_root) {
         Ok(b) => b,
         Err(e) => {
@@ -777,16 +898,11 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
     for bucket in &buckets {
         state.buckets_scanned += 1;
         let bucket_path = storage_root.join(bucket);
-        let meta_root = storage_root
-            .join(SYSTEM_ROOT)
-            .join(SYSTEM_BUCKETS_DIR)
-            .join(bucket)
-            .join(BUCKET_META_DIR);
-        let index_entries = collect_index_entries(&meta_root);
+        let index_entries = collect_all_metadata(storage_root, bucket);
 
-        check_phantom(&mut state, bucket, &bucket_path, &index_entries);
-        check_orphaned(&mut state, bucket, &bucket_path, &index_entries);
-        check_stale_versions(&mut state, storage_root, bucket);
+        check_phantom(&mut state, bucket, &bucket_path, &index_entries, &mut pacer);
+        check_orphaned(&mut state, bucket, &bucket_path, &index_entries, &mut pacer);
+        check_stale_versions(&mut state, storage_root, bucket, &mut pacer);
         check_etag_cache(&mut state, storage_root, bucket, &index_entries);
     }
 
@@ -816,12 +932,7 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
         };
 
         let bucket_path = storage_root.join(bucket);
-        let meta_root = storage_root
-            .join(SYSTEM_ROOT)
-            .join(SYSTEM_BUCKETS_DIR)
-            .join(bucket)
-            .join(BUCKET_META_DIR);
-        let index_entries = collect_index_entries(&meta_root);
+        let index_entries = collect_all_metadata(storage_root, bucket);
 
         last_offset_visited = Some(offset);
         let result = check_corrupted(
@@ -831,6 +942,7 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize) -> ScanState {
             &index_entries,
             after_key,
             &mut remaining,
+            &mut pacer,
         );
 
         if let Some(k) = result.last_examined {
@@ -883,6 +995,23 @@ struct IndexEntryInfo {
     key_name: String,
 }
 
+fn collect_all_metadata(storage_root: &Path, bucket: &str) -> HashMap<String, IndexEntryInfo> {
+    let modern_meta_root = storage_root
+        .join(SYSTEM_ROOT)
+        .join(SYSTEM_BUCKETS_DIR)
+        .join(bucket)
+        .join(BUCKET_META_DIR);
+    let mut out = collect_index_entries(&modern_meta_root);
+
+    let legacy_meta_root = storage_root.join(bucket).join(".meta");
+    if legacy_meta_root.exists() {
+        for (k, v) in collect_index_entries(&legacy_meta_root) {
+            out.entry(k).or_insert(v);
+        }
+    }
+    out
+}
+
 fn collect_index_entries(meta_root: &Path) -> HashMap<String, IndexEntryInfo> {
     let mut out: HashMap<String, IndexEntryInfo> = HashMap::new();
     if !meta_root.exists() {
@@ -905,9 +1034,8 @@ fn collect_index_entries(meta_root: &Path) -> HashMap<String, IndexEntryInfo> {
                 stack.push(path);
                 continue;
             }
-            if entry.file_name().to_string_lossy() != INDEX_FILE {
-                continue;
-            }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+
             let rel_dir = match path.parent().and_then(|p| p.strip_prefix(meta_root).ok()) {
                 Some(p) => p.to_path_buf(),
                 None => continue,
@@ -922,33 +1050,72 @@ fn collect_index_entries(meta_root: &Path) -> HashMap<String, IndexEntryInfo> {
                     .join("/")
             };
 
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let index_data: Map<String, Value> = match serde_json::from_str(&content) {
-                Ok(Value::Object(m)) => m,
-                _ => continue,
-            };
+            if file_name == INDEX_FILE {
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let index_data: Map<String, Value> = match serde_json::from_str(&content) {
+                    Ok(Value::Object(m)) => m,
+                    _ => continue,
+                };
 
-            for (key_name, entry_val) in index_data {
+                for (key_name, entry_val) in index_data {
+                    let full_key = if dir_prefix.is_empty() {
+                        key_name.clone()
+                    } else {
+                        format!("{}/{}", dir_prefix, key_name)
+                    };
+                    out.insert(
+                        full_key,
+                        IndexEntryInfo {
+                            entry: entry_val,
+                            index_file: path.clone(),
+                            key_name,
+                        },
+                    );
+                }
+            } else if let Some(stem) = file_name.strip_suffix(".meta.json") {
                 let full_key = if dir_prefix.is_empty() {
-                    key_name.clone()
+                    stem.to_string()
                 } else {
-                    format!("{}/{}", dir_prefix, key_name)
+                    format!("{}/{}", dir_prefix, stem)
+                };
+                if out.contains_key(&full_key) {
+                    continue;
+                }
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let entry_val: Value = match serde_json::from_str(&content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
                 };
                 out.insert(
                     full_key,
                     IndexEntryInfo {
                         entry: entry_val,
                         index_file: path.clone(),
-                        key_name,
+                        key_name: stem.to_string(),
                     },
                 );
             }
         }
     }
     out
+}
+
+fn resolve_data_path(bucket_path: &Path, full_key: &str) -> PathBuf {
+    if let Some(stripped) = full_key.strip_suffix('/') {
+        return bucket_path.join(stripped).join(DIR_MARKER_FILE);
+    }
+    let direct = bucket_path.join(full_key);
+    if direct.is_dir() {
+        direct.join(KEY_DATA_MARKER_FILE)
+    } else {
+        direct
+    }
 }
 
 fn stored_etag(entry: &Value) -> Option<String> {
@@ -983,6 +1150,7 @@ fn check_corrupted(
     entries: &HashMap<String, IndexEntryInfo>,
     after_key: &str,
     remaining: &mut usize,
+    pacer: &mut Pacer,
 ) -> CorruptionScanResult {
     if *remaining == 0 {
         return CorruptionScanResult {
@@ -1005,17 +1173,20 @@ fn check_corrupted(
         }
         *remaining -= 1;
         last_examined = Some((*full_key).clone());
+        pacer.tick();
 
         let info = &entries[*full_key];
-        let object_path = bucket_path.join(*full_key);
-        if !object_path.exists() {
+        let object_path = resolve_data_path(bucket_path, full_key);
+        if !object_path.is_file() {
             continue;
         }
         let meta_map = entry_metadata_map(&info.entry);
         if metadata_is_corrupted(&meta_map) {
             continue;
         }
-        state.objects_scanned += 1;
+        if EncryptionMetadata::is_encrypted(&meta_map) {
+            continue;
+        }
 
         let Some(stored) = stored_etag(&info.entry) else {
             continue;
@@ -1053,18 +1224,20 @@ fn check_phantom(
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
+    pacer: &mut Pacer,
 ) {
     let mut keys: Vec<&String> = entries.keys().collect();
     keys.sort();
 
     for full_key in keys {
+        pacer.tick();
         let info = &entries[full_key];
         if metadata_is_corrupted(&entry_metadata_map(&info.entry)) {
             continue;
         }
         state.objects_scanned += 1;
-        let object_path = bucket_path.join(full_key);
-        if !object_path.exists() {
+        let object_path = resolve_data_path(bucket_path, full_key);
+        if !object_path.is_file() {
             state.phantom_metadata += 1;
             state.push_issue(
                 "phantom_metadata",
@@ -1081,6 +1254,7 @@ fn check_orphaned(
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
+    pacer: &mut Pacer,
 ) {
     let indexed: HashSet<&String> = entries.keys().collect();
     let mut stack: Vec<(PathBuf, String)> = vec![(bucket_path.to_path_buf(), String::new())];
@@ -1107,12 +1281,17 @@ fn check_orphaned(
                 };
                 stack.push((entry.path(), new_prefix));
             } else if ft.is_file() {
-                let full_key = if prefix.is_empty() {
+                pacer.tick();
+                let full_key = if name == KEY_DATA_MARKER_FILE {
+                    if prefix.is_empty() {
+                        continue;
+                    }
+                    prefix.clone()
+                } else if prefix.is_empty() {
                     name
                 } else {
                     format!("{}/{}", prefix, name)
                 };
-                state.objects_scanned += 1;
                 if !indexed.contains(&full_key) {
                     state.orphaned_objects += 1;
                     state.push_issue(
@@ -1127,7 +1306,12 @@ fn check_orphaned(
     }
 }
 
-fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str) {
+fn check_stale_versions(
+    state: &mut ScanState,
+    storage_root: &Path,
+    bucket: &str,
+    pacer: &mut Pacer,
+) {
     let versions_root = storage_root
         .join(SYSTEM_ROOT)
         .join(SYSTEM_BUCKETS_DIR)
@@ -1167,7 +1351,7 @@ fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str
         }
 
         for (stem, path) in &bin_stems {
-            state.objects_scanned += 1;
+            pacer.tick();
             if !json_stems.contains_key(stem) {
                 state.stale_versions += 1;
                 let key = path
@@ -1184,7 +1368,7 @@ fn check_stale_versions(state: &mut ScanState, storage_root: &Path, bucket: &str
         }
 
         for (stem, path) in &json_stems {
-            state.objects_scanned += 1;
+            pacer.tick();
             if !bin_stems.contains_key(stem) {
                 if manifest_is_delete_marker(path) {
                     continue;
@@ -1244,7 +1428,6 @@ fn check_etag_cache(
     };
 
     for (full_key, cached_val) in cache {
-        state.objects_scanned += 1;
         let Some(cached_etag) = cached_val.as_str() else {
             continue;
         };
@@ -1289,6 +1472,46 @@ mod tests {
             serde_json::to_string(&Value::Object(map)).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn encrypted_objects_are_not_flagged_corrupted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "encbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        fs::write(bucket_path.join("secret.bin"), b"ciphertext-bytes-on-disk").unwrap();
+
+        let mut map = Map::new();
+        map.insert(
+            "secret.bin".to_string(),
+            json!({
+                "metadata": {
+                    "__etag__": "00000000000000000000000000000000",
+                    "x-amz-server-side-encryption": "AES256",
+                    "x-amz-encryption-nonce": "abc",
+                }
+            }),
+        );
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&Value::Object(map)).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(
+            state.corrupted_objects, 0,
+            "encrypted objects must be skipped by the corruption scan"
+        );
     }
 
     #[test]
@@ -1343,7 +1566,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
 
         assert_eq!(state.corrupted_objects, 1, "corrupted");
         assert_eq!(state.phantom_metadata, 1, "phantom");
@@ -1359,10 +1582,54 @@ mod tests {
     }
 
     #[test]
+    fn scan_handles_collided_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let bucket_path = root.join(bucket);
+        let folder_dir = bucket_path.join("folder");
+        fs::create_dir_all(&folder_dir).unwrap();
+
+        let outer = b"outer value";
+        let outer_etag = md5_hex(outer);
+        fs::write(folder_dir.join(KEY_DATA_MARKER_FILE), outer).unwrap();
+
+        let inner = b"inner value";
+        let inner_etag = md5_hex(inner);
+        fs::write(folder_dir.join("file"), inner).unwrap();
+
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        write_index(&meta_root, &[("folder", &outer_etag)]);
+        write_index(&meta_root.join("folder"), &[("file", &inner_etag)]);
+
+        let state = scan_all_buckets(root, 10_000, 0);
+
+        assert_eq!(
+            state.corrupted_objects, 0,
+            "marker should hash to stored etag: {:?}",
+            state.errors
+        );
+        assert_eq!(state.phantom_metadata, 0, "no phantoms for collided keys");
+        assert_eq!(
+            state.orphaned_objects, 0,
+            "marker file must not leak as orphan"
+        );
+        assert!(
+            state.errors.is_empty(),
+            "no errors expected: {:?}",
+            state.errors
+        );
+    }
+
+    #[test]
     fn skips_system_root_as_bucket() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(SYSTEM_ROOT).join("config")).unwrap();
-        let state = scan_all_buckets(tmp.path(), 100);
+        let state = scan_all_buckets(tmp.path(), 100, 0);
         assert_eq!(state.buckets_scanned, 0);
     }
 
@@ -1400,7 +1667,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.corrupted_objects, 0,
             "poisoned entries must not re-flag"
@@ -1448,7 +1715,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.stale_versions, 1,
             "delete-marker manifest must not be flagged; only the data-bearing orphan should count"
@@ -1494,7 +1761,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.phantom_metadata, 0,
             "poisoned entries with quarantined files must not be reported as phantom metadata"
@@ -1522,7 +1789,7 @@ mod tests {
             &[("multi.bin", "deadbeefdeadbeefdeadbeefdeadbeef-3")],
         );
 
-        let state = scan_all_buckets(root, 10_000);
+        let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.corrupted_objects, 0,
             "multipart-style ETags must not be checked against whole-body MD5"
@@ -1570,17 +1837,17 @@ mod tests {
             &["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"],
         );
 
-        let _ = scan_all_buckets(root, 2);
+        let _ = scan_all_buckets(root, 2, 0);
         let cursor1 = load_cursor(&cursor_path_for(root));
         assert_eq!(cursor1.bucket, "alpha");
         assert_eq!(cursor1.after_key, "b.txt");
 
-        let _ = scan_all_buckets(root, 2);
+        let _ = scan_all_buckets(root, 2, 0);
         let cursor2 = load_cursor(&cursor_path_for(root));
         assert_eq!(cursor2.bucket, "alpha");
         assert_eq!(cursor2.after_key, "d.txt");
 
-        let _ = scan_all_buckets(root, 2);
+        let _ = scan_all_buckets(root, 2, 0);
         let cursor3 = load_cursor(&cursor_path_for(root));
         assert_eq!(
             cursor3.bucket, "",
@@ -1596,12 +1863,12 @@ mod tests {
         seed_bucket_with_objects(root, "alpha", &["x.txt", "y.txt"]);
         seed_bucket_with_objects(root, "bravo", &["m.txt", "n.txt"]);
 
-        let _ = scan_all_buckets(root, 3);
+        let _ = scan_all_buckets(root, 3, 0);
         let c1 = load_cursor(&cursor_path_for(root));
         assert_eq!(c1.bucket, "bravo");
         assert_eq!(c1.after_key, "m.txt");
 
-        let _ = scan_all_buckets(root, 3);
+        let _ = scan_all_buckets(root, 3, 0);
         let c2 = load_cursor(&cursor_path_for(root));
         assert_eq!(c2.bucket, "", "second run should finish the sweep");
     }
@@ -1617,7 +1884,7 @@ mod tests {
         };
         save_cursor(&cursor_path_for(root), &cursor);
 
-        let state = scan_all_buckets(root, 100);
+        let state = scan_all_buckets(root, 100, 0);
         assert!(state.errors.is_empty(), "unexpected errors: {:?}", state.errors);
         let after = load_cursor(&cursor_path_for(root));
         assert_eq!(
@@ -1659,7 +1926,7 @@ mod tests {
             .collect();
         write_index(&meta_root, &pairs);
 
-        let state = scan_all_buckets(root, 100_000);
+        let state = scan_all_buckets(root, 100_000, 0);
 
         let phantom_in_list = state
             .issues
@@ -1715,11 +1982,109 @@ mod tests {
             &[("ghost-b.txt", "deadbeefdeadbeefdeadbeefdeadbeef")],
         );
 
-        let state = scan_all_buckets(root, 1);
+        let state = scan_all_buckets(root, 1, 0);
         assert_eq!(
             state.phantom_metadata, 2,
             "phantom-metadata phase must visit every bucket each run, not be gated by the corruption budget"
         );
         assert_eq!(state.buckets_scanned, 2);
+    }
+
+    #[test]
+    fn legacy_per_key_meta_json_files_are_recognized_as_indexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "ente";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR)
+            .join("1580559962386438");
+        fs::create_dir_all(bucket_path.join("1580559962386438")).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        let key = "1580559962386438/b82bb2e0-061c-4b54-9b7f-524fa2a1d374";
+        let bytes = b"encrypted blob";
+        let etag = md5_hex(bytes);
+        fs::write(root.join(bucket).join(key), bytes).unwrap();
+
+        let payload = json!({ "metadata": { "__etag__": etag } });
+        fs::write(
+            meta_root.join("b82bb2e0-061c-4b54-9b7f-524fa2a1d374.meta.json"),
+            serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(
+            state.orphaned_objects, 0,
+            "legacy per-key .meta.json must count as indexed metadata"
+        );
+        assert_eq!(state.corrupted_objects, 0);
+        assert_eq!(state.phantom_metadata, 0);
+    }
+
+    #[test]
+    fn aggregate_index_takes_precedence_over_legacy_per_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "mixed";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        let bytes = b"hello";
+        let real_etag = md5_hex(bytes);
+        fs::write(bucket_path.join("a.txt"), bytes).unwrap();
+
+        write_index(&meta_root, &[("a.txt", &real_etag)]);
+        let stale = json!({ "metadata": { "__etag__": "00000000000000000000000000000000" } });
+        fs::write(
+            meta_root.join("a.txt.meta.json"),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(
+            state.corrupted_objects, 0,
+            "aggregate index must win over legacy per-key file"
+        );
+        assert_eq!(state.orphaned_objects, 0);
+    }
+
+    #[test]
+    fn legacy_meta_dir_at_bucket_root_is_recognized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "older";
+        let bucket_path = root.join(bucket);
+        let legacy_meta = bucket_path.join(".meta");
+        fs::create_dir_all(&legacy_meta).unwrap();
+
+        let bytes = b"older bytes";
+        let etag = md5_hex(bytes);
+        fs::write(bucket_path.join("old.txt"), bytes).unwrap();
+
+        let payload = json!({ "metadata": { "__etag__": etag } });
+        fs::write(
+            legacy_meta.join("old.txt.meta.json"),
+            serde_json::to_string(&payload).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(
+            state.orphaned_objects, 0,
+            "legacy <bucket>/.meta/<key>.meta.json must also count as indexed"
+        );
+        assert_eq!(state.corrupted_objects, 0);
     }
 }

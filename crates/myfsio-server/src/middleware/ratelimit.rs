@@ -310,8 +310,6 @@ mod tests {
 
     #[test]
     fn head_without_head_specific_override_falls_through_to_path_limiter() {
-        // RATE_LIMIT_OBJECT_OPS configured, RATE_LIMIT_HEAD_OPS not.
-        // HEAD on an object path must use the object limiter, not the looser default.
         let state = RateLimitLayerState::with_per_op(
             RateLimitSetting::new(100, 60),
             RateLimitSetting::new(100, 60),

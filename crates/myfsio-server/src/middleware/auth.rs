@@ -48,26 +48,17 @@ fn wrap_body_for_sha256_verification(req: &mut Request) -> Option<Response> {
                 "Streaming SigV4 chunk-signature validation is not yet implemented; \
                  resend with x-amz-content-sha256: UNSIGNED-PAYLOAD or disable STRICT_STREAMING_SIGV4",
             );
-            let status = StatusCode::from_u16(err.http_status())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let code_str = err.code.as_str();
-            return Some(
-                (
-                    status,
-                    [
-                        ("content-type", "application/xml"),
-                        ("x-amz-error-code", code_str),
-                    ],
-                    err.to_xml(),
-                )
-                    .into_response(),
-            );
+            return Some(crate::s3_response::s3_error_response(err));
         }
-        tracing::warn!(
-            payload_type = %upper,
-            "Accepting streaming SigV4 request without per-chunk signature validation. \
-             Set STRICT_STREAMING_SIGV4=true to reject these requests until full validation lands."
-        );
+        static STREAMING_SIGV4_WARN: std::sync::Once = std::sync::Once::new();
+        STREAMING_SIGV4_WARN.call_once(|| {
+            tracing::warn!(
+                payload_type = %upper,
+                "Accepting streaming SigV4 requests without per-chunk signature validation. \
+                 Set STRICT_STREAMING_SIGV4=true to reject these requests until full validation lands. \
+                 (This warning is emitted once per process; subsequent streaming uploads are accepted silently.)"
+            );
+        });
         return None;
     }
 
@@ -777,7 +768,7 @@ async fn authorize_request(
 
     if remaining.is_empty() {
         let action = resolve_bucket_action(method, query);
-        return authorize_action(state, principal, bucket, action, None).await;
+        return authorize_action(state, principal, bucket, action, None, method_access(method)).await;
     }
 
     let object_key = remaining.join("/");
@@ -791,14 +782,26 @@ async fn authorize_request(
                         "Access to reserved bucket names is not permitted",
                     ));
                 }
-                let source_allowed =
-                    authorize_action(state, principal, src_bucket, "read", Some(src_key))
-                        .await
-                        .is_ok();
-                let dest_allowed =
-                    authorize_action(state, principal, bucket, "write", Some(&object_key))
-                        .await
-                        .is_ok();
+                let source_allowed = authorize_action(
+                    state,
+                    principal,
+                    src_bucket,
+                    "read",
+                    Some(src_key),
+                    Some(false),
+                )
+                .await
+                .is_ok();
+                let dest_allowed = authorize_action(
+                    state,
+                    principal,
+                    bucket,
+                    "write",
+                    Some(&object_key),
+                    Some(true),
+                )
+                .await
+                .is_ok();
                 if source_allowed && dest_allowed {
                     return Ok(());
                 }
@@ -808,7 +811,15 @@ async fn authorize_request(
     }
 
     let action = resolve_object_action(method, query);
-    authorize_action(state, principal, bucket, action, Some(&object_key)).await
+    authorize_action(
+        state,
+        principal,
+        bucket,
+        action,
+        Some(&object_key),
+        method_access(method),
+    )
+    .await
 }
 
 pub async fn ui_authorize(
@@ -818,7 +829,7 @@ pub async fn ui_authorize(
     action: &str,
     object_key: Option<&str>,
 ) -> Result<(), String> {
-    authorize_action(state, Some(principal), bucket, action, object_key)
+    authorize_action(state, Some(principal), bucket, action, object_key, None)
         .await
         .map_err(|err| err.message)
 }
@@ -837,6 +848,7 @@ pub async fn ui_authorize_list(
         Some(principal.access_key.as_str()),
         bucket,
         "list",
+        None,
         None,
     )
     .await;
@@ -875,6 +887,7 @@ pub async fn ui_can_see_bucket(
         bucket,
         "list",
         None,
+        None,
     )
     .await;
 
@@ -900,6 +913,7 @@ async fn authorize_action(
     bucket: &str,
     action: &str,
     object_key: Option<&str>,
+    write: Option<bool>,
 ) -> Result<(), S3Error> {
     let iam_allowed = principal
         .map(|principal| {
@@ -914,6 +928,7 @@ async fn authorize_action(
         bucket,
         action,
         object_key,
+        write,
     )
     .await;
 
@@ -982,6 +997,7 @@ async fn evaluate_bucket_policy(
     bucket: &str,
     action: &str,
     object_key: Option<&str>,
+    write: Option<bool>,
 ) -> PolicyDecision {
     let config = match state.storage.get_bucket_config(bucket).await {
         Ok(config) => config,
@@ -996,7 +1012,8 @@ async fn evaluate_bucket_policy(
     match policy.get("Statement") {
         Some(Value::Array(items)) => {
             for statement in items.iter() {
-                match evaluate_policy_statement(statement, access_key, bucket, action, object_key) {
+                match evaluate_policy_statement(statement, access_key, bucket, action, object_key, write)
+                {
                     PolicyDecision::Deny => return PolicyDecision::Deny,
                     PolicyDecision::Allow => decision = PolicyDecision::Allow,
                     PolicyDecision::Neutral => {}
@@ -1004,7 +1021,7 @@ async fn evaluate_bucket_policy(
             }
         }
         Some(statement) => {
-            return evaluate_policy_statement(statement, access_key, bucket, action, object_key);
+            return evaluate_policy_statement(statement, access_key, bucket, action, object_key, write);
         }
         None => return PolicyDecision::Neutral,
     }
@@ -1018,15 +1035,9 @@ fn evaluate_policy_statement(
     bucket: &str,
     action: &str,
     object_key: Option<&str>,
+    write: Option<bool>,
 ) -> PolicyDecision {
-    if !statement_matches_principal(statement, access_key)
-        || !statement_matches_action(statement, action)
-        || !statement_matches_resource(statement, bucket, object_key)
-    {
-        return PolicyDecision::Neutral;
-    }
-
-    match statement
+    let effect = match statement
         .get("Effect")
         .and_then(|value| value.as_str())
         .map(|value| value.to_ascii_lowercase())
@@ -1034,8 +1045,23 @@ fn evaluate_policy_statement(
     {
         Some("deny") => PolicyDecision::Deny,
         Some("allow") => PolicyDecision::Allow,
-        _ => PolicyDecision::Neutral,
+        _ => return PolicyDecision::Neutral,
+    };
+
+    let action_gate = if matches!(effect, PolicyDecision::Allow) {
+        write
+    } else {
+        None
+    };
+
+    if !statement_matches_principal(statement, access_key)
+        || !statement_matches_action(statement, action, action_gate)
+        || !statement_matches_resource(statement, bucket, object_key)
+    {
+        return PolicyDecision::Neutral;
     }
+
+    effect
 }
 
 fn statement_matches_principal(statement: &Value, access_key: Option<&str>) -> bool {
@@ -1058,15 +1084,45 @@ fn principal_value_matches(value: &Value, access_key: Option<&str>) -> bool {
     }
 }
 
-fn statement_matches_action(statement: &Value, action: &str) -> bool {
+fn statement_matches_action(statement: &Value, action: &str, write: Option<bool>) -> bool {
     match statement.get("Action") {
-        Some(Value::String(value)) => policy_action_matches(value, action),
+        Some(Value::String(value)) => action_grant_matches(value, action, write),
         Some(Value::Array(items)) => items.iter().any(|item| {
             item.as_str()
-                .map(|value| policy_action_matches(value, action))
+                .map(|value| action_grant_matches(value, action, write))
                 .unwrap_or(false)
         }),
         _ => false,
+    }
+}
+
+fn action_grant_matches(policy_action: &str, requested_action: &str, write: Option<bool>) -> bool {
+    if !policy_action_matches(policy_action, requested_action) {
+        return false;
+    }
+    match (write, policy_action_is_write(policy_action)) {
+        (Some(requested_write), Some(policy_write)) => requested_write == policy_write,
+        _ => true,
+    }
+}
+
+fn policy_action_is_write(policy_action: &str) -> Option<bool> {
+    let normalized = policy_action.trim().to_ascii_lowercase();
+    let verb = normalized.strip_prefix("s3:").unwrap_or(normalized.as_str());
+    if verb.starts_with("get") || verb.starts_with("list") || verb.starts_with("head") {
+        Some(false)
+    } else if verb.starts_with("put") || verb.starts_with("delete") || verb.starts_with("create") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn method_access(method: &Method) -> Option<bool> {
+    match *method {
+        Method::GET | Method::HEAD => Some(false),
+        Method::PUT | Method::POST | Method::DELETE => Some(true),
+        _ => None,
     }
 }
 
@@ -1767,28 +1823,45 @@ fn urlencoding_decode(s: &str) -> String {
 }
 
 fn error_response(err: S3Error, resource: &str) -> Response {
-    let status =
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let request_id = uuid::Uuid::new_v4().simple().to_string();
-    let code_str = err.code.as_str();
-    let body = err
-        .with_resource(resource.to_string())
-        .with_request_id(request_id)
-        .to_xml();
-    (
-        status,
-        [
-            ("content-type", "application/xml"),
-            ("x-amz-error-code", code_str),
-        ],
-        body,
-    )
-        .into_response()
+    crate::s3_response::s3_error_response(err.with_resource(resource.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{policy_action_matches, wildcard_match};
+    use super::{action_grant_matches, policy_action_matches, wildcard_match};
+
+    #[test]
+    fn subresource_read_grant_does_not_authorize_write() {
+        assert!(action_grant_matches("s3:GetBucketCors", "cors", Some(false)));
+        assert!(!action_grant_matches("s3:GetBucketCors", "cors", Some(true)));
+        assert!(action_grant_matches("s3:PutBucketCors", "cors", Some(true)));
+        assert!(!action_grant_matches("s3:PutBucketCors", "cors", Some(false)));
+        assert!(action_grant_matches(
+            "s3:GetLifecycleConfiguration",
+            "lifecycle",
+            Some(false)
+        ));
+        assert!(!action_grant_matches(
+            "s3:GetLifecycleConfiguration",
+            "lifecycle",
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn wildcards_and_core_actions_still_match_with_gate() {
+        assert!(action_grant_matches("s3:*", "cors", Some(true)));
+        assert!(action_grant_matches("s3:*", "cors", Some(false)));
+        assert!(action_grant_matches("*", "cors", Some(true)));
+        assert!(action_grant_matches("s3:GetObject", "read", Some(false)));
+        assert!(action_grant_matches("s3:PutObject", "write", Some(true)));
+    }
+
+    #[test]
+    fn no_method_disposition_skips_gate() {
+        assert!(action_grant_matches("s3:GetBucketCors", "cors", None));
+        assert!(action_grant_matches("s3:PutBucketCors", "cors", None));
+    }
 
     #[test]
     fn star_action_matches_anything() {

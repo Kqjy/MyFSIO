@@ -44,6 +44,7 @@ pub struct ServerConfig {
     pub integrity_auto_heal: bool,
     pub integrity_dry_run: bool,
     pub integrity_heal_concurrency: usize,
+    pub integrity_scan_pacing_ms: u64,
     pub integrity_quarantine_retention_days: u64,
     pub metrics_enabled: bool,
     pub metrics_history_enabled: bool,
@@ -66,6 +67,7 @@ pub struct ServerConfig {
     pub replication_healer_enabled: bool,
     pub replication_healer_interval_secs: u64,
     pub replication_healer_max_attempts: u32,
+    pub replication_part_stall_timeout_secs: u64,
     pub site_sync_enabled: bool,
     pub site_sync_interval_secs: u64,
     pub site_sync_batch_size: usize,
@@ -191,7 +193,8 @@ impl ServerConfig {
         let integrity_batch_size = parse_usize_env("INTEGRITY_BATCH_SIZE", 10_000);
         let integrity_auto_heal = parse_bool_env("INTEGRITY_AUTO_HEAL", false);
         let integrity_dry_run = parse_bool_env("INTEGRITY_DRY_RUN", false);
-        let integrity_heal_concurrency = parse_usize_env("INTEGRITY_HEAL_CONCURRENCY", 4);
+        let integrity_heal_concurrency = parse_usize_env("INTEGRITY_HEAL_CONCURRENCY", 1);
+        let integrity_scan_pacing_ms = parse_u64_env("INTEGRITY_SCAN_PACING_MS", 0);
         let integrity_quarantine_retention_days =
             parse_u64_env("INTEGRITY_QUARANTINE_RETENTION_DAYS", 7);
 
@@ -228,6 +231,8 @@ impl ServerConfig {
             parse_u64_env("REPLICATION_HEALER_INTERVAL_SECONDS", 60);
         let replication_healer_max_attempts =
             parse_u64_env("REPLICATION_HEALER_MAX_ATTEMPTS", 12) as u32;
+        let replication_part_stall_timeout_secs =
+            parse_u64_env("REPLICATION_PART_STALL_TIMEOUT_SECONDS", 300);
 
         let site_sync_enabled = parse_bool_env("SITE_SYNC_ENABLED", false);
         let site_sync_interval_secs = parse_u64_env("SITE_SYNC_INTERVAL_SECONDS", 60);
@@ -336,6 +341,7 @@ impl ServerConfig {
             integrity_auto_heal,
             integrity_dry_run,
             integrity_heal_concurrency,
+            integrity_scan_pacing_ms,
             integrity_quarantine_retention_days,
             metrics_enabled,
             metrics_history_enabled,
@@ -358,6 +364,7 @@ impl ServerConfig {
             replication_healer_enabled,
             replication_healer_interval_secs,
             replication_healer_max_attempts,
+            replication_part_stall_timeout_secs,
             site_sync_enabled,
             site_sync_interval_secs,
             site_sync_batch_size,
@@ -435,7 +442,8 @@ impl Default for ServerConfig {
             integrity_batch_size: 10_000,
             integrity_auto_heal: false,
             integrity_dry_run: false,
-            integrity_heal_concurrency: 4,
+            integrity_heal_concurrency: 1,
+            integrity_scan_pacing_ms: 0,
             integrity_quarantine_retention_days: 7,
             metrics_enabled: false,
             metrics_history_enabled: false,
@@ -458,6 +466,7 @@ impl Default for ServerConfig {
             replication_healer_enabled: true,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
+            replication_part_stall_timeout_secs: 300,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,

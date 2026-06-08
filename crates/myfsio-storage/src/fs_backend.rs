@@ -201,7 +201,14 @@ fn path_is_within(candidate: &Path, root: &Path) -> bool {
     }
 }
 
-type ListCacheEntry = (String, u64, f64, Option<String>, Option<String>);
+type ListCacheEntry = (
+    String,
+    u64,
+    f64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 #[derive(Clone, Default)]
 struct ShallowCacheEntry {
@@ -355,7 +362,12 @@ impl FsStorageBackend {
                 .join(trimmed)
                 .join(DIR_MARKER_FILE))
         } else {
-            Ok(self.bucket_path(bucket_name).join(&encoded))
+            let direct = self.bucket_path(bucket_name).join(&encoded);
+            if direct.is_dir() {
+                Ok(direct.join(KEY_DATA_MARKER_FILE))
+            } else {
+                Ok(direct)
+            }
         }
     }
 
@@ -367,8 +379,74 @@ impl FsStorageBackend {
                 .join(trimmed)
                 .join(DIR_MARKER_FILE)
         } else {
-            self.bucket_path(bucket_name).join(&encoded)
+            let direct = self.bucket_path(bucket_name).join(&encoded);
+            if direct.is_dir() {
+                direct.join(KEY_DATA_MARKER_FILE)
+            } else {
+                direct
+            }
         }
+    }
+
+    fn ensure_writable_parents_sync(
+        &self,
+        bucket_root: &Path,
+        object_key: &str,
+    ) -> std::io::Result<()> {
+        let encoded = fs_encode_key(object_key);
+        let effective = if object_key.ends_with('/') {
+            encoded.trim_end_matches('/').to_string()
+        } else {
+            encoded
+        };
+        let segments: Vec<&str> = effective.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.len() <= 1 && !object_key.ends_with('/') {
+            return Ok(());
+        }
+        let intermediate_count = if object_key.ends_with('/') {
+            segments.len()
+        } else {
+            segments.len() - 1
+        };
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir)?;
+        let mut current = bucket_root.to_path_buf();
+        for seg in &segments[..intermediate_count] {
+            let next = current.join(seg);
+            let meta = match std::fs::symlink_metadata(&next) {
+                Ok(m) => Some(m),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => return Err(err),
+            };
+            if let Some(meta) = meta {
+                if meta.file_type().is_file() {
+                    let temp_path =
+                        tmp_dir.join(format!(".tmp_keydata_{}", Uuid::new_v4().simple()));
+                    match std::fs::rename(&next, &temp_path) {
+                        Ok(()) => {}
+                        Err(err) => {
+                            if next.is_dir() {
+                                current = next;
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    }
+                    if let Err(err) = std::fs::create_dir_all(&next) {
+                        let _ = std::fs::rename(&temp_path, &next);
+                        return Err(err);
+                    }
+                    let target = next.join(KEY_DATA_MARKER_FILE);
+                    if let Err(err) = std::fs::rename(&temp_path, &target) {
+                        let _ = std::fs::remove_dir(&next);
+                        let _ = std::fs::rename(&temp_path, &next);
+                        return Err(err);
+                    }
+                }
+            }
+            current = next;
+        }
+        Ok(())
     }
 
     fn validate_key(&self, object_key: &str) -> StorageResult<()> {
@@ -436,35 +514,11 @@ impl FsStorageBackend {
         }
     }
 
-    fn load_dir_index_sync(&self, bucket_name: &str, rel_dir: &Path) -> HashMap<String, String> {
-        let index_path = self.index_file_for_dir(bucket_name, rel_dir);
-        if !index_path.exists() {
-            return HashMap::new();
-        }
-        let Ok(text) = std::fs::read_to_string(&index_path) else {
-            return HashMap::new();
-        };
-        let Ok(index) = serde_json::from_str::<HashMap<String, Value>>(&text) else {
-            return HashMap::new();
-        };
-        let mut out = HashMap::with_capacity(index.len());
-        for (name, entry) in index {
-            if let Some(etag) = entry
-                .get("metadata")
-                .and_then(|m| m.get("__etag__"))
-                .and_then(|v| v.as_str())
-            {
-                out.insert(name, etag.to_string());
-            }
-        }
-        out
-    }
-
     fn load_dir_index_full_sync(
         &self,
         bucket_name: &str,
         rel_dir: &Path,
-    ) -> HashMap<String, (Option<String>, Option<String>)> {
+    ) -> HashMap<String, (Option<String>, Option<String>, Option<String>)> {
         let index_path = self.index_file_for_dir(bucket_name, rel_dir);
         if !index_path.exists() {
             return HashMap::new();
@@ -486,7 +540,16 @@ impl FsStorageBackend {
                 .and_then(|m| m.get("__version_id__"))
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned);
-            out.insert(name, (etag, version_id));
+            let owner = meta
+                .and_then(|m| m.get("__acl__"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .and_then(|acl| {
+                    acl.get("owner")
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned)
+                });
+            out.insert(name, (etag, version_id, owner));
         }
         out
     }
@@ -1632,8 +1695,10 @@ impl FsStorageBackend {
         let bucket_path = self.require_bucket(bucket_name)?;
 
         let mut all_keys: Vec<ListCacheEntry> = Vec::new();
-        let mut dir_idx_cache: HashMap<PathBuf, HashMap<String, (Option<String>, Option<String>)>> =
-            HashMap::new();
+        let mut dir_idx_cache: HashMap<
+            PathBuf,
+            HashMap<String, (Option<String>, Option<String>, Option<String>)>,
+        > = HashMap::new();
         let internal = INTERNAL_FOLDERS;
         let bucket_str = bucket_path.to_string_lossy().to_string();
         let bucket_prefix_len = bucket_str.len() + 1;
@@ -1664,10 +1729,17 @@ impl FsStorageBackend {
                         fs_rel = fs_rel.replace('\\', "/");
                     }
                     let is_dir_marker = name_str.as_ref() == DIR_MARKER_FILE;
+                    let is_keydata_marker = name_str.as_ref() == KEY_DATA_MARKER_FILE;
                     if is_dir_marker {
                         fs_rel = fs_rel
                             .strip_suffix(DIR_MARKER_FILE)
                             .unwrap_or(&fs_rel)
+                            .to_string();
+                    } else if is_keydata_marker {
+                        fs_rel = fs_rel
+                            .strip_suffix(KEY_DATA_MARKER_FILE)
+                            .unwrap_or(&fs_rel)
+                            .trim_end_matches('/')
                             .to_string();
                     }
                     if let Ok(meta) = entry.metadata() {
@@ -1678,21 +1750,43 @@ impl FsStorageBackend {
                             .map(|d| d.as_secs_f64())
                             .unwrap_or(0.0);
 
-                        let rel_dir = Path::new(&fs_rel)
-                            .parent()
-                            .map(|p| p.to_path_buf())
-                            .unwrap_or_default();
+                        let lookup_path = if is_keydata_marker {
+                            Path::new(&fs_rel).to_path_buf()
+                        } else {
+                            Path::new(&fs_rel)
+                                .parent()
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_default()
+                        };
+                        let lookup_name = if is_keydata_marker {
+                            Path::new(&fs_rel)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| name_str.to_string())
+                        } else {
+                            name_str.to_string()
+                        };
+                        let rel_dir = if is_keydata_marker {
+                            Path::new(&fs_rel)
+                                .parent()
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_default()
+                        } else {
+                            lookup_path
+                        };
                         let idx = dir_idx_cache.entry(rel_dir.clone()).or_insert_with(|| {
                             self.load_dir_index_full_sync(bucket_name, &rel_dir)
                         });
-                        let (etag, version_id) = if is_dir_marker {
-                            (None, None)
+                        let (etag, version_id, owner) = if is_dir_marker {
+                            (None, None, None)
                         } else {
-                            idx.get(name_str.as_ref()).cloned().unwrap_or((None, None))
+                            idx.get(lookup_name.as_str())
+                                .cloned()
+                                .unwrap_or((None, None, None))
                         };
 
                         let key = fs_decode_key(&fs_rel);
-                        all_keys.push((key, meta.len(), mtime, etag, version_id));
+                        all_keys.push((key, meta.len(), mtime, etag, version_id, owner));
                     }
                 }
             }
@@ -1736,7 +1830,11 @@ impl FsStorageBackend {
         params: &ListParams,
     ) -> StorageResult<ListObjectsResult> {
         self.require_bucket(bucket_name)?;
-        if let Some(ref prefix) = params.prefix {
+        let prefix = params
+            .prefix
+            .as_deref()
+            .map(|p| p.trim_start_matches(['/', '\\']));
+        if let Some(prefix) = prefix {
             if !prefix.is_empty() {
                 validate_list_prefix(prefix)?;
             }
@@ -1744,7 +1842,7 @@ impl FsStorageBackend {
 
         let listing = self.get_full_listing_sync(bucket_name)?;
 
-        let (slice_start, slice_end) = match params.prefix.as_deref() {
+        let (slice_start, slice_end) = match prefix {
             Some(p) if !p.is_empty() => slice_range_for_prefix(&listing[..], |e| &e.0, p),
             _ => (0, listing.len()),
         };
@@ -1769,7 +1867,7 @@ impl FsStorageBackend {
 
         let objects: Vec<ObjectMeta> = prefix_filter[start_idx..end_idx]
             .iter()
-            .map(|(key, size, mtime, etag, version_id)| {
+            .map(|(key, size, mtime, etag, version_id, owner)| {
                 let lm = Utc
                     .timestamp_opt(*mtime as i64, ((*mtime % 1.0) * 1_000_000_000.0) as u32)
                     .single()
@@ -1777,6 +1875,7 @@ impl FsStorageBackend {
                 let mut obj = ObjectMeta::new(key.clone(), *size, lm);
                 obj.etag = etag.clone();
                 obj.version_id = version_id.clone();
+                obj.owner = owner.clone();
                 obj
             })
             .collect();
@@ -1813,7 +1912,7 @@ impl FsStorageBackend {
             return Ok(Arc::new(ShallowCacheEntry::default()));
         }
 
-        let dir_etags = self.load_dir_index_sync(bucket_name, rel_dir);
+        let dir_index = self.load_dir_index_full_sync(bucket_name, rel_dir);
 
         let mut files = Vec::new();
         let mut dirs = Vec::new();
@@ -1848,7 +1947,37 @@ impl FsStorageBackend {
             let display_name = fs_decode_key(&name_str);
             if ft.is_dir() {
                 dirs.push(format!("{}{}{}", rel_dir_prefix, display_name, delimiter));
+                let marker_path = entry.path().join(KEY_DATA_MARKER_FILE);
+                if let Ok(marker_meta) = std::fs::metadata(&marker_path) {
+                    if marker_meta.is_file() {
+                        let mtime = marker_meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0);
+                        let lm = Utc
+                            .timestamp_opt(
+                                mtime as i64,
+                                ((mtime % 1.0) * 1_000_000_000.0) as u32,
+                            )
+                            .single()
+                            .unwrap_or_else(Utc::now);
+                        let rel = format!("{}{}", rel_dir_prefix, display_name);
+                        let mut obj = ObjectMeta::new(rel, marker_meta.len(), lm);
+                        let (etag, _vid, owner) = dir_index
+                            .get(&name_str)
+                            .cloned()
+                            .unwrap_or((None, None, None));
+                        obj.etag = etag;
+                        obj.owner = owner;
+                        files.push(obj);
+                    }
+                }
             } else if ft.is_file() {
+                if name_str == KEY_DATA_MARKER_FILE {
+                    continue;
+                }
                 if name_str == DIR_MARKER_FILE {
                     if !rel_dir_prefix.is_empty() {
                         if let Ok(meta) = entry.metadata() {
@@ -1885,9 +2014,13 @@ impl FsStorageBackend {
                         .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
                         .single()
                         .unwrap_or_else(Utc::now);
-                    let etag = dir_etags.get(&name_str).cloned();
+                    let (etag, _vid, owner) = dir_index
+                        .get(&name_str)
+                        .cloned()
+                        .unwrap_or((None, None, None));
                     let mut obj = ObjectMeta::new(rel, meta.len(), lm);
                     obj.etag = etag;
+                    obj.owner = owner;
                     files.push(obj);
                 }
             }
@@ -1943,22 +2076,15 @@ impl FsStorageBackend {
     ) -> StorageResult<ShallowListResult> {
         self.require_bucket(bucket_name)?;
 
-        if params.prefix.starts_with('/') || params.prefix.starts_with('\\') {
-            return Ok(ShallowListResult {
-                objects: Vec::new(),
-                common_prefixes: Vec::new(),
-                is_truncated: false,
-                next_continuation_token: None,
-            });
-        }
+        let prefix = params.prefix.trim_start_matches(['/', '\\']);
 
-        let rel_dir: PathBuf = if params.prefix.is_empty() {
+        let rel_dir: PathBuf = if prefix.is_empty() {
             PathBuf::new()
         } else {
-            validate_list_prefix(&params.prefix)?;
-            let encoded_prefix = fs_encode_key(&params.prefix);
+            validate_list_prefix(prefix)?;
+            let encoded_prefix = fs_encode_key(prefix);
             let prefix_path = Path::new(&encoded_prefix);
-            if params.prefix.ends_with(&params.delimiter) {
+            if prefix.ends_with(&params.delimiter) {
                 prefix_path.to_path_buf()
             } else {
                 prefix_path.parent().unwrap_or(Path::new("")).to_path_buf()
@@ -1967,9 +2093,8 @@ impl FsStorageBackend {
 
         let cached = self.get_shallow_sync(bucket_name, &rel_dir, &params.delimiter)?;
 
-        let (file_start, file_end) =
-            slice_range_for_prefix(&cached.files, |o| &o.key, &params.prefix);
-        let (dir_start, dir_end) = slice_range_for_prefix(&cached.dirs, |s| s, &params.prefix);
+        let (file_start, file_end) = slice_range_for_prefix(&cached.files, |o| &o.key, prefix);
+        let (dir_start, dir_end) = slice_range_for_prefix(&cached.dirs, |s| s, prefix);
         let files = &cached.files[file_start..file_end];
         let dirs = &cached.dirs[dir_start..dir_end];
 
@@ -2053,6 +2178,9 @@ impl FsStorageBackend {
     ) -> StorageResult<ObjectMeta> {
         let etag = etag_override.unwrap_or(etag);
         self.require_bucket(bucket_name)?;
+        let bucket_root = self.bucket_path(bucket_name);
+        self.ensure_writable_parents_sync(&bucket_root, key)
+            .map_err(StorageError::Io)?;
         let destination = self.object_live_path(bucket_name, key);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
@@ -3753,6 +3881,51 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Ok(uploads)
     }
 
+    async fn get_multipart_metadata(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+    ) -> StorageResult<HashMap<String, String>> {
+        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        if !manifest_path.exists() {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let manifest: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
+        let metadata = manifest
+            .get("metadata")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<HashMap<String, String>>()
+            })
+            .unwrap_or_default();
+        Ok(metadata)
+    }
+
+    async fn get_multipart_part_path(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+    ) -> StorageResult<PathBuf> {
+        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        if !manifest_path.exists() {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+        let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
+        if !part_file.is_file() {
+            return Err(StorageError::InvalidObjectKey(format!(
+                "Part {} not found",
+                part_number
+            )));
+        }
+        Ok(part_file)
+    }
+
     async fn get_bucket_config(&self, bucket: &str) -> StorageResult<BucketConfig> {
         self.require_bucket(bucket)?;
         Ok(self.read_bucket_config_sync(bucket))
@@ -4118,6 +4291,246 @@ mod tests {
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_put_object_after_prefix_object() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"inner".to_vec()));
+        backend
+            .put_object("test-bucket", "folder/file", data, None)
+            .await
+            .unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"outer".to_vec()));
+        backend
+            .put_object("test-bucket", "folder", data, None)
+            .await
+            .expect("PUT 'folder' after 'folder/file' should succeed");
+
+        let (obj, mut stream) = backend
+            .get_object("test-bucket", "folder")
+            .await
+            .unwrap();
+        assert_eq!(obj.size, 5);
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"outer");
+
+        let (_, mut stream) = backend
+            .get_object("test-bucket", "folder/file")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"inner");
+    }
+
+    #[tokio::test]
+    async fn test_head_and_delete_collided_object() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"inner".to_vec()));
+        backend
+            .put_object("test-bucket", "folder/file", data, None)
+            .await
+            .unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"outer".to_vec()));
+        backend
+            .put_object("test-bucket", "folder", data, None)
+            .await
+            .unwrap();
+
+        let meta = backend
+            .head_object("test-bucket", "folder")
+            .await
+            .expect("head on collided key");
+        assert_eq!(meta.size, 5);
+
+        backend
+            .delete_object("test-bucket", "folder")
+            .await
+            .expect("delete collided key");
+        assert!(backend.head_object("test-bucket", "folder").await.is_err());
+        let inner = backend
+            .head_object("test-bucket", "folder/file")
+            .await
+            .expect("sibling key survives");
+        assert_eq!(inner.size, 5);
+    }
+
+    #[tokio::test]
+    async fn test_put_prefix_object_after_object() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"outer".to_vec()));
+        backend
+            .put_object("test-bucket", "folder", data, None)
+            .await
+            .unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"inner".to_vec()));
+        backend
+            .put_object("test-bucket", "folder/file", data, None)
+            .await
+            .expect("PUT 'folder/file' after 'folder' should succeed");
+
+        let (_, mut stream) = backend
+            .get_object("test-bucket", "folder")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"outer");
+
+        let (_, mut stream) = backend
+            .get_object("test-bucket", "folder/file")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"inner");
+    }
+
+    #[tokio::test]
+    async fn test_list_carries_per_object_owner() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let acl_alice = serde_json::to_string(&serde_json::json!({
+            "owner": "alice",
+            "grants": [],
+        }))
+        .unwrap();
+        let acl_bob = serde_json::to_string(&serde_json::json!({
+            "owner": "bob",
+            "grants": [],
+        }))
+        .unwrap();
+
+        let mut meta_a: HashMap<String, String> = HashMap::new();
+        meta_a.insert("__acl__".to_string(), acl_alice);
+        backend
+            .put_object(
+                "test-bucket",
+                "alice-file",
+                Box::pin(std::io::Cursor::new(b"a".to_vec())),
+                Some(meta_a),
+            )
+            .await
+            .unwrap();
+
+        let mut meta_b: HashMap<String, String> = HashMap::new();
+        meta_b.insert("__acl__".to_string(), acl_bob);
+        backend
+            .put_object(
+                "test-bucket",
+                "bob-file",
+                Box::pin(std::io::Cursor::new(b"b".to_vec())),
+                Some(meta_b),
+            )
+            .await
+            .unwrap();
+
+        let result = backend
+            .list_objects(
+                "test-bucket",
+                &myfsio_common::types::ListParams {
+                    max_keys: 100,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let by_key: HashMap<_, _> = result
+            .objects
+            .into_iter()
+            .map(|o| (o.key.clone(), o.owner.clone()))
+            .collect();
+        assert_eq!(
+            by_key.get("alice-file").and_then(|o| o.clone()),
+            Some("alice".to_string())
+        );
+        assert_eq!(
+            by_key.get("bob-file").and_then(|o| o.clone()),
+            Some("bob".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_after_collision_shows_both_keys() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"inner".to_vec()));
+        backend
+            .put_object("test-bucket", "folder/file", data, None)
+            .await
+            .unwrap();
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"outer".to_vec()));
+        backend
+            .put_object("test-bucket", "folder", data, None)
+            .await
+            .unwrap();
+
+        let params = myfsio_common::types::ListParams {
+            max_keys: 100,
+            ..Default::default()
+        };
+        let result = backend.list_objects("test-bucket", &params).await.unwrap();
+        let keys: Vec<&str> = result.objects.iter().map(|o| o.key.as_str()).collect();
+        assert!(
+            keys.contains(&"folder"),
+            "flat list missing 'folder' key: {:?}",
+            keys
+        );
+        assert!(
+            keys.contains(&"folder/file"),
+            "flat list missing 'folder/file' key: {:?}",
+            keys
+        );
+        for k in &keys {
+            assert!(
+                !k.contains(KEY_DATA_MARKER_FILE),
+                "internal marker leaked into listing: {}",
+                k
+            );
+        }
+
+        let shallow_params = myfsio_common::types::ShallowListParams {
+            prefix: String::new(),
+            delimiter: "/".to_string(),
+            max_keys: 100,
+            continuation_token: None,
+        };
+        let shallow = backend
+            .list_objects_shallow("test-bucket", &shallow_params)
+            .await
+            .unwrap();
+        let shallow_keys: Vec<&str> =
+            shallow.objects.iter().map(|o| o.key.as_str()).collect();
+        assert!(
+            shallow_keys.contains(&"folder"),
+            "shallow list missing 'folder': {:?}",
+            shallow_keys
+        );
+        assert!(
+            shallow.common_prefixes.contains(&"folder/".to_string()),
+            "shallow common-prefixes missing 'folder/': {:?}",
+            shallow.common_prefixes
+        );
+        for k in &shallow_keys {
+            assert!(
+                !k.contains(KEY_DATA_MARKER_FILE),
+                "internal marker leaked into shallow listing: {}",
+                k
+            );
+        }
     }
 
     #[tokio::test]

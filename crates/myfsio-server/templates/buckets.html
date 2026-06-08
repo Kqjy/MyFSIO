@@ -13,12 +13,27 @@
   </button>
 </div>
 
-<div class="d-flex justify-content-between align-items-center mb-3 gap-3">
-  <div class="position-relative flex-grow-1" style="max-width: 300px;">
-    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-muted" viewBox="0 0 16 16">
-      <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
-    </svg>
-    <input type="search" class="form-control ps-5" id="bucket-search" placeholder="Filter buckets..." aria-label="Search buckets">
+<div class="d-flex justify-content-between align-items-center mb-3 gap-3 flex-wrap">
+  <div class="d-flex align-items-center gap-3 flex-grow-1 flex-wrap">
+    <div class="position-relative flex-grow-1" style="max-width: 300px;">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-search position-absolute top-50 start-0 translate-middle-y ms-3 text-muted" viewBox="0 0 16 16">
+        <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+      </svg>
+      <input type="search" class="form-control ps-5" id="bucket-search" placeholder="Filter buckets..." aria-label="Search buckets">
+    </div>
+    <div class="btn-group btn-group-sm" role="group" aria-label="Access filter" id="bucket-access-filter">
+      <input type="radio" class="btn-check" name="access-filter" id="access-filter-all" value="all" autocomplete="off" checked>
+      <label class="btn btn-outline-secondary" for="access-filter-all">All</label>
+
+      <input type="radio" class="btn-check" name="access-filter" id="access-filter-private" value="private" autocomplete="off">
+      <label class="btn btn-outline-secondary" for="access-filter-private">Private</label>
+
+      <input type="radio" class="btn-check" name="access-filter" id="access-filter-public" value="public" autocomplete="off">
+      <label class="btn btn-outline-secondary" for="access-filter-public">Public</label>
+
+      <input type="radio" class="btn-check" name="access-filter" id="access-filter-custom" value="custom" autocomplete="off">
+      <label class="btn btn-outline-secondary" for="access-filter-custom">Custom</label>
+    </div>
   </div>
   <div class="btn-group" role="group" aria-label="View toggle">
     <input type="radio" class="btn-check" name="view-toggle" id="view-grid" autocomplete="off" checked>
@@ -39,7 +54,7 @@
 
 <div class="row g-3" id="buckets-container">
   {% for bucket in buckets %}
-  <div class="col-md-6 col-xl-4 bucket-item">
+  <div class="col-md-6 col-xl-4 bucket-item" data-access="{{ bucket.access_kind }}">
     <div class="card h-100 shadow-sm bucket-card" data-bucket-row data-href="{{ bucket.detail_url }}">
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-start mb-2">
@@ -141,43 +156,57 @@
 
     const searchInput = document.getElementById('bucket-search');
     const bucketItems = document.querySelectorAll('.bucket-item');
-    const noBucketsMsg = document.querySelector('.text-center.py-5');
+    const accessFilterInputs = document.querySelectorAll('#bucket-access-filter input[name="access-filter"]');
+    const noResults = document.getElementById('bucket-no-results');
 
-    if (searchInput) {
-      searchInput.addEventListener('input', (e) => {
-        const term = e.target.value.toLowerCase();
-        let visibleCount = 0;
+    function currentAccessFilter() {
+      const checked = document.querySelector('#bucket-access-filter input[name="access-filter"]:checked');
+      return checked ? checked.value : 'all';
+    }
 
-        bucketItems.forEach(item => {
-          const name = item.querySelector('.bucket-name').textContent.toLowerCase();
-          if (name.includes(term)) {
-            item.classList.remove('d-none');
-            visibleCount++;
-          } else {
-            item.classList.add('d-none');
-          }
-        });
+    function applyFilters() {
+      const term = (searchInput ? searchInput.value : '').toLowerCase();
+      const access = currentAccessFilter();
+      let visibleCount = 0;
 
-        var noResults = document.getElementById('bucket-no-results');
-        if (noResults) {
-          if (term && visibleCount === 0) {
-            noResults.classList.remove('d-none');
-          } else {
-            noResults.classList.add('d-none');
-          }
+      bucketItems.forEach(item => {
+        const name = item.querySelector('.bucket-name').textContent.toLowerCase();
+        const itemAccess = item.dataset.access || '';
+        const matchesName = !term || name.includes(term);
+        const matchesAccess = access === 'all' || itemAccess === access;
+        if (matchesName && matchesAccess) {
+          item.classList.remove('d-none');
+          visibleCount++;
+        } else {
+          item.classList.add('d-none');
         }
       });
+
+      if (noResults) {
+        const filtering = term || access !== 'all';
+        if (filtering && visibleCount === 0) {
+          noResults.classList.remove('d-none');
+        } else {
+          noResults.classList.add('d-none');
+        }
+      }
     }
+
+    if (searchInput) {
+      searchInput.addEventListener('input', applyFilters);
+    }
+    accessFilterInputs.forEach(input => input.addEventListener('change', applyFilters));
+
+    applyFilters();
 
     const viewGrid = document.getElementById('view-grid');
     const viewList = document.getElementById('view-list');
     const container = document.getElementById('buckets-container');
-    const items = document.querySelectorAll('.bucket-item');
     const cards = document.querySelectorAll('.bucket-card');
 
     function setView(view) {
       if (view === 'list') {
-        items.forEach(item => {
+        bucketItems.forEach(item => {
           item.classList.remove('col-md-6', 'col-xl-4');
           item.classList.add('col-12');
         });
@@ -187,7 +216,7 @@
         });
         localStorage.setItem('bucket-view-pref', 'list');
       } else {
-        items.forEach(item => {
+        bucketItems.forEach(item => {
           item.classList.remove('col-12');
           item.classList.add('col-md-6', 'col-xl-4');
         });

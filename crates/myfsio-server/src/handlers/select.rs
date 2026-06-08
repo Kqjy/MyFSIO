@@ -280,7 +280,9 @@ fn execute_select_query(path: PathBuf, request: SelectRequest) -> Result<Vec<Vec
     load_input_table(&conn, &path, &request.input_format)?;
 
     conn.execute_batch(
-        "SET enable_external_access=false; \
+        "SET memory_limit='256MB'; \
+         SET max_memory='256MB'; \
+         SET enable_external_access=false; \
          SET lock_configuration=true;",
     )
     .map_err(|e| format!("DuckDB lockdown failed: {}", e))?;
@@ -566,6 +568,16 @@ fn normalize_single_char(value: &str, default_char: char) -> String {
     value.chars().next().unwrap_or(default_char).to_string()
 }
 
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 fn collect_csv_chunks(
     rows: &mut duckdb::Rows<'_>,
     col_count: usize,
@@ -606,7 +618,8 @@ fn collect_csv_chunks(
         buffer.push_str(&record_delimiter);
 
         while buffer.len() >= CHUNK_SIZE {
-            let rest = buffer.split_off(CHUNK_SIZE);
+            let split_at = floor_char_boundary(&buffer, CHUNK_SIZE);
+            let rest = buffer.split_off(split_at);
             chunks.push(buffer.into_bytes());
             buffer = rest;
         }
@@ -646,7 +659,8 @@ fn collect_json_chunks(
         buffer.push_str(&record_delimiter);
 
         while buffer.len() >= CHUNK_SIZE {
-            let rest = buffer.split_off(CHUNK_SIZE);
+            let split_at = floor_char_boundary(&buffer, CHUNK_SIZE);
+            let rest = buffer.split_off(split_at);
             chunks.push(buffer.into_bytes());
             buffer = rest;
         }
@@ -722,27 +736,7 @@ fn require_xml_content_type(headers: &HeaderMap) -> Option<Response> {
 }
 
 fn s3_error_response(err: S3Error) -> Response {
-    let status =
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let resource = if err.resource.is_empty() {
-        "/".to_string()
-    } else {
-        err.resource.clone()
-    };
-    let code_str = err.code.as_str();
-    let body = err
-        .with_resource(resource)
-        .with_request_id(uuid::Uuid::new_v4().simple().to_string())
-        .to_xml();
-    (
-        status,
-        [
-            ("content-type", "application/xml"),
-            ("x-amz-error-code", code_str),
-        ],
-        body,
-    )
-        .into_response()
+    crate::s3_response::s3_error_response(err)
 }
 
 fn build_stats_xml(bytes_scanned: usize, bytes_returned: usize) -> String {

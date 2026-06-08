@@ -5,8 +5,6 @@ static INSTALL_PROVIDER: Once = Once::new();
 
 fn ensure_crypto_provider() {
     INSTALL_PROVIDER.call_once(|| {
-        // Idempotent: only the first installation across the process succeeds;
-        // subsequent attempts return Err which we deliberately ignore.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     });
 }
