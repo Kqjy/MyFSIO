@@ -185,7 +185,8 @@
     return template.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/'));
   };
 
-  const ROW_HEIGHT = 53;
+  let ROW_HEIGHT = 53;
+  let rowHeightMeasured = false;
   const BUFFER_ROWS = 10;
   let visibleItems = [];
   let renderedRange = { start: 0, end: 0 };
@@ -547,6 +548,19 @@
     objectsTableBody.appendChild(bottomSpacer);
 
     attachRowHandlers();
+
+    if (!rowHeightMeasured) {
+      const firstRow = objectsTableBody.querySelector('[data-virtual-index]');
+      const measured = firstRow?.getBoundingClientRect().height;
+      if (measured) {
+        rowHeightMeasured = true;
+        if (Math.abs(measured - ROW_HEIGHT) > 1) {
+          ROW_HEIGHT = measured;
+          renderedRange = { start: -1, end: -1 };
+          renderVirtualRows();
+        }
+      }
+    }
   };
 
   let scrollTimeout = null;
@@ -948,6 +962,9 @@
       const folderPath = row.dataset.folderPath;
 
       const checkbox = row.querySelector('[data-folder-select]');
+      if (checkbox && selectedRows.has(folderPath)) {
+        checkbox.checked = true;
+      }
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
         if (checkbox.checked) {
