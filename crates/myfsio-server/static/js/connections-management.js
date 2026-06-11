@@ -202,6 +202,7 @@ window.ConnectionsManagement = (function() {
         document.getElementById('editTestResult').innerHTML = '';
 
         var form = document.getElementById('editConnectionForm');
+        form.dataset.connectionId = id;
         form.action = endpoints.updateTemplate.replace('CONNECTION_ID', id);
       });
     }
@@ -217,6 +218,7 @@ window.ConnectionsManagement = (function() {
 
         document.getElementById('deleteConnectionName').textContent = name;
         var form = document.getElementById('deleteConnectionForm');
+        form.dataset.connectionId = id;
         form.action = endpoints.deleteTemplate.replace('CONNECTION_ID', id);
       });
     }
@@ -274,8 +276,8 @@ window.ConnectionsManagement = (function() {
             var modal = bootstrap.Modal.getInstance(document.getElementById('editConnectionModal'));
             if (modal) modal.hide();
 
-            var connId = editForm.action.split('/').slice(-2)[0];
-            var row = document.querySelector('tr[data-connection-id="' + connId + '"]');
+            var connId = editForm.dataset.connectionId || '';
+            var row = document.querySelector('tr[data-connection-id="' + CSS.escape(connId) + '"]');
             if (row && data.connection) {
               var nameCell = row.querySelector('.fw-medium');
               if (nameCell) nameCell.textContent = data.connection.name;
@@ -292,7 +294,7 @@ window.ConnectionsManagement = (function() {
               var accessCode = row.querySelector('code.small');
               if (accessCode && data.connection.access_key) {
                 var ak = data.connection.access_key;
-                accessCode.textContent = ak.slice(0, 8) + '...' + ak.slice(-4);
+                accessCode.textContent = ak.length > 12 ? ak.slice(0, 8) + '...' + ak.slice(-4) : ak;
               }
 
               var editBtn = row.querySelector('[data-bs-target="#editConnectionModal"]');
@@ -333,8 +335,8 @@ window.ConnectionsManagement = (function() {
             var modal = bootstrap.Modal.getInstance(document.getElementById('deleteConnectionModal'));
             if (modal) modal.hide();
 
-            var connId = deleteForm.action.split('/').slice(-2)[0];
-            var row = document.querySelector('tr[data-connection-id="' + connId + '"]');
+            var connId = deleteForm.dataset.connectionId || '';
+            var row = document.querySelector('tr[data-connection-id="' + CSS.escape(connId) + '"]');
             if (row) {
               row.remove();
             }

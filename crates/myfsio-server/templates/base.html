@@ -443,7 +443,7 @@
           {% for flash in flashed_messages %}
             var type = "{{ flash.category }}";
             if (type === "danger") type = "error";
-            window.showToast({{ flash.message | json_encode | safe }}, "Notification", type);
+            window.showToast({{ flash.message | json_island | safe }}, "Notification", type);
           {% endfor %}
         {% endif %}
       })();

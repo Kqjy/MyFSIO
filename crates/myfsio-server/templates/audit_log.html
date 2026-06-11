@@ -39,7 +39,7 @@
             {% else %}
               {% for e in entries %}
                 <tr>
-                  <td class="ps-3 small text-muted">{{ e.ts }}</td>
+                  <td class="ps-3 small text-muted">{{ e.ts | format_datetime }}</td>
                   <td><code class="small">{{ e.origin_site_id | default(value="") }}</code></td>
                   <td class="small">{{ e.admin_user_id | default(value="") }}</td>
                   <td class="small"><code>{{ e.method }}</code> {{ e.path }}</td>

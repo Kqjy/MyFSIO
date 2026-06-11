@@ -150,8 +150,7 @@
             </div>
           </div>
 
-          {% if site.capacity %}
-          <div class="mb-3">
+          <div class="mb-3 site-capacity-block{% if not site.capacity %} d-none{% endif %}">
             <div class="d-flex justify-content-between align-items-center mb-1">
               <span class="text-uppercase text-muted small">Disk Capacity</span>
               <span class="small text-muted">
@@ -162,10 +161,8 @@
               <div class="progress-bar bg-primary site-disk-bar" role="progressbar" style="width:0%;" data-total="{{ site.capacity.total_bytes | default(value=0) }}" data-available="{{ site.capacity.available_bytes | default(value=0) }}"></div>
             </div>
           </div>
-          {% endif %}
 
-          {% if site.system and site.system.cpu_percent is defined %}
-          <div class="mb-3">
+          <div class="mb-3 site-system-block{% if not site.system or site.system.cpu_percent is not defined %} d-none{% endif %}">
             <div class="text-uppercase text-muted small mb-2">System</div>
             <div class="d-flex flex-column gap-2">
               <div>
@@ -197,10 +194,8 @@
               </div>
             </div>
           </div>
-          {% endif %}
 
-          {% if site.sync %}
-          <div class="d-flex align-items-center justify-content-between border-top pt-3">
+          <div class="d-flex align-items-center justify-content-between border-top pt-3 site-sync-block{% if not site.sync %} d-none{% endif %}">
             <div class="d-flex align-items-center gap-2 small">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
                 <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
@@ -219,7 +214,6 @@
               <span class="site-sync-errors-count">{{ site.sync.errors | default(value=0) }}</span> err
             </span>
           </div>
-          {% endif %}
         </div>
 
         <div class="site-offline-content {% if site.online %}d-none{% endif %}">
@@ -292,7 +286,7 @@
         <tbody>
           {% for e in audit_entries %}
           <tr>
-            <td class="ps-3 small text-muted">{{ e.ts }}</td>
+            <td class="ps-3 small text-muted">{{ e.ts | format_datetime }}</td>
             <td><code class="small">{{ e.origin_site_id | default(value="") }}</code></td>
             <td class="small">{{ e.admin_user_id | default(value="") }}</td>
             <td class="small"><code>{{ e.method }}</code> {{ e.path }}</td>
@@ -398,6 +392,10 @@
         toggle(".site-online-content", online);
         toggle(".site-offline-content", !online);
 
+        toggle(".site-capacity-block", !!site.capacity);
+        toggle(".site-system-block", !!(site.system && site.system.cpu_percent != null));
+        toggle(".site-sync-block", !!site.sync);
+
         if (online) {
             var setNum = function (sel, val) {
                 var el = card.querySelector(sel);
@@ -440,8 +438,9 @@
             var sync = site.sync || {};
             var syncLabel = card.querySelector(".site-sync-label");
             if (syncLabel) {
-                if (sync.last_sync_at) {
-                    syncLabel.innerHTML = '<span data-last-sync-at="' + sync.last_sync_at + '">last sync <span class="last-sync-rel">' + fmtRel(sync.last_sync_at) + '</span></span>';
+                var lastSyncTs = Number(sync.last_sync_at);
+                if (isFinite(lastSyncTs) && lastSyncTs > 0) {
+                    syncLabel.innerHTML = '<span data-last-sync-at="' + lastSyncTs + '">last sync <span class="last-sync-rel">' + fmtRel(lastSyncTs) + '</span></span>';
                 } else {
                     syncLabel.innerHTML = '<span class="text-muted">no sync yet</span>';
                 }
@@ -459,6 +458,10 @@
         }
     }
 
+    var pageReloading = false;
+    var pollFailures = 0;
+    var MAX_POLL_FAILURES = 5;
+
     function poll(force) {
         var url = "/ui/cluster/data" + (force ? "?force=1" : "");
         var icon = document.getElementById("cluster-refresh-icon");
@@ -466,7 +469,11 @@
         if (force && icon) icon.classList.add("spin");
         if (force && btn) btn.disabled = true;
         return fetch(url, { credentials: "same-origin", cache: "no-store" })
-            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (r) {
+                if (!r.ok) { pollFailures++; return null; }
+                pollFailures = 0;
+                return r.json();
+            })
             .then(function (data) {
                 if (!data) return;
                 var totals = data.totals || {};
@@ -485,17 +492,24 @@
                 var onlineBadge = document.getElementById("cluster-online-badge");
                 if (onlineBadge) onlineBadge.textContent = (totals.online_count || 0) + " / " + (totals.total_count || 0) + " online";
 
+                var sawNewSite = false;
                 (data.sites || []).forEach(function (site) {
-                    var card = document.querySelector('.site-card[data-site-id="' + site.site_id + '"]');
+                    var card = document.querySelector('.site-card[data-site-id="' + CSS.escape(String(site.site_id)) + '"]');
                     if (card) updateCard(card, site);
+                    else sawNewSite = true;
                 });
+                if (sawNewSite && !pageReloading) {
+                    pageReloading = true;
+                    location.reload();
+                    return;
+                }
 
                 applyDiskBars();
                 applyPctBars();
                 var stamp = document.getElementById("cluster-updated-at");
                 if (stamp) stamp.textContent = "updated " + new Date().toLocaleTimeString();
             })
-            .catch(function () {})
+            .catch(function () { pollFailures++; })
             .finally(function () {
                 if (icon) icon.classList.remove("spin");
                 if (btn) btn.disabled = false;
@@ -507,7 +521,14 @@
     applyPctBars();
     refreshRel();
     setInterval(refreshRel, 5000);
-    setInterval(function () { poll(false); }, 10000);
+    var pollTimer = setInterval(function () {
+        if (document.hidden || pageReloading) return;
+        if (pollFailures >= MAX_POLL_FAILURES) {
+            clearInterval(pollTimer);
+            return;
+        }
+        poll(false);
+    }, 10000);
 
     var refreshBtn = document.getElementById("cluster-refresh-btn");
     if (refreshBtn) {
