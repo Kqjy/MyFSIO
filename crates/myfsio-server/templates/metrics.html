@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Metrics - S3 Compatible Storage{% endblock %}
+{% block title %}Metrics - MyFSIO Console{% endblock %}
 
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
@@ -450,6 +450,14 @@
   var paused = false;
   window.__metricsPaused = false;
   var chartsAvailable = typeof Chart !== 'undefined';
+  if (!chartsAvailable) {
+    var chartBanner = document.getElementById('metrics-error-banner');
+    if (chartBanner) {
+      chartBanner.classList.remove('d-none');
+      var chartBannerMsg = chartBanner.querySelector('div');
+      if (chartBannerMsg) chartBannerMsg.textContent = 'Charts unavailable: Chart.js failed to load. Metric values will still refresh, but gauges and graphs cannot be drawn.';
+    }
+  }
   var countdown = 5;
   var countdownEl = document.getElementById('refreshCountdown');
   var pauseBtn = document.getElementById('pauseBtn');

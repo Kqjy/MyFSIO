@@ -2209,19 +2209,25 @@ fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
             let bytes_freed = execution
                 .get("result")
                 .map(|result| {
-                    [
-                        "temp_bytes_freed",
-                        "multipart_bytes_freed",
-                        "orphaned_version_bytes_freed",
-                    ]
-                    .iter()
-                    .map(|key| {
-                        result
-                            .get(key)
-                            .and_then(|value| value.as_u64())
-                            .unwrap_or(0)
-                    })
-                    .sum::<u64>()
+                    result
+                        .get("total_bytes_freed")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or_else(|| {
+                            [
+                                "temp_bytes_freed",
+                                "quarantine_bytes_freed",
+                                "multipart_bytes_freed",
+                                "orphaned_version_bytes_freed",
+                            ]
+                            .iter()
+                            .map(|key| {
+                                result
+                                    .get(key)
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0)
+                            })
+                            .sum::<u64>()
+                        })
                 })
                 .unwrap_or(0);
             if let Some(obj) = execution.as_object_mut() {

@@ -521,14 +521,25 @@
     applyPctBars();
     refreshRel();
     setInterval(refreshRel, 5000);
-    var pollTimer = setInterval(function () {
-        if (document.hidden || pageReloading) return;
+
+    var degradedTicks = 0;
+    function pollTick() {
+        if (pageReloading) return;
         if (pollFailures >= MAX_POLL_FAILURES) {
-            clearInterval(pollTimer);
-            return;
+            degradedTicks++;
+            if (degradedTicks % 6 !== 0) return;
+        } else {
+            degradedTicks = 0;
         }
         poll(false);
-    }, 10000);
+    }
+    document.addEventListener("DOMContentLoaded", function () {
+        if (window.UICore && window.UICore.pollingManager) {
+            window.UICore.pollingManager.start("cluster-overview", pollTick, 10000);
+        } else {
+            setInterval(function () { if (!document.hidden) pollTick(); }, 10000);
+        }
+    });
 
     var refreshBtn = document.getElementById("cluster-refresh-btn");
     if (refreshBtn) {

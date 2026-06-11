@@ -448,7 +448,7 @@
                     </button>
                   </label>
                   <div class="position-relative">
-                    <textarea class="form-control font-monospace" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode | safe }}' spellcheck="false" style="font-size: 0.85rem; line-height: 1.5; tab-size: 2;">{% if bucket_policy_text %}{{ bucket_policy_text }}{% else %}{{ default_policy }}{% endif %}</textarea>
+                    <textarea class="form-control font-monospace" rows="14" name="policy_document" id="policyDocument" data-public-template='{{ default_policy | json_encode }}' spellcheck="false" style="font-size: 0.85rem; line-height: 1.5; tab-size: 2;">{% if bucket_policy_text %}{{ bucket_policy_text }}{% else %}{{ default_policy }}{% endif %}</textarea>
                     <div id="policyValidationStatus" class="position-absolute top-0 end-0 m-2 d-none">
                       <span class="badge bg-success-subtle text-success" id="policyValidBadge">
                         <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="me-1" viewBox="0 0 16 16">
@@ -2861,8 +2861,6 @@
 
 {% block extra_scripts %}
 <script src="{{ url_for(endpoint="static", filename="js/bucket-detail-utils.js") }}"></script>
-<script src="{{ url_for(endpoint="static", filename="js/bucket-detail-upload.js") }}"></script>
-<script src="{{ url_for(endpoint="static", filename="js/bucket-detail-operations.js") }}"></script>
 <script src="{{ url_for(endpoint="static", filename="js/bucket-detail-main.js") }}"></script>
 <script>
 window.BucketDetailConfig = {

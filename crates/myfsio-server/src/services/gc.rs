@@ -356,6 +356,7 @@ impl GcService {
             "empty_dirs_removed": empty_dirs_removed,
             "quarantine_entries_deleted": quarantine_entries_deleted,
             "quarantine_bytes_freed": quarantine_bytes_freed,
+            "total_bytes_freed": temp_bytes_freed.saturating_add(quarantine_bytes_freed),
             "errors": errors,
         })
     }
