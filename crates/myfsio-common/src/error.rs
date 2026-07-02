@@ -42,6 +42,7 @@ pub enum S3ErrorCode {
     NotModified,
     QuotaExceeded,
     ReplicationConfigurationNotFoundError,
+    RequestTimeout,
     RequestTimeTooSkewed,
     ServerSideEncryptionConfigurationNotFoundError,
     SignatureDoesNotMatch,
@@ -91,6 +92,7 @@ impl S3ErrorCode {
             Self::NotModified => 304,
             Self::QuotaExceeded => 403,
             Self::ReplicationConfigurationNotFoundError => 404,
+            Self::RequestTimeout => 400,
             Self::RequestTimeTooSkewed => 403,
             Self::ServerSideEncryptionConfigurationNotFoundError => 404,
             Self::SignatureDoesNotMatch => 403,
@@ -142,6 +144,7 @@ impl S3ErrorCode {
             Self::ReplicationConfigurationNotFoundError => {
                 "ReplicationConfigurationNotFoundError"
             }
+            Self::RequestTimeout => "RequestTimeout",
             Self::RequestTimeTooSkewed => "RequestTimeTooSkewed",
             Self::ServerSideEncryptionConfigurationNotFoundError => {
                 "ServerSideEncryptionConfigurationNotFoundError"
@@ -193,6 +196,7 @@ impl S3ErrorCode {
             Self::NotModified => "Not Modified",
             Self::QuotaExceeded => "The bucket quota has been exceeded",
             Self::ReplicationConfigurationNotFoundError => "The replication configuration was not found",
+            Self::RequestTimeout => "Your socket connection to the server was not read from or written to within the timeout period. Idle connections will be closed.",
             Self::RequestTimeTooSkewed => "The difference between the request time and the server's time is too large",
             Self::ServerSideEncryptionConfigurationNotFoundError => "The server side encryption configuration was not found",
             Self::SignatureDoesNotMatch => "The request signature we calculated does not match the signature you provided",

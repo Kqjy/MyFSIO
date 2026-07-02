@@ -164,13 +164,23 @@ cargo build --release -p myfsio-server
               </tr>
               <tr>
                 <td><code>REQUEST_BODY_TIMEOUT_SECONDS</code></td>
-                <td><code>60</code></td>
-                <td>Per-request body read timeout for the S3 API.</td>
+                <td><code>300</code></td>
+                <td>Idle timeout between request-body reads for the S3 API. Uploads that stall longer than this receive <code>400 RequestTimeout</code>.</td>
+              </tr>
+              <tr>
+                <td><code>UPLOAD_STREAM_BUFFER_BYTES</code></td>
+                <td><code>8388608</code></td>
+                <td>In-memory buffer between the client stream and the disk writer for PutObject/UploadPart (8&nbsp;MiB). Lets clients keep streaming while a slow disk catches up; <code>0</code> disables.</td>
               </tr>
               <tr>
                 <td><code>MULTIPART_MIN_PART_SIZE</code></td>
                 <td><code>5242880</code></td>
                 <td>Minimum part size enforced for multipart uploads (5&nbsp;MiB).</td>
+              </tr>
+              <tr>
+                <td><code>MULTIPART_OBJECT_LAYOUT</code></td>
+                <td><code>segments</code></td>
+                <td>Storage layout for completed multipart objects. <code>segments</code> keeps the uploaded parts as immutable segment files so CompleteMultipartUpload finishes in milliseconds on any filesystem (recommended, especially on HDD/ext4). <code>concat</code> assembles one file like older releases. Applies to new completes only; both layouts remain readable. Binaries older than this feature cannot read <code>segments</code> objects.</td>
               </tr>
               <tr>
                 <td><code>BULK_DELETE_MAX_KEYS</code></td>
@@ -1730,6 +1740,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
               <tr><td><code>GC_TEMP_FILE_MAX_AGE_HOURS</code></td><td><code>24</code></td><td>Delete temp files older than this</td></tr>
               <tr><td><code>GC_MULTIPART_MAX_AGE_DAYS</code></td><td><code>7</code></td><td>Delete orphaned multipart uploads older than this</td></tr>
               <tr><td><code>GC_LOCK_FILE_MAX_AGE_HOURS</code></td><td><code>1</code></td><td>Delete stale lock files older than this</td></tr>
+              <tr><td><code>GC_SEGMENT_MAX_AGE_HOURS</code></td><td><code>24</code></td><td>Delete orphaned multipart segment directories (unreferenced by any object or version) older than this</td></tr>
               <tr><td><code>GC_DRY_RUN</code></td><td><code>false</code></td><td>Log what would be deleted without removing</td></tr>
             </tbody>
           </table>
@@ -2129,9 +2140,9 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
                 <td>Update IAM inline policies or remove conflicting deny statements.</td>
               </tr>
               <tr>
-                <td>Large uploads time out mid-stream</td>
-                <td><code>REQUEST_BODY_TIMEOUT_SECONDS</code> exceeded</td>
-                <td>Raise the timeout, use multipart uploads, or upload from a faster network.</td>
+                <td>Uploads fail with <code>400 RequestTimeout</code></td>
+                <td>No request-body data received for <code>REQUEST_BODY_TIMEOUT_SECONDS</code> (default 300s)</td>
+                <td>The client stalled or the link is saturated; S3 SDKs retry this automatically. Raise the timeout for very slow links, and increase <code>UPLOAD_STREAM_BUFFER_BYTES</code> on slow disks.</td>
               </tr>
               <tr>
                 <td>Requests hit the wrong host</td>

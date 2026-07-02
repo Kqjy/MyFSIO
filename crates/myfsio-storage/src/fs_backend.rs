@@ -30,6 +30,71 @@ const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
     "__version_id__",
 ];
 
+pub enum OpenedObjectContent {
+    Single(std::fs::File),
+    Segmented {
+        files: Vec<(std::fs::File, u64)>,
+        total: u64,
+    },
+}
+
+impl OpenedObjectContent {
+    async fn into_range_stream(
+        self,
+        start: u64,
+        len: Option<u64>,
+    ) -> std::io::Result<AsyncReadStream> {
+        match self {
+            OpenedObjectContent::Single(file) => {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                let mut file = tokio::fs::File::from_std(file);
+                if start > 0 {
+                    file.seek(std::io::SeekFrom::Start(start)).await?;
+                }
+                Ok(match len {
+                    Some(n) => Box::pin(file.take(n)),
+                    None => Box::pin(file),
+                })
+            }
+            OpenedObjectContent::Segmented { files, total } => {
+                let tokio_files: Vec<(tokio::fs::File, u64)> = files
+                    .into_iter()
+                    .map(|(f, size)| (tokio::fs::File::from_std(f), size))
+                    .collect();
+                let effective_len = len.unwrap_or_else(|| total.saturating_sub(start));
+                let reader = crate::segments::SegmentRangeReader::from_files(
+                    tokio_files,
+                    start,
+                    effective_len,
+                )
+                .await?;
+                Ok(Box::pin(reader))
+            }
+        }
+    }
+
+    fn into_snapshot_source(self, link_path: PathBuf) -> crate::traits::SnapshotSource {
+        match self {
+            OpenedObjectContent::Single(_) => crate::traits::SnapshotSource::LinkedFile(link_path),
+            OpenedObjectContent::Segmented { files, total } => {
+                crate::traits::SnapshotSource::Segments { files, total }
+            }
+        }
+    }
+}
+
+fn parse_md5_hex(s: &str) -> Option<[u8; 16]> {
+    let s = s.trim().trim_matches('"');
+    if s.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 pub fn encode_part_sizes(sizes: &[u64]) -> String {
     let mut out = String::with_capacity(sizes.len() * 8);
     for (i, s) in sizes.iter().enumerate() {
@@ -218,11 +283,28 @@ struct ShallowCacheEntry {
 
 const OBJECT_LOCK_STRIPES: usize = 2048;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MultipartLayout {
+    #[default]
+    Segments,
+    Concat,
+}
+
+impl MultipartLayout {
+    pub fn from_env_str(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "concat" => Self::Concat,
+            _ => Self::Segments,
+        }
+    }
+}
+
 pub struct FsStorageBackend {
     root: PathBuf,
     object_key_max_length_bytes: usize,
     object_cache_max_size: usize,
     stream_chunk_size: usize,
+    multipart_layout: MultipartLayout,
     bucket_config_cache: DashMap<String, (BucketConfig, Instant)>,
     bucket_config_cache_ttl: std::time::Duration,
     meta_read_cache: DashMap<(String, String), Option<HashMap<String, Value>>>,
@@ -243,6 +325,7 @@ pub struct FsStorageBackendConfig {
     pub object_cache_max_size: usize,
     pub bucket_config_cache_ttl: std::time::Duration,
     pub stream_chunk_size: usize,
+    pub multipart_layout: MultipartLayout,
 }
 
 impl Default for FsStorageBackendConfig {
@@ -252,6 +335,7 @@ impl Default for FsStorageBackendConfig {
             object_cache_max_size: 100,
             bucket_config_cache_ttl: std::time::Duration::from_secs(30),
             stream_chunk_size: STREAM_CHUNK_SIZE,
+            multipart_layout: MultipartLayout::default(),
         }
     }
 }
@@ -276,6 +360,7 @@ impl FsStorageBackend {
             object_key_max_length_bytes: config.object_key_max_length_bytes,
             object_cache_max_size: config.object_cache_max_size,
             stream_chunk_size,
+            multipart_layout: config.multipart_layout,
             bucket_config_cache: DashMap::new(),
             bucket_config_cache_ttl: config.bucket_config_cache_ttl,
             meta_read_cache: DashMap::new(),
@@ -350,6 +435,220 @@ impl FsStorageBackend {
 
     fn tmp_dir(&self) -> PathBuf {
         self.system_root_path().join("tmp")
+    }
+
+    pub fn segments_bucket_root(&self, bucket_name: &str) -> PathBuf {
+        self.system_bucket_root(bucket_name)
+            .join(crate::segments::SEGMENTS_DIR)
+    }
+
+    fn segment_set_for(
+        &self,
+        bucket: &str,
+        segment_id: &str,
+        sizes: Vec<u64>,
+    ) -> crate::segments::SegmentSet {
+        crate::segments::SegmentSet::new(
+            self.segments_bucket_root(bucket).join(segment_id),
+            sizes,
+        )
+    }
+
+    fn open_object_for_read_sync(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<(ObjectMeta, OpenedObjectContent)> {
+        let _guard = self.get_object_lock(bucket, key).read();
+        self.open_object_for_read_locked_sync(bucket, key)
+    }
+
+    fn open_object_for_read_locked_sync(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> StorageResult<(ObjectMeta, OpenedObjectContent)> {
+        self.require_bucket(bucket)?;
+        let path = self.object_path(bucket, key)?;
+        if !path.is_file() {
+            let stored_meta = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&stored_meta) {
+                return Err(StorageError::ObjectCorrupted {
+                    bucket: bucket.to_string(),
+                    key: key.to_string(),
+                    detail: metadata_corruption_detail(&stored_meta),
+                });
+            }
+            if self
+                .read_bucket_config_sync(bucket)
+                .versioning_status()
+                .is_active()
+            {
+                if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
+                    return Err(StorageError::DeleteMarker {
+                        bucket: bucket.to_string(),
+                        key: key.to_string(),
+                        version_id: dm_version_id,
+                    });
+                }
+            }
+            return Err(StorageError::ObjectNotFound {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+            });
+        }
+
+        let file = std::fs::File::open(&path).map_err(StorageError::Io)?;
+        let meta = file.metadata().map_err(StorageError::Io)?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let lm = Utc
+            .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
+            .single()
+            .unwrap_or_else(Utc::now);
+
+        let stored_meta = self.read_metadata_sync(bucket, key);
+        if metadata_is_corrupted(&stored_meta) {
+            return Err(StorageError::ObjectCorrupted {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+                detail: metadata_corruption_detail(&stored_meta),
+            });
+        }
+        let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
+        obj.etag = stored_meta.get("__etag__").cloned();
+        obj.content_type = stored_meta.get("__content_type__").cloned();
+        obj.storage_class = stored_meta
+            .get("__storage_class__")
+            .cloned()
+            .or_else(|| Some("STANDARD".to_string()));
+        obj.version_id = stored_meta.get("__version_id__").cloned();
+        obj.metadata = stored_meta
+            .iter()
+            .filter(|(k, _)| !k.starts_with("__"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        obj.internal_metadata = stored_meta;
+        let content = self.open_content_for_read_sync(bucket, key, file, &obj.internal_metadata)?;
+        Ok((obj, content))
+    }
+
+    fn open_version_for_read_sync(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<(ObjectMeta, OpenedObjectContent)> {
+        let _guard = self.get_object_lock(bucket, key).read();
+        self.open_version_for_read_locked_sync(bucket, key, version_id)
+    }
+
+    fn open_version_for_read_locked_sync(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+    ) -> StorageResult<(ObjectMeta, OpenedObjectContent)> {
+        let (record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
+        if record
+            .get("is_delete_marker")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(StorageError::MethodNotAllowed(
+                "The specified method is not allowed against a delete marker".to_string(),
+            ));
+        }
+        let file = std::fs::File::open(&data_path).map_err(StorageError::Io)?;
+        let obj = self.object_meta_from_version_record(key, &record, &data_path)?;
+        let record_meta = Self::version_metadata_from_record(&record);
+        let content = self.open_content_for_read_sync(bucket, key, file, &record_meta)?;
+        Ok((obj, content))
+    }
+
+    fn open_content_for_read_sync(
+        &self,
+        bucket: &str,
+        key: &str,
+        mut file: std::fs::File,
+        stored_meta: &HashMap<String, String>,
+    ) -> StorageResult<OpenedObjectContent> {
+        let Some(seg_id) = stored_meta.get(crate::segments::META_KEY_SEGMENTS) else {
+            return Ok(OpenedObjectContent::Single(file));
+        };
+        let corrupted = |detail: String| StorageError::ObjectCorrupted {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            detail,
+        };
+        let header = crate::segments::read_stub_header_from(&mut file)
+            .map_err(StorageError::Io)?
+            .ok_or_else(|| {
+                corrupted("segmented object data file is missing its stub header".to_string())
+            })?;
+        if &header.segment_id != seg_id {
+            return Err(corrupted(format!(
+                "stub references segment set {} but metadata says {}",
+                header.segment_id, seg_id
+            )));
+        }
+        let meta_sizes = stored_meta
+            .get(META_KEY_PART_SIZES)
+            .and_then(|raw| parse_part_sizes(raw));
+        if let Some(ref sizes) = meta_sizes {
+            if *sizes != header.sizes {
+                return Err(corrupted(
+                    "part size manifest does not match the segment stub".to_string(),
+                ));
+            }
+        }
+        let set = self.segment_set_for(bucket, seg_id, header.sizes.clone());
+        let mut files = Vec::with_capacity(set.sizes.len());
+        for (i, size) in set.sizes.iter().enumerate() {
+            let seg_path = set.seg_path(i);
+            let seg_file = std::fs::File::open(&seg_path).map_err(|e| {
+                corrupted(format!(
+                    "segment file {} is unreadable: {}",
+                    seg_path.display(),
+                    e
+                ))
+            })?;
+            let seg_len = seg_file.metadata().map_err(StorageError::Io)?.len();
+            if seg_len != *size {
+                return Err(corrupted(format!(
+                    "segment file {} has size {} but manifest says {}",
+                    seg_path.display(),
+                    seg_len,
+                    size
+                )));
+            }
+            files.push((seg_file, *size));
+        }
+        Ok(OpenedObjectContent::Segmented {
+            files,
+            total: header.total,
+        })
+    }
+
+    fn release_segment_dir(&self, bucket: &str, segment_id: &str) {
+        if segment_id.is_empty() {
+            return;
+        }
+        let seg_dir = self.segments_bucket_root(bucket).join(segment_id);
+        if let Err(e) = std::fs::remove_dir_all(&seg_dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    bucket = bucket,
+                    segment_id = segment_id,
+                    error = %e,
+                    "failed to remove segment directory; GC will sweep it"
+                );
+            }
+        }
     }
 
     fn object_path(&self, bucket_name: &str, object_key: &str) -> StorageResult<PathBuf> {
@@ -1174,12 +1473,29 @@ impl FsStorageBackend {
         };
 
         let data_path = version_dir.join(format!("{}.bin", version_id));
-        std::fs::copy(&source, &data_path)?;
-
         let source_meta = source.metadata()?;
-        let source_size = source_meta.len();
 
-        let etag = Self::compute_etag_sync(&source).unwrap_or_default();
+        let stub_header = if metadata.contains_key(crate::segments::META_KEY_SEGMENTS) {
+            crate::segments::read_stub_header(&source).unwrap_or(None)
+        } else {
+            None
+        };
+        let (source_size, etag, segment_id) = match stub_header {
+            Some(header) => {
+                crate::segments::write_stub(&data_path, &header)?;
+                (header.total, header.etag.clone(), Some(header.segment_id))
+            }
+            None => {
+                std::fs::copy(&source, &data_path)?;
+                let etag = metadata
+                    .get("__etag__")
+                    .cloned()
+                    .filter(|e| !e.is_empty())
+                    .or_else(|| Self::compute_etag_sync(&source).ok())
+                    .unwrap_or_default();
+                (source_meta.len(), etag, None)
+            }
+        };
 
         let live_last_modified = metadata
             .get("__last_modified__")
@@ -1207,7 +1523,7 @@ impl FsStorageBackend {
             .and_then(|entry| entry.get("tags").cloned())
             .unwrap_or(Value::Array(Vec::new()));
 
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "version_id": version_id,
             "key": key,
             "size": source_size,
@@ -1218,6 +1534,9 @@ impl FsStorageBackend {
             "tags": live_tags,
             "reason": reason,
         });
+        if let Some(seg_id) = segment_id {
+            record["segment_id"] = Value::String(seg_id);
+        }
 
         let manifest_path = version_dir.join(format!("{}.json", version_id));
         Self::atomic_write_json_sync(&manifest_path, &record, true)?;
@@ -1372,6 +1691,18 @@ impl FsStorageBackend {
     ) -> std::io::Result<()> {
         let (manifest_path, data_path) = self.version_record_paths(bucket_name, key, "null");
         if manifest_path.is_file() {
+            if let Some(seg_id) = std::fs::read_to_string(&manifest_path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+                .and_then(|record| {
+                    record
+                        .get("segment_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+            {
+                self.release_segment_dir(bucket_name, &seg_id);
+            }
             Self::safe_unlink(&manifest_path)?;
         }
         if data_path.is_file() {
@@ -2227,14 +2558,18 @@ impl FsStorageBackend {
         std::fs::create_dir_all(&lock_dir).map_err(StorageError::Io)?;
 
         let versioning_status = bucket_config.versioning_status();
+        let mut release_old_segments: Option<String> = None;
         if is_overwrite {
+            let existing_meta = self.read_metadata_sync(bucket_name, key);
+            let old_segments = existing_meta
+                .get(crate::segments::META_KEY_SEGMENTS)
+                .cloned();
             match versioning_status {
                 VersioningStatus::Enabled => {
                     self.archive_current_version_sync(bucket_name, key, "overwrite")
                         .map_err(StorageError::Io)?;
                 }
                 VersioningStatus::Suspended => {
-                    let existing_meta = self.read_metadata_sync(bucket_name, key);
                     let existing_vid = existing_meta
                         .get("__version_id__")
                         .map(String::as_str)
@@ -2242,9 +2577,13 @@ impl FsStorageBackend {
                     if !existing_vid.is_empty() && existing_vid != "null" {
                         self.archive_current_version_sync(bucket_name, key, "overwrite")
                             .map_err(StorageError::Io)?;
+                    } else {
+                        release_old_segments = old_segments;
                     }
                 }
-                VersioningStatus::Disabled => {}
+                VersioningStatus::Disabled => {
+                    release_old_segments = old_segments;
+                }
             }
         }
         if matches!(versioning_status, VersioningStatus::Suspended) {
@@ -2256,6 +2595,10 @@ impl FsStorageBackend {
             let _ = std::fs::remove_file(tmp_path);
             StorageError::Io(e)
         })?;
+
+        if let Some(seg_id) = release_old_segments {
+            self.release_segment_dir(bucket_name, &seg_id);
+        }
 
         self.invalidate_bucket_caches(bucket_name);
 
@@ -2436,77 +2779,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         key: &str,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
-        let (obj, file) = run_blocking(|| -> StorageResult<(ObjectMeta, std::fs::File)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            self.require_bucket(bucket)?;
-            let path = self.object_path(bucket, key)?;
-            if !path.is_file() {
-                let stored_meta = self.read_metadata_sync(bucket, key);
-                if metadata_is_corrupted(&stored_meta) {
-                    return Err(StorageError::ObjectCorrupted {
-                        bucket: bucket.to_string(),
-                        key: key.to_string(),
-                        detail: metadata_corruption_detail(&stored_meta),
-                    });
-                }
-                if self
-                    .read_bucket_config_sync(bucket)
-                    .versioning_status()
-                    .is_active()
-                {
-                    if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
-                        return Err(StorageError::DeleteMarker {
-                            bucket: bucket.to_string(),
-                            key: key.to_string(),
-                            version_id: dm_version_id,
-                        });
-                    }
-                }
-                return Err(StorageError::ObjectNotFound {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                });
-            }
-
-            let file = std::fs::File::open(&path).map_err(StorageError::Io)?;
-            let meta = file.metadata().map_err(StorageError::Io)?;
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            let lm = Utc
-                .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
-                .single()
-                .unwrap_or_else(Utc::now);
-
-            let stored_meta = self.read_metadata_sync(bucket, key);
-            if metadata_is_corrupted(&stored_meta) {
-                return Err(StorageError::ObjectCorrupted {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                    detail: metadata_corruption_detail(&stored_meta),
-                });
-            }
-            let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
-            obj.etag = stored_meta.get("__etag__").cloned();
-            obj.content_type = stored_meta.get("__content_type__").cloned();
-            obj.storage_class = stored_meta
-                .get("__storage_class__")
-                .cloned()
-                .or_else(|| Some("STANDARD".to_string()));
-            obj.version_id = stored_meta.get("__version_id__").cloned();
-            obj.metadata = stored_meta
-                .iter()
-                .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            obj.internal_metadata = stored_meta;
-            Ok((obj, file))
-        })?;
-
-        let stream: AsyncReadStream = Box::pin(tokio::fs::File::from_std(file));
+        let (obj, content) = run_blocking(|| self.open_object_for_read_sync(bucket, key))?;
+        let stream = content
+            .into_range_stream(0, None)
+            .await
+            .map_err(StorageError::Io)?;
         Ok((obj, stream))
     }
 
@@ -2517,93 +2794,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         start: u64,
         len: Option<u64>,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
-        let (obj, file) = run_blocking(|| -> StorageResult<(ObjectMeta, std::fs::File)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            self.require_bucket(bucket)?;
-            let path = self.object_path(bucket, key)?;
-            if !path.is_file() {
-                let stored_meta = self.read_metadata_sync(bucket, key);
-                if metadata_is_corrupted(&stored_meta) {
-                    return Err(StorageError::ObjectCorrupted {
-                        bucket: bucket.to_string(),
-                        key: key.to_string(),
-                        detail: metadata_corruption_detail(&stored_meta),
-                    });
-                }
-                if self
-                    .read_bucket_config_sync(bucket)
-                    .versioning_status()
-                    .is_active()
-                {
-                    if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
-                        return Err(StorageError::DeleteMarker {
-                            bucket: bucket.to_string(),
-                            key: key.to_string(),
-                            version_id: dm_version_id,
-                        });
-                    }
-                }
-                return Err(StorageError::ObjectNotFound {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                });
-            }
-
-            use std::io::{Seek, SeekFrom};
-            let mut file = std::fs::File::open(&path).map_err(StorageError::Io)?;
-            let meta = file.metadata().map_err(StorageError::Io)?;
-            if start > meta.len() {
-                return Err(StorageError::InvalidRange);
-            }
-            if start > 0 {
-                file.seek(SeekFrom::Start(start))
-                    .map_err(StorageError::Io)?;
-            }
-
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            let lm = Utc
-                .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
-                .single()
-                .unwrap_or_else(Utc::now);
-
-            let stored_meta = self.read_metadata_sync(bucket, key);
-            if metadata_is_corrupted(&stored_meta) {
-                return Err(StorageError::ObjectCorrupted {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                    detail: metadata_corruption_detail(&stored_meta),
-                });
-            }
-            let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
-            obj.etag = stored_meta.get("__etag__").cloned();
-            obj.content_type = stored_meta.get("__content_type__").cloned();
-            obj.storage_class = stored_meta
-                .get("__storage_class__")
-                .cloned()
-                .or_else(|| Some("STANDARD".to_string()));
-            obj.version_id = stored_meta.get("__version_id__").cloned();
-            obj.metadata = stored_meta
-                .iter()
-                .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            obj.internal_metadata = stored_meta;
-            Ok((obj, file))
-        })?;
-
-        let tokio_file = tokio::fs::File::from_std(file);
-        let stream: AsyncReadStream = match len {
-            Some(n) => {
-                use tokio::io::AsyncReadExt;
-                Box::pin(tokio_file.take(n))
-            }
-            None => Box::pin(tokio_file),
-        };
+        let (obj, content) = run_blocking(|| self.open_object_for_read_sync(bucket, key))?;
+        if start > obj.size {
+            return Err(StorageError::InvalidRange);
+        }
+        let stream = content
+            .into_range_stream(start, len)
+            .await
+            .map_err(StorageError::Io)?;
         Ok((obj, stream))
     }
 
@@ -2612,76 +2810,13 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         key: &str,
     ) -> StorageResult<(ObjectMeta, tokio::fs::File)> {
-        let (obj, file) = run_blocking(|| -> StorageResult<(ObjectMeta, std::fs::File)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            self.require_bucket(bucket)?;
-            let path = self.object_path(bucket, key)?;
-            if !path.is_file() {
-                let stored_meta = self.read_metadata_sync(bucket, key);
-                if metadata_is_corrupted(&stored_meta) {
-                    return Err(StorageError::ObjectCorrupted {
-                        bucket: bucket.to_string(),
-                        key: key.to_string(),
-                        detail: metadata_corruption_detail(&stored_meta),
-                    });
-                }
-                if self
-                    .read_bucket_config_sync(bucket)
-                    .versioning_status()
-                    .is_active()
-                {
-                    if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
-                        return Err(StorageError::DeleteMarker {
-                            bucket: bucket.to_string(),
-                            key: key.to_string(),
-                            version_id: dm_version_id,
-                        });
-                    }
-                }
-                return Err(StorageError::ObjectNotFound {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                });
-            }
-
-            let file = std::fs::File::open(&path).map_err(StorageError::Io)?;
-            let meta_fs = file.metadata().map_err(StorageError::Io)?;
-            let mtime = meta_fs
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            let lm = Utc
-                .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
-                .single()
-                .unwrap_or_else(Utc::now);
-
-            let stored_meta = self.read_metadata_sync(bucket, key);
-            if metadata_is_corrupted(&stored_meta) {
-                return Err(StorageError::ObjectCorrupted {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                    detail: metadata_corruption_detail(&stored_meta),
-                });
-            }
-            let mut obj = ObjectMeta::new(key.to_string(), meta_fs.len(), lm);
-            obj.etag = stored_meta.get("__etag__").cloned();
-            obj.content_type = stored_meta.get("__content_type__").cloned();
-            obj.storage_class = stored_meta
-                .get("__storage_class__")
-                .cloned()
-                .or_else(|| Some("STANDARD".to_string()));
-            obj.version_id = stored_meta.get("__version_id__").cloned();
-            obj.metadata = stored_meta
-                .iter()
-                .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            obj.internal_metadata = stored_meta;
-            Ok((obj, file))
-        })?;
-        Ok((obj, tokio::fs::File::from_std(file)))
+        let (obj, content) = run_blocking(|| self.open_object_for_read_sync(bucket, key))?;
+        match content {
+            OpenedObjectContent::Single(file) => Ok((obj, tokio::fs::File::from_std(file))),
+            OpenedObjectContent::Segmented { .. } => Err(StorageError::Internal(
+                "get_object_snapshot is not supported for segmented objects".to_string(),
+            )),
+        }
     }
 
     async fn get_object_version_snapshot(
@@ -2690,23 +2825,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         key: &str,
         version_id: &str,
     ) -> StorageResult<(ObjectMeta, tokio::fs::File)> {
-        let (obj, file) = run_blocking(|| -> StorageResult<(ObjectMeta, std::fs::File)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            let (record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
-            if record
-                .get("is_delete_marker")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(StorageError::MethodNotAllowed(
-                    "The specified method is not allowed against a delete marker".to_string(),
-                ));
-            }
-            let file = std::fs::File::open(&data_path).map_err(StorageError::Io)?;
-            let obj = self.object_meta_from_version_record(key, &record, &data_path)?;
-            Ok((obj, file))
-        })?;
-        Ok((obj, tokio::fs::File::from_std(file)))
+        let (obj, content) =
+            run_blocking(|| self.open_version_for_read_sync(bucket, key, version_id))?;
+        match content {
+            OpenedObjectContent::Single(file) => Ok((obj, tokio::fs::File::from_std(file))),
+            OpenedObjectContent::Segmented { .. } => Err(StorageError::Internal(
+                "get_object_version_snapshot is not supported for segmented objects".to_string(),
+            )),
+        }
     }
 
     async fn snapshot_object_to_link(
@@ -2714,81 +2840,23 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         key: &str,
         link_path: &std::path::Path,
-    ) -> StorageResult<ObjectMeta> {
+    ) -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
         let link_owned = link_path.to_owned();
-        run_blocking(|| -> StorageResult<ObjectMeta> {
+        run_blocking(|| -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
             let _guard = self.get_object_lock(bucket, key).read();
-            self.require_bucket(bucket)?;
-            let path = self.object_path(bucket, key)?;
-            if !path.is_file() {
-                let stored_meta = self.read_metadata_sync(bucket, key);
-                if metadata_is_corrupted(&stored_meta) {
-                    return Err(StorageError::ObjectCorrupted {
-                        bucket: bucket.to_string(),
-                        key: key.to_string(),
-                        detail: metadata_corruption_detail(&stored_meta),
-                    });
-                }
-                if self
-                    .read_bucket_config_sync(bucket)
-                    .versioning_status()
-                    .is_active()
-                {
-                    if let Some((dm_version_id, _)) = self.read_delete_marker_sync(bucket, key) {
-                        return Err(StorageError::DeleteMarker {
-                            bucket: bucket.to_string(),
-                            key: key.to_string(),
-                            version_id: dm_version_id,
-                        });
+            let (obj, content) = self.open_object_for_read_locked_sync(bucket, key)?;
+            match content {
+                OpenedObjectContent::Single(_) => {
+                    let path = self.object_path(bucket, key)?;
+                    if let Some(parent) = link_owned.parent() {
+                        std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
                     }
+                    let _ = std::fs::remove_file(&link_owned);
+                    std::fs::hard_link(&path, &link_owned).map_err(StorageError::Io)?;
+                    Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
                 }
-                return Err(StorageError::ObjectNotFound {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                });
+                segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
             }
-
-            if let Some(parent) = link_owned.parent() {
-                std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
-            }
-            let _ = std::fs::remove_file(&link_owned);
-            std::fs::hard_link(&path, &link_owned).map_err(StorageError::Io)?;
-
-            let meta_fs = std::fs::metadata(&link_owned).map_err(StorageError::Io)?;
-            let mtime = meta_fs
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            let lm = Utc
-                .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
-                .single()
-                .unwrap_or_else(Utc::now);
-
-            let stored_meta = self.read_metadata_sync(bucket, key);
-            if metadata_is_corrupted(&stored_meta) {
-                return Err(StorageError::ObjectCorrupted {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                    detail: metadata_corruption_detail(&stored_meta),
-                });
-            }
-            let mut obj = ObjectMeta::new(key.to_string(), meta_fs.len(), lm);
-            obj.etag = stored_meta.get("__etag__").cloned();
-            obj.content_type = stored_meta.get("__content_type__").cloned();
-            obj.storage_class = stored_meta
-                .get("__storage_class__")
-                .cloned()
-                .or_else(|| Some("STANDARD".to_string()));
-            obj.version_id = stored_meta.get("__version_id__").cloned();
-            obj.metadata = stored_meta
-                .iter()
-                .filter(|(k, _)| !k.starts_with("__"))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            obj.internal_metadata = stored_meta;
-            Ok(obj)
         })
     }
 
@@ -2798,27 +2866,63 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         key: &str,
         version_id: &str,
         link_path: &std::path::Path,
-    ) -> StorageResult<ObjectMeta> {
+    ) -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
         let link_owned = link_path.to_owned();
-        run_blocking(|| -> StorageResult<ObjectMeta> {
+        run_blocking(|| -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
             let _guard = self.get_object_lock(bucket, key).read();
-            let (record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
-            if record
-                .get("is_delete_marker")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(StorageError::MethodNotAllowed(
-                    "The specified method is not allowed against a delete marker".to_string(),
-                ));
+            let (obj, content) =
+                self.open_version_for_read_locked_sync(bucket, key, version_id)?;
+            match content {
+                OpenedObjectContent::Single(_) => {
+                    let (_, data_path) =
+                        self.read_version_record_sync(bucket, key, version_id)?;
+                    if let Some(parent) = link_owned.parent() {
+                        std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+                    }
+                    let _ = std::fs::remove_file(&link_owned);
+                    std::fs::hard_link(&data_path, &link_owned).map_err(StorageError::Io)?;
+                    Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
+                }
+                segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
             }
-            if let Some(parent) = link_owned.parent() {
-                std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
-            }
-            let _ = std::fs::remove_file(&link_owned);
-            std::fs::hard_link(&data_path, &link_owned).map_err(StorageError::Io)?;
-            self.object_meta_from_version_record(key, &record, &data_path)
         })
+    }
+
+    async fn materialize_object_to_tmp(&self, bucket: &str, key: &str) -> StorageResult<PathBuf> {
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
+        let dest = tmp_dir.join(format!("mat-{}", Uuid::new_v4()));
+        let dest_owned = dest.clone();
+        run_blocking(move || -> StorageResult<()> {
+            let _guard = self.get_object_lock(bucket, key).read();
+            let (_, content) = self.open_object_for_read_locked_sync(bucket, key)?;
+            match content {
+                OpenedObjectContent::Single(_) => {
+                    let path = self.object_path(bucket, key)?;
+                    if std::fs::hard_link(&path, &dest_owned).is_err() {
+                        std::fs::copy(&path, &dest_owned).map_err(StorageError::Io)?;
+                    }
+                    Ok(())
+                }
+                OpenedObjectContent::Segmented { files, .. } => {
+                    let mut out = std::fs::File::create(&dest_owned).map_err(StorageError::Io)?;
+                    for (mut file, expected) in files {
+                        let copied =
+                            std::io::copy(&mut file, &mut out).map_err(StorageError::Io)?;
+                        if copied != expected {
+                            return Err(StorageError::Internal(
+                                "segment changed while materializing object".to_string(),
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        })
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&dest);
+        })?;
+        Ok(dest)
     }
 
     async fn get_object_path(&self, bucket: &str, key: &str) -> StorageResult<PathBuf> {
@@ -2927,23 +3031,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         key: &str,
         version_id: &str,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
-        let (obj, file) = run_blocking(|| -> StorageResult<(ObjectMeta, std::fs::File)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            let (record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
-            if record
-                .get("is_delete_marker")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(StorageError::MethodNotAllowed(
-                    "The specified method is not allowed against a delete marker".to_string(),
-                ));
-            }
-            let file = std::fs::File::open(&data_path).map_err(StorageError::Io)?;
-            let obj = self.object_meta_from_version_record(key, &record, &data_path)?;
-            Ok((obj, file))
-        })?;
-        let stream: AsyncReadStream = Box::pin(tokio::fs::File::from_std(file));
+        let (obj, content) =
+            run_blocking(|| self.open_version_for_read_sync(bucket, key, version_id))?;
+        let stream = content
+            .into_range_stream(0, None)
+            .await
+            .map_err(StorageError::Io)?;
         Ok((obj, stream))
     }
 
@@ -2955,39 +3048,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         start: u64,
         len: Option<u64>,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
-        let (obj, file) = run_blocking(|| -> StorageResult<(ObjectMeta, std::fs::File)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            let (record, data_path) = self.read_version_record_sync(bucket, key, version_id)?;
-            if record
-                .get("is_delete_marker")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(StorageError::MethodNotAllowed(
-                    "The specified method is not allowed against a delete marker".to_string(),
-                ));
-            }
-            use std::io::{Seek, SeekFrom};
-            let mut file = std::fs::File::open(&data_path).map_err(StorageError::Io)?;
-            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            if start > size {
-                return Err(StorageError::InvalidRange);
-            }
-            if start > 0 {
-                file.seek(SeekFrom::Start(start))
-                    .map_err(StorageError::Io)?;
-            }
-            let obj = self.object_meta_from_version_record(key, &record, &data_path)?;
-            Ok((obj, file))
-        })?;
-        let tokio_file = tokio::fs::File::from_std(file);
-        let stream: AsyncReadStream = match len {
-            Some(n) => {
-                use tokio::io::AsyncReadExt;
-                Box::pin(tokio_file.take(n))
-            }
-            None => Box::pin(tokio_file),
-        };
+        let (obj, content) =
+            run_blocking(|| self.open_version_for_read_sync(bucket, key, version_id))?;
+        if start > obj.size {
+            return Err(StorageError::InvalidRange);
+        }
+        let stream = content
+            .into_range_stream(start, len)
+            .await
+            .map_err(StorageError::Io)?;
         Ok((obj, stream))
     }
 
@@ -3089,6 +3158,10 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     if should_archive {
                         self.archive_current_version_sync(bucket, key, "delete")
                             .map_err(StorageError::Io)?;
+                    } else if let Some(seg_id) =
+                        existing_meta.get(crate::segments::META_KEY_SEGMENTS)
+                    {
+                        self.release_segment_dir(bucket, seg_id);
                     }
                     Self::safe_unlink(&path).map_err(StorageError::Io)?;
                     self.delete_metadata_sync(bucket, key)
@@ -3127,6 +3200,10 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 return Ok(DeleteOutcome::default());
             }
 
+            let stored_meta = self.read_metadata_sync(bucket, key);
+            if let Some(seg_id) = stored_meta.get(crate::segments::META_KEY_SEGMENTS) {
+                self.release_segment_dir(bucket, seg_id);
+            }
             Self::safe_unlink(&path).map_err(StorageError::Io)?;
             self.delete_metadata_sync(bucket, key)
                 .map_err(StorageError::Io)?;
@@ -3163,6 +3240,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     stored_version == Some(version_id)
                 };
                 if live_matches {
+                    if let Some(seg_id) = metadata.get(crate::segments::META_KEY_SEGMENTS) {
+                        self.release_segment_dir(bucket, seg_id);
+                    }
                     Self::safe_unlink(&live_path).map_err(StorageError::Io)?;
                     self.delete_metadata_sync(bucket, key)
                         .map_err(StorageError::Io)?;
@@ -3187,15 +3267,23 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 });
             }
 
-            let is_delete_marker = if manifest_path.is_file() {
+            let version_record = if manifest_path.is_file() {
                 std::fs::read_to_string(&manifest_path)
                     .ok()
                     .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-                    .and_then(|record| record.get("is_delete_marker").and_then(Value::as_bool))
-                    .unwrap_or(false)
             } else {
-                false
+                None
             };
+            let is_delete_marker = version_record
+                .as_ref()
+                .and_then(|record| record.get("is_delete_marker").and_then(Value::as_bool))
+                .unwrap_or(false);
+            if let Some(seg_id) = version_record
+                .as_ref()
+                .and_then(|record| record.get("segment_id").and_then(Value::as_str))
+            {
+                self.release_segment_dir(bucket, seg_id);
+            }
 
             Self::safe_unlink(&data_path).map_err(StorageError::Io)?;
             Self::safe_unlink(&manifest_path).map_err(StorageError::Io)?;
@@ -3242,17 +3330,18 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let copy_res = run_blocking(
             || -> StorageResult<(String, u64, HashMap<String, String>)> {
                 let _src_guard = self.get_object_lock(src_bucket, src_key).read();
-                let src_path = self.object_path(src_bucket, src_key)?;
-                if !src_path.is_file() {
-                    return Err(StorageError::ObjectNotFound {
-                        bucket: src_bucket.to_string(),
-                        key: src_key.to_string(),
-                    });
-                }
+                let (obj, content) =
+                    self.open_object_for_read_locked_sync(src_bucket, src_key)?;
 
                 use std::io::{BufReader, BufWriter, Read, Write};
-                let src_file = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
-                let mut reader = BufReader::with_capacity(chunk_size, src_file);
+                let mut reader: Box<dyn Read> = match content {
+                    OpenedObjectContent::Single(file) => {
+                        Box::new(BufReader::with_capacity(chunk_size, file))
+                    }
+                    OpenedObjectContent::Segmented { files, .. } => {
+                        Box::new(crate::segments::OpenSegmentsRead::new(files))
+                    }
+                };
                 let tmp_file = std::fs::File::create(&tmp_path).map_err(StorageError::Io)?;
                 let mut writer = BufWriter::with_capacity(chunk_size * 4, tmp_file);
                 let mut hasher = Md5::new();
@@ -3269,14 +3358,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 }
                 writer.flush().map_err(StorageError::Io)?;
 
-                let src_metadata = self.read_metadata_sync(src_bucket, src_key);
-                if metadata_is_corrupted(&src_metadata) {
-                    return Err(StorageError::ObjectCorrupted {
-                        bucket: src_bucket.to_string(),
-                        key: src_key.to_string(),
-                        detail: metadata_corruption_detail(&src_metadata),
-                    });
-                }
+                let mut src_metadata = obj.internal_metadata;
+                src_metadata.remove(crate::segments::META_KEY_SEGMENTS);
+                src_metadata.remove(META_KEY_PART_SIZES);
                 Ok((format!("{:x}", hasher.finalize()), total, src_metadata))
             },
         );
@@ -3553,48 +3637,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let copy_res = run_blocking(|| -> StorageResult<(String, u64, DateTime<Utc>)> {
             let _guard = self.get_object_lock(src_bucket, src_key).read();
 
-            let src_path = match src_version_id.as_deref() {
+            let (obj, content) = match src_version_id.as_deref() {
                 Some(version_id) => {
-                    let (record, data_path) =
-                        self.read_version_record_sync(src_bucket, src_key, version_id)?;
-                    if record
-                        .get("is_delete_marker")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        return Err(StorageError::MethodNotAllowed(
-                            "The specified method is not allowed against a delete marker"
-                                .to_string(),
-                        ));
-                    }
-                    data_path
+                    self.open_version_for_read_locked_sync(src_bucket, src_key, version_id)?
                 }
-                None => self.object_path(src_bucket, src_key)?,
+                None => self.open_object_for_read_locked_sync(src_bucket, src_key)?,
             };
-            if !src_path.is_file() {
-                return Err(StorageError::ObjectNotFound {
-                    bucket: src_bucket.to_string(),
-                    key: src_key.to_string(),
-                });
-            }
-
-            use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-            let mut src = std::fs::File::open(&src_path).map_err(StorageError::Io)?;
-            let src_meta = src.metadata().map_err(StorageError::Io)?;
-            let src_size = src_meta.len();
-            let src_mtime = src_meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            let last_modified = Utc
-                .timestamp_opt(
-                    src_mtime as i64,
-                    ((src_mtime % 1.0) * 1_000_000_000.0) as u32,
-                )
-                .single()
-                .unwrap_or_else(Utc::now);
+            let src_size = obj.size;
+            let last_modified = obj.last_modified;
 
             let (start, end) = match range {
                 Some((s, e)) => {
@@ -3613,10 +3663,19 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             };
             let length = if src_size == 0 { 0 } else { end - start + 1 };
 
-            if start > 0 {
-                src.seek(SeekFrom::Start(start)).map_err(StorageError::Io)?;
-            }
-            let mut src = std::io::BufReader::with_capacity(chunk_size, src);
+            use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+            let mut src: Box<dyn Read> = match content {
+                OpenedObjectContent::Single(mut file) => {
+                    if start > 0 {
+                        file.seek(SeekFrom::Start(start)).map_err(StorageError::Io)?;
+                    }
+                    Box::new(std::io::BufReader::with_capacity(chunk_size, file))
+                }
+                OpenedObjectContent::Segmented { files, .. } => Box::new(
+                    crate::segments::OpenSegmentsRead::with_window(files, start, length)
+                        .map_err(StorageError::Io)?,
+                ),
+            };
             let dst = std::fs::File::create(&tmp_file).map_err(StorageError::Io)?;
             let mut dst = BufWriter::with_capacity(chunk_size * 4, dst);
             let mut hasher = Md5::new();
@@ -3707,16 +3766,29 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let part_infos: Vec<PartInfo> = parts.to_vec();
         let upload_dir_owned = upload_dir.clone();
         let tmp_path_owned = tmp_path.clone();
+        let manifest_parts = manifest
+            .get("parts")
+            .and_then(|p| p.as_object())
+            .cloned()
+            .unwrap_or_default();
 
-        let assemble_res =
-            tokio::task::spawn_blocking(move || -> StorageResult<(String, u64, Vec<u64>)> {
-                use std::io::{BufReader, BufWriter, Read, Write};
-                let out_raw = std::fs::File::create(&tmp_path_owned).map_err(StorageError::Io)?;
-                let mut out_file = BufWriter::with_capacity(chunk_size * 4, out_raw);
+        let segments_allowed = self.multipart_layout == MultipartLayout::Segments
+            && part_infos.len() >= 2
+            && !metadata.contains_key(MULTIPART_PENDING_SSE_ALG)
+            && !metadata.contains_key(MULTIPART_PENDING_SSE_KMS_KEY)
+            && !metadata.contains_key(MULTIPART_PENDING_SSE_C_KEY)
+            && !metadata.contains_key(MPU_SSE_C_MARKER);
+        let segment_dir = self.segments_bucket_root(bucket).join(upload_id);
+        let segment_id = upload_id.to_string();
+        let upload_lock =
+            self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+
+        let assemble_res = tokio::task::spawn_blocking(
+            move || -> StorageResult<(String, u64, Vec<u64>, Option<String>)> {
+                use std::io::Read;
                 let mut md5_digest_concat = Vec::with_capacity(part_infos.len() * 16);
                 let mut total_size: u64 = 0;
                 let mut part_sizes: Vec<u64> = Vec::with_capacity(part_infos.len());
-                let mut buf = vec![0u8; chunk_size];
 
                 for part_info in &part_infos {
                     let part_file =
@@ -3727,33 +3799,116 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                             part_info.part_number
                         )));
                     }
-                    let reader = std::fs::File::open(&part_file).map_err(StorageError::Io)?;
-                    let mut reader = BufReader::with_capacity(chunk_size, reader);
-                    let mut part_hasher = Md5::new();
-                    let mut part_bytes: u64 = 0;
-                    loop {
-                        let n = reader.read(&mut buf).map_err(StorageError::Io)?;
-                        if n == 0 {
-                            break;
+                    let file_size = std::fs::metadata(&part_file)
+                        .map_err(StorageError::Io)?
+                        .len();
+                    let manifest_entry = manifest_parts.get(&part_info.part_number.to_string());
+                    let manifest_etag = manifest_entry
+                        .and_then(|e| e.get("etag"))
+                        .and_then(|v| v.as_str());
+                    let manifest_size = manifest_entry
+                        .and_then(|e| e.get("size"))
+                        .and_then(|v| v.as_u64());
+                    match (manifest_etag.and_then(parse_md5_hex), manifest_size) {
+                        (Some(digest), Some(size)) if size == file_size => {
+                            md5_digest_concat.extend_from_slice(&digest);
                         }
-                        part_hasher.update(&buf[..n]);
-                        out_file.write_all(&buf[..n]).map_err(StorageError::Io)?;
-                        total_size += n as u64;
-                        part_bytes += n as u64;
+                        _ => {
+                            let reader =
+                                std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                            let mut reader =
+                                std::io::BufReader::with_capacity(chunk_size, reader);
+                            let mut part_hasher = Md5::new();
+                            let mut buf = vec![0u8; chunk_size];
+                            loop {
+                                let n = reader.read(&mut buf).map_err(StorageError::Io)?;
+                                if n == 0 {
+                                    break;
+                                }
+                                part_hasher.update(&buf[..n]);
+                            }
+                            md5_digest_concat.extend_from_slice(&part_hasher.finalize());
+                        }
                     }
-                    md5_digest_concat.extend_from_slice(&part_hasher.finalize());
-                    part_sizes.push(part_bytes);
+                    part_sizes.push(file_size);
+                    total_size += file_size;
                 }
 
-                out_file.flush().map_err(StorageError::Io)?;
                 let mut composite_hasher = Md5::new();
                 composite_hasher.update(&md5_digest_concat);
                 let etag = format!("{:x}-{}", composite_hasher.finalize(), part_infos.len());
-                Ok((etag, total_size, part_sizes))
-            })
-            .await;
 
-        let (etag, total_size, part_sizes) = match assemble_res {
+                if part_infos.len() == 1 {
+                    let part_file =
+                        upload_dir_owned.join(format!("part-{:05}.part", part_infos[0].part_number));
+                    if std::fs::rename(&part_file, &tmp_path_owned).is_err() {
+                        std::fs::copy(&part_file, &tmp_path_owned).map_err(StorageError::Io)?;
+                    }
+                    return Ok((etag, total_size, part_sizes, None));
+                }
+
+                if segments_allowed && total_size >= crate::segments::SEGMENT_MIN_TOTAL {
+                    let _guard = upload_lock.lock();
+                    std::fs::create_dir_all(&segment_dir).map_err(StorageError::Io)?;
+                    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(part_infos.len());
+                    let mut move_err: Option<std::io::Error> = None;
+                    for (ordinal, part_info) in part_infos.iter().enumerate() {
+                        let part_file = upload_dir_owned
+                            .join(format!("part-{:05}.part", part_info.part_number));
+                        let seg_file = segment_dir
+                            .join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                        match std::fs::rename(&part_file, &seg_file) {
+                            Ok(()) => moved.push((seg_file, part_file)),
+                            Err(e) => {
+                                move_err = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(e) = move_err {
+                        for (seg_file, part_file) in moved.into_iter().rev() {
+                            let _ = std::fs::rename(&seg_file, &part_file);
+                        }
+                        let _ = std::fs::remove_dir(&segment_dir);
+                        return Err(StorageError::Io(e));
+                    }
+
+                    let header = crate::segments::StubHeader::new(
+                        segment_id.clone(),
+                        part_sizes.clone(),
+                        etag.clone(),
+                    );
+                    if let Err(e) = crate::segments::write_stub(&tmp_path_owned, &header) {
+                        for (seg_file, part_file) in moved.into_iter().rev() {
+                            let _ = std::fs::rename(&seg_file, &part_file);
+                        }
+                        let _ = std::fs::remove_dir(&segment_dir);
+                        return Err(StorageError::Io(e));
+                    }
+                    return Ok((etag, total_size, part_sizes, Some(segment_id)));
+                }
+
+                let mut out_file =
+                    std::fs::File::create(&tmp_path_owned).map_err(StorageError::Io)?;
+                for (part_info, expected) in part_infos.iter().zip(&part_sizes) {
+                    let part_file = upload_dir_owned
+                        .join(format!("part-{:05}.part", part_info.part_number));
+                    let mut src = std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                    let copied =
+                        std::io::copy(&mut src, &mut out_file).map_err(StorageError::Io)?;
+                    if copied != *expected {
+                        return Err(StorageError::Internal(format!(
+                            "Part {} changed while completing the multipart upload",
+                            part_info.part_number
+                        )));
+                    }
+                }
+                Ok((etag, total_size, part_sizes, None))
+            },
+        )
+        .await;
+
+        let (etag, total_size, part_sizes, segmented_as) = match assemble_res {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
                 let _ = std::fs::remove_file(&tmp_path);
@@ -3769,6 +3924,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
         let mut metadata = metadata;
         metadata.insert(META_KEY_PART_SIZES.to_string(), encode_part_sizes(&part_sizes));
+        if let Some(ref seg_id) = segmented_as {
+            metadata.insert(
+                crate::segments::META_KEY_SEGMENTS.to_string(),
+                seg_id.clone(),
+            );
+        }
 
         let result = run_blocking(|| {
             let _guard = self.get_object_lock(bucket, &object_key).write();
@@ -3789,7 +3950,26 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 Ok(obj)
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&tmp_path);
+                if parts.len() == 1 && tmp_path.exists() {
+                    let part_file =
+                        upload_dir.join(format!("part-{:05}.part", parts[0].part_number));
+                    if std::fs::rename(&tmp_path, &part_file).is_err() {
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+                } else {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    if let Some(ref seg_id) = segmented_as {
+                        let seg_dir = self.segments_bucket_root(bucket).join(seg_id);
+                        for (ordinal, part_info) in parts.iter().enumerate() {
+                            let seg_file =
+                                seg_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                            let part_file = upload_dir
+                                .join(format!("part-{:05}.part", part_info.part_number));
+                            let _ = std::fs::rename(&seg_file, &part_file);
+                        }
+                        let _ = std::fs::remove_dir(&seg_dir);
+                    }
+                }
                 Err(e)
             }
         }
@@ -4830,6 +5010,342 @@ mod tests {
         assert_eq!(parse_part_sizes(raw).unwrap(), vec![1024u64, 512u64]);
     }
 
+    async fn read_stream_to_end(mut stream: AsyncReadStream) -> Vec<u8> {
+        let mut out = Vec::new();
+        stream.read_to_end(&mut out).await.unwrap();
+        out
+    }
+
+    async fn seed_segmented_object(
+        backend: &FsStorageBackend,
+        bucket: &str,
+        key: &str,
+        parts_data: &[Vec<u8>],
+    ) -> (String, ObjectMeta) {
+        let upload_id = backend.initiate_multipart(bucket, key, None).await.unwrap();
+        let mut parts = Vec::new();
+        for (i, data) in parts_data.iter().enumerate() {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(data.clone()));
+            let etag = backend
+                .upload_part(bucket, &upload_id, (i + 1) as u32, stream)
+                .await
+                .unwrap();
+            parts.push(PartInfo {
+                part_number: (i + 1) as u32,
+                etag,
+            });
+        }
+        let obj = backend
+            .complete_multipart(bucket, &upload_id, &parts)
+            .await
+            .unwrap();
+        (upload_id, obj)
+    }
+
+    fn segmented_parts() -> Vec<Vec<u8>> {
+        vec![
+            (0..5000u32).map(|i| (i % 251) as u8).collect(),
+            (0..4000u32).map(|i| (i % 13) as u8).collect(),
+        ]
+    }
+
+    fn expected_composite_etag(parts_data: &[Vec<u8>]) -> String {
+        let mut concat = Vec::new();
+        for p in parts_data {
+            concat.extend_from_slice(&Md5::digest(p));
+        }
+        format!("{:x}-{}", Md5::digest(&concat), parts_data.len())
+    }
+
+    #[tokio::test]
+    async fn test_segmented_complete_roundtrip() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("seg-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let full: Vec<u8> = parts_data.concat();
+
+        let (upload_id, obj) = seed_segmented_object(&backend, "seg-bkt", "v.bin", &parts_data).await;
+        assert_eq!(obj.size, full.len() as u64);
+        assert_eq!(obj.etag.as_deref(), Some(expected_composite_etag(&parts_data).as_str()));
+
+        let stored = backend
+            .get_object_metadata("seg-bkt", "v.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.get(crate::segments::META_KEY_SEGMENTS),
+            Some(&upload_id)
+        );
+
+        let live_path = backend.object_path("seg-bkt", "v.bin").unwrap();
+        let header = crate::segments::read_stub_header(&live_path)
+            .unwrap()
+            .expect("live file must be a segment stub");
+        assert_eq!(header.total, full.len() as u64);
+        assert_eq!(
+            std::fs::metadata(&live_path).unwrap().len(),
+            full.len() as u64
+        );
+        let seg_dir = backend.segments_bucket_root("seg-bkt").join(&upload_id);
+        assert!(seg_dir.is_dir());
+
+        let (meta, stream) = backend.get_object("seg-bkt", "v.bin").await.unwrap();
+        assert_eq!(meta.size, full.len() as u64);
+        assert_eq!(read_stream_to_end(stream).await, full);
+
+        let (_, stream) = backend
+            .get_object_range("seg-bkt", "v.bin", 4990, Some(30))
+            .await
+            .unwrap();
+        assert_eq!(read_stream_to_end(stream).await, &full[4990..5020]);
+
+        let head = backend.head_object("seg-bkt", "v.bin").await.unwrap();
+        assert_eq!(head.size, full.len() as u64);
+
+        let listing = backend
+            .list_objects("seg-bkt", &ListParams::default())
+            .await
+            .unwrap();
+        let entry = listing
+            .objects
+            .iter()
+            .find(|o| o.key == "v.bin")
+            .expect("listed");
+        assert_eq!(entry.size, full.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_segmented_and_concat_layouts_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let concat_backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig {
+                multipart_layout: MultipartLayout::Concat,
+                ..FsStorageBackendConfig::default()
+            },
+        );
+        concat_backend.create_bucket("cmp-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let (_, concat_obj) =
+            seed_segmented_object(&concat_backend, "cmp-bkt", "c.bin", &parts_data).await;
+
+        let (_dir2, seg_backend) = create_test_backend();
+        seg_backend.create_bucket("cmp-bkt").await.unwrap();
+        let (_, seg_obj) =
+            seed_segmented_object(&seg_backend, "cmp-bkt", "c.bin", &parts_data).await;
+
+        assert_eq!(concat_obj.etag, seg_obj.etag);
+        assert_eq!(concat_obj.size, seg_obj.size);
+
+        let concat_meta = concat_backend
+            .get_object_metadata("cmp-bkt", "c.bin")
+            .await
+            .unwrap();
+        assert!(!concat_meta.contains_key(crate::segments::META_KEY_SEGMENTS));
+
+        let (_, s1) = concat_backend.get_object("cmp-bkt", "c.bin").await.unwrap();
+        let (_, s2) = seg_backend.get_object("cmp-bkt", "c.bin").await.unwrap();
+        assert_eq!(read_stream_to_end(s1).await, read_stream_to_end(s2).await);
+    }
+
+    #[tokio::test]
+    async fn test_segmented_delete_releases_segment_dir() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("segdel-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let (upload_id, _) =
+            seed_segmented_object(&backend, "segdel-bkt", "d.bin", &parts_data).await;
+        let seg_dir = backend.segments_bucket_root("segdel-bkt").join(&upload_id);
+        assert!(seg_dir.is_dir());
+        backend.delete_object("segdel-bkt", "d.bin").await.unwrap();
+        assert!(!seg_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_segmented_overwrite_releases_old_segment_dir() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("segow-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let (upload_id, _) =
+            seed_segmented_object(&backend, "segow-bkt", "o.bin", &parts_data).await;
+        let seg_dir = backend.segments_bucket_root("segow-bkt").join(&upload_id);
+        assert!(seg_dir.is_dir());
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"tiny".to_vec()));
+        backend
+            .put_object("segow-bkt", "o.bin", data, None)
+            .await
+            .unwrap();
+        assert!(!seg_dir.exists());
+        let (_, stream) = backend.get_object("segow-bkt", "o.bin").await.unwrap();
+        assert_eq!(read_stream_to_end(stream).await, b"tiny");
+    }
+
+    #[tokio::test]
+    async fn test_segmented_versioned_overwrite_and_restore() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("segver-bkt").await.unwrap();
+        backend.set_versioning("segver-bkt", true).await.unwrap();
+        let parts_data = segmented_parts();
+        let full: Vec<u8> = parts_data.concat();
+        let (upload_id, obj) =
+            seed_segmented_object(&backend, "segver-bkt", "vv.bin", &parts_data).await;
+        let v1 = obj.version_id.clone().expect("versioned complete");
+        let seg_dir = backend.segments_bucket_root("segver-bkt").join(&upload_id);
+
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"second".to_vec()));
+        backend
+            .put_object("segver-bkt", "vv.bin", data, None)
+            .await
+            .unwrap();
+        assert!(
+            seg_dir.is_dir(),
+            "versioned overwrite must transfer segment ownership, not delete"
+        );
+
+        let (_, data_path) = backend.version_record_paths("segver-bkt", "vv.bin", &v1);
+        let header = crate::segments::read_stub_header(&data_path)
+            .unwrap()
+            .expect("archived version must be a stub");
+        assert_eq!(header.total, full.len() as u64);
+        assert_eq!(
+            std::fs::metadata(&data_path).unwrap().len(),
+            full.len() as u64
+        );
+
+        let (vmeta, vstream) = backend
+            .get_object_version("segver-bkt", "vv.bin", &v1)
+            .await
+            .unwrap();
+        assert_eq!(vmeta.size, full.len() as u64);
+        assert_eq!(read_stream_to_end(vstream).await, full);
+
+        let (_, vrange) = backend
+            .get_object_version_range("segver-bkt", "vv.bin", &v1, 4999, Some(2))
+            .await
+            .unwrap();
+        assert_eq!(read_stream_to_end(vrange).await, &full[4999..5001]);
+
+        let live_meta = backend
+            .get_object_metadata("segver-bkt", "vv.bin")
+            .await
+            .unwrap();
+        let v2 = live_meta.get("__version_id__").cloned().unwrap();
+        backend
+            .delete_object_version("segver-bkt", "vv.bin", &v2)
+            .await
+            .unwrap();
+        let (_, stream) = backend.get_object("segver-bkt", "vv.bin").await.unwrap();
+        assert_eq!(
+            read_stream_to_end(stream).await,
+            full,
+            "promoted segmented version must serve original bytes"
+        );
+        assert!(seg_dir.is_dir());
+
+        backend
+            .delete_object_version("segver-bkt", "vv.bin", &v1)
+            .await
+            .unwrap();
+        assert!(!seg_dir.exists(), "deleting the last owner must release segments");
+    }
+
+    #[tokio::test]
+    async fn test_segmented_copy_object_produces_single_file() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("segcp-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let full: Vec<u8> = parts_data.concat();
+        seed_segmented_object(&backend, "segcp-bkt", "src.bin", &parts_data).await;
+
+        let copied = backend
+            .copy_object("segcp-bkt", "src.bin", "segcp-bkt", "dst.bin")
+            .await
+            .unwrap();
+        assert_eq!(copied.size, full.len() as u64);
+
+        let dst_meta = backend
+            .get_object_metadata("segcp-bkt", "dst.bin")
+            .await
+            .unwrap();
+        assert!(!dst_meta.contains_key(crate::segments::META_KEY_SEGMENTS));
+        assert!(!dst_meta.contains_key(META_KEY_PART_SIZES));
+
+        let (_, stream) = backend.get_object("segcp-bkt", "dst.bin").await.unwrap();
+        assert_eq!(read_stream_to_end(stream).await, full);
+
+        let dst_path = backend.object_path("segcp-bkt", "dst.bin").unwrap();
+        assert!(crate::segments::read_stub_header(&dst_path)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_segmented_upload_part_copy_across_boundary() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("segpc-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let full: Vec<u8> = parts_data.concat();
+        seed_segmented_object(&backend, "segpc-bkt", "src.bin", &parts_data).await;
+
+        let upload_id = backend
+            .initiate_multipart("segpc-bkt", "dst.bin", None)
+            .await
+            .unwrap();
+        backend
+            .upload_part_copy(
+                "segpc-bkt",
+                &upload_id,
+                1,
+                "segpc-bkt",
+                "src.bin",
+                None,
+                Some((4000, 6999)),
+            )
+            .await
+            .unwrap();
+        let part_path = backend
+            .get_multipart_part_path("segpc-bkt", &upload_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&part_path).unwrap(), &full[4000..7000]);
+        backend
+            .abort_multipart("segpc-bkt", &upload_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_segmented_materialize_to_tmp() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("segmat-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let full: Vec<u8> = parts_data.concat();
+        seed_segmented_object(&backend, "segmat-bkt", "m.bin", &parts_data).await;
+
+        let tmp = backend
+            .materialize_object_to_tmp("segmat-bkt", "m.bin")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&tmp).unwrap(), full);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_small_multipart_falls_back_to_concat() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("segsm-bkt").await.unwrap();
+        let parts_data = vec![vec![b'A'; 1024], vec![b'B'; 512]];
+        seed_segmented_object(&backend, "segsm-bkt", "s.bin", &parts_data).await;
+        let stored = backend
+            .get_object_metadata("segsm-bkt", "s.bin")
+            .await
+            .unwrap();
+        assert!(!stored.contains_key(crate::segments::META_KEY_SEGMENTS));
+        let (_, stream) = backend.get_object("segsm-bkt", "s.bin").await.unwrap();
+        assert_eq!(read_stream_to_end(stream).await, parts_data.concat());
+    }
+
     #[tokio::test]
     async fn test_put_clears_poison_flag() {
         let (_dir, backend) = create_test_backend();
@@ -5119,7 +5635,7 @@ mod tests {
                 while !stop.load(Ordering::Relaxed) {
                     let link = tmp_dir.join(format!("lnk-{}", Uuid::new_v4()));
                     match b.snapshot_object_to_link("link-bkt", "hot", &link).await {
-                        Ok(meta) => {
+                        Ok((meta, _source)) => {
                             let bytes = std::fs::read(&link).unwrap_or_default();
                             let md5 = format!("{:x}", Md5::digest(&bytes));
                             reads.fetch_add(1, Ordering::Relaxed);

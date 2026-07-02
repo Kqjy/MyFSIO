@@ -76,6 +76,9 @@ impl AppState {
                     config.bucket_config_cache_ttl_seconds,
                 ),
                 stream_chunk_size: config.stream_chunk_size,
+                multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
+                    &config.multipart_object_layout,
+                ),
             },
         ));
         let iam = Arc::new(IamService::new_with_secret(
@@ -92,6 +95,7 @@ impl AppState {
                     multipart_max_age_days: config.gc_multipart_max_age_days,
                     lock_file_max_age_hours: config.gc_lock_file_max_age_hours,
                     quarantine_max_age_days: config.integrity_quarantine_retention_days,
+                    segment_max_age_hours: config.gc_segment_max_age_hours,
                     dry_run: config.gc_dry_run,
                 },
             )))

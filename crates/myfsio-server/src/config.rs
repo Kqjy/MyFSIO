@@ -37,6 +37,7 @@ pub struct ServerConfig {
     pub gc_temp_file_max_age_hours: f64,
     pub gc_multipart_max_age_days: u64,
     pub gc_lock_file_max_age_hours: f64,
+    pub gc_segment_max_age_hours: f64,
     pub gc_dry_run: bool,
     pub integrity_enabled: bool,
     pub integrity_interval_hours: f64,
@@ -103,6 +104,8 @@ pub struct ServerConfig {
     pub bulk_delete_max_keys: usize,
     pub stream_chunk_size: usize,
     pub request_body_timeout_secs: u64,
+    pub upload_stream_buffer_bytes: usize,
+    pub multipart_object_layout: String,
     pub ratelimit_default: RateLimitSetting,
     pub ratelimit_list_buckets: RateLimitSetting,
     pub ratelimit_bucket_ops: RateLimitSetting,
@@ -186,6 +189,7 @@ impl ServerConfig {
         let gc_temp_file_max_age_hours = parse_f64_env("GC_TEMP_FILE_MAX_AGE_HOURS", 24.0);
         let gc_multipart_max_age_days = parse_u64_env("GC_MULTIPART_MAX_AGE_DAYS", 7);
         let gc_lock_file_max_age_hours = parse_f64_env("GC_LOCK_FILE_MAX_AGE_HOURS", 1.0);
+        let gc_segment_max_age_hours = parse_f64_env("GC_SEGMENT_MAX_AGE_HOURS", 24.0);
         let gc_dry_run = parse_bool_env("GC_DRY_RUN", false);
 
         let integrity_enabled = parse_bool_env("INTEGRITY_ENABLED", false);
@@ -293,7 +297,10 @@ impl ServerConfig {
         let multipart_min_part_size = parse_u64_env("MULTIPART_MIN_PART_SIZE", 5_242_880);
         let bulk_delete_max_keys = parse_usize_env("BULK_DELETE_MAX_KEYS", 1000);
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
-        let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 60);
+        let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 300);
+        let upload_stream_buffer_bytes = parse_usize_env("UPLOAD_STREAM_BUFFER_BYTES", 8_388_608);
+        let multipart_object_layout = std::env::var("MULTIPART_OBJECT_LAYOUT")
+            .unwrap_or_else(|_| "segments".to_string());
         let ratelimit_default =
             parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(50_000, 60));
         let ratelimit_list_buckets =
@@ -334,6 +341,7 @@ impl ServerConfig {
             gc_temp_file_max_age_hours,
             gc_multipart_max_age_days,
             gc_lock_file_max_age_hours,
+            gc_segment_max_age_hours,
             gc_dry_run,
             integrity_enabled,
             integrity_interval_hours,
@@ -400,6 +408,8 @@ impl ServerConfig {
             bulk_delete_max_keys,
             stream_chunk_size,
             request_body_timeout_secs,
+            upload_stream_buffer_bytes,
+            multipart_object_layout,
             ratelimit_default,
             ratelimit_list_buckets,
             ratelimit_bucket_ops,
@@ -436,6 +446,7 @@ impl Default for ServerConfig {
             gc_temp_file_max_age_hours: 24.0,
             gc_multipart_max_age_days: 7,
             gc_lock_file_max_age_hours: 1.0,
+            gc_segment_max_age_hours: 24.0,
             gc_dry_run: false,
             integrity_enabled: false,
             integrity_interval_hours: 24.0,
@@ -508,7 +519,9 @@ impl Default for ServerConfig {
             multipart_min_part_size: 5_242_880,
             bulk_delete_max_keys: 1000,
             stream_chunk_size: 1_048_576,
-            request_body_timeout_secs: 60,
+            request_body_timeout_secs: 300,
+            upload_stream_buffer_bytes: 8_388_608,
+            multipart_object_layout: "segments".to_string(),
             ratelimit_default: RateLimitSetting::new(50_000, 60),
             ratelimit_list_buckets: RateLimitSetting::new(50_000, 60),
             ratelimit_bucket_ops: RateLimitSetting::new(50_000, 60),

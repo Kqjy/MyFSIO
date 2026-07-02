@@ -11,6 +11,7 @@ pub struct GcConfig {
     pub multipart_max_age_days: u64,
     pub lock_file_max_age_hours: f64,
     pub quarantine_max_age_days: u64,
+    pub segment_max_age_hours: f64,
     pub dry_run: bool,
 }
 
@@ -22,6 +23,7 @@ impl Default for GcConfig {
             multipart_max_age_days: 7,
             lock_file_max_age_hours: 1.0,
             quarantine_max_age_days: 7,
+            segment_max_age_hours: 24.0,
             dry_run: false,
         }
     }
@@ -94,6 +96,7 @@ impl GcService {
             "multipart_max_age_days": self.config.multipart_max_age_days,
             "lock_file_max_age_hours": self.config.lock_file_max_age_hours,
             "quarantine_max_age_days": self.config.quarantine_max_age_days,
+            "segment_max_age_hours": self.config.segment_max_age_hours,
             "dry_run": self.config.dry_run,
         })
     }
@@ -329,6 +332,62 @@ impl GcService {
             }
         }
 
+        let mut segment_dirs_deleted = 0u64;
+        let mut segment_bytes_freed = 0u64;
+        let segment_max_age =
+            std::time::Duration::from_secs_f64(self.config.segment_max_age_hours * 3600.0);
+        if buckets_dir.exists() {
+            if let Ok(bucket_dirs) = std::fs::read_dir(&buckets_dir) {
+                for bucket_entry in bucket_dirs.flatten() {
+                    let segments_dir = bucket_entry.path().join("segments");
+                    if !segments_dir.is_dir() {
+                        continue;
+                    }
+                    let bucket_name = bucket_entry.file_name().to_string_lossy().to_string();
+                    let mut referenced: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    collect_segment_refs(&self.storage_root.join(&bucket_name), &mut referenced);
+                    collect_segment_refs(&bucket_entry.path().join("versions"), &mut referenced);
+                    if let Ok(seg_dirs) = std::fs::read_dir(&segments_dir) {
+                        for seg_entry in seg_dirs.flatten() {
+                            let seg_path = seg_entry.path();
+                            if !seg_path.is_dir() {
+                                continue;
+                            }
+                            let seg_id = seg_entry.file_name().to_string_lossy().to_string();
+                            if referenced.contains(&seg_id) {
+                                continue;
+                            }
+                            let Some(modified) =
+                                seg_entry.metadata().ok().and_then(|m| m.modified().ok())
+                            else {
+                                continue;
+                            };
+                            let Ok(age) = now.duration_since(modified) else {
+                                continue;
+                            };
+                            if age <= segment_max_age {
+                                continue;
+                            }
+                            let bytes = dir_total_bytes(&seg_path);
+                            if !dry_run {
+                                if let Err(e) = std::fs::remove_dir_all(&seg_path) {
+                                    errors.push(format!(
+                                        "Failed to remove orphaned segment dir {}: {}",
+                                        seg_path.display(),
+                                        e
+                                    ));
+                                    continue;
+                                }
+                            }
+                            segment_dirs_deleted += 1;
+                            segment_bytes_freed += bytes;
+                        }
+                    }
+                }
+            }
+        }
+
         if !dry_run {
             for dir in [&tmp_dir, &multipart_dir] {
                 if dir.exists() {
@@ -356,7 +415,11 @@ impl GcService {
             "empty_dirs_removed": empty_dirs_removed,
             "quarantine_entries_deleted": quarantine_entries_deleted,
             "quarantine_bytes_freed": quarantine_bytes_freed,
-            "total_bytes_freed": temp_bytes_freed.saturating_add(quarantine_bytes_freed),
+            "segment_dirs_deleted": segment_dirs_deleted,
+            "segment_bytes_freed": segment_bytes_freed,
+            "total_bytes_freed": temp_bytes_freed
+                .saturating_add(quarantine_bytes_freed)
+                .saturating_add(segment_bytes_freed),
             "errors": errors,
         })
     }
@@ -387,6 +450,37 @@ impl GcService {
                 }
             }
         })
+    }
+}
+
+fn collect_segment_refs(root: &std::path::Path, out: &mut std::collections::HashSet<String>) {
+    if !root.is_dir() {
+        return;
+    }
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.len() < myfsio_storage::segments::SEGMENT_MIN_TOTAL {
+                continue;
+            }
+            if let Ok(Some(header)) = myfsio_storage::segments::read_stub_header(&path) {
+                out.insert(header.segment_id);
+            }
+        }
     }
 }
 
