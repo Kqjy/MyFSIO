@@ -707,7 +707,12 @@
 
 <script>
 (function() {
-    var escapeHtml = window.UICore ? window.UICore.escapeHtml : function(s) { return s; };
+    function escapeHtml(s) {
+        if (window.UICore && window.UICore.escapeHtml) return window.UICore.escapeHtml(s);
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' }[c];
+        });
+    }
 
     var editPeerModal = document.getElementById('editPeerModal');
     if (editPeerModal) {

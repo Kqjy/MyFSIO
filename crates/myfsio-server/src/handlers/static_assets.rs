@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -31,7 +34,11 @@ pub async fn serve(
             ) {
                 if let Ok(bytes) = tokio::fs::read(&canonical).await {
                     let mime = mime_guess::from_path(&canonical).first_or_octet_stream();
-                    return build_response(&normalized, bytes, mime.as_ref(), &headers);
+                    let etag = compute_etag(&bytes);
+                    if let Some(resp) = not_modified_response(&etag, &headers) {
+                        return resp;
+                    }
+                    return build_response(&normalized, bytes, mime.as_ref(), &etag);
                 }
             }
         }
@@ -41,32 +48,55 @@ pub async fn serve(
     match embedded::static_file(&normalized) {
         Some(file) => {
             let mime = mime_guess::from_path(&normalized).first_or_octet_stream();
-            build_response(&normalized, file.data.into_owned(), mime.as_ref(), &headers)
+            let etag = embedded_etag(&normalized, file.data.as_ref());
+            if let Some(resp) = not_modified_response(&etag, &headers) {
+                return resp;
+            }
+            build_response(&normalized, file.data.into_owned(), mime.as_ref(), &etag)
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn build_response(_path: &str, bytes: Vec<u8>, mime: &str, request_headers: &HeaderMap) -> Response {
+fn compute_etag(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let etag = format!("\"{:.16x}\"", hasher.finalize());
+    hasher.update(bytes);
+    format!("\"{:.16x}\"", hasher.finalize())
+}
 
-    if let Some(if_none_match) = request_headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-    {
-        if if_none_match.split(',').any(|tag| tag.trim() == etag) {
-            let mut resp = Response::new(Body::empty());
-            *resp.status_mut() = StatusCode::NOT_MODIFIED;
-            if let Ok(v) = HeaderValue::from_str(&etag) {
-                resp.headers_mut().insert(header::ETAG, v);
-            }
-            return resp;
+fn embedded_etag(path: &str, bytes: &[u8]) -> String {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(etag) = guard.get(path) {
+            return etag.clone();
         }
     }
+    let etag = compute_etag(bytes);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(path.to_string(), etag.clone());
+    }
+    etag
+}
 
+fn not_modified_response(etag: &str, request_headers: &HeaderMap) -> Option<Response> {
+    let if_none_match = request_headers
+        .get(header::IF_NONE_MATCH)?
+        .to_str()
+        .ok()?;
+    if !if_none_match.split(',').any(|tag| tag.trim() == etag) {
+        return None;
+    }
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = StatusCode::NOT_MODIFIED;
+    if let Ok(v) = HeaderValue::from_str(etag) {
+        resp.headers_mut().insert(header::ETAG, v);
+    }
+    Some(resp)
+}
+
+fn build_response(path: &str, bytes: Vec<u8>, mime: &str, etag: &str) -> Response {
     let len = bytes.len();
     let mut response = Response::new(Body::from(bytes));
     if let Ok(value) = HeaderValue::from_str(mime) {
@@ -75,12 +105,16 @@ fn build_response(_path: &str, bytes: Vec<u8>, mime: &str, request_headers: &Hea
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
-    if let Ok(v) = HeaderValue::from_str(&etag) {
+    if let Ok(v) = HeaderValue::from_str(etag) {
         response.headers_mut().insert(header::ETAG, v);
     }
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=300, must-revalidate"),
-    );
+    let cache_control = if path.starts_with("js/vendor/") {
+        HeaderValue::from_static("public, max-age=86400")
+    } else {
+        HeaderValue::from_static("public, max-age=300, must-revalidate")
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, cache_control);
     response
 }

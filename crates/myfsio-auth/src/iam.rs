@@ -104,7 +104,7 @@ impl RawIamUser {
     }
 }
 
-const LEGACY_FULL_ACCESS_ACTIONS: &[&str] = &[
+pub const LEGACY_FULL_ACCESS_ACTIONS: &[&str] = &[
     "list",
     "read",
     "write",
@@ -127,10 +127,7 @@ const LEGACY_FULL_ACCESS_ACTIONS: &[&str] = &[
 ];
 
 fn normalize_legacy_full_access(policy: IamPolicy) -> IamPolicy {
-    if policy.bucket != "*"
-        || policy.prefix != "*"
-        || policy.actions.iter().any(|a| a == "*")
-    {
+    if policy.bucket != "*" || policy.prefix != "*" || policy.actions.iter().any(|a| a == "*") {
         return policy;
     }
     if !policy.actions.iter().any(|a| a == "iam:*") {
@@ -799,7 +796,7 @@ impl IamService {
             if user.access_keys.iter().any(|k| k.access_key == access_key) {
                 if user.peer_site_id.is_some() {
                     return Err(
-                        "Peer credentials cannot be modified via user-management".to_string(),
+                        "Peer credentials cannot be modified via user-management".to_string()
                     );
                 }
                 if user.access_keys.len() <= 1 {
@@ -936,8 +933,7 @@ impl IamService {
         let mut config = self.load_config()?;
         let before = config.users.len();
         config.users.retain(|u| {
-            !(u.peer_site_id.is_some()
-                && u.access_keys.iter().any(|k| k.access_key == access_key))
+            !(u.peer_site_id.is_some() && u.access_keys.iter().any(|k| k.access_key == access_key))
         });
         if config.users.len() == before {
             return Err(format!("Peer credential '{}' not found", access_key));

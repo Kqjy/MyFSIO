@@ -1,4 +1,7 @@
 {% extends "base.html" %}
+
+{% block title %}Metrics - MyFSIO Console{% endblock %}
+
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
   <div>
@@ -440,11 +443,21 @@
 {% endblock %}
 
 {% block extra_scripts %}
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="{{ url_for(endpoint="static", filename="js/vendor/chart.umd.min.js") }}"></script>
 <script>
 (function() {
   var POLL_INTERVAL = 5000;
   var paused = false;
+  window.__metricsPaused = false;
+  var chartsAvailable = typeof Chart !== 'undefined';
+  if (!chartsAvailable) {
+    var chartBanner = document.getElementById('metrics-error-banner');
+    if (chartBanner) {
+      chartBanner.classList.remove('d-none');
+      var chartBannerMsg = chartBanner.querySelector('div');
+      if (chartBannerMsg) chartBannerMsg.textContent = 'Charts unavailable: Chart.js failed to load. Metric values will still refresh, but gauges and graphs cannot be drawn.';
+    }
+  }
   var countdown = 5;
   var countdownEl = document.getElementById('refreshCountdown');
   var pauseBtn = document.getElementById('pauseBtn');
@@ -480,11 +493,12 @@
       ctx.restore();
     }
   };
-  Chart.register(gaugePlugin);
+  if (chartsAvailable) Chart.register(gaugePlugin);
 
   var gaugeBg = 'rgba(128, 128, 128, 0.08)';
 
   function createGauge(id, value, color, warnValue) {
+    if (!chartsAvailable) return null;
     var ctx = document.getElementById(id);
     if (!ctx) return null;
     return new Chart(ctx, {
@@ -512,6 +526,7 @@
   }
 
   function createSparkline(id, color) {
+    if (!chartsAvailable) return null;
     var ctx = document.getElementById(id);
     if (!ctx) return null;
     return new Chart(ctx, {
@@ -552,7 +567,6 @@
   function updateGauge(chart, value) {
     if (!chart) return;
     chart.data.datasets[0].data = [value, Math.max(0, 100 - value)];
-    var color = chart.data.datasets[0].backgroundColor[0];
     chart.update('none');
   }
 
@@ -679,6 +693,7 @@
   if (pauseBtn) {
     pauseBtn.addEventListener('click', function() {
       paused = !paused;
+      window.__metricsPaused = paused;
       pauseIcon.classList.toggle('d-none', paused);
       playIcon.classList.toggle('d-none', !paused);
       if (liveDot) liveDot.style.animationPlayState = paused ? 'paused' : 'running';
@@ -718,7 +733,7 @@
     exportSystem.addEventListener('click', function(e) {
       e.preventDefault();
       fetch('/ui/metrics/api').then(function(r) { return r.json(); }).then(function(d) {
-        downloadJson(d, 'system-metrics-' + new Date().toISOString().slice(0,19) + '.json');
+        downloadJson(d, 'system-metrics-' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json');
       });
     });
   }
@@ -729,7 +744,7 @@
     exportOps.addEventListener('click', function(e) {
       e.preventDefault();
       fetch('/ui/metrics/operations').then(function(r) { return r.json(); }).then(function(d) {
-        downloadJson(d, 'operation-metrics-' + new Date().toISOString().slice(0,19) + '.json');
+        downloadJson(d, 'operation-metrics-' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json');
       });
     });
   }
@@ -742,7 +757,7 @@
       e.preventDefault();
       var hours = document.getElementById('historyTimeRange') ? document.getElementById('historyTimeRange').value : 24;
       fetch('/ui/metrics/history?hours=' + hours).then(function(r) { return r.json(); }).then(function(d) {
-        downloadJson(d, 'metrics-history-' + new Date().toISOString().slice(0,19) + '.json');
+        downloadJson(d, 'metrics-history-' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json');
       });
     });
   }
@@ -751,6 +766,11 @@
 
 {% if operation_metrics_enabled %}
 (function() {
+  if (typeof Chart === 'undefined') {
+    var opStatusEl = document.getElementById('opStatus');
+    if (opStatusEl) opStatusEl.textContent = 'Charts unavailable: Chart.js failed to load.';
+    return;
+  }
   var methodChart = null;
   var statusChart = null;
   var endpointChart = null;
@@ -1010,11 +1030,11 @@
   function startOpPolling() {
     if (opTimer) clearInterval(opTimer);
     opTimer = setInterval(function() {
-      if (!document.hidden) updateOpMetrics();
+      if (!document.hidden && !window.__metricsPaused) updateOpMetrics();
     }, 5000);
     if (trendTimer) clearInterval(trendTimer);
     trendTimer = setInterval(function() {
-      if (!document.hidden) loadOpTrends();
+      if (!document.hidden && !window.__metricsPaused) loadOpTrends();
     }, 60000);
   }
 
@@ -1042,6 +1062,11 @@
 
 {% if metrics_history_enabled %}
 (function() {
+  if (typeof Chart === 'undefined') {
+    var historyStatusEl = document.getElementById('historyStatus');
+    if (historyStatusEl) historyStatusEl.textContent = 'Charts unavailable: Chart.js failed to load.';
+    return;
+  }
   var cpuChart = null;
   var memoryChart = null;
   var diskChart = null;
@@ -1102,7 +1127,7 @@
   }
 
   function loadHistory() {
-    if (document.hidden) return;
+    if (document.hidden || window.__metricsPaused) return;
     var hours = timeRangeSelect ? timeRangeSelect.value : 24;
     fetch('/ui/metrics/history?hours=' + hours)
       .then(function(r) { return r.json(); })

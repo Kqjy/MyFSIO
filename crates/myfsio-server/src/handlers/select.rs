@@ -48,15 +48,34 @@ pub async fn post_select_object_content(
         Err(err) => return s3_error_response(err),
     };
 
-    let object_path = match state.storage.get_object_path(bucket, key).await {
-        Ok(path) => path,
-        Err(_) => {
-            return s3_error_response(S3Error::new(S3ErrorCode::NoSuchKey, "Object not found"));
+    let stored_meta = state
+        .storage
+        .get_object_metadata(bucket, key)
+        .await
+        .unwrap_or_default();
+    let segmented = stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
+
+    let (object_path, cleanup_path) = if segmented {
+        match state.storage.materialize_object_to_tmp(bucket, key).await {
+            Ok(path) => (path.clone(), Some(path)),
+            Err(_) => {
+                return s3_error_response(S3Error::new(S3ErrorCode::NoSuchKey, "Object not found"));
+            }
+        }
+    } else {
+        match state.storage.get_object_path(bucket, key).await {
+            Ok(path) => (path, None),
+            Err(_) => {
+                return s3_error_response(S3Error::new(S3ErrorCode::NoSuchKey, "Object not found"));
+            }
         }
     };
 
     let join_res =
         tokio::task::spawn_blocking(move || execute_select_query(object_path, request)).await;
+    if let Some(path) = cleanup_path {
+        let _ = tokio::fs::remove_file(&path).await;
+    }
     let chunks = match join_res {
         Ok(Ok(chunks)) => chunks,
         Ok(Err(message)) => {

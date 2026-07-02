@@ -106,6 +106,23 @@ fn register_filters(tera: &mut Tera, display_timezone: &str) {
     );
     tera.register_filter("filesizeformat", filesizeformat_filter);
     tera.register_filter("slice", slice_filter);
+    tera.register_filter("json_island", json_island_filter);
+}
+
+fn json_island_filter(value: &Value, _args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let json = serde_json::to_string(value).map_err(|e| tera::Error::msg(e.to_string()))?;
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            _ => out.push(c),
+        }
+    }
+    Ok(Value::String(out))
 }
 
 fn register_functions(tera: &mut Tera, endpoints: Arc<RwLock<HashMap<String, String>>>) {
@@ -221,7 +238,9 @@ fn format_datetime_filter(
     };
 
     match dt {
-        Some(d) => Ok(Value::String(d.with_timezone(&tz).format(format).to_string())),
+        Some(d) => Ok(Value::String(
+            d.with_timezone(&tz).format(format).to_string(),
+        )),
         None => Ok(value.clone()),
     }
 }

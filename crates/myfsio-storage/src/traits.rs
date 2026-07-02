@@ -8,6 +8,50 @@ use tokio::io::AsyncRead;
 pub type StorageResult<T> = Result<T, StorageError>;
 pub type AsyncReadStream = Pin<Box<dyn AsyncRead + Send>>;
 
+pub enum SnapshotSource {
+    LinkedFile(PathBuf),
+    Segments {
+        files: Vec<(std::fs::File, u64)>,
+        total: u64,
+    },
+}
+
+impl SnapshotSource {
+    pub async fn into_range_stream(
+        self,
+        start: u64,
+        len: Option<u64>,
+    ) -> std::io::Result<AsyncReadStream> {
+        match self {
+            SnapshotSource::LinkedFile(path) => {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                let mut file = tokio::fs::File::open(&path).await?;
+                if start > 0 {
+                    file.seek(std::io::SeekFrom::Start(start)).await?;
+                }
+                Ok(match len {
+                    Some(n) => Box::pin(file.take(n)),
+                    None => Box::pin(file),
+                })
+            }
+            SnapshotSource::Segments { files, total } => {
+                let tokio_files: Vec<(tokio::fs::File, u64)> = files
+                    .into_iter()
+                    .map(|(f, size)| (tokio::fs::File::from_std(f), size))
+                    .collect();
+                let effective_len = len.unwrap_or_else(|| total.saturating_sub(start));
+                let reader = crate::segments::SegmentRangeReader::from_files(
+                    tokio_files,
+                    start,
+                    effective_len,
+                )
+                .await?;
+                Ok(Box::pin(reader))
+            }
+        }
+    }
+}
+
 #[allow(async_fn_in_trait)]
 pub trait StorageEngine: Send + Sync {
     async fn list_buckets(&self) -> StorageResult<Vec<BucketMeta>>;
@@ -58,7 +102,7 @@ pub trait StorageEngine: Send + Sync {
         bucket: &str,
         key: &str,
         link_path: &std::path::Path,
-    ) -> StorageResult<ObjectMeta>;
+    ) -> StorageResult<(ObjectMeta, SnapshotSource)>;
 
     async fn snapshot_object_version_to_link(
         &self,
@@ -66,7 +110,10 @@ pub trait StorageEngine: Send + Sync {
         key: &str,
         version_id: &str,
         link_path: &std::path::Path,
-    ) -> StorageResult<ObjectMeta>;
+    ) -> StorageResult<(ObjectMeta, SnapshotSource)>;
+
+    async fn materialize_object_to_tmp(&self, bucket: &str, key: &str)
+        -> StorageResult<PathBuf>;
 
     async fn head_object(&self, bucket: &str, key: &str) -> StorageResult<ObjectMeta>;
 

@@ -121,9 +121,16 @@ fn render_iam() {
             "is_expired": false,
             "is_expiring_soon": true,
             "access_keys": [{"access_key": "AKIA1", "status": "active", "created_at": "2024-01-01"}],
-            "policy_count": 1,
-            "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            "policy_count": 2,
+            "policies": [
+                {"bucket": "*", "actions": ["*"], "prefix": "*"},
+                {"bucket": "docs", "actions": ["list", "read"], "prefix": "*"}
+            ]
         }]),
+    );
+    ctx.insert(
+        "full_access_actions_count",
+        &myfsio_auth::iam::LEGACY_FULL_ACCESS_ACTIONS.len(),
     );
     ctx.insert("iam_locked", &false);
     ctx.insert("locked_reason", &"");
@@ -284,7 +291,14 @@ fn render_website_domains() {
     let mut ctx = base_ctx();
     ctx.insert("mappings", &Vec::<Value>::new());
     ctx.insert("buckets", &Vec::<String>::new());
+    ctx.insert("website_hosting_enabled", &true);
     render_or_panic("website_domains.html", &ctx);
+    let mut disabled_ctx = base_ctx();
+    disabled_ctx.insert("mappings", &Vec::<Value>::new());
+    disabled_ctx.insert("buckets", &Vec::<String>::new());
+    disabled_ctx.insert("website_hosting_enabled", &false);
+    let rendered = render_to_string_or_panic("website_domains.html", &disabled_ctx);
+    assert!(rendered.contains("WEBSITE_HOSTING_ENABLED"));
 }
 
 #[test]

@@ -171,7 +171,7 @@
                                     <span class="text-muted small text-truncate d-inline-block" style="max-width: 200px;" title="{{ conn.endpoint_url }}">{{ conn.endpoint_url }}</span>
                                 </td>
                                 <td><span class="badge bg-primary bg-opacity-10 text-primary">{{ conn.region }}</span></td>
-                                <td><code class="small">{{ conn.access_key | slice(start=0, end=8) }}...{{ conn.access_key | slice(start=-4) }}</code></td>
+                                <td><code class="small">{% if conn.access_key | length > 12 %}{{ conn.access_key | slice(start=0, end=8) }}...{{ conn.access_key | slice(start=-4) }}{% else %}{{ conn.access_key }}{% endif %}</code></td>
                                 <td class="text-end">
                                     <div class="btn-group btn-group-sm" role="group">
                                         <button type="button" class="btn btn-outline-secondary"

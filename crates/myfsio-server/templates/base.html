@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     {% if principal %}<meta name="csrf-token" content="{{ csrf_token_value }}" />{% endif %}
-    <title>MyFSIO Console</title>
+    <title>{% block title %}MyFSIO Console{% endblock %}</title>
     <link rel="icon" type="image/png" href="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" />
     <link rel="icon" type="image/x-icon" href="{{ url_for(endpoint="static", filename="images/MyFSIO.ico") }}" />
     <link
@@ -443,7 +443,7 @@
           {% for flash in flashed_messages %}
             var type = "{{ flash.category }}";
             if (type === "danger") type = "error";
-            window.showToast({{ flash.message | json_encode | safe }}, "Notification", type);
+            window.showToast({{ flash.message | json_island | safe }}, "Notification", type);
           {% endfor %}
         {% endif %}
       })();

@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-auth"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "aes",
  "base64",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-common"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "base64",
  "chrono",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-crypto"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-server"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-storage"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2807,11 +2807,12 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "myfsio-xml"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "base64",
  "chrono",

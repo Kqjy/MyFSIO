@@ -132,8 +132,31 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
     s3_error_response(S3Error::from(err))
 }
 
+fn error_chain_has_body_timeout(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if e.downcast_ref::<tower_http::timeout::TimeoutError>().is_some() {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+fn io_error_is_body_timeout(err: &std::io::Error) -> bool {
+    error_chain_has_body_timeout(err)
+}
+
+fn request_timeout_response() -> Response {
+    tracing::warn!("request body timed out while streaming; returning RequestTimeout");
+    s3_error_response(S3Error::from_code(S3ErrorCode::RequestTimeout))
+}
+
 fn io_error_to_s3_response(err: &std::io::Error) -> Option<Response> {
     use std::io::ErrorKind;
+    if io_error_is_body_timeout(err) {
+        return Some(request_timeout_response());
+    }
     let message = err.to_string();
     let lower = message.to_ascii_lowercase();
     let hit_collision = matches!(
@@ -1761,7 +1784,10 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
         let mut data: Vec<u8> = Vec::new();
         let mut buf = [0u8; 65_536];
         loop {
-            let n = reader.read(&mut buf).await.map_err(|_| {
+            let n = reader.read(&mut buf).await.map_err(|err| {
+                if io_error_is_body_timeout(&err) {
+                    return request_timeout_response();
+                }
                 s3_error_response(S3Error::new(
                     S3ErrorCode::InvalidRequest,
                     "Failed to read aws-chunked request body",
@@ -1788,6 +1814,8 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
         let chunk = chunk.map_err(|err| {
             if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(&err) {
                 bad_digest_response(message)
+            } else if error_chain_has_body_timeout(&err) {
+                request_timeout_response()
             } else {
                 s3_error_response(S3Error::new(
                     S3ErrorCode::InvalidRequest,
@@ -2102,14 +2130,19 @@ pub async fn put_object(
             return response;
         }
         Box::pin(std::io::Cursor::new(data))
-    } else if aws_chunked {
-        Box::pin(chunked::decode_body(body))
     } else {
-        let stream = tokio_util::io::StreamReader::new(
-            body.into_data_stream()
-                .map_err(std::io::Error::other),
-        );
-        Box::pin(stream)
+        let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
+            Box::pin(chunked::decode_body(body))
+        } else {
+            Box::pin(tokio_util::io::StreamReader::new(
+                body.into_data_stream().map_err(std::io::Error::other),
+            ))
+        };
+        spool_upload_stream(
+            raw,
+            state.config.upload_stream_buffer_bytes,
+            state.config.stream_chunk_size,
+        )
     };
 
     match state
@@ -2334,7 +2367,7 @@ pub async fn get_object(
                 .await
         }
     };
-    let snap_meta = match snap_res {
+    let (snap_meta, snap_source) = match snap_res {
         Ok(m) => m,
         Err(e) => return storage_err_response(e),
     };
@@ -2373,7 +2406,7 @@ pub async fn get_object(
                 let range_str = format!("bytes={}-{}", view.start, view.start + view.length - 1);
                 return serve_range_from_snapshot(
                     &state,
-                    snap_link,
+                    snap_source,
                     snap_meta,
                     &range_str,
                     &query,
@@ -2398,53 +2431,57 @@ pub async fn get_object(
     let enc_info =
         myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&snap_meta.internal_metadata);
 
-    let (file, file_size, enc_header): (tokio::fs::File, u64, Option<&str>) =
-        match (enc_info.as_ref(), state.encryption.as_ref()) {
-            (Some(enc_info), Some(enc_svc)) => {
-                if enc_info.algorithm == "AES256" && enc_info.encrypted_data_key.is_none() {
-                    if let Err(resp) = require_sse_c_key_match(&headers, &snap_meta.internal_metadata)
-                    {
-                        let _ = tokio::fs::remove_file(&snap_link).await;
-                        return resp;
-                    }
+    let (reader, file_size, enc_header): (
+        myfsio_storage::traits::AsyncReadStream,
+        u64,
+        Option<&str>,
+    ) = match (enc_info.as_ref(), state.encryption.as_ref()) {
+        (Some(enc_info), Some(enc_svc)) => {
+            if enc_info.algorithm == "AES256" && enc_info.encrypted_data_key.is_none() {
+                if let Err(resp) = require_sse_c_key_match(&headers, &snap_meta.internal_metadata)
+                {
+                    let _ = tokio::fs::remove_file(&snap_link).await;
+                    return resp;
                 }
-                let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
-                let customer_key = match extract_sse_c_key(&headers) {
-                    Ok(key) => key,
-                    Err(resp) => {
-                        let _ = tokio::fs::remove_file(&snap_link).await;
-                        return resp;
-                    }
-                };
-                let decrypt_res = enc_svc
-                    .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
-                    .await;
-                let _ = tokio::fs::remove_file(&snap_link).await;
-                if let Err(e) = decrypt_res {
-                    let _ = tokio::fs::remove_file(&dec_tmp).await;
-                    return s3_error_response(S3Error::new(
-                        myfsio_common::error::S3ErrorCode::InternalError,
-                        format!("Decryption failed: {}", e),
-                    ));
-                }
-                let file = match open_self_deleting(dec_tmp.clone()).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        let _ = tokio::fs::remove_file(&dec_tmp).await;
-                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-                    }
-                };
-                let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-                (file, file_size, Some(enc_info.algorithm.as_str()))
             }
-            (Some(_), None) => {
-                let _ = tokio::fs::remove_file(&snap_link).await;
+            let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
+            let customer_key = match extract_sse_c_key(&headers) {
+                Ok(key) => key,
+                Err(resp) => {
+                    let _ = tokio::fs::remove_file(&snap_link).await;
+                    return resp;
+                }
+            };
+            let decrypt_res = enc_svc
+                .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
+                .await;
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            if let Err(e) = decrypt_res {
+                let _ = tokio::fs::remove_file(&dec_tmp).await;
                 return s3_error_response(S3Error::new(
                     myfsio_common::error::S3ErrorCode::InternalError,
-                    "Object is encrypted but encryption service is disabled".to_string(),
+                    format!("Decryption failed: {}", e),
                 ));
             }
-            (None, _) => {
+            let file = match open_self_deleting(dec_tmp.clone()).await {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&dec_tmp).await;
+                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                }
+            };
+            let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+            (Box::pin(file), file_size, Some(enc_info.algorithm.as_str()))
+        }
+        (Some(_), None) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return s3_error_response(S3Error::new(
+                myfsio_common::error::S3ErrorCode::InternalError,
+                "Object is encrypted but encryption service is disabled".to_string(),
+            ));
+        }
+        (None, _) => match snap_source {
+            myfsio_storage::traits::SnapshotSource::LinkedFile(_) => {
                 let file = match open_self_deleting(snap_link.clone()).await {
                     Ok(f) => f,
                     Err(e) => {
@@ -2452,11 +2489,21 @@ pub async fn get_object(
                         return storage_err_response(myfsio_storage::error::StorageError::Io(e));
                     }
                 };
-                (file, snap_meta.size, None)
+                (Box::pin(file), snap_meta.size, None)
             }
-        };
+            segments => {
+                let stream = match segments.into_range_stream(0, None).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return storage_err_response(myfsio_storage::error::StorageError::Io(e))
+                    }
+                };
+                (stream, snap_meta.size, None)
+            }
+        },
+    };
 
-    let stream = ReaderStream::with_capacity(file, stream_cap);
+    let stream = ReaderStream::with_capacity(reader, stream_cap);
     let body = Body::from_stream(stream);
 
     let meta = &snap_meta;
@@ -2953,11 +3000,10 @@ fn resolve_part_view(
     })
 }
 
-const MULTIPART_PENDING_SSE_ALG: &str = "__pending_sse_algorithm__";
-const MULTIPART_PENDING_SSE_KMS_KEY: &str = "__pending_sse_kms_key_id__";
-const MULTIPART_PENDING_SSE_C_KEY: &str = "__pending_sse_c_customer_key__";
-
-const MPU_SSE_C_MARKER: &str = "__mpu_sse_c__";
+use myfsio_common::constants::{
+    MPU_SSE_C_MARKER, MULTIPART_PENDING_SSE_ALG, MULTIPART_PENDING_SSE_C_KEY,
+    MULTIPART_PENDING_SSE_KMS_KEY,
+};
 const MPU_WRAPPED_ODK: &str = "__mpu_wrapped_odk__";
 const MPU_CHUNK_SIZE: &str = "__mpu_chunk_size__";
 const MPU_PART_NUMBERS: &str = "__mpu_part_numbers__";
@@ -3172,7 +3218,7 @@ async fn upload_part_handler_with_chunking(
         .await;
     }
 
-    let boxed: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
+    let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
         Box::pin(chunked::decode_body(body))
     } else {
         let stream = tokio_util::io::StreamReader::new(
@@ -3181,6 +3227,11 @@ async fn upload_part_handler_with_chunking(
         );
         Box::pin(stream)
     };
+    let boxed = spool_upload_stream(
+        raw,
+        state.config.upload_stream_buffer_bytes,
+        state.config.stream_chunk_size,
+    );
 
     match state
         .storage
@@ -3264,13 +3315,18 @@ async fn upload_part_sse_c(
     let plain_tmp = tmp_dir.join(format!("mpu-plain-{}", uuid::Uuid::new_v4()));
     let block_tmp = tmp_dir.join(format!("mpu-block-{}", uuid::Uuid::new_v4()));
 
-    let boxed: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
+    let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
         Box::pin(chunked::decode_body(body))
     } else {
         Box::pin(tokio_util::io::StreamReader::new(
             body.into_data_stream().map_err(std::io::Error::other),
         ))
     };
+    let boxed = spool_upload_stream(
+        raw,
+        state.config.upload_stream_buffer_bytes,
+        state.config.stream_chunk_size,
+    );
 
     if let Err(resp) = drain_stream_to_file(boxed, &plain_tmp).await {
         let _ = tokio::fs::remove_file(&plain_tmp).await;
@@ -3314,6 +3370,45 @@ async fn upload_part_sse_c(
         }
         Err(e) => storage_err_response(e),
     }
+}
+
+fn spool_upload_stream(
+    stream: myfsio_storage::traits::AsyncReadStream,
+    buffer_bytes: usize,
+    chunk_size: usize,
+) -> myfsio_storage::traits::AsyncReadStream {
+    if buffer_bytes == 0 {
+        return stream;
+    }
+    let chunk_size = chunk_size.clamp(64 * 1024, buffer_bytes.max(64 * 1024));
+    let capacity = (buffer_bytes / chunk_size).max(1);
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(capacity);
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut stream = stream;
+        let mut buf = vec![0u8; chunk_size];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx
+                        .send(Ok(bytes::Bytes::copy_from_slice(&buf[..n])))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+    });
+    Box::pin(tokio_util::io::StreamReader::new(
+        tokio_stream::wrappers::ReceiverStream::new(rx),
+    ))
 }
 
 async fn drain_stream_to_file(
@@ -3725,6 +3820,11 @@ async fn complete_multipart_handler(
             trigger_replication_for_request(state, peer_marker, bucket, key, "write");
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("content-type", "application/xml".parse().unwrap());
+            if let Some(ref vid) = meta.version_id {
+                if let Ok(value) = vid.parse() {
+                    resp_headers.insert("x-amz-version-id", value);
+                }
+            }
             if let Some(alg) = sse_alg_response {
                 if let Ok(value) = alg.parse() {
                     resp_headers.insert("x-amz-server-side-encryption", value);
@@ -4233,13 +4333,31 @@ async fn copy_object_handler(
                 .await
         }
     };
-    let snap_meta = match snap_meta {
+    let (snap_meta, snap_source) = match snap_meta {
         Ok(m) => m,
         Err(e) => {
             let _ = tokio::fs::remove_file(&src_snap).await;
             return storage_err_response(e);
         }
     };
+    if let myfsio_storage::traits::SnapshotSource::Segments { files, .. } = snap_source {
+        let dest = src_snap.clone();
+        let materialize = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut out = std::fs::File::create(&dest)?;
+            let mut reader = myfsio_storage::segments::OpenSegmentsRead::new(files);
+            std::io::copy(&mut reader, &mut out)?;
+            Ok(())
+        })
+        .await;
+        let materialize = match materialize {
+            Ok(r) => r,
+            Err(join) => Err(std::io::Error::other(join)),
+        };
+        if let Err(e) = materialize {
+            let _ = tokio::fs::remove_file(&src_snap).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    }
 
     let snap_internal = &snap_meta.internal_metadata;
 
@@ -4328,6 +4446,8 @@ async fn copy_object_handler(
 
     let mut dst_metadata = dst_metadata;
     strip_storage_managed_keys(&mut dst_metadata);
+    dst_metadata.remove(myfsio_storage::segments::META_KEY_SEGMENTS);
+    dst_metadata.remove("__part_sizes__");
 
     let (publish_path, publish_metadata, plaintext_etag_override) =
         if let Some(enc_ctx) = dst_enc_ctx {
@@ -4631,23 +4751,39 @@ async fn range_get_handler_inner(
                 .await
         }
     };
-    let meta = match snap_meta {
+    let (meta, snap_source) = match snap_meta {
         Ok(m) => m,
         Err(e) => return storage_err_response(e),
     };
 
-    serve_range_from_snapshot(state, snap_link, meta, range_str, query, headers, parts_count).await
+    serve_range_from_snapshot(state, snap_source, meta, range_str, query, headers, parts_count)
+        .await
 }
 
 async fn serve_range_from_snapshot(
     state: &AppState,
-    snap_link: std::path::PathBuf,
+    snap_source: myfsio_storage::traits::SnapshotSource,
     meta: myfsio_common::types::ObjectMeta,
     range_str: &str,
     query: &ObjectQuery,
     headers: &HeaderMap,
     parts_count: Option<u32>,
 ) -> Response {
+    let snap_link = match snap_source {
+        myfsio_storage::traits::SnapshotSource::LinkedFile(link) => link,
+        segments => {
+            return serve_range_from_segments(
+                state,
+                segments,
+                meta,
+                range_str,
+                query,
+                headers,
+                parts_count,
+            )
+            .await;
+        }
+    };
     let key = meta.key.as_str();
     let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
 
@@ -4828,6 +4964,31 @@ async fn stream_partial_content(
     let stream = ReaderStream::with_capacity(limited, stream_cap);
     let body = Body::from_stream(stream);
 
+    let headers = partial_content_headers(
+        start,
+        end,
+        plaintext_size,
+        meta,
+        key,
+        query,
+        enc_header,
+        parts_count,
+    );
+    (StatusCode::PARTIAL_CONTENT, headers, body).into_response()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn partial_content_headers(
+    start: u64,
+    end: u64,
+    plaintext_size: u64,
+    meta: &myfsio_common::types::ObjectMeta,
+    key: &str,
+    query: &ObjectQuery,
+    enc_header: Option<&str>,
+    parts_count: Option<u32>,
+) -> HeaderMap {
+    let length = end - start + 1;
     let mut headers = HeaderMap::new();
     headers.insert("content-length", length.to_string().parse().unwrap());
     headers.insert(
@@ -4872,8 +5033,52 @@ async fn stream_partial_content(
     if let Some(count) = parts_count {
         headers.insert("x-amz-mp-parts-count", count.to_string().parse().unwrap());
     }
+    headers
+}
 
-    (StatusCode::PARTIAL_CONTENT, headers, body).into_response()
+async fn serve_range_from_segments(
+    state: &AppState,
+    snap_source: myfsio_storage::traits::SnapshotSource,
+    meta: myfsio_common::types::ObjectMeta,
+    range_str: &str,
+    query: &ObjectQuery,
+    headers: &HeaderMap,
+    parts_count: Option<u32>,
+) -> Response {
+    let key = meta.key.as_str();
+    if let Some(resp) = evaluate_get_preconditions(headers, &meta) {
+        return resp;
+    }
+
+    let total = meta.size;
+    let (start, end) = match parse_range(range_str, total) {
+        Some(r) => r,
+        None => {
+            let mut extra = HeaderMap::new();
+            if let Ok(v) = format!("bytes */{}", total).parse() {
+                extra.insert(axum::http::header::CONTENT_RANGE, v);
+            }
+            return crate::s3_response::s3_error_response_with_headers(
+                S3Error::new(
+                    myfsio_common::error::S3ErrorCode::InvalidRange,
+                    format!("Range not satisfiable for size {}", total),
+                ),
+                extra,
+            );
+        }
+    };
+    let length = end - start + 1;
+
+    let reader = match snap_source.into_range_stream(start, Some(length)).await {
+        Ok(r) => r,
+        Err(e) => return storage_err_response(myfsio_storage::error::StorageError::Io(e)),
+    };
+    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
+    let body = Body::from_stream(ReaderStream::with_capacity(reader, stream_cap));
+
+    let resp_headers =
+        partial_content_headers(start, end, total, &meta, key, query, None, parts_count);
+    (StatusCode::PARTIAL_CONTENT, resp_headers, body).into_response()
 }
 
 async fn serve_mpu_sse_c(

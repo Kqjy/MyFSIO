@@ -168,7 +168,27 @@
   let currentSortField = 'name';
   let currentSortDir = 'asc';
   let pageSize = 5000;
-  let currentPrefix = '';
+  const normalizeFolderPrefix = (raw) => {
+    let p = (raw || '').replace(/^\/+/, '');
+    if (p && !p.endsWith('/')) p += '/';
+    return p;
+  };
+  const folderUrl = (prefix) => {
+    const url = new URL(window.location.href);
+    if (prefix) {
+      url.searchParams.set('prefix', prefix);
+    } else {
+      url.searchParams.delete('prefix');
+    }
+    return url.pathname + url.search + url.hash;
+  };
+  const syncPrefixToUrl = (prefix) => {
+    const target = folderUrl(prefix);
+    const current = window.location.pathname + window.location.search + window.location.hash;
+    if (target === current) return;
+    history.pushState({ objectPrefix: prefix }, '', target);
+  };
+  let currentPrefix = normalizeFolderPrefix(new URLSearchParams(window.location.search).get('prefix'));
   let allObjects = [];
   let streamFolders = [];
   let useDelimiterMode = true;
@@ -185,7 +205,8 @@
     return template.replace('KEY_PLACEHOLDER', encodeURIComponent(key).replace(/%2F/g, '/'));
   };
 
-  const ROW_HEIGHT = 53;
+  let ROW_HEIGHT = 53;
+  let rowHeightMeasured = false;
   const BUFFER_ROWS = 10;
   let visibleItems = [];
   let renderedRange = { start: 0, end: 0 };
@@ -547,6 +568,19 @@
     objectsTableBody.appendChild(bottomSpacer);
 
     attachRowHandlers();
+
+    if (!rowHeightMeasured) {
+      const firstRow = objectsTableBody.querySelector('[data-virtual-index]');
+      const measured = firstRow?.getBoundingClientRect().height;
+      if (measured) {
+        rowHeightMeasured = true;
+        if (Math.abs(measured - ROW_HEIGHT) > 1) {
+          ROW_HEIGHT = measured;
+          renderedRange = { start: -1, end: -1 };
+          renderVirtualRows();
+        }
+      }
+    }
   };
 
   let scrollTimeout = null;
@@ -948,6 +982,9 @@
       const folderPath = row.dataset.folderPath;
 
       const checkbox = row.querySelector('[data-folder-select]');
+      if (checkbox && selectedRows.has(folderPath)) {
+        checkbox.checked = true;
+      }
       checkbox?.addEventListener('change', (e) => {
         e.stopPropagation();
         if (checkbox.checked) {
@@ -1114,7 +1151,7 @@
       `;
     } else {
       rootLi.innerHTML = `
-        <a href="#" data-folder-nav="" class="text-decoration-none">
+        <a href="${escapeHtml(folderUrl(''))}" data-folder-nav="" class="text-decoration-none">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
             <path d="M8.354 1.146a.5.5 0 0 0-.708 0l-6 6A.5.5 0 0 0 1.5 7.5v7a.5.5 0 0 0 .5.5h4.5a.5.5 0 0 0 .5-.5v-4h2v4a.5.5 0 0 0 .5.5H14a.5.5 0 0 0 .5-.5v-7a.5.5 0 0 0-.146-.354L13 5.793V2.5a.5.5 0 0 0-.5-.5h-1a.5.5 0 0 0-.5.5v1.293L8.354 1.146zM2.5 14V7.707l5.5-5.5 5.5 5.5V14H10v-4a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v4H2.5z"/>
           </svg>
@@ -1138,7 +1175,7 @@
           li.textContent = part;
         } else {
           const a = document.createElement('a');
-          a.href = '#';
+          a.href = folderUrl(accumulated);
           a.className = 'text-decoration-none';
           a.dataset.folderNav = accumulated;
           a.textContent = part;
@@ -1150,6 +1187,7 @@
 
     ol.querySelectorAll('[data-folder-nav]').forEach(link => {
       link.addEventListener('click', (e) => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
         e.preventDefault();
         navigateToFolder(link.dataset.folderNav);
       });
@@ -1204,12 +1242,15 @@
     return tr;
   };
 
-  const navigateToFolder = (prefix) => {
+  const navigateToFolder = (prefix, { updateHistory = true } = {}) => {
     if (streamAbortController) {
       streamAbortController.abort();
       streamAbortController = null;
     }
 
+    if (updateHistory) {
+      syncPrefixToUrl(prefix);
+    }
     currentPrefix = prefix;
 
     if (scrollContainer) scrollContainer.scrollTop = 0;
@@ -1227,6 +1268,13 @@
     isLoadingObjects = false;
     loadObjects(false);
   };
+
+  window.addEventListener('popstate', () => {
+    const prefix = normalizeFolderPrefix(new URLSearchParams(window.location.search).get('prefix'));
+    if (prefix !== currentPrefix) {
+      navigateToFolder(prefix, { updateHistory: false });
+    }
+  });
 
   const renderObjectsView = () => {
     if (!objectsTableBody) return;
@@ -1715,9 +1763,16 @@
     }
   };
 
+  const versionTimestamp = (entry) => {
+    if (!entry) return '';
+    if (entry.archived_at_display) return entry.archived_at_display;
+    const raw = entry.archived_at || entry.last_modified;
+    return raw ? new Date(raw).toLocaleString() : entry.version_id;
+  };
+
   const confirmVersionRestore = (row, version, label = null, onConfirm) => {
     if (!version) return;
-    const timestamp = (version.archived_at || version.last_modified) ? new Date(version.archived_at || version.last_modified).toLocaleString() : version.version_id;
+    const timestamp = versionTimestamp(version);
     const sizeLabel = formatBytes(Number(version.size) || 0);
     const reasonLabel = describeVersionReason(version.reason);
     const targetLabel = label || row?.dataset.key || 'this object';
@@ -1790,9 +1845,9 @@
 
       const latestCell = document.createElement('td');
       if (item.latest) {
-        const ts = (item.latest.archived_at || item.latest.last_modified) ? new Date(item.latest.archived_at || item.latest.last_modified).toLocaleString() : item.latest.version_id;
+        const ts = versionTimestamp(item.latest);
         const sizeLabel = formatBytes(Number(item.latest.size) || 0);
-        latestCell.innerHTML = `<div class="small">${ts}</div><div class="text-muted small">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
+        latestCell.innerHTML = `<div class="small">${escapeHtml(ts)}</div><div class="text-muted small">${sizeLabel} · ${describeVersionReason(item.latest.reason)}</div>`;
       } else {
         latestCell.innerHTML = '<span class="text-muted small">Unknown</span>';
       }
@@ -1974,7 +2029,7 @@
       badge.textContent = `#${versionNumber}`;
       const title = document.createElement('div');
       title.className = 'fw-semibold small';
-      const timestamp = (entry.archived_at || entry.last_modified) ? new Date(entry.archived_at || entry.last_modified).toLocaleString() : entry.version_id;
+      const timestamp = versionTimestamp(entry);
       title.textContent = timestamp;
       heading.appendChild(badge);
       heading.appendChild(title);
@@ -2167,7 +2222,7 @@
 
     previewKey.textContent = row.dataset.key;
     previewSize.textContent = formatBytes(Number(row.dataset.size));
-    previewModified.textContent = row.dataset.lastModifiedIso || row.dataset.lastModified;
+    previewModified.textContent = row.dataset.lastModifiedDisplay || row.dataset.lastModifiedIso || row.dataset.lastModified;
     previewEtag.textContent = row.dataset.etag;
     downloadButton.href = row.dataset.downloadUrl;
     downloadButton.classList.remove('disabled');

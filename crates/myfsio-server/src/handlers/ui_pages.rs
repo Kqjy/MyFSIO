@@ -126,7 +126,10 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
         ("ui.cluster_dashboard", "/ui/cluster"),
         ("ui.peer_credentials", "/ui/peer-credentials"),
         ("ui.create_peer_credential", "/ui/peer-credentials/create"),
-        ("ui.delete_peer_credential", "/ui/peer-credentials/{access_key}/delete"),
+        (
+            "ui.delete_peer_credential",
+            "/ui/peer-credentials/{access_key}/delete",
+        ),
         ("ui.audit_log", "/ui/audit-log"),
         ("ui.metrics_dashboard", "/ui/metrics"),
         ("ui.system_dashboard", "/ui/system"),
@@ -153,10 +156,7 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
 fn page_context(state: &AppState, session: &SessionHandle, endpoint: &str) -> Context {
     let mut ctx = base_context(session, Some(endpoint));
     let live_principal = crate::handlers::ui::current_principal(state, session);
-    let is_admin = live_principal
-        .as_ref()
-        .map(|p| p.is_admin)
-        .unwrap_or(false);
+    let is_admin = live_principal.as_ref().map(|p| p.is_admin).unwrap_or(false);
     let principal_value = session.read(|s| {
         s.user_id.as_ref().map(|uid| {
             json!({
@@ -791,11 +791,7 @@ pub async fn iam_dashboard(
                     policy
                         .get("actions")
                         .and_then(|value| value.as_array())
-                        .map(|actions| {
-                            actions
-                                .iter()
-                                .any(|action| action.as_str() == Some("*"))
-                        })
+                        .map(|actions| actions.iter().any(|action| action.as_str() == Some("*")))
                         .unwrap_or(false)
                 })
             })
@@ -843,6 +839,10 @@ pub async fn iam_dashboard(
         serde_json::to_string_pretty(&state.iam.export_config(true)).unwrap_or_default();
     ctx.insert("config_document", &config_doc);
     ctx.insert("config_summary", &json!({ "user_count": users.len() }));
+    ctx.insert(
+        "full_access_actions_count",
+        &myfsio_auth::iam::LEGACY_FULL_ACCESS_ACTIONS.len(),
+    );
     render(&state, "iam.html", &ctx)
 }
 
@@ -1795,7 +1795,8 @@ pub async fn add_peer_site(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await
+        {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
                 reason
@@ -1961,7 +1962,8 @@ pub async fn update_peer_site(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(&endpoint).await
+        {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
                 reason
@@ -2206,8 +2208,27 @@ fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
             let timestamp = execution.get("timestamp").and_then(|value| value.as_f64());
             let bytes_freed = execution
                 .get("result")
-                .and_then(|value| value.get("temp_bytes_freed"))
-                .and_then(|value| value.as_u64())
+                .map(|result| {
+                    result
+                        .get("total_bytes_freed")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or_else(|| {
+                            [
+                                "temp_bytes_freed",
+                                "quarantine_bytes_freed",
+                                "multipart_bytes_freed",
+                                "orphaned_version_bytes_freed",
+                            ]
+                            .iter()
+                            .map(|key| {
+                                result
+                                    .get(key)
+                                    .and_then(|value| value.as_u64())
+                                    .unwrap_or(0)
+                            })
+                            .sum::<u64>()
+                        })
+                })
                 .unwrap_or(0);
             if let Some(obj) = execution.as_object_mut() {
                 obj.insert(
@@ -2363,6 +2384,10 @@ pub async fn website_domains_dashboard(
     ctx.insert("domains", &mappings);
     ctx.insert("mappings", &mappings);
     ctx.insert("buckets", &buckets);
+    ctx.insert(
+        "website_hosting_enabled",
+        &state.config.website_hosting_enabled,
+    );
     render(&state, "website_domains.html", &ctx)
 }
 
@@ -2676,7 +2701,10 @@ async fn create_peer_replication_rules_impl(
         session.write(|s| {
             s.push_flash(
                 "success",
-                format!("Created {} replication rule(s) for {}.", created, peer_label),
+                format!(
+                    "Created {} replication rule(s) for {}.",
+                    created, peer_label
+                ),
             )
         });
         if !conflict_buckets.is_empty() {
@@ -3170,8 +3198,8 @@ impl ConnectionForm {
         } else {
             TuningProfile::from_str_opt(profile_str)
         };
-        let part_size_bytes = parse_optional_u64(&self.tuning_part_size_mb)
-            .map(|mb| mb.saturating_mul(1024 * 1024));
+        let part_size_bytes =
+            parse_optional_u64(&self.tuning_part_size_mb).map(|mb| mb.saturating_mul(1024 * 1024));
         let multipart_concurrency = parse_optional_u64(&self.tuning_concurrency)
             .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
         let part_buffer_bytes = parse_optional_u64(&self.tuning_buffer_kb)
@@ -3223,7 +3251,8 @@ fn connection_tuning_json(
         t.and_then(|t| t.profile.map(|p| p.as_str())).unwrap_or(""),
         t.and_then(|t| t.part_size_bytes).map(|b| b / (1024 * 1024)),
         t.and_then(|t| t.multipart_concurrency),
-        t.and_then(|t| t.part_buffer_bytes).map(|b| (b / 1024) as u64),
+        t.and_then(|t| t.part_buffer_bytes)
+            .map(|b| (b / 1024) as u64),
         t.and_then(|t| t.mpu_in_place_retries),
     )
 }
@@ -3259,7 +3288,8 @@ pub async fn create_connection(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await
+        {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
                 reason
@@ -3374,7 +3404,8 @@ pub async fn update_connection(
     }
 
     if !state.config.allow_internal_endpoints {
-        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await {
+        if let Err(reason) = crate::handlers::ui_api::guard_external_endpoint_async(endpoint).await
+        {
             let message = format!(
                 "Endpoint rejected: {}. Set ALLOW_INTERNAL_ENDPOINTS=true to allow private targets.",
                 reason
@@ -3932,8 +3963,14 @@ mod connection_form_tests {
         assert!(stored > 0, "must not wrap to 0; got {stored}");
         assert_eq!(stored, u32::MAX);
         let resolved = tuning.resolve().mpu_in_place_retries;
-        assert!(resolved > 1, "resolved retries must exceed 1; got {resolved}");
-        assert!(resolved <= 10, "resolved must be clamped to documented max; got {resolved}");
+        assert!(
+            resolved > 1,
+            "resolved retries must exceed 1; got {resolved}"
+        );
+        assert!(
+            resolved <= 10,
+            "resolved must be clamped to documented max; got {resolved}"
+        );
     }
 
     #[test]

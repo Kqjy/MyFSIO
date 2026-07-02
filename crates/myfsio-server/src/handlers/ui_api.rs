@@ -462,7 +462,7 @@ fn manifest_timestamp(value: &VersionManifest) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
-fn manifest_to_json(record: &VersionManifest) -> Value {
+fn manifest_to_json(record: &VersionManifest, tz: chrono_tz::Tz) -> Value {
     let ts = manifest_timestamp(record);
     let public_metadata: HashMap<&String, &String> = record
         .metadata
@@ -475,6 +475,7 @@ fn manifest_to_json(record: &VersionManifest) -> Value {
         "size": record.size,
         "etag": record.etag,
         "archived_at": ts.to_rfc3339(),
+        "archived_at_display": format_display_timestamp(&ts, tz),
         "last_modified": ts.to_rfc3339(),
         "metadata": public_metadata,
         "reason": record.reason.clone().unwrap_or_else(|| "update".to_string()),
@@ -1115,13 +1116,27 @@ pub struct ListObjectsQuery {
     pub delimiter: Option<String>,
 }
 
-fn object_json(bucket_name: &str, o: &myfsio_common::types::ObjectMeta) -> Value {
+fn display_tz(state: &AppState) -> chrono_tz::Tz {
+    state
+        .config
+        .display_timezone
+        .parse()
+        .unwrap_or(chrono_tz::UTC)
+}
+
+fn format_display_timestamp(dt: &DateTime<Utc>, tz: chrono_tz::Tz) -> String {
+    dt.with_timezone(&tz)
+        .format("%Y-%m-%d %H:%M:%S %Z")
+        .to_string()
+}
+
+fn object_json(bucket_name: &str, o: &myfsio_common::types::ObjectMeta, tz: chrono_tz::Tz) -> Value {
     json!({
         "key": o.key,
         "size": o.size,
         "last_modified": o.last_modified.to_rfc3339(),
         "last_modified_iso": o.last_modified.to_rfc3339(),
-        "last_modified_display": o.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+        "last_modified_display": format_display_timestamp(&o.last_modified, tz),
         "etag": o.etag.clone().unwrap_or_default(),
         "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
         "content_type": o.content_type.clone().unwrap_or_default(),
@@ -1171,6 +1186,7 @@ pub async fn list_bucket_objects(
         .unwrap_or(false);
 
     let use_shallow = q.delimiter.as_deref() == Some("/");
+    let tz = display_tz(&state);
 
     if use_shallow {
         let params = myfsio_common::types::ShallowListParams {
@@ -1188,7 +1204,7 @@ pub async fn list_bucket_objects(
                 let objects: Vec<Value> = res
                     .objects
                     .iter()
-                    .map(|o| object_json(&bucket_name, o))
+                    .map(|o| object_json(&bucket_name, o, tz))
                     .collect();
                 let view_count: u64 = if prefix_active {
                     (objects.len() + res.common_prefixes.len()) as u64
@@ -1223,7 +1239,7 @@ pub async fn list_bucket_objects(
             let objects: Vec<Value> = res
                 .objects
                 .iter()
-                .map(|o| object_json(&bucket_name, o))
+                .map(|o| object_json(&bucket_name, o, tz))
                 .collect();
             let view_count: u64 = if prefix_active {
                 objects.len() as u64
@@ -1292,6 +1308,7 @@ pub async fn stream_bucket_objects(
 
     let storage = state.storage.clone();
     let bucket = bucket_name.clone();
+    let tz = display_tz(&state);
 
     tokio::spawn(async move {
         if tx
@@ -1337,7 +1354,7 @@ pub async fn stream_bucket_objects(
                                 "size": o.size,
                                 "last_modified": o.last_modified.to_rfc3339(),
                                 "last_modified_iso": o.last_modified.to_rfc3339(),
-                                "last_modified_display": o.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                "last_modified_display": format_display_timestamp(&o.last_modified, tz),
                                 "etag": o.etag.clone().unwrap_or_default(),
                                 "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
                             })
@@ -1386,7 +1403,7 @@ pub async fn stream_bucket_objects(
                                 "size": o.size,
                                 "last_modified": o.last_modified.to_rfc3339(),
                                 "last_modified_iso": o.last_modified.to_rfc3339(),
-                                "last_modified_display": o.last_modified.format("%Y-%m-%d %H:%M:%S").to_string(),
+                                "last_modified_display": format_display_timestamp(&o.last_modified, tz),
                                 "etag": o.etag.clone().unwrap_or_default(),
                                 "storage_class": o.storage_class.clone().unwrap_or_else(|| "STANDARD".to_string()),
                             })
@@ -1465,6 +1482,7 @@ pub async fn search_bucket_objects(
     let limit = q.limit.unwrap_or(500).clamp(1, 1000);
     let prefix = q.prefix.clone().unwrap_or_default();
     let start_after = q.start_after.clone().filter(|s| !s.is_empty());
+    let tz = display_tz(&state);
 
     if term.is_empty() {
         return Json(json!({ "results": [], "truncated": false, "next_token": Value::Null }))
@@ -1496,7 +1514,7 @@ pub async fn search_bucket_objects(
                             break;
                         }
                         last_match_key = Some(o.key.clone());
-                        results.push(object_json(&bucket_name, o));
+                        results.push(object_json(&bucket_name, o, tz));
                     }
                 }
                 if truncated || !res.is_truncated || res.next_continuation_token.is_none() {
@@ -3115,9 +3133,10 @@ async fn object_metadata_json(state: &AppState, bucket: &str, key: &str) -> Resp
 }
 
 async fn object_versions_json(state: &AppState, bucket: &str, key: &str) -> Response {
+    let tz = display_tz(state);
     match read_version_manifests_for_object(state, bucket, key) {
         Ok(entries) => Json(json!({
-            "versions": entries.into_iter().map(|entry| manifest_to_json(&entry)).collect::<Vec<_>>(),
+            "versions": entries.into_iter().map(|entry| manifest_to_json(&entry, tz)).collect::<Vec<_>>(),
         }))
         .into_response(),
         Err(err) => json_error(StatusCode::BAD_REQUEST, err),
@@ -4093,6 +4112,7 @@ pub async fn archived_objects(
     if !versions_root.exists() {
         return Json(json!({ "objects": [] })).into_response();
     }
+    let tz = display_tz(&state);
 
     let mut grouped: BTreeMap<String, Vec<VersionManifest>> = BTreeMap::new();
     let mut stack = vec![versions_root];
@@ -4141,7 +4161,7 @@ pub async fn archived_objects(
             continue;
         }
         versions.sort_by_key(|b| std::cmp::Reverse(manifest_timestamp(b)));
-        let latest = versions.first().map(manifest_to_json);
+        let latest = versions.first().map(|record| manifest_to_json(record, tz));
         objects.push(json!({
             "key": key,
             "versions": versions.len(),

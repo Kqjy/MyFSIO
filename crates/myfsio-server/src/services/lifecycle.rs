@@ -350,10 +350,24 @@ impl LifecycleService {
                     .get("version_id")
                     .and_then(|value| value.as_str())
                     .unwrap_or_default();
-                let data_path = entry.path().with_file_name(format!("{}.bin", version_id));
-                let _ = std::fs::remove_file(&data_path);
-                let _ = std::fs::remove_file(entry.path());
-                result.versions_deleted += 1;
+                if !version_id.is_empty() {
+                    match self
+                        .storage
+                        .delete_object_version(bucket, &key, version_id)
+                        .await
+                    {
+                        Ok(_) => result.versions_deleted += 1,
+                        Err(err) => result
+                            .errors
+                            .push(format!("expire version {}: {}", version_id, err)),
+                    }
+                } else {
+                    let data_path =
+                        entry.path().with_file_name(format!("{}.bin", version_id));
+                    let _ = std::fs::remove_file(&data_path);
+                    let _ = std::fs::remove_file(entry.path());
+                    result.versions_deleted += 1;
+                }
             }
         }
         None

@@ -569,7 +569,7 @@ window.IAMManagement = (function() {
   }
 
   function updateUserCount() {
-    var countEl = document.querySelector('.card-header .text-muted.small');
+    var countEl = document.getElementById('iamUserCount');
     if (countEl) {
       var count = document.querySelectorAll('.iam-user-card').length;
       countEl.textContent = count + ' user' + (count !== 1 ? 's' : '') + ' configured';
@@ -675,7 +675,7 @@ window.IAMManagement = (function() {
           onSuccess: function(data) {
             policyModal.hide();
 
-            var userCard = document.querySelector('.iam-user-item[data-user-id="' + userId + '"]');
+            var userCard = document.querySelector('.iam-user-item[data-user-id="' + CSS.escape(userId) + '"]');
             if (userCard) {
               var cardEl = userCard.querySelector('.iam-user-card');
               var badgeContainer = cardEl ? cardEl.querySelector('[data-policy-badges]') : null;
@@ -726,7 +726,7 @@ window.IAMManagement = (function() {
             editUserModal.hide();
 
             var newName = data.display_name || document.getElementById('editUserDisplayName').value;
-            var editBtn = document.querySelector('[data-edit-user][data-user-id="' + key + '"]');
+            var editBtn = document.querySelector('[data-edit-user][data-user-id="' + CSS.escape(key) + '"]');
             if (editBtn) {
               editBtn.setAttribute('data-display-name', newName);
               var card = editBtn.closest('.iam-user-card');
@@ -778,7 +778,7 @@ window.IAMManagement = (function() {
               return;
             }
 
-            var deleteBtn = document.querySelector('[data-delete-user][data-user-id="' + key + '"]');
+            var deleteBtn = document.querySelector('[data-delete-user][data-user-id="' + CSS.escape(key) + '"]');
             if (deleteBtn) {
               var cardCol = deleteBtn.closest('[class*="col-"]');
               if (cardCol) {

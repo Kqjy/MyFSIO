@@ -351,6 +351,16 @@ impl BatchRun {
     }
 }
 
+struct TmpFileGuard(Option<PathBuf>);
+
+impl Drop for TmpFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 struct InFlightGuard {
     run: Option<Arc<BatchRun>>,
     manager: Option<Arc<ReplicationManager>>,
@@ -1075,25 +1085,49 @@ impl ReplicationManager {
             }
         }
 
-        let src_path = match self.storage.get_object_path(bucket, object_key).await {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::error!("Source object not found: {}/{}", bucket, object_key);
-                return ReplicateOutcome::Failed;
+        let stored_meta = self
+            .storage
+            .get_object_metadata(bucket, object_key)
+            .await
+            .unwrap_or_default();
+        let segmented =
+            stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
+        let (src_path, _materialized_guard) = if segmented {
+            match self
+                .storage
+                .materialize_object_to_tmp(bucket, object_key)
+                .await
+            {
+                Ok(p) => {
+                    let guard = TmpFileGuard(Some(p.clone()));
+                    (p, guard)
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to materialize segmented source {}/{} for replication: {}",
+                        bucket,
+                        object_key,
+                        e
+                    );
+                    return ReplicateOutcome::Failed;
+                }
+            }
+        } else {
+            match self.storage.get_object_path(bucket, object_key).await {
+                Ok(p) => (p, TmpFileGuard(None)),
+                Err(_) => {
+                    tracing::error!("Source object not found: {}/{}", bucket, object_key);
+                    return ReplicateOutcome::Failed;
+                }
             }
         };
         let file_size = match tokio::fs::metadata(&src_path).await {
             Ok(m) => m.len(),
             Err(_) => 0,
         };
-        let stored_meta = self
-            .storage
-            .get_object_metadata(bucket, object_key)
-            .await
-            .unwrap_or_default();
         let mut obj_meta = ReplicationObjectMeta::from_internal_metadata(&stored_meta);
         if obj_meta.content_type.is_none() {
-            obj_meta.content_type = mime_guess::from_path(&src_path)
+            obj_meta.content_type = mime_guess::from_path(object_key)
                 .first_raw()
                 .map(|s| s.to_string());
         }

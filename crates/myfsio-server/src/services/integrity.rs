@@ -1232,7 +1232,8 @@ fn check_phantom(
     for full_key in keys {
         pacer.tick();
         let info = &entries[full_key];
-        if metadata_is_corrupted(&entry_metadata_map(&info.entry)) {
+        let meta_map = entry_metadata_map(&info.entry);
+        if metadata_is_corrupted(&meta_map) {
             continue;
         }
         state.objects_scanned += 1;
@@ -1245,6 +1246,34 @@ fn check_phantom(
                 full_key,
                 "metadata entry without file on disk".to_string(),
             );
+        } else if let Some(seg_id) = meta_map.get(myfsio_storage::segments::META_KEY_SEGMENTS) {
+            let seg_dir = bucket_path.parent().map(|root| {
+                root.join(".myfsio.sys")
+                    .join("buckets")
+                    .join(bucket)
+                    .join(myfsio_storage::segments::SEGMENTS_DIR)
+                    .join(seg_id)
+            });
+            let sizes = meta_map
+                .get("__part_sizes__")
+                .and_then(|raw| myfsio_storage::fs_backend::parse_part_sizes(raw));
+            let intact = match (seg_dir, sizes) {
+                (Some(dir), Some(sizes)) => {
+                    myfsio_storage::segments::SegmentSet::new(dir, sizes)
+                        .verify_files()
+                        .is_ok()
+                }
+                _ => false,
+            };
+            if !intact {
+                state.phantom_metadata += 1;
+                state.push_issue(
+                    "missing_segments",
+                    bucket,
+                    full_key,
+                    "segmented object is missing or has mismatched segment files".to_string(),
+                );
+            }
         }
     }
 }

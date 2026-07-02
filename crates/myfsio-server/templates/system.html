@@ -373,18 +373,6 @@
 (function () {
   var csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
 
-  function setLoading(btnId, loading, spinnerOnly) {
-    var btn = document.getElementById(btnId);
-    if (!btn) return;
-    btn.disabled = loading;
-    if (loading && !spinnerOnly) {
-      btn.dataset.originalHtml = btn.innerHTML;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Running...';
-    } else if (!loading && btn.dataset.originalHtml) {
-      btn.innerHTML = btn.dataset.originalHtml;
-    }
-  }
-
   function formatBytes(bytes) {
     if (!bytes || bytes === 0) return '0 B';
     var units = ['B', 'KB', 'MB', 'GB'];
@@ -394,7 +382,7 @@
     return (i === 0 ? b : b.toFixed(1)) + ' ' + units[i];
   }
 
-  var _displayTimezone = {{ display_timezone| json_encode | safe }};
+  var _displayTimezone = {{ display_timezone | json_island | safe }};
 
   function formatTimestamp(ts) {
     var d = new Date(ts * 1000);
@@ -436,9 +424,11 @@
         var r = exec.result || {};
         var cleaned = (r.temp_files_deleted || 0) + (r.multipart_uploads_deleted || 0) +
           (r.lock_files_deleted || 0) + (r.orphaned_metadata_deleted || 0) +
-          (r.orphaned_versions_deleted || 0) + (r.empty_dirs_removed || 0);
-        var freed = (r.temp_bytes_freed || 0) + (r.multipart_bytes_freed || 0) +
-          (r.orphaned_version_bytes_freed || 0);
+          (r.orphaned_versions_deleted || 0) + (r.empty_dirs_removed || 0) +
+          (r.quarantine_entries_deleted || 0);
+        var freed = r.total_bytes_freed != null ? r.total_bytes_freed :
+          (r.temp_bytes_freed || 0) + (r.quarantine_bytes_freed || 0) +
+          (r.multipart_bytes_freed || 0) + (r.orphaned_version_bytes_freed || 0);
         var mode = exec.dry_run
           ? '<span class="badge bg-warning bg-opacity-10 text-warning">Dry run</span>'
           : '<span class="badge bg-primary bg-opacity-10 text-primary">Live</span>';
@@ -498,8 +488,49 @@
     .catch(function () {});
   }
 
-  var _gcPollTimer = null;
-  var _gcLastDryRun = false;
+  function makeStatusPoller(opts) {
+    var timer = null;
+    var failures = 0;
+    function schedule(ms) {
+      clearTimeout(timer);
+      timer = setTimeout(tick, ms);
+    }
+    function tick() {
+      if (document.hidden) {
+        schedule(2000);
+        return;
+      }
+      fetch(opts.statusUrl, {
+        headers: {'X-CSRFToken': csrfToken},
+        cache: 'no-store'
+      })
+      .then(function (r) {
+        if (!r.ok) throw new Error('status ' + r.status);
+        return r.json();
+      })
+      .then(function (status) {
+        failures = 0;
+        if (status.scanning) {
+          var elapsed = status.scan_elapsed_seconds || 0;
+          document.getElementById(opts.elapsedId).textContent = ' (' + elapsed.toFixed(0) + 's)';
+          schedule(2000);
+        } else {
+          opts.setScanning(false);
+          opts.onDone();
+        }
+      })
+      .catch(function () {
+        failures++;
+        schedule(failures >= 5 ? 15000 : 3000);
+      });
+    }
+    return {
+      start: function () {
+        failures = 0;
+        schedule(2000);
+      }
+    };
+  }
 
   function _gcSetScanning(scanning) {
     var banner = document.getElementById('gcScanningBanner');
@@ -529,9 +560,11 @@
 
     var totalItems = (data.temp_files_deleted || 0) + (data.multipart_uploads_deleted || 0) +
                       (data.lock_files_deleted || 0) + (data.orphaned_metadata_deleted || 0) +
-                      (data.orphaned_versions_deleted || 0) + (data.empty_dirs_removed || 0);
-    var totalFreed = (data.temp_bytes_freed || 0) + (data.multipart_bytes_freed || 0) +
-                     (data.orphaned_version_bytes_freed || 0);
+                      (data.orphaned_versions_deleted || 0) + (data.empty_dirs_removed || 0) +
+                      (data.quarantine_entries_deleted || 0);
+    var totalFreed = data.total_bytes_freed != null ? data.total_bytes_freed :
+                     (data.temp_bytes_freed || 0) + (data.quarantine_bytes_freed || 0) +
+                     (data.multipart_bytes_freed || 0) + (data.orphaned_version_bytes_freed || 0);
 
     alert.className = totalItems > 0 ? 'alert alert-success mb-0 small' : 'alert alert-info mb-0 small';
     title.textContent = (dryRun ? '[Dry Run] ' : '') + 'Completed in ' + (data.execution_time_seconds || 0).toFixed(2) + 's';
@@ -542,6 +575,7 @@
     if (data.lock_files_deleted) lines.push('Lock files: ' + data.lock_files_deleted);
     if (data.orphaned_metadata_deleted) lines.push('Orphaned metadata: ' + data.orphaned_metadata_deleted);
     if (data.orphaned_versions_deleted) lines.push('Orphaned versions: ' + data.orphaned_versions_deleted + ' (' + formatBytes(data.orphaned_version_bytes_freed) + ')');
+    if (data.quarantine_entries_deleted) lines.push('Quarantine entries: ' + data.quarantine_entries_deleted + ' (' + formatBytes(data.quarantine_bytes_freed) + ')');
     if (data.empty_dirs_removed) lines.push('Empty directories: ' + data.empty_dirs_removed);
     if (totalItems === 0) lines.push('Nothing to clean up.');
     if (totalFreed > 0) lines.push('Total freed: ' + formatBytes(totalFreed));
@@ -550,41 +584,28 @@
     body.innerHTML = lines.join('<br>');
   }
 
-  function _gcPoll() {
-    fetch('{{ url_for(endpoint="ui.system_gc_status") }}', {
-      headers: {'X-CSRFToken': csrfToken},
-      cache: 'no-store'
-    })
-    .then(function (r) { return r.json(); })
-    .then(function (status) {
-      if (status.scanning) {
-        var elapsed = status.scan_elapsed_seconds || 0;
-        document.getElementById('gcScanElapsed').textContent = ' (' + elapsed.toFixed(0) + 's)';
-        _gcPollTimer = setTimeout(_gcPoll, 2000);
-      } else {
-        _gcSetScanning(false);
-        _gcRefreshHistory();
-        fetch('{{ url_for(endpoint="ui.system_gc_history") }}?limit=1', {
-          headers: {'X-CSRFToken': csrfToken},
-          cache: 'no-store'
-        })
-        .then(function (r) { return r.json(); })
-        .then(function (hist) {
-          if (hist.executions && hist.executions.length > 0) {
-            var latest = hist.executions[0];
-            _gcShowResult(latest.result, latest.dry_run);
-          }
-        })
-        .catch(function () {});
-      }
-    })
-    .catch(function () {
-      _gcPollTimer = setTimeout(_gcPoll, 3000);
-    });
-  }
+  var _gcPoller = makeStatusPoller({
+    statusUrl: '{{ url_for(endpoint="ui.system_gc_status") }}',
+    elapsedId: 'gcScanElapsed',
+    setScanning: _gcSetScanning,
+    onDone: function () {
+      _gcRefreshHistory();
+      fetch('{{ url_for(endpoint="ui.system_gc_history") }}?limit=1', {
+        headers: {'X-CSRFToken': csrfToken},
+        cache: 'no-store'
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (hist) {
+        if (hist.executions && hist.executions.length > 0) {
+          var latest = hist.executions[0];
+          _gcShowResult(latest.result, latest.dry_run);
+        }
+      })
+      .catch(function () {});
+    }
+  });
 
   window.runGC = function (dryRun) {
-    _gcLastDryRun = dryRun;
     document.getElementById('gcResult').classList.add('d-none');
     _gcSetScanning(true);
 
@@ -608,7 +629,7 @@
         return;
       }
       if (data.status === 'started' || data.scanning === true || data.running === true) {
-        _gcPollTimer = setTimeout(_gcPoll, 2000);
+        _gcPoller.start();
         return;
       }
       _gcSetScanning(false);
@@ -630,11 +651,8 @@
 
   {% if gc_status.scanning %}
   _gcSetScanning(true);
-  _gcPollTimer = setTimeout(_gcPoll, 2000);
+  _gcPoller.start();
   {% endif %}
-
-  var _integrityPollTimer = null;
-  var _integrityLastMode = {dryRun: false, autoHeal: false};
 
   function _integritySetScanning(scanning) {
     var banner = document.getElementById('integrityScanningBanner');
@@ -688,41 +706,28 @@
     body.innerHTML = lines.join('<br>');
   }
 
-  function _integrityPoll() {
-    fetch('{{ url_for(endpoint="ui.system_integrity_status") }}', {
-      headers: {'X-CSRFToken': csrfToken},
-      cache: 'no-store'
-    })
-    .then(function (r) { return r.json(); })
-    .then(function (status) {
-      if (status.scanning) {
-        var elapsed = status.scan_elapsed_seconds || 0;
-        document.getElementById('integrityScanElapsed').textContent = ' (' + elapsed.toFixed(0) + 's)';
-        _integrityPollTimer = setTimeout(_integrityPoll, 2000);
-      } else {
-        _integritySetScanning(false);
-        _integrityRefreshHistory();
-        fetch('{{ url_for(endpoint="ui.system_integrity_history") }}?limit=1', {
-          headers: {'X-CSRFToken': csrfToken},
-          cache: 'no-store'
-        })
-        .then(function (r) { return r.json(); })
-        .then(function (hist) {
-          if (hist.executions && hist.executions.length > 0) {
-            var latest = hist.executions[0];
-            _integrityShowResult(latest.result, latest.dry_run, latest.auto_heal);
-          }
-        })
-        .catch(function () {});
-      }
-    })
-    .catch(function () {
-      _integrityPollTimer = setTimeout(_integrityPoll, 3000);
-    });
-  }
+  var _integrityPoller = makeStatusPoller({
+    statusUrl: '{{ url_for(endpoint="ui.system_integrity_status") }}',
+    elapsedId: 'integrityScanElapsed',
+    setScanning: _integritySetScanning,
+    onDone: function () {
+      _integrityRefreshHistory();
+      fetch('{{ url_for(endpoint="ui.system_integrity_history") }}?limit=1', {
+        headers: {'X-CSRFToken': csrfToken},
+        cache: 'no-store'
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (hist) {
+        if (hist.executions && hist.executions.length > 0) {
+          var latest = hist.executions[0];
+          _integrityShowResult(latest.result, latest.dry_run, latest.auto_heal);
+        }
+      })
+      .catch(function () {});
+    }
+  });
 
   window.runIntegrity = function (dryRun, autoHeal) {
-    _integrityLastMode = {dryRun: dryRun, autoHeal: autoHeal};
     document.getElementById('integrityResult').classList.add('d-none');
     _integritySetScanning(true);
 
@@ -746,7 +751,7 @@
         return;
       }
       if (data.status === 'started' || data.scanning === true || data.running === true) {
-        _integrityPollTimer = setTimeout(_integrityPoll, 2000);
+        _integrityPoller.start();
         return;
       }
       _integritySetScanning(false);
@@ -768,7 +773,7 @@
 
   {% if integrity_status.scanning %}
   _integritySetScanning(true);
-  _integrityPollTimer = setTimeout(_integrityPoll, 2000);
+  _integrityPoller.start();
   {% endif %}
 })();
 </script>

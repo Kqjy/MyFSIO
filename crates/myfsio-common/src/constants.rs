@@ -13,6 +13,11 @@ pub const KEY_DATA_MARKER_FILE: &str = ".__myfsio_keydata__";
 
 pub const INTERNAL_FOLDERS: &[&str] = &[".meta", ".versions", ".multipart"];
 
+pub const MULTIPART_PENDING_SSE_ALG: &str = "__pending_sse_algorithm__";
+pub const MULTIPART_PENDING_SSE_KMS_KEY: &str = "__pending_sse_kms_key_id__";
+pub const MULTIPART_PENDING_SSE_C_KEY: &str = "__pending_sse_c_customer_key__";
+pub const MPU_SSE_C_MARKER: &str = "__mpu_sse_c__";
+
 pub const DEFAULT_REGION: &str = "us-east-1";
 pub const AWS_SERVICE: &str = "s3";
 

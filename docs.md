@@ -136,8 +136,11 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `ADMIN_SECRET_KEY` | unset | Optional deterministic first-run/reset secret key |
 | `SESSION_LIFETIME_DAYS` | `1` | UI session lifetime in days |
 | `LOG_LEVEL` | `INFO` | Log verbosity (also honored as `RUST_LOG`) |
-| `REQUEST_BODY_TIMEOUT_SECONDS` | `60` | Per-request body read timeout |
+| `REQUEST_BODY_TIMEOUT_SECONDS` | `300` | Idle timeout between request-body reads; stalled uploads receive `400 RequestTimeout` |
+| `UPLOAD_STREAM_BUFFER_BYTES` | `8388608` | In-memory buffer between client stream and disk writer for uploads (8 MiB); `0` disables |
 | `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum part size enforced where applicable (5 MiB) |
+| `MULTIPART_OBJECT_LAYOUT` | `segments` | How completed multipart objects are stored: `segments` keeps part files and completes in O(metadata) (recommended, especially on HDD/ext4); `concat` assembles one file like older releases. Affects new completes only; both layouts stay readable. Note: binaries older than this feature cannot read `segments` objects |
+| `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Age before an orphaned (unreferenced) multipart segment directory is garbage-collected |
 | `BULK_DELETE_MAX_KEYS` | `1000` | Maximum keys per UI bulk-delete request |
 | `STREAM_CHUNK_SIZE` | `1048576` | Default streaming chunk size for opt-in routes |
 | `OBJECT_KEY_MAX_LENGTH_BYTES` | `1024` | Maximum object key length |
@@ -225,6 +228,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `GC_TEMP_FILE_MAX_AGE_HOURS` | `24` | Delete temp files older than this |
 | `GC_MULTIPART_MAX_AGE_DAYS` | `7` | Delete orphaned multipart uploads older than this |
 | `GC_LOCK_FILE_MAX_AGE_HOURS` | `1` | Delete stale lock files older than this |
+| `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Delete orphaned multipart segment directories older than this |
 | `GC_DRY_RUN` | `false` | Log deletions without removing files |
 
 ### Encryption tuning
