@@ -53,6 +53,7 @@ pub struct ServerConfig {
     pub metrics_retention_hours: u64,
     pub metrics_history_interval_minutes: u64,
     pub metrics_history_retention_hours: u64,
+    pub metrics_storage_refresh_minutes: u64,
     pub lifecycle_enabled: bool,
     pub lifecycle_max_history_per_bucket: usize,
     pub website_hosting_enabled: bool,
@@ -210,6 +211,8 @@ impl ServerConfig {
         let metrics_retention_hours = parse_u64_env("OPERATION_METRICS_RETENTION_HOURS", 24);
         let metrics_history_interval_minutes = parse_u64_env("METRICS_HISTORY_INTERVAL_MINUTES", 5);
         let metrics_history_retention_hours = parse_u64_env("METRICS_HISTORY_RETENTION_HOURS", 24);
+        let metrics_storage_refresh_minutes =
+            parse_u64_env("METRICS_STORAGE_REFRESH_MINUTES", 30).max(5);
 
         let lifecycle_enabled = parse_bool_env("LIFECYCLE_ENABLED", false);
         let lifecycle_max_history_per_bucket =
@@ -270,8 +273,7 @@ impl ServerConfig {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let relay_idempotency_cache_size =
-            parse_usize_env("RELAY_IDEMPOTENCY_CACHE_SIZE", 10_000);
+        let relay_idempotency_cache_size = parse_usize_env("RELAY_IDEMPOTENCY_CACHE_SIZE", 10_000);
         let relay_idempotency_ttl_secs = parse_u64_env("RELAY_IDEMPOTENCY_TTL_SECONDS", 3_600);
         let audit_log_enabled = parse_bool_env("AUDIT_LOG_ENABLED", false);
         let cors_origins = parse_list_env("CORS_ORIGINS", "*");
@@ -286,10 +288,7 @@ impl ServerConfig {
             match raw.parse::<chrono_tz::Tz>() {
                 Ok(_) => raw,
                 Err(_) => {
-                    tracing::warn!(
-                        "Invalid DISPLAY_TIMEZONE '{}', falling back to UTC",
-                        raw
-                    );
+                    tracing::warn!("Invalid DISPLAY_TIMEZONE '{}', falling back to UTC", raw);
                     "UTC".to_string()
                 }
             }
@@ -299,8 +298,8 @@ impl ServerConfig {
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
         let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 300);
         let upload_stream_buffer_bytes = parse_usize_env("UPLOAD_STREAM_BUFFER_BYTES", 8_388_608);
-        let multipart_object_layout = std::env::var("MULTIPART_OBJECT_LAYOUT")
-            .unwrap_or_else(|_| "segments".to_string());
+        let multipart_object_layout =
+            std::env::var("MULTIPART_OBJECT_LAYOUT").unwrap_or_else(|_| "segments".to_string());
         let ratelimit_default =
             parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(50_000, 60));
         let ratelimit_list_buckets =
@@ -357,6 +356,7 @@ impl ServerConfig {
             metrics_retention_hours,
             metrics_history_interval_minutes,
             metrics_history_retention_hours,
+            metrics_storage_refresh_minutes,
             lifecycle_enabled,
             lifecycle_max_history_per_bucket,
             website_hosting_enabled,
@@ -462,6 +462,7 @@ impl Default for ServerConfig {
             metrics_retention_hours: 24,
             metrics_history_interval_minutes: 5,
             metrics_history_retention_hours: 24,
+            metrics_storage_refresh_minutes: 30,
             lifecycle_enabled: false,
             lifecycle_max_history_per_bucket: 50,
             website_hosting_enabled: false,

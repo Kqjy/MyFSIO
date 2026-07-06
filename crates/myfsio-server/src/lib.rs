@@ -258,6 +258,14 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/metrics/operations/history",
             get(ui_api::metrics_operations_history),
         )
+        .route(
+            "/ui/metrics/operations/errors",
+            get(ui_api::metrics_operations_errors),
+        )
+        .route(
+            "/ui/metrics/operations/error-summary",
+            get(ui_api::metrics_operations_error_summary),
+        )
         .route("/ui/system", get(ui_pages::system_dashboard))
         .route("/ui/system/gc/status", get(ui_api::gc_status_ui))
         .route("/ui/system/gc/run", post(ui_api::gc_run_ui))
@@ -441,8 +449,14 @@ pub fn create_router(state: state::AppState) -> Router {
                 "/myfsio/kms/keys/{key_id}/disable",
                 axum::routing::post(handlers::kms::disable_key),
             )
-            .route("/myfsio/kms/encrypt", axum::routing::post(handlers::kms::encrypt))
-            .route("/myfsio/kms/decrypt", axum::routing::post(handlers::kms::decrypt))
+            .route(
+                "/myfsio/kms/encrypt",
+                axum::routing::post(handlers::kms::encrypt),
+            )
+            .route(
+                "/myfsio/kms/decrypt",
+                axum::routing::post(handlers::kms::decrypt),
+            )
             .route(
                 "/myfsio/kms/generate-data-key",
                 axum::routing::post(handlers::kms::generate_data_key),

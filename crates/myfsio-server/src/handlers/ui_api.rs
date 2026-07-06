@@ -118,10 +118,7 @@ async fn ensure_ui_authorized(
     let access_key = match session.read(|s| s.user_id.clone()) {
         Some(k) => k,
         None => {
-            return Err(json_error(
-                StatusCode::UNAUTHORIZED,
-                "Sign in to continue.",
-            ));
+            return Err(json_error(StatusCode::UNAUTHORIZED, "Sign in to continue."));
         }
     };
     let principal = match state.iam.get_principal(&access_key) {
@@ -148,10 +145,7 @@ async fn authorize_ui_list_prefix(
     let access_key = match session.read(|s| s.user_id.clone()) {
         Some(k) => k,
         None => {
-            return Err(json_error(
-                StatusCode::UNAUTHORIZED,
-                "Sign in to continue.",
-            ));
+            return Err(json_error(StatusCode::UNAUTHORIZED, "Sign in to continue."));
         }
     };
     let principal = match state.iam.get_principal(&access_key) {
@@ -1130,7 +1124,11 @@ fn format_display_timestamp(dt: &DateTime<Utc>, tz: chrono_tz::Tz) -> String {
         .to_string()
 }
 
-fn object_json(bucket_name: &str, o: &myfsio_common::types::ObjectMeta, tz: chrono_tz::Tz) -> Value {
+fn object_json(
+    bucket_name: &str,
+    o: &myfsio_common::types::ObjectMeta,
+    tz: chrono_tz::Tz,
+) -> Value {
     json!({
         "key": o.key,
         "size": o.size,
@@ -1179,11 +1177,7 @@ pub async fn list_bucket_objects(
         .unwrap_or(false);
     let bucket_stats = state.storage.bucket_stats(&bucket_name).await.ok();
     let bucket_total = bucket_stats.as_ref().map(|s| s.objects).unwrap_or(0);
-    let prefix_active = q
-        .prefix
-        .as_deref()
-        .map(|p| !p.is_empty())
-        .unwrap_or(false);
+    let prefix_active = q.prefix.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
 
     let use_shallow = q.delimiter.as_deref() == Some("/");
     let tz = display_tz(&state);
@@ -1712,7 +1706,9 @@ pub(crate) fn guard_external_endpoint(endpoint: &str) -> Result<(), &'static str
     if trimmed.is_empty() {
         return Err("empty endpoint");
     }
-    let scheme_idx = trimmed.find("://").ok_or("missing scheme (use http:// or https://)")?;
+    let scheme_idx = trimmed
+        .find("://")
+        .ok_or("missing scheme (use http:// or https://)")?;
     let scheme = &trimmed[..scheme_idx];
     if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return Err("only http and https schemes are allowed");
@@ -1738,7 +1734,10 @@ pub(crate) fn guard_external_endpoint(endpoint: &str) -> Result<(), &'static str
         return Err("missing host");
     }
     let lowered = host_part.to_ascii_lowercase();
-    if matches!(lowered.as_str(), "localhost" | "ip6-localhost" | "ip6-loopback") {
+    if matches!(
+        lowered.as_str(),
+        "localhost" | "ip6-localhost" | "ip6-loopback"
+    ) {
         return Err("loopback hostnames are not allowed");
     }
     if lowered.ends_with(".localhost") || lowered.ends_with(".local") {
@@ -3239,14 +3238,16 @@ async fn object_presign_json(
     let credential = format!("{}/{}/{}/s3/aws4_request", access_key, date_stamp, region);
 
     let canonical_uri = format!("/{}/{}", bucket, encode_object_key(key));
-    let mut query_params = [(
+    let mut query_params = [
+        (
             "X-Amz-Algorithm".to_string(),
             "AWS4-HMAC-SHA256".to_string(),
         ),
         ("X-Amz-Credential".to_string(), credential.clone()),
         ("X-Amz-Date".to_string(), amz_date.clone()),
         ("X-Amz-Expires".to_string(), expires.to_string()),
-        ("X-Amz-SignedHeaders".to_string(), "host".to_string())];
+        ("X-Amz-SignedHeaders".to_string(), "host".to_string()),
+    ];
     query_params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
     let canonical_query = query_params
@@ -3521,9 +3522,7 @@ async fn delete_object_json(
     }
 
     if purge_versions {
-        if let Err(resp) =
-            ensure_versions_unlocked_for_purge(state, bucket, key).await
-        {
+        if let Err(resp) = ensure_versions_unlocked_for_purge(state, bucket, key).await {
             return resp;
         }
         if let Err(err) = state.storage.delete_object(bucket, key).await {
@@ -3568,7 +3567,10 @@ async fn ensure_versions_unlocked_for_purge(
     let entries = match std::fs::read_dir(&version_dir) {
         Ok(entries) => entries,
         Err(err) => {
-            return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()));
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                err.to_string(),
+            ));
         }
     };
     for entry in entries.flatten() {
@@ -3733,8 +3735,7 @@ mod object_action_tests {
 
     #[test]
     fn parses_delete_for_key_containing_restore() {
-        let (key, action) =
-            parse_object_post_action("foo/restore/bar.txt/delete").expect("parsed");
+        let (key, action) = parse_object_post_action("foo/restore/bar.txt/delete").expect("parsed");
         assert_eq!(key, "foo/restore/bar.txt");
         assert!(matches!(action, ObjectPostAction::Delete));
     }
@@ -3910,8 +3911,7 @@ pub async fn bulk_delete_objects(
 
     for entry in &cleaned {
         if entry.ends_with('/') {
-            if let Err(resp) =
-                authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
+            if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
             {
                 return resp;
             }
@@ -3942,9 +3942,7 @@ pub async fn bulk_delete_objects(
     let mut errors = Vec::new();
 
     for key in keys {
-        if let Err(message) =
-            authorize_bulk_key(&state, &session, &bucket_name, &key).await
-        {
+        if let Err(message) = authorize_bulk_key(&state, &session, &bucket_name, &key).await {
             errors.push(json!({ "key": key, "error": message }));
             continue;
         }
@@ -3953,9 +3951,7 @@ pub async fn bulk_delete_objects(
             continue;
         }
         if payload.purge_versions {
-            if let Err(message) =
-                check_versions_lock_for_bulk(&state, &bucket_name, &key).await
-            {
+            if let Err(message) = check_versions_lock_for_bulk(&state, &bucket_name, &key).await {
                 errors.push(json!({ "key": key, "error": message }));
                 continue;
             }
@@ -4037,8 +4033,7 @@ pub async fn bulk_download_objects(
 
     for entry in &cleaned {
         if entry.ends_with('/') {
-            if let Err(resp) =
-                authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
+            if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, entry).await
             {
                 return resp;
             }
@@ -4206,9 +4201,7 @@ pub async fn archived_post_dispatch(
         if let Err(resp) = ensure_object_lock_allows_ui_delete(&state, &bucket_name, key).await {
             return resp;
         }
-        if let Err(resp) =
-            ensure_versions_unlocked_for_purge(&state, &bucket_name, key).await
-        {
+        if let Err(resp) = ensure_versions_unlocked_for_purge(&state, &bucket_name, key).await {
             return resp;
         }
         match purge_object_versions_for_key(&state, &bucket_name, key).await {
@@ -4753,6 +4746,16 @@ pub struct HoursQuery {
     pub hours: Option<u64>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct OperationErrorsQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub bucket: Option<String>,
+}
+
 pub async fn metrics_history(
     State(state): State<AppState>,
     Query(q): Query<HoursQuery>,
@@ -4785,6 +4788,7 @@ pub async fn metrics_operations(State(state): State<AppState>) -> Response {
             Json(json!({
                 "enabled": true,
                 "stats": stats,
+                "interval_minutes": metrics.interval_minutes(),
             }))
             .into_response()
         }
@@ -4806,7 +4810,7 @@ pub async fn metrics_operations_history(
             Json(json!({
                 "enabled": true,
                 "history": history,
-                "interval_minutes": 5,
+                "interval_minutes": metrics.interval_minutes(),
             }))
             .into_response()
         }
@@ -4814,6 +4818,49 @@ pub async fn metrics_operations_history(
             "enabled": false,
             "history": [],
             "interval_minutes": 5,
+        }))
+        .into_response(),
+    }
+}
+
+pub async fn metrics_operations_errors(
+    State(state): State<AppState>,
+    Query(q): Query<OperationErrorsQuery>,
+) -> Response {
+    match &state.metrics {
+        Some(metrics) => Json(metrics.recent_errors(
+            q.limit.unwrap_or(100),
+            q.code.as_deref().filter(|value| !value.is_empty()),
+            q.bucket.as_deref().filter(|value| !value.is_empty()),
+        ))
+        .into_response(),
+        None => Json(json!({
+            "enabled": false,
+            "total_buffered": 0,
+            "errors": [],
+        }))
+        .into_response(),
+    }
+}
+
+pub async fn metrics_operations_error_summary(
+    State(state): State<AppState>,
+    Query(q): Query<HoursQuery>,
+) -> Response {
+    let requested = match q.hours.unwrap_or(1) {
+        6 => 6,
+        24 => 24,
+        _ => 1,
+    };
+    match &state.metrics {
+        Some(metrics) => Json(metrics.error_summary(requested)).into_response(),
+        None => Json(json!({
+            "enabled": false,
+            "hours": requested,
+            "total_errors": 0,
+            "error_codes": {},
+            "error_buckets": {},
+            "window_included": false,
         }))
         .into_response(),
     }

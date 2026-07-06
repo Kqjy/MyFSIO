@@ -263,6 +263,9 @@ async fn main() {
         .expect("Failed to listen for Ctrl+C");
     tracing::info!("Shutdown signal received");
     shutdown.notify_waiters();
+    if let Some(metrics) = &state.metrics {
+        metrics.flush();
+    }
 
     if let Err(err) = api_task.await.unwrap_or(Ok(())) {
         tracing::error!("API server exited with error: {}", err);
@@ -271,6 +274,9 @@ async fn main() {
         if let Err(err) = task.await.unwrap_or(Ok(())) {
             tracing::error!("UI server exited with error: {}", err);
         }
+    }
+    if let Some(metrics) = &state.metrics {
+        metrics.flush();
     }
 
     for handle in bg_handles {
@@ -553,13 +559,12 @@ fn migrate_peer_credentials(config: &ServerConfig) {
         .collect();
 
     if candidates.is_empty() {
-        println!(
-            "No peer_inbound_access_key entries found in site registry; nothing to migrate."
-        );
+        println!("No peer_inbound_access_key entries found in site registry; nothing to migrate.");
         return;
     }
 
-    let iam = IamService::new_with_secret(config.iam_config_path.clone(), config.secret_key.clone());
+    let iam =
+        IamService::new_with_secret(config.iam_config_path.clone(), config.secret_key.clone());
 
     let mut migrated: Vec<String> = Vec::new();
     let mut already: Vec<String> = Vec::new();

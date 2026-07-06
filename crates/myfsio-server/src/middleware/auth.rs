@@ -191,10 +191,7 @@ fn parse_website_config(value: &Value) -> Option<(String, Option<String>)> {
     }
 }
 
-fn apply_website_object_headers(
-    headers: &mut HeaderMap,
-    meta: &myfsio_common::types::ObjectMeta,
-) {
+fn apply_website_object_headers(headers: &mut HeaderMap, meta: &myfsio_common::types::ObjectMeta) {
     if let Some(ref etag) = meta.etag {
         if let Ok(value) = format!("\"{}\"", etag).parse() {
             headers.insert(header::ETAG, value);
@@ -597,10 +594,23 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
         let error_code = if status >= 400 {
-            Some(s3_code_for_status(status))
+            Some(
+                response
+                    .headers()
+                    .get("x-amz-error-code")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| s3_code_for_status(status).to_string()),
+            )
         } else {
             None
         };
+        let request_id = response
+            .headers()
+            .get("x-amz-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (bucket, key) = bucket_key_from_path(&path);
         metrics.record_request(
             method.as_str(),
             endpoint_type,
@@ -608,7 +618,11 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
             latency_ms,
             bytes_in,
             bytes_out,
-            error_code,
+            error_code.as_deref(),
+            bucket.as_deref(),
+            key.as_deref(),
+            request_id.as_deref(),
+            "api",
         );
     }
 
@@ -683,6 +697,32 @@ fn s3_code_for_status(status: u16) -> &'static str {
         503 => "ServiceUnavailable",
         _ => "Other",
     }
+}
+
+fn bucket_key_from_path(path: &str) -> (Option<String>, Option<String>) {
+    if path == "/" || path == "/myfsio" || path.starts_with("/myfsio/") {
+        return (None, None);
+    }
+    if path == "/ui" || path.starts_with("/ui/") {
+        return (None, None);
+    }
+    let trimmed = path.trim_start_matches('/');
+    let Some((bucket, rest)) = trimmed.split_once('/') else {
+        return if trimmed.is_empty() {
+            (None, None)
+        } else {
+            (Some(trimmed.to_string()), None)
+        };
+    };
+    if bucket.is_empty() {
+        return (None, None);
+    }
+    let key = if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    };
+    (Some(bucket.to_string()), key)
 }
 
 enum AuthResult {
@@ -768,7 +808,15 @@ async fn authorize_request(
 
     if remaining.is_empty() {
         let action = resolve_bucket_action(method, query);
-        return authorize_action(state, principal, bucket, action, None, method_access(method)).await;
+        return authorize_action(
+            state,
+            principal,
+            bucket,
+            action,
+            None,
+            method_access(method),
+        )
+        .await;
     }
 
     let object_key = remaining.join("/");
@@ -873,14 +921,8 @@ pub async fn ui_authorize_list(
     Err("Access denied".to_string())
 }
 
-pub async fn ui_can_see_bucket(
-    state: &AppState,
-    principal: &Principal,
-    bucket: &str,
-) -> bool {
-    let iam_allowed = state
-        .iam
-        .authorize(principal, Some(bucket), "list", None);
+pub async fn ui_can_see_bucket(state: &AppState, principal: &Principal, bucket: &str) -> bool {
+    let iam_allowed = state.iam.authorize(principal, Some(bucket), "list", None);
     let policy_decision = evaluate_bucket_policy(
         state,
         Some(principal.access_key.as_str()),
@@ -1012,8 +1054,9 @@ async fn evaluate_bucket_policy(
     match policy.get("Statement") {
         Some(Value::Array(items)) => {
             for statement in items.iter() {
-                match evaluate_policy_statement(statement, access_key, bucket, action, object_key, write)
-                {
+                match evaluate_policy_statement(
+                    statement, access_key, bucket, action, object_key, write,
+                ) {
                     PolicyDecision::Deny => return PolicyDecision::Deny,
                     PolicyDecision::Allow => decision = PolicyDecision::Allow,
                     PolicyDecision::Neutral => {}
@@ -1021,7 +1064,9 @@ async fn evaluate_bucket_policy(
             }
         }
         Some(statement) => {
-            return evaluate_policy_statement(statement, access_key, bucket, action, object_key, write);
+            return evaluate_policy_statement(
+                statement, access_key, bucket, action, object_key, write,
+            );
         }
         None => return PolicyDecision::Neutral,
     }
@@ -1108,7 +1153,9 @@ fn action_grant_matches(policy_action: &str, requested_action: &str, write: Opti
 
 fn policy_action_is_write(policy_action: &str) -> Option<bool> {
     let normalized = policy_action.trim().to_ascii_lowercase();
-    let verb = normalized.strip_prefix("s3:").unwrap_or(normalized.as_str());
+    let verb = normalized
+        .strip_prefix("s3:")
+        .unwrap_or(normalized.as_str());
     if verb.starts_with("get") || verb.starts_with("list") || verb.starts_with("head") {
         Some(false)
     } else if verb.starts_with("put") || verb.starts_with("delete") || verb.starts_with("create") {
@@ -1182,8 +1229,7 @@ fn policy_action_matches(policy_action: &str, requested_action: &str) -> bool {
     }
     if normalized_policy.contains('*') || normalized_policy.contains('?') {
         for (s3_action, internal_action) in S3_ACTION_TABLE {
-            if *internal_action == requested_action
-                && wildcard_match(s3_action, &normalized_policy)
+            if *internal_action == requested_action && wildcard_match(s3_action, &normalized_policy)
             {
                 return true;
             }
@@ -1391,8 +1437,8 @@ fn try_auth(state: &AppState, req: &Request) -> AuthResult {
         return verify_sigv4_query(state, req);
     }
 
-    let has_legacy_headers = req.headers().get("x-access-key").is_some()
-        || req.headers().get("x-secret-key").is_some();
+    let has_legacy_headers =
+        req.headers().get("x-access-key").is_some() || req.headers().get("x-secret-key").is_some();
     if has_legacy_headers && !state.config.allow_legacy_header_auth {
         tracing::warn!(
             "Rejecting x-access-key/x-secret-key auth (set ALLOW_LEGACY_HEADER_AUTH=true to re-enable; SigV4 is preferred)"
@@ -1832,10 +1878,22 @@ mod tests {
 
     #[test]
     fn subresource_read_grant_does_not_authorize_write() {
-        assert!(action_grant_matches("s3:GetBucketCors", "cors", Some(false)));
-        assert!(!action_grant_matches("s3:GetBucketCors", "cors", Some(true)));
+        assert!(action_grant_matches(
+            "s3:GetBucketCors",
+            "cors",
+            Some(false)
+        ));
+        assert!(!action_grant_matches(
+            "s3:GetBucketCors",
+            "cors",
+            Some(true)
+        ));
         assert!(action_grant_matches("s3:PutBucketCors", "cors", Some(true)));
-        assert!(!action_grant_matches("s3:PutBucketCors", "cors", Some(false)));
+        assert!(!action_grant_matches(
+            "s3:PutBucketCors",
+            "cors",
+            Some(false)
+        ));
         assert!(action_grant_matches(
             "s3:GetLifecycleConfiguration",
             "lifecycle",

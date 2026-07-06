@@ -200,6 +200,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `OPERATION_METRICS_RETENTION_HOURS` | `24` | Retention window for operation metrics |
 | `METRICS_HISTORY_INTERVAL_MINUTES` | `5` | Snapshot interval for system metrics |
 | `METRICS_HISTORY_RETENTION_HOURS` | `24` | Retention window for system metrics |
+| `METRICS_STORAGE_REFRESH_MINUTES` | `30` | Interval for refreshing total stored bytes in system metrics; minimum 5 |
 
 ### Replication and site sync
 
@@ -479,9 +480,10 @@ Tune it with:
 ```bash
 METRICS_HISTORY_INTERVAL_MINUTES=10
 METRICS_HISTORY_RETENTION_HOURS=72
+METRICS_STORAGE_REFRESH_MINUTES=30
 ```
 
-Snapshots are stored in `data/.myfsio.sys/config/metrics_history.json`.
+Snapshots are stored in `data/.myfsio.sys/config/metrics_history.json` with atomic temp-file replacement. CPU sampling and storage-size walks run on blocking worker threads; total stored bytes are refreshed on the `METRICS_STORAGE_REFRESH_MINUTES` cadence and reused between refreshes.
 
 ### Operation metrics
 
@@ -499,6 +501,8 @@ OPERATION_METRICS_RETENTION_HOURS=24
 ```
 
 Snapshots are stored in `data/.myfsio.sys/config/operation_metrics.json`.
+
+Empty operation windows are not persisted. The Metrics UI zero-fills gaps in charts, and `/ui/metrics/operations/error-summary?hours=1|6|24` merges the live window with persisted snapshots so S3 API error codes remain visible after snapshot rollover. Recent in-memory error details are exposed at `/ui/metrics/operations/errors?limit=N&code=X&bucket=Y`.
 
 ## 9. Encryption and KMS
 

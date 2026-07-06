@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 pub struct SystemMetricsConfig {
     pub interval_minutes: u64,
     pub retention_hours: u64,
+    pub storage_refresh_minutes: u64,
 }
 
 impl Default for SystemMetricsConfig {
@@ -19,6 +20,7 @@ impl Default for SystemMetricsConfig {
         Self {
             interval_minutes: 5,
             retention_hours: 24,
+            storage_refresh_minutes: 30,
         }
     }
 }
@@ -38,6 +40,13 @@ pub struct SystemMetricsService {
     config: SystemMetricsConfig,
     history: Arc<RwLock<Vec<SystemMetricsSnapshot>>>,
     history_path: PathBuf,
+    storage_bytes_cache: Arc<RwLock<StorageBytesCache>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StorageBytesCache {
+    bytes: u64,
+    last_refresh: Option<DateTime<Utc>>,
 }
 
 impl SystemMetricsService {
@@ -51,19 +60,7 @@ impl SystemMetricsService {
             .join("config")
             .join("metrics_history.json");
 
-        let mut history = if history_path.exists() {
-            std::fs::read_to_string(&history_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| {
-                    v.get("history").and_then(|h| {
-                        serde_json::from_value::<Vec<SystemMetricsSnapshot>>(h.clone()).ok()
-                    })
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let mut history = load_history(&history_path);
         prune_history(&mut history, config.retention_hours);
 
         Self {
@@ -72,6 +69,7 @@ impl SystemMetricsService {
             config,
             history: Arc::new(RwLock::new(history)),
             history_path,
+            storage_bytes_cache: Arc::new(RwLock::new(StorageBytesCache::default())),
         }
     }
 
@@ -82,12 +80,22 @@ impl SystemMetricsService {
     }
 
     async fn take_snapshot(&self) {
-        let snapshot = collect_snapshot(&self.storage_root, &self.storage).await;
+        let snapshot = self.collect_snapshot().await;
         let mut history = self.history.write().await;
         history.push(snapshot);
         prune_history(&mut history, self.config.retention_hours);
         drop(history);
         self.save_history().await;
+    }
+
+    async fn collect_snapshot(&self) -> SystemMetricsSnapshot {
+        collect_snapshot(
+            &self.storage_root,
+            &self.storage,
+            &self.storage_bytes_cache,
+            self.config.storage_refresh_minutes,
+        )
+        .await
     }
 
     async fn save_history(&self) {
@@ -96,10 +104,11 @@ impl SystemMetricsService {
         if let Some(parent) = self.history_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(
-            &self.history_path,
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        );
+        let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
+        let tmp = self.history_path.with_extension("json.tmp");
+        if std::fs::write(&tmp, serialized).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.history_path);
+        }
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -108,6 +117,7 @@ impl SystemMetricsService {
         tokio::spawn(async move {
             self.take_snapshot().await;
             let mut timer = tokio::time::interval(interval);
+            timer.tick().await;
             loop {
                 timer.tick().await;
                 self.take_snapshot().await;
@@ -172,22 +182,22 @@ pub fn sample_disk(path: &Path) -> (u64, u64) {
 async fn collect_snapshot(
     storage_root: &Path,
     storage: &Arc<FsStorageBackend>,
+    storage_bytes_cache: &Arc<RwLock<StorageBytesCache>>,
+    storage_refresh_minutes: u64,
 ) -> SystemMetricsSnapshot {
-    let (cpu_percent, memory_percent) = sample_system_now();
-    let (disk_total, disk_free) = sample_disk(storage_root);
+    let root = storage_root.to_path_buf();
+    let ((cpu_percent, memory_percent), (disk_total, disk_free)) =
+        tokio::task::spawn_blocking(move || (sample_system_now(), sample_disk(&root)))
+            .await
+            .unwrap_or(((0.0, 0.0), (0, 0)));
     let disk_percent = if disk_total > 0 {
         ((disk_total - disk_free) as f64 / disk_total as f64) * 100.0
     } else {
         0.0
     };
 
-    let mut storage_bytes = 0u64;
-    let buckets = storage.list_buckets().await.unwrap_or_default();
-    for bucket in buckets {
-        if let Ok(stats) = storage.bucket_stats(&bucket.name).await {
-            storage_bytes += stats.total_bytes();
-        }
-    }
+    let storage_bytes =
+        cached_storage_bytes(storage, storage_bytes_cache, storage_refresh_minutes).await;
 
     SystemMetricsSnapshot {
         timestamp: Utc::now(),
@@ -198,6 +208,154 @@ async fn collect_snapshot(
     }
 }
 
+async fn cached_storage_bytes(
+    storage: &Arc<FsStorageBackend>,
+    cache: &Arc<RwLock<StorageBytesCache>>,
+    storage_refresh_minutes: u64,
+) -> u64 {
+    let refresh_minutes = storage_refresh_minutes.max(5);
+    let now = Utc::now();
+    {
+        let cached = cache.read().await;
+        if let Some(last_refresh) = cached.last_refresh {
+            if now - last_refresh < chrono::Duration::minutes(refresh_minutes as i64) {
+                return cached.bytes;
+            }
+        }
+    }
+
+    let previous = { cache.read().await.bytes };
+    let storage = storage.clone();
+    let handle = tokio::runtime::Handle::current();
+    let refreshed = tokio::task::spawn_blocking(move || {
+        handle.block_on(async move {
+            let mut total = 0u64;
+            let buckets = storage.list_buckets().await.unwrap_or_default();
+            for bucket in buckets {
+                if let Ok(stats) = storage.bucket_stats(&bucket.name).await {
+                    total += stats.total_bytes();
+                }
+            }
+            total
+        })
+    })
+    .await
+    .unwrap_or(previous);
+
+    let mut cached = cache.write().await;
+    cached.bytes = refreshed;
+    cached.last_refresh = Some(now);
+    refreshed
+}
+
+fn load_history(path: &Path) -> Vec<SystemMetricsSnapshot> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) => value
+            .get("history")
+            .and_then(|history| {
+                serde_json::from_value::<Vec<SystemMetricsSnapshot>>(history.clone()).ok()
+            })
+            .unwrap_or_default(),
+        Err(err) => {
+            rename_corrupt_file(path, err.to_string());
+            Vec::new()
+        }
+    }
+}
+
+fn rename_corrupt_file(path: &Path, error: String) {
+    let ts = Utc::now().timestamp();
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("metrics_history.json");
+    let corrupt_path = path.with_file_name(format!("{name}.corrupt-{ts}"));
+    match std::fs::rename(path, &corrupt_path) {
+        Ok(()) => tracing::warn!(
+            path = %path.display(),
+            corrupt_path = %corrupt_path.display(),
+            error = %error,
+            "Renamed corrupt system metrics file"
+        ),
+        Err(rename_err) => tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            rename_error = %rename_err,
+            "Failed to rename corrupt system metrics file"
+        ),
+    }
+}
+
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn service(root: &Path) -> SystemMetricsService {
+        SystemMetricsService::new(
+            root,
+            Arc::new(FsStorageBackend::new(root.to_path_buf())),
+            SystemMetricsConfig {
+                interval_minutes: 5,
+                retention_hours: 1,
+                storage_refresh_minutes: 30,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn atomic_save_leaves_valid_json() {
+        let tmp = tempdir().unwrap();
+        let metrics = service(tmp.path());
+        metrics.take_snapshot().await;
+
+        let path = metrics.history_path.clone();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["history"].as_array().unwrap().len(), 1);
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn corrupt_history_file_is_renamed_on_load() {
+        let tmp = tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(".myfsio.sys")
+            .join("config")
+            .join("metrics_history.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{not json").unwrap();
+
+        let metrics = service(tmp.path());
+        assert!(metrics.get_history(None).await.is_empty());
+        assert!(!path.exists());
+        let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(entries
+            .iter()
+            .any(|name| name.starts_with("metrics_history.json.corrupt-")));
+    }
+
+    #[tokio::test]
+    async fn take_snapshot_records_single_startup_snapshot() {
+        let tmp = tempdir().unwrap();
+        let metrics = service(tmp.path());
+        metrics.take_snapshot().await;
+        let history = metrics.get_history(None).await;
+        assert_eq!(history.len(), 1);
+    }
 }

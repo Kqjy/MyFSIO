@@ -122,6 +122,7 @@ impl AppState {
                 crate::services::system_metrics::SystemMetricsConfig {
                     interval_minutes: config.metrics_history_interval_minutes,
                     retention_hours: config.metrics_history_retention_hours,
+                    storage_refresh_minutes: config.metrics_storage_refresh_minutes,
                 },
             )))
         } else {
@@ -294,7 +295,10 @@ impl AppState {
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
         let idemp_cap = NonZeroUsize::new(config.relay_idempotency_cache_size.max(1))
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
-        let audit_log = Arc::new(AuditLog::new(&config.storage_root, config.audit_log_enabled));
+        let audit_log = Arc::new(AuditLog::new(
+            &config.storage_root,
+            config.audit_log_enabled,
+        ));
         Self {
             config,
             storage,
@@ -318,9 +322,7 @@ impl AppState {
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
             relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),
-            relay_idempotency_inflight: Arc::new(Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            relay_idempotency_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
             audit_log,
         }
     }
