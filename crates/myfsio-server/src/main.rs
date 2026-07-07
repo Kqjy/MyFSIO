@@ -71,6 +71,8 @@ async fn main() {
         Command::Serve => {}
     }
 
+    myfsio_server::handlers::ui_api::init_server_start_time();
+
     ensure_iam_bootstrap(&config);
     let bind_addr = config.bind_addr;
     let ui_bind_addr = config.ui_bind_addr;

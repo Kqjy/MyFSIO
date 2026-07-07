@@ -206,6 +206,7 @@
 
     function setView(view) {
       if (view === 'list') {
+        if (container) container.classList.add('bucket-list-view');
         bucketItems.forEach(item => {
           item.classList.remove('col-md-6', 'col-xl-4');
           item.classList.add('col-12');
@@ -216,6 +217,7 @@
         });
         localStorage.setItem('bucket-view-pref', 'list');
       } else {
+        if (container) container.classList.remove('bucket-list-view');
         bucketItems.forEach(item => {
           item.classList.remove('col-12');
           item.classList.add('col-md-6', 'col-xl-4');

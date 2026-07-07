@@ -81,10 +81,7 @@ fn embedded_etag(path: &str, bytes: &[u8]) -> String {
 }
 
 fn not_modified_response(etag: &str, request_headers: &HeaderMap) -> Option<Response> {
-    let if_none_match = request_headers
-        .get(header::IF_NONE_MATCH)?
-        .to_str()
-        .ok()?;
+    let if_none_match = request_headers.get(header::IF_NONE_MATCH)?.to_str().ok()?;
     if !if_none_match.split(',').any(|tag| tag.trim() == etag) {
         return None;
     }
@@ -108,7 +105,7 @@ fn build_response(path: &str, bytes: Vec<u8>, mime: &str, etag: &str) -> Respons
     if let Ok(v) = HeaderValue::from_str(etag) {
         response.headers_mut().insert(header::ETAG, v);
     }
-    let cache_control = if path.starts_with("js/vendor/") {
+    let cache_control = if path.starts_with("js/vendor/") || path.starts_with("css/vendor/") {
         HeaderValue::from_static("public, max-age=86400")
     } else {
         HeaderValue::from_static("public, max-age=300, must-revalidate")

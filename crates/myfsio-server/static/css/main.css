@@ -1610,17 +1610,21 @@ html.sidebar-will-collapse .sidebar-user {
 
 .objects-table-container {
 	max-height: 600px;
-	overflow-y: auto;
+	overflow: auto;
+	position: relative;
+	background-color: var(--myfsio-card-bg);
+	isolation: isolate;
 }
 
 .objects-table-container thead {
 	position: sticky;
 	top: 0;
-	z-index: 10;
+	z-index: 20;
 }
 
 .objects-table-container thead th {
-	background-color: var(--myfsio-preview-bg);
+	background-color: var(--myfsio-card-bg);
+	background-clip: padding-box;
 	border-bottom: 2px solid var(--myfsio-card-border);
 	box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
 }
@@ -2393,6 +2397,117 @@ pre code {
 	font-weight: 600;
 	text-transform: uppercase;
 	letter-spacing: 0.03em;
+}
+
+.bucket-list-view {
+	gap: 0.5rem !important;
+}
+
+.bucket-list-view .bucket-card {
+	border-radius: 0.5rem !important;
+}
+
+.bucket-list-view .bucket-card::before {
+	height: 0;
+}
+
+.bucket-list-view .bucket-card:hover {
+	transform: none;
+}
+
+.bucket-list-view .bucket-card .card-body {
+	min-height: 56px;
+	padding: 0.625rem 1rem;
+	display: flex;
+	align-items: center;
+	gap: 1rem;
+	justify-content: space-between;
+}
+
+.bucket-list-view .bucket-card .card-body > .d-flex {
+	flex: 1 1 auto;
+	min-width: 0;
+	margin-bottom: 0 !important;
+	align-items: center !important;
+	gap: 1rem;
+}
+
+.bucket-list-view .bucket-card .card-body > .d-flex > .d-flex {
+	min-width: 0;
+	align-items: center !important;
+}
+
+.bucket-list-view .bucket-card .bucket-icon {
+	width: 32px;
+	height: 32px;
+	border-radius: 8px;
+}
+
+.bucket-list-view .bucket-card .bucket-icon svg {
+	width: 18px;
+	height: 18px;
+}
+
+.bucket-list-view .bucket-card .bucket-name {
+	font-size: 0.95rem;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 32vw;
+}
+
+.bucket-list-view .bucket-card small {
+	white-space: nowrap;
+}
+
+.bucket-list-view .bucket-card .bucket-access-badge {
+	flex-shrink: 0;
+}
+
+.bucket-list-view .bucket-card .bucket-stats {
+	display: flex;
+	flex: 0 0 auto;
+	gap: 1.25rem;
+	padding: 0;
+	margin-top: 0;
+	background: transparent;
+	border-radius: 0;
+}
+
+.bucket-list-view .bucket-card .bucket-stat {
+	display: flex;
+	align-items: baseline;
+	gap: 0.35rem;
+	text-align: left;
+	white-space: nowrap;
+}
+
+.bucket-list-view .bucket-card .bucket-stat-value {
+	font-size: 0.95rem;
+	line-height: 1;
+}
+
+.bucket-list-view .bucket-card .bucket-stat-label {
+	margin-top: 0;
+	font-size: 0.7rem;
+}
+
+@media (max-width: 767.98px) {
+	.bucket-list-view .bucket-card .card-body {
+		min-height: 64px;
+		align-items: flex-start;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.bucket-list-view .bucket-card .bucket-name {
+		max-width: 56vw;
+	}
+
+	.bucket-list-view .bucket-card .bucket-stats {
+		width: 100%;
+		justify-content: space-between;
+	}
 }
 
 .form-control:focus,

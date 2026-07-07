@@ -207,10 +207,13 @@ impl ServerConfig {
 
         let metrics_history_enabled = parse_bool_env("METRICS_HISTORY_ENABLED", false);
 
-        let metrics_interval_minutes = parse_u64_env("OPERATION_METRICS_INTERVAL_MINUTES", 5);
-        let metrics_retention_hours = parse_u64_env("OPERATION_METRICS_RETENTION_HOURS", 24);
-        let metrics_history_interval_minutes = parse_u64_env("METRICS_HISTORY_INTERVAL_MINUTES", 5);
-        let metrics_history_retention_hours = parse_u64_env("METRICS_HISTORY_RETENTION_HOURS", 24);
+        let metrics_interval_minutes =
+            parse_u64_env("OPERATION_METRICS_INTERVAL_MINUTES", 5).max(1);
+        let metrics_retention_hours = parse_u64_env("OPERATION_METRICS_RETENTION_HOURS", 24).max(1);
+        let metrics_history_interval_minutes =
+            parse_u64_env("METRICS_HISTORY_INTERVAL_MINUTES", 5).max(1);
+        let metrics_history_retention_hours =
+            parse_u64_env("METRICS_HISTORY_RETENTION_HOURS", 24).max(1);
         let metrics_storage_refresh_minutes =
             parse_u64_env("METRICS_STORAGE_REFRESH_MINUTES", 30).max(5);
 
@@ -733,5 +736,26 @@ mod tests {
         std::env::remove_var("RATE_LIMIT_ADMIN");
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
+    }
+
+    #[test]
+    fn metrics_intervals_and_retentions_are_floored() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("OPERATION_METRICS_INTERVAL_MINUTES", "0");
+        std::env::set_var("OPERATION_METRICS_RETENTION_HOURS", "0");
+        std::env::set_var("METRICS_HISTORY_INTERVAL_MINUTES", "0");
+        std::env::set_var("METRICS_HISTORY_RETENTION_HOURS", "0");
+
+        let config = ServerConfig::from_env();
+
+        assert_eq!(config.metrics_interval_minutes, 1);
+        assert_eq!(config.metrics_retention_hours, 1);
+        assert_eq!(config.metrics_history_interval_minutes, 1);
+        assert_eq!(config.metrics_history_retention_hours, 1);
+
+        std::env::remove_var("OPERATION_METRICS_INTERVAL_MINUTES");
+        std::env::remove_var("OPERATION_METRICS_RETENTION_HOURS");
+        std::env::remove_var("METRICS_HISTORY_INTERVAL_MINUTES");
+        std::env::remove_var("METRICS_HISTORY_RETENTION_HOURS");
     }
 }

@@ -2143,7 +2143,7 @@ pub async fn metrics_dashboard(
     let app = metrics.get("app").cloned().unwrap_or_else(|| {
         json!({
             "buckets": 0, "objects": 0, "storage_used": "0 B",
-            "uptime_days": 0, "versions": 0,
+            "uptime_days": 0, "uptime_seconds": 0, "uptime_display": "0h 0m", "versions": 0,
         })
     });
     let mem_pct = memory

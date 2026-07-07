@@ -210,7 +210,7 @@
       </div>
       <div class="d-flex gap-4 text-white text-nowrap">
         <div class="text-center">
-          <div class="fw-bold" data-metric="health_uptime">{{ app.uptime_days }}d</div>
+          <div class="fw-bold" data-metric="health_uptime">{{ app.uptime_display | default(value="0h 0m") }}</div>
           <small class="opacity-75" style="font-size: 0.7rem;">Uptime</small>
         </div>
       </div>
@@ -493,6 +493,18 @@ function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function formatUptime(seconds) {
+  seconds = Math.max(0, Number(seconds) || 0);
+  if (seconds < 86400) {
+    var hours = Math.floor(seconds / 3600);
+    var minutes = Math.floor((seconds % 3600) / 60);
+    return hours + 'h ' + minutes + 'm';
+  }
+  var days = Math.floor(seconds / 86400);
+  var remHours = Math.floor((seconds % 86400) / 3600);
+  return days + 'd ' + remHours + 'h';
+}
+
 (function() {
   var POLL_INTERVAL = 5000;
   var paused = false;
@@ -674,7 +686,7 @@ function formatTime(ts) {
         el = document.querySelector('[data-metric="versions_count2"]');
         if (el) el.textContent = data.app.versions;
         el = document.querySelector('[data-metric="health_uptime"]');
-        if (el) el.textContent = data.app.uptime_days + 'd';
+        if (el) el.textContent = data.app.uptime_display || formatUptime(data.app.uptime_seconds);
 
         var cpuHigh = data.cpu_percent > 80;
         var memHigh = data.memory.percent > 85;

@@ -536,31 +536,6 @@ fn rename_corrupt_file(path: &Path, error: String) {
     }
 }
 
-pub fn classify_endpoint(path: &str) -> &'static str {
-    if path.is_empty() || path == "/" {
-        return "service";
-    }
-    let trimmed = path.trim_end_matches('/');
-    if trimmed.starts_with("/ui") {
-        return "ui";
-    }
-    if trimmed.starts_with("/myfsio/kms") {
-        return "kms";
-    }
-    if trimmed.starts_with("/myfsio/admin") {
-        return "admin";
-    }
-    if trimmed.starts_with("/myfsio") {
-        return "service";
-    }
-    let parts: Vec<&str> = trimmed.trim_start_matches('/').split('/').collect();
-    match parts.len() {
-        0 => "service",
-        1 => "bucket",
-        _ => "object",
-    }
-}
-
 fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

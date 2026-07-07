@@ -4630,6 +4630,10 @@ pub async fn clear_replication_failures(
 static SERVER_START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static SYSINFO: std::sync::OnceLock<Mutex<System>> = std::sync::OnceLock::new();
 
+pub fn init_server_start_time() {
+    SERVER_START_TIME.get_or_init(std::time::Instant::now);
+}
+
 async fn sample_system() -> (f64, u64, u64) {
     let lock = SYSINFO.get_or_init(|| {
         let mut system = System::new();
@@ -4683,7 +4687,21 @@ fn sample_disk(path: &FsPath) -> (u64, u64) {
 
 pub async fn collect_metrics(state: &AppState) -> Value {
     let start_time = *SERVER_START_TIME.get_or_init(std::time::Instant::now);
-    let uptime_days = start_time.elapsed().as_secs_f64() / 86400.0;
+    let uptime_seconds = start_time.elapsed().as_secs();
+    let uptime_days = uptime_seconds as f64 / 86400.0;
+    let uptime_display = if uptime_seconds < 86_400 {
+        format!(
+            "{}h {}m",
+            uptime_seconds / 3600,
+            (uptime_seconds % 3600) / 60
+        )
+    } else {
+        format!(
+            "{}d {}h",
+            uptime_seconds / 86_400,
+            (uptime_seconds % 86_400) / 3600
+        )
+    };
 
     let buckets_list = state.storage.list_buckets().await.unwrap_or_default();
     let bucket_count = buckets_list.len() as u64;
@@ -4732,6 +4750,8 @@ pub async fn collect_metrics(state: &AppState) -> Value {
             "objects": total_objects,
             "versions": total_versions,
             "uptime_days": uptime_days.floor() as u64,
+            "uptime_seconds": uptime_seconds,
+            "uptime_display": uptime_display,
         },
     })
 }

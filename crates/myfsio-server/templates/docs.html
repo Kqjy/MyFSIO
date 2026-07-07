@@ -220,7 +220,7 @@ cargo build --release -p myfsio-server
               </tr>
               <tr>
                 <td><code>RATE_LIMIT_DEFAULT</code></td>
-                <td><code>5000 per minute</code></td>
+                <td><code>50000 per minute</code></td>
                 <td>Default rate limit for S3 and KMS API endpoints. Accepts <code>N per &lt;second/minute/hour/day&gt;</code> or <code>N/&lt;seconds&gt;</code>.</td>
               </tr>
               <tr>
@@ -318,6 +318,26 @@ cargo build --release -p myfsio-server
                 <td><code>METRICS_HISTORY_INTERVAL_MINUTES</code></td>
                 <td><code>5</code></td>
                 <td>Interval between history snapshots.</td>
+              </tr>
+              <tr>
+                <td><code>METRICS_STORAGE_REFRESH_MINUTES</code></td>
+                <td><code>30</code></td>
+                <td>Storage-size walk refresh interval for system metrics; minimum <code>5</code>.</td>
+              </tr>
+              <tr>
+                <td><code>OPERATION_METRICS_ENABLED</code></td>
+                <td><code>false</code></td>
+                <td>Enable operation metrics collection.</td>
+              </tr>
+              <tr>
+                <td><code>OPERATION_METRICS_INTERVAL_MINUTES</code></td>
+                <td><code>5</code></td>
+                <td>Snapshot interval for operation metrics; minimum <code>1</code>.</td>
+              </tr>
+              <tr>
+                <td><code>OPERATION_METRICS_RETENTION_HOURS</code></td>
+                <td><code>24</code></td>
+                <td>Operation metrics retention window; minimum <code>1</code>.</td>
               </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Site Sync Settings (Bidirectional Replication)</td>
@@ -553,14 +573,14 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
         <p class="text-muted">On first startup, MyFSIO generates random admin credentials and prints them to the console. Set <code>ADMIN_ACCESS_KEY</code> and <code>ADMIN_SECRET_KEY</code> for custom credentials. When <code>SECRET_KEY</code> is configured, the IAM config is encrypted at rest. To reset credentials, run <code>cargo run -p myfsio-server -- --reset-cred</code> or the installed binary with <code>--reset-cred</code>.</p>
         <div class="docs-highlight mb-3">
           <ol class="mb-0">
-            <li>Check the console output for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/ui/login</code>.</li>
+            <li>Check the console output for the generated <code>Access Key</code> and <code>Secret Key</code>, then visit <code>/login</code>.</li>
             <li>Create additional users with descriptive display names, AWS-style inline policies (for example <code>{"bucket": "*", "actions": ["list", "read"]}</code>), and optional credential expiry dates. Use <code>{"bucket": "*", "actions": ["*"]}</code> to grant full administrator access — this is the only policy shape that satisfies <code>require_admin</code> on routes such as <code>/myfsio/admin/cluster/overview</code>. <code>iam:*</code> grants only IAM-management actions and is <strong>not</strong> a substitute for <code>"*"</code> on admin routes.</li>
             <li>Set credential expiry on users to grant time-limited access. The UI shows expiry badges and provides preset durations (1h, 24h, 7d, 30d, 90d). Expired credentials are rejected at authentication.</li>
             <li>Rotate secrets when sharing with CI jobs—new secrets display once and persist to <code>data/.myfsio.sys/config/iam.json</code>.</li>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
           </ol>
         </div>
-        <p class="mb-0 text-muted">All API calls require <code>X-Access-Key</code> and <code>X-Secret-Key</code> headers. The UI stores them in the server-managed session after you log in.</p>
+        <p class="mb-0 text-muted">S3 API calls use SigV4 by default. The legacy <code>X-Access-Key</code> and <code>X-Secret-Key</code> header pair works only when <code>ALLOW_LEGACY_HEADER_AUTH=true</code>, and peer credentials are always SigV4-only. The UI stores credentials in the server-managed session after you log in.</p>
       </div>
     </article>
     <article id="console" class="card shadow-sm docs-section">
@@ -589,7 +609,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <h3 class="h6 text-uppercase text-muted">Object browser</h3>
             <ul>
               <li>Navigate folder hierarchies using breadcrumbs. Objects with <code>/</code> in keys display as folders.</li>
-              <li>Infinite scroll loads more objects automatically. Choose batch size (50–250) from the footer dropdown.</li>
+              <li>Infinite scroll loads more objects automatically.</li>
               <li>Bulk select objects for multi-delete or multi-download (ZIP archive, up to 256&nbsp;MB total). Filter by name using the search box.</li>
               <li>If loading fails, click <strong>Retry</strong> to attempt again—no page refresh needed.</li>
             </ul>
@@ -604,7 +624,7 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
           <div>
             <h3 class="h6 text-uppercase text-muted">Policies &amp; versioning</h3>
             <ul>
-              <li>Toggle versioning (requires write access). Archived-only keys are flagged so you can restore them quickly.</li>
+              <li>Toggle versioning (requires admin). Archived-only keys are flagged so you can restore them quickly.</li>
               <li>The policy editor saves each bucket policy in that bucket's <code>.bucket.json</code>; legacy <code>data/.myfsio.sys/config/bucket_policies.json</code> entries are still read as a fallback.</li>
             </ul>
           </div>
@@ -872,6 +892,7 @@ s3.complete_multipart_upload(
     UploadId=upload_id,
     MultipartUpload={'Parts': parts}
 )</code></pre>
+        <p class="small text-muted">CompleteMultipartUpload returns the completed object's version in the <code>x-amz-version-id</code> response header when versioning is active.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Presigned URLs for Sharing</h3>
 <pre class="mb-0"><code class="language-text"># Generate presigned URLs via the UI:
@@ -1059,7 +1080,7 @@ SITE_SYNC_BATCH_SIZE=100        # Max objects per sync cycle</code></pre>
             <li><strong>PULL:</strong> Background worker fetches remote changes every <code>SITE_SYNC_INTERVAL_SECONDS</code></li>
             <li><strong>Conflict Resolution:</strong> Last-Write-Wins based on <code>last_modified</code> timestamps (1-second clock skew tolerance)</li>
             <li><strong>Deletion Sync:</strong> Remote deletions propagate locally only for objects originally synced from remote</li>
-            <li><strong>Loop Prevention:</strong> <code>S3ReplicationAgent</code> and <code>SiteSyncAgent</code> User-Agents prevent infinite sync loops</li>
+            <li><strong>Loop Prevention:</strong> peer-credential requests are marked as <code>ReplicationPeerRequest</code>, and ETag/size checks short-circuit already-synced objects</li>
         </ul>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Error Handling &amp; Rate Limits</h3>
@@ -1224,7 +1245,7 @@ cargo run -p myfsio-server --</code></pre>
           <li>The signing principal is a full admin on the receiving site (policy <code>{"bucket":"*","actions":["*"]}</code>), <strong>or</strong></li>
           <li>The signing principal is a <strong>peer credential</strong> issued on the receiving site (an IAM record with the internal <code>peer_site_id</code> flag set; new peer access keys conventionally start with <code>PEERAK…</code>).</li>
         </ol>
-        <p class="small text-muted">Peer credentials are scoped: they can <strong>only</strong> call <code>/myfsio/admin/cluster/overview</code> (any S3 path returns <code>403</code>), they refuse the legacy <code>x-access-key</code>/<code>x-secret-key</code> header pair (peer creds are SigV4-only), and they do not appear in the user-management endpoints. Their requests run under a stricter 60-second clock-skew window with in-memory replay-detection LRU.</p>
+        <p class="small text-muted">Peer credentials are scoped: they can call <code>/myfsio/admin/cluster/overview</code> and the <code>/myfsio/admin/peer/*</code> relay surface (any S3 path returns <code>403</code>), they refuse the legacy <code>x-access-key</code>/<code>x-secret-key</code> header pair (peer creds are SigV4-only), and they do not appear in the user-management endpoints. Their requests run under a stricter 60-second clock-skew window with in-memory replay-detection LRU.</p>
 
         <h4 class="h6 mt-3 mb-2">Issuing a peer credential</h4>
 <pre class="mb-3"><code class="language-bash">curl -X POST {{ api_base }}/myfsio/admin/peer-credentials \
@@ -1273,7 +1294,7 @@ curl -X DELETE {{ api_base }}/myfsio/admin/peer-credentials/PEERAK…</code></pr
         <ul class="small text-muted mb-3">
           <li>Refuses any access key that shares an IAM user with other access keys (it would clear that user's policies and convert all of its keys to peer credentials). Move the AK to a dedicated user before retrying.</li>
           <li>Errors with exit code <code>1</code> when the registry references an AK that is not present in IAM, instead of silently treating it as already-migrated.</li>
-          <li>Clears the migrated user's policies. <strong>If you used the same AK as a site-sync credential, reissue separate IAM users for site-sync</strong> — the migrated AK is now restricted to <code>/myfsio/admin/cluster/overview</code>.</li>
+          <li>Clears the migrated user's policies. <strong>If you used the same AK as a site-sync credential, reissue separate IAM users for site-sync</strong> — the migrated AK is now restricted to <code>/myfsio/admin/cluster/overview</code> and <code>/myfsio/admin/peer/*</code>.</li>
         </ul>
 
         <h4 class="h6 mt-3 mb-2">Other relevant settings</h4>
@@ -1381,9 +1402,9 @@ curl {{ api_base }}/myfsio/admin/topology \
         <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
 <pre class="mb-3"><code class="language-bash"># Enable versioning
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?versioning" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"Status": "Enabled"}'
+  -d '&lt;VersioningConfiguration&gt;&lt;Status&gt;Enabled&lt;/Status&gt;&lt;/VersioningConfiguration&gt;'
 
 # Get versioning status
 curl "{{ api_base }}/&lt;bucket&gt;?versioning" \
@@ -1450,20 +1471,18 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
 
         <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
 <pre class="mb-3"><code class="language-bash"># Set quota (max 100MB, max 1000 objects)
-curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
+curl -X PUT "{{ api_base }}/&lt;bucket&gt;?quota" \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"max_bytes": 104857600, "max_objects": 1000}'
+  -d '{"max_size_bytes": 104857600, "max_objects": 1000}'
 
 # Get current quota
-curl "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
+curl "{{ api_base }}/&lt;bucket&gt;?quota" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
 
 # Remove quota
-curl -X PUT "{{ api_base }}/bucket/&lt;bucket&gt;?quota" \
-  -H "Content-Type: application/json" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"max_bytes": null, "max_objects": null}'</code></pre>
+curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?quota" \
+  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
         <div class="alert alert-light border mb-0">
           <div class="d-flex gap-2">
@@ -1552,7 +1571,7 @@ cargo run -p myfsio-server --</code></pre>
 curl -X POST {{ api_base }}/myfsio/kms/keys \
   -H "Content-Type: application/json" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"alias": "my-key", "description": "Production key"}'
+  -d '{"description": "Production key"}'
 
 # List all keys
 curl {{ api_base }}/myfsio/kms/keys \
@@ -1642,6 +1661,7 @@ curl "{{ api_base }}/my-bucket/secret.txt" \
         <p class="small text-muted mb-3">
           Lifecycle rules run in a Tokio background task, not a system cronjob. The enforcement cycle triggers every <strong>3600 seconds (1 hour)</strong> by default. Each cycle scans all buckets with lifecycle configurations and applies matching rules.
         </p>
+        <p class="small text-muted mb-3">Set <code>LIFECYCLE_ENABLED=true</code> before startup; configured lifecycle rules are stored even when the worker is disabled.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Expiration Types</h3>
         <div class="table-responsive mb-3">
@@ -1718,7 +1738,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
           <span class="docs-section-kicker">14</span>
           <h2 class="h4 mb-0">Garbage Collection</h2>
         </div>
-        <p class="text-muted">Automatically clean up orphaned data that accumulates over time: stale temp files, abandoned multipart uploads, stale lock files, orphaned metadata, orphaned versions, and empty directories.</p>
+        <p class="text-muted">Automatically clean up stale temp files, abandoned multipart uploads, stale lock files, quarantined files, orphaned segment directories, and empty internal directories.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Enabling GC</h3>
         <p class="small text-muted">Disabled by default. Enable via environment variable:</p>
@@ -1760,9 +1780,9 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
               <tr><td><strong>Temp files</strong></td><td><code>.myfsio.sys/tmp/</code></td><td>Older than configured max age</td></tr>
               <tr><td><strong>Orphaned multipart</strong></td><td><code>.myfsio.sys/multipart/</code></td><td>Older than configured max age</td></tr>
               <tr><td><strong>Stale lock files</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/locks/</code></td><td>Older than configured max age</td></tr>
-              <tr><td><strong>Orphaned metadata</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/meta/</code></td><td>Object file no longer exists</td></tr>
-              <tr><td><strong>Orphaned versions</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/versions/</code></td><td>Main object no longer exists</td></tr>
-              <tr><td><strong>Empty directories</strong></td><td>Various internal dirs</td><td>Directory is empty after cleanup</td></tr>
+              <tr><td><strong>Quarantined files</strong></td><td><code>.myfsio.sys/quarantine/&lt;bucket&gt;/</code></td><td>Older than <code>INTEGRITY_QUARANTINE_RETENTION_DAYS</code></td></tr>
+              <tr><td><strong>Orphaned segment dirs</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/segments/</code></td><td>Unreferenced and older than <code>GC_SEGMENT_MAX_AGE_HOURS</code></td></tr>
+              <tr><td><strong>Empty directories</strong></td><td><code>.myfsio.sys/tmp/</code> and <code>.myfsio.sys/multipart/</code></td><td>Directory is empty after cleanup</td></tr>
             </tbody>
           </table>
         </div>
@@ -1822,7 +1842,7 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
           <span class="docs-section-kicker">15</span>
           <h2 class="h4 mb-0">Integrity Scanner</h2>
         </div>
-        <p class="text-muted">Detect and optionally auto-repair data inconsistencies: corrupted objects, orphaned files, phantom metadata, stale versions, ETag cache drift, and unmigrated legacy metadata.</p>
+        <p class="text-muted">Detect and optionally auto-repair data inconsistencies: corrupted objects, orphaned files, phantom metadata, stale versions, and ETag cache drift.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Enabling Integrity Scanner</h3>
         <p class="small text-muted">Disabled by default. Enable via environment variable:</p>
@@ -1840,10 +1860,17 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
             </thead>
             <tbody>
               <tr><td><code>INTEGRITY_ENABLED</code></td><td><code>false</code></td><td>Enable the background integrity scanner</td></tr>
+              <tr><td><code>INTEGRITY_INTERVAL_HOURS</code></td><td><code>24</code></td><td>Hours between background scans</td></tr>
+              <tr><td><code>INTEGRITY_BATCH_SIZE</code></td><td><code>10000</code></td><td>Maximum objects scanned per cycle</td></tr>
+              <tr><td><code>INTEGRITY_AUTO_HEAL</code></td><td><code>false</code></td><td>Attempt heals after each scan</td></tr>
+              <tr><td><code>INTEGRITY_DRY_RUN</code></td><td><code>false</code></td><td>Report heal actions without changing files</td></tr>
+              <tr><td><code>INTEGRITY_HEAL_CONCURRENCY</code></td><td><code>1</code></td><td>Maximum concurrent heal tasks</td></tr>
+              <tr><td><code>INTEGRITY_SCAN_PACING_MS</code></td><td><code>0</code></td><td>Optional delay between scanned objects</td></tr>
+              <tr><td><code>INTEGRITY_QUARANTINE_RETENTION_DAYS</code></td><td><code>7</code></td><td>How long GC retains quarantined files</td></tr>
             </tbody>
           </table>
         </div>
-        <p class="small text-muted mb-3">Other scanner settings (interval, batch size, auto-heal, dry run) currently use hardcoded defaults: 24-hour interval, batch size 10&nbsp;000, auto-heal off, dry run off. Use the admin API below to trigger a one-off scan with <code>auto_heal</code> or <code>dry_run</code> overrides.</p>
+        <p class="small text-muted mb-3">Use the admin API below to trigger a one-off scan with <code>auto_heal</code> or <code>dry_run</code> overrides.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">What Gets Checked</h3>
         <div class="table-responsive mb-3">
@@ -1856,12 +1883,11 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
               </tr>
             </thead>
             <tbody>
-              <tr><td><strong>Corrupted objects</strong></td><td>File MD5 does not match stored ETag</td><td>Update ETag in index (disk is authoritative)</td></tr>
-              <tr><td><strong>Orphaned objects</strong></td><td>File exists without metadata entry</td><td>Create index entry with computed MD5/size/mtime</td></tr>
+              <tr><td><strong>Corrupted objects</strong></td><td>File MD5 does not match stored ETag</td><td>Quarantine bytes, try peer restore, otherwise mark poisoned</td></tr>
+              <tr><td><strong>Orphaned objects</strong></td><td>File exists without metadata entry</td><td>Reported only; no automatic heal</td></tr>
               <tr><td><strong>Phantom metadata</strong></td><td>Index entry exists but file is missing</td><td>Remove stale entry from index</td></tr>
-              <tr><td><strong>Stale versions</strong></td><td>Manifest without data or vice versa</td><td>Remove orphaned version file</td></tr>
-              <tr><td><strong>ETag cache</strong></td><td><code>etag_index.json</code> differs from metadata</td><td>Delete cache file (auto-rebuilt)</td></tr>
-              <tr><td><strong>Legacy metadata</strong></td><td>Legacy <code>.meta.json</code> differs or unmigrated</td><td>Migrate to index, delete legacy file</td></tr>
+              <tr><td><strong>Stale versions</strong></td><td>Manifest without data or vice versa</td><td>Move stale version files to quarantine</td></tr>
+              <tr><td><strong>ETag cache</strong></td><td><code>etag_index.json</code> differs from metadata</td><td>Rewrite the affected key entry in <code>etag_index.json</code></td></tr>
             </tbody>
           </table>
         </div>
@@ -1961,32 +1987,39 @@ cargo run -p myfsio-server --</code></pre>
                 <td><code>5</code></td>
                 <td>Interval between snapshots (minutes)</td>
               </tr>
+              <tr>
+                <td><code>METRICS_STORAGE_REFRESH_MINUTES</code></td>
+                <td><code>30</code></td>
+                <td>Storage-size walk refresh interval; minimum <code>5</code></td>
+              </tr>
             </tbody>
           </table>
         </div>
 
         <h3 class="h6 text-uppercase text-muted mt-4">API Endpoints</h3>
 <pre class="mb-3"><code class="language-bash"># Get metrics history (last 24 hours by default)
-curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/history" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+curl "http://localhost:5100/ui/metrics/history" \
+  --cookie "session=..."
 
 # Get history for specific time range
-curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/history?hours=6" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+curl "http://localhost:5100/ui/metrics/history?hours=6" \
+  --cookie "session=..."
 
 # Get current settings
-curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/settings" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+curl "http://localhost:5100/ui/metrics/settings" \
+  --cookie "session=..."
 
-# Update settings at runtime
-curl -X PUT "{{ api_base | replace(from="/api", to="/ui") }}/metrics/settings" \
+# Update display settings snapshot
+curl -X PUT "http://localhost:5100/ui/metrics/settings" \
   -H "Content-Type: application/json" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
+  --cookie "session=..." \
   -d '{"enabled": true, "retention_hours": 48, "interval_minutes": 10}'</code></pre>
+        <p class="small text-muted">These endpoints are on the UI listener and require an admin UI session. <code>PUT /ui/metrics/settings</code> updates an in-memory display snapshot only; it does not change the snapshot cadence fixed at startup and returns <code>409 CONFLICT</code> if history was disabled at boot.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
         <p class="small text-muted mb-3">History data is stored at:</p>
         <code class="d-block mb-3">data/.myfsio.sys/config/metrics_history.json</code>
+        <p class="small text-muted mb-3">Writes use atomic temp-file replacement. Corrupt files are renamed with a <code>.corrupt-&lt;ts&gt;</code> suffix, one startup snapshot is recorded when enabled, and storage-size walks are cached according to <code>METRICS_STORAGE_REFRESH_MINUTES</code>.</p>
 
         <div class="alert alert-light border mb-0">
           <div class="d-flex gap-2">
@@ -2066,34 +2099,41 @@ cargo run -p myfsio-server --</code></pre>
             <div class="bg-light rounded p-3 h-100">
               <h6 class="small fw-bold mb-2">Endpoint Breakdown</h6>
               <ul class="small text-muted mb-0 ps-3">
-                <li><code>object</code> - Object operations (GET/PUT/DELETE)</li>
-                <li><code>bucket</code> - Bucket operations</li>
-                <li><code>ui</code> - Web UI requests</li>
-                <li><code>service</code> - Health checks, etc.</li>
+                <li>API classes: <code>list_buckets</code>, <code>bucket</code>, <code>bucket_versioning</code>, <code>bucket_lifecycle</code>, <code>bucket_policy</code>, <code>bucket_website</code>, <code>bucket_encryption</code>, <code>bucket_replication</code>, <code>list_multipart_uploads</code>, <code>multipart_init</code>, <code>multipart_part</code>, <code>object_tagging</code>, <code>object_acl</code>, <code>object</code>, <code>other</code></li>
+                <li>UI classes use <code>ui_*</code> names from the UI endpoint classifier.</li>
               </ul>
             </div>
           </div>
         </div>
 
         <h3 class="h6 text-uppercase text-muted mt-4">S3 Error Codes</h3>
-        <p class="small text-muted">The dashboard tracks S3 API-specific error codes like <code>NoSuchKey</code>, <code>AccessDenied</code>, <code>BucketNotFound</code>. These are separate from HTTP status codes &ndash; a 404 from the UI won't appear here, only S3 API errors.</p>
+        <p class="small text-muted">The dashboard tracks S3 API-specific error codes like <code>NoSuchKey</code>, <code>AccessDenied</code>, and <code>NoSuchBucket</code>. The recorder reads <code>x-amz-error-code</code> first and falls back to a status-derived S3 label. UI 4xx/5xx responses are tagged <code>UIError</code> in recent errors only and are excluded from the S3 error-code map.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">API Endpoints</h3>
 <pre class="mb-3"><code class="language-bash"># Get current operation metrics
-curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+curl "http://localhost:5100/ui/metrics/operations" \
+  --cookie "session=..."
 
 # Get operation metrics history
-curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"
+curl "http://localhost:5100/ui/metrics/operations/history" \
+  --cookie "session=..."
 
 # Filter history by time range
-curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history?hours=6" \
-  -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
+curl "http://localhost:5100/ui/metrics/operations/history?hours=6" \
+  --cookie "session=..."
+
+# Error-code summary over persisted plus live windows
+curl "http://localhost:5100/ui/metrics/operations/error-summary?hours=1" \
+  --cookie "session=..."
+
+# Recent in-memory errors
+curl "http://localhost:5100/ui/metrics/operations/errors?limit=100&amp;code=NoSuchKey&amp;bucket=demo" \
+  --cookie "session=..."</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Storage Location</h3>
         <p class="small text-muted mb-3">Operation metrics data is stored at:</p>
         <code class="d-block mb-3">data/.myfsio.sys/config/operation_metrics.json</code>
+        <p class="small text-muted mb-3">Error-code summaries for 1h/6h/24h merge persisted snapshots with the live window, survive rollover and restarts, and include per-bucket attribution capped at 50 buckets plus <code>(other)</code>. Recent errors are a 256-entry in-memory ring buffer with request IDs. Error-code-over-time charts zero-fill empty buckets. Writes are atomic; corrupt files are quarantined with <code>.corrupt-&lt;ts&gt;</code>. Shutdown flushes non-empty windows, and empty windows do not write.</p>
 
         <div class="alert alert-light border mb-0">
           <div class="d-flex gap-2">
@@ -2147,11 +2187,11 @@ curl "{{ api_base | replace(from="/api", to="/ui") }}/metrics/operations/history
               <tr>
                 <td>Requests hit the wrong host</td>
                 <td>Proxy headers missing or <code>API_BASE_URL</code> incorrect</td>
-                <td>Ensure your proxy sends <code>X-Forwarded-Host</code>/<code>Proto</code> headers, or explicitly set <code>API_BASE_URL</code> to your public domain.</td>
+                <td>Set <code>API_BASE_URL</code> to your public endpoint. The server does not read <code>X-Forwarded-Host</code> or <code>X-Forwarded-Proto</code>; <code>X-Forwarded-For</code> is honored only when <code>NUM_TRUSTED_PROXIES&gt;0</code>.</td>
               </tr>
               <tr>
                 <td>Large folder uploads hitting rate limits (429)</td>
-                <td><code>RATE_LIMIT_DEFAULT</code> exceeded (5000/min by default)</td>
+                <td><code>RATE_LIMIT_DEFAULT</code> exceeded (50000/min by default)</td>
                 <td>Increase <code>RATE_LIMIT_DEFAULT</code> (or the per-route override), or upload in smaller batches. Distributed rate-limit storage is not supported yet.</td>
               </tr>
             </tbody>
@@ -2214,15 +2254,15 @@ curl {{ api_base }}/myfsio/health
         <h3 class="h6 text-uppercase text-muted mt-4">API Usage</h3>
 <pre class="mb-3"><code class="language-bash"># Set object retention
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?retention" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"Mode": "GOVERNANCE", "RetainUntilDate": "2025-12-31T23:59:59Z"}'
+  -d '&lt;Retention&gt;&lt;Mode&gt;GOVERNANCE&lt;/Mode&gt;&lt;RetainUntilDate&gt;2025-12-31T23:59:59Z&lt;/RetainUntilDate&gt;&lt;/Retention&gt;'
 
 # Enable legal hold (indefinite protection)
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{"Status": "ON"}'
+  -d '&lt;LegalHold&gt;&lt;Status&gt;ON&lt;/Status&gt;&lt;/LegalHold&gt;'
 
 # Get legal hold status
 curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
@@ -2251,21 +2291,16 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?legal-hold" \
 
 <pre class="mb-3"><code class="language-bash"># Enable access logging
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?logging" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{
-    "LoggingEnabled": {
-      "TargetBucket": "log-bucket",
-      "TargetPrefix": "logs/my-bucket/"
-    }
-  }'
+  -d '&lt;BucketLoggingStatus&gt;&lt;LoggingEnabled&gt;&lt;TargetBucket&gt;log-bucket&lt;/TargetBucket&gt;&lt;TargetPrefix&gt;logs/my-bucket/&lt;/TargetPrefix&gt;&lt;/LoggingEnabled&gt;&lt;/BucketLoggingStatus&gt;'
 
 # Get logging configuration
 curl "{{ api_base }}/&lt;bucket&gt;?logging" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;"</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Log Contents</h3>
-        <p class="small text-muted mb-0">Logs include: timestamp, bucket, key, operation type, request ID, requester, source IP, HTTP status, error codes, bytes transferred, timing, referrer, and User-Agent.</p>
+        <p class="small text-muted mb-0">Access logging is configuration-only in this server: the S3 logging configuration is stored and returned, but no access log records are generated or delivered.</p>
       </div>
     </article>
     <article id="notifications" class="card shadow-sm docs-section">
@@ -2300,23 +2335,19 @@ curl "{{ api_base }}/&lt;bucket&gt;?logging" \
 
 <pre class="mb-3"><code class="language-bash"># Set notification configuration
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{
-    "TopicConfigurations": [{
-      "Id": "upload-notify",
-      "TopicArn": "https://webhook.example.com/s3-events",
-      "Events": ["s3:ObjectCreated:*"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {"Name": "prefix", "Value": "uploads/"},
-            {"Name": "suffix", "Value": ".jpg"}
-          ]
-        }
-      }
-    }]
-  }'</code></pre>
+  -d '&lt;NotificationConfiguration&gt;
+    &lt;WebhookConfiguration&gt;
+      &lt;Id&gt;upload-notify&lt;/Id&gt;
+      &lt;Url&gt;https://webhook.example.com/s3-events&lt;/Url&gt;
+      &lt;Event&gt;s3:ObjectCreated:*&lt;/Event&gt;
+      &lt;Filter&gt;&lt;S3Key&gt;
+        &lt;FilterRule&gt;&lt;Name&gt;prefix&lt;/Name&gt;&lt;Value&gt;uploads/&lt;/Value&gt;&lt;/FilterRule&gt;
+        &lt;FilterRule&gt;&lt;Name&gt;suffix&lt;/Name&gt;&lt;Value&gt;.jpg&lt;/Value&gt;&lt;/FilterRule&gt;
+      &lt;/S3Key&gt;&lt;/Filter&gt;
+    &lt;/WebhookConfiguration&gt;
+  &lt;/NotificationConfiguration&gt;'</code></pre>
 
         <div class="alert alert-warning border-warning bg-warning-subtle mb-0">
           <div class="d-flex gap-2">
@@ -2345,16 +2376,14 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;?notification" \
 
 <pre class="mb-3"><code class="language-bash"># Query a CSV file
 curl -X POST "{{ api_base }}/&lt;bucket&gt;/data.csv?select" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{
-    "Expression": "SELECT name, age FROM s3object WHERE age > 25",
-    "ExpressionType": "SQL",
-    "InputSerialization": {
-      "CSV": {"FileHeaderInfo": "USE", "FieldDelimiter": ","}
-    },
-    "OutputSerialization": {"JSON": {}}
-  }'</code></pre>
+  -d '&lt;SelectObjectContentRequest&gt;
+    &lt;Expression&gt;SELECT name, age FROM s3object WHERE age &gt; 25&lt;/Expression&gt;
+    &lt;ExpressionType&gt;SQL&lt;/ExpressionType&gt;
+    &lt;InputSerialization&gt;&lt;CSV&gt;&lt;FileHeaderInfo&gt;USE&lt;/FileHeaderInfo&gt;&lt;FieldDelimiter&gt;,&lt;/FieldDelimiter&gt;&lt;/CSV&gt;&lt;/InputSerialization&gt;
+    &lt;OutputSerialization&gt;&lt;JSON /&gt;&lt;/OutputSerialization&gt;
+  &lt;/SelectObjectContentRequest&gt;'</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Supported Formats</h3>
         <div class="row g-2 mb-0">
@@ -2490,8 +2519,9 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
 
 <pre class="mb-3"><code class="language-bash"># Set bucket ACL
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?acl" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -H "x-amz-acl: public-read"
+  -d '&lt;AccessControlPolicy&gt;&lt;AccessControlList&gt;&lt;Grant&gt;&lt;Permission&gt;READ&lt;/Permission&gt;&lt;Grantee&gt;&lt;URI&gt;http://acs.amazonaws.com/groups/global/AllUsers&lt;/URI&gt;&lt;/Grantee&gt;&lt;/Grant&gt;&lt;/AccessControlList&gt;&lt;/AccessControlPolicy&gt;'
 
 # Set object ACL during upload
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
@@ -2515,14 +2545,9 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
         <h3 class="h6 text-uppercase text-muted mt-4">Object Tagging</h3>
 <pre class="mb-3"><code class="language-bash"># Set object tags
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?tagging" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{
-    "TagSet": [
-      {"Key": "Classification", "Value": "Confidential"},
-      {"Key": "Owner", "Value": "john@example.com"}
-    ]
-  }'
+  -d '&lt;Tagging&gt;&lt;TagSet&gt;&lt;Tag&gt;&lt;Key&gt;Classification&lt;/Key&gt;&lt;Value&gt;Confidential&lt;/Value&gt;&lt;/Tag&gt;&lt;Tag&gt;&lt;Key&gt;Owner&lt;/Key&gt;&lt;Value&gt;john@example.com&lt;/Value&gt;&lt;/Tag&gt;&lt;/TagSet&gt;&lt;/Tagging&gt;'
 
 # Get object tags
 curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?tagging" \
@@ -2537,21 +2562,16 @@ curl -X PUT "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;" \
         <h3 class="h6 text-uppercase text-muted mt-4">Bucket Tagging</h3>
 <pre class="mb-3"><code class="language-bash"># Set bucket tags
 curl -X PUT "{{ api_base }}/&lt;bucket&gt;?tagging" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/xml" \
   -H "X-Access-Key: &lt;key&gt;" -H "X-Secret-Key: &lt;secret&gt;" \
-  -d '{
-    "TagSet": [
-      {"Key": "Environment", "Value": "Production"},
-      {"Key": "Team", "Value": "Engineering"}
-    ]
-  }'</code></pre>
+  -d '&lt;Tagging&gt;&lt;TagSet&gt;&lt;Tag&gt;&lt;Key&gt;Environment&lt;/Key&gt;&lt;Value&gt;Production&lt;/Value&gt;&lt;/Tag&gt;&lt;Tag&gt;&lt;Key&gt;Team&lt;/Key&gt;&lt;Value&gt;Engineering&lt;/Value&gt;&lt;/Tag&gt;&lt;/TagSet&gt;&lt;/Tagging&gt;'</code></pre>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Use Cases</h3>
         <div class="row g-2 mb-0">
           <div class="col-md-6">
             <ul class="small text-muted mb-0 ps-3">
               <li>Filter objects for lifecycle expiration by tag</li>
-              <li>Use tag conditions in bucket policies</li>
+              <li>Filter internal reports by project or owner tags</li>
             </ul>
           </div>
           <div class="col-md-6">
@@ -2754,15 +2774,8 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?cors" \
           </table>
         </div>
 
-        <h3 class="h6 text-uppercase text-muted mt-4">Simple Upload (No Signing)</h3>
-<pre class="mb-3"><code class="language-html">&lt;form action="{{ api_base }}/my-bucket" method="POST" enctype="multipart/form-data"&gt;
-  &lt;input type="hidden" name="key" value="uploads/${filename}"&gt;
-  &lt;input type="file" name="file"&gt;
-  &lt;button type="submit"&gt;Upload&lt;/button&gt;
-&lt;/form&gt;</code></pre>
-
         <h3 class="h6 text-uppercase text-muted mt-4">Signed Upload (With Policy)</h3>
-        <p class="small text-muted mb-0">For authenticated uploads, include a base64-encoded policy and SigV4 signature fields. The policy constrains allowed keys, content types, and size limits. See docs.md Section 20 for full signing examples.</p>
+        <p class="small text-muted mb-0">For authenticated uploads, include a base64-encoded policy and SigV4 signature fields. The policy constrains allowed keys, content types, and size limits. See <code>docs.md</code> §14/§15 for testing notes and route references.</p>
       </div>
     </article>
     <article id="list-objects-v2" class="card shadow-sm docs-section">
@@ -2839,7 +2852,7 @@ cp -r logs/ logs-backup/</code></pre>
         </ol>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Rollback</h3>
-        <p class="small text-muted mb-0">If something goes wrong, stop the service, restore the backed-up config and data directories, then restart with the previous binary or code version. See <code>docs.md</code> Section 4 for detailed rollback procedures including blue-green deployment strategies.</p>
+        <p class="small text-muted mb-0">If something goes wrong, stop the service, restore the backed-up config and data directories, then restart with the previous binary or code version. See <code>docs.md</code> Section 12 for the rollback flow.</p>
       </div>
     </article>
     <article id="api-matrix" class="card shadow-sm docs-section">
@@ -2863,7 +2876,10 @@ POST   /&lt;bucket&gt;?delete                 # Bulk delete
 
 # Bucket Configuration
 GET|PUT|DELETE /&lt;bucket&gt;?policy          # Bucket policy
-GET|PUT        /&lt;bucket&gt;?quota           # Bucket quota
+GET            /&lt;bucket&gt;?policyStatus    # Bucket policy public status
+GET|PUT|DELETE /&lt;bucket&gt;?ownershipControls # Ownership controls
+GET|PUT|DELETE /&lt;bucket&gt;?publicAccessBlock # Public access block
+GET|PUT|DELETE /&lt;bucket&gt;?quota           # Bucket quota
 GET|PUT        /&lt;bucket&gt;?versioning      # Versioning
 GET|PUT|DELETE /&lt;bucket&gt;?lifecycle        # Lifecycle rules
 GET|PUT|DELETE /&lt;bucket&gt;?cors             # CORS config
@@ -2873,7 +2889,7 @@ GET|PUT|DELETE /&lt;bucket&gt;?tagging          # Bucket tags
 GET|PUT|DELETE /&lt;bucket&gt;?replication      # Replication rules
 GET|PUT        /&lt;bucket&gt;?logging          # Access logging
 GET|PUT        /&lt;bucket&gt;?notification     # Event notifications
-GET|PUT        /&lt;bucket&gt;?object-lock      # Object lock config
+GET|PUT|DELETE /&lt;bucket&gt;?object-lock      # Object lock config
 GET|PUT|DELETE /&lt;bucket&gt;?website          # Static website
 GET            /&lt;bucket&gt;?uploads          # List multipart uploads
 GET            /&lt;bucket&gt;?versions         # List object versions
@@ -2895,13 +2911,13 @@ GET|PUT        /&lt;bucket&gt;/&lt;key&gt;?legal-hold # Legal hold
 # Multipart Upload
 POST   /&lt;bucket&gt;/&lt;key&gt;?uploads          # Initiate
 PUT    /&lt;bucket&gt;/&lt;key&gt;?uploadId=X&amp;partNumber=N  # Upload part
-POST   /&lt;bucket&gt;/&lt;key&gt;?uploadId=X       # Complete
+POST   /&lt;bucket&gt;/&lt;key&gt;?uploadId=X       # Complete (returns x-amz-version-id)
 DELETE /&lt;bucket&gt;/&lt;key&gt;?uploadId=X       # Abort
 GET    /&lt;bucket&gt;/&lt;key&gt;?uploadId=X       # List parts
 
 # Copy (via x-amz-copy-source header)
 PUT    /&lt;bucket&gt;/&lt;key&gt;                  # CopyObject
-PUT    /&lt;bucket&gt;/&lt;key&gt;?uploadId&amp;partNumber # UploadPartCopy
+PUT    /&lt;bucket&gt;/&lt;key&gt;?uploadId=X&amp;partNumber=N # UploadPartCopy
 
 # Admin API
 GET|PUT /myfsio/admin/site                     # Local site config
@@ -2911,6 +2927,12 @@ GET|PUT|DELETE /myfsio/admin/sites/&lt;id&gt;        # Manage peer
 GET|POST /myfsio/admin/sites/&lt;id&gt;/health       # Peer health
 GET     /myfsio/admin/sites/&lt;id&gt;/bidirectional-status  # Bidi sync state
 GET     /myfsio/admin/topology                 # Cluster topology
+GET     /myfsio/admin/cluster/overview         # Cluster overview
+ANY     /myfsio/admin/relay/&lt;site_id&gt;/*        # Outbound peer relay
+ANY     /myfsio/admin/peer/*                   # Inbound peer relay
+GET     /myfsio/admin/audit-log                # Relay audit log
+POST|GET|DELETE /myfsio/admin/peer-credentials # Peer credentials
+GET     /myfsio/admin/site-sync-stats          # Site sync stats
 GET|POST /myfsio/admin/website-domains              # List / Create domain mapping
 GET|PUT|DELETE /myfsio/admin/website-domains/&lt;domain&gt;  # Manage domain mapping
 GET     /myfsio/admin/iam/users                # List IAM users
@@ -2960,6 +2982,7 @@ POST   /myfsio/kms/materials/&lt;id&gt;                    # Fetch wrapped key m
           <li><a href="#encryption">Encryption</a></li>
           <li><a href="#lifecycle">Lifecycle Rules</a></li>
           <li><a href="#garbage-collection">Garbage Collection</a></li>
+          <li><a href="#integrity">Integrity Scanner</a></li>
           <li><a href="#metrics">Metrics History</a></li>
           <li><a href="#operation-metrics">Operation Metrics</a></li>
           <li><a href="#troubleshooting">Troubleshooting</a></li>

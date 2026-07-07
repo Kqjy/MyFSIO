@@ -785,7 +785,7 @@ impl ReplicationManager {
         }
     }
 
-    async fn replicate_existing_objects_with_run(
+    async fn sync_existing_objects_with_run(
         self: Arc<Self>,
         bucket: String,
         run: Arc<BatchRun>,
@@ -922,7 +922,7 @@ impl ReplicationManager {
         let manager = self.clone();
         tokio::spawn(async move {
             let submitted = manager
-                .replicate_existing_objects_with_run(bucket.clone(), run)
+                .sync_existing_objects_with_run(bucket.clone(), run)
                 .await;
             if submitted > 0 {
                 tracing::info!(
