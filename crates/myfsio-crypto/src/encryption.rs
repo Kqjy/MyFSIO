@@ -5,11 +5,29 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::aes_gcm::{
-    decrypt_part_block, decrypt_part_block_range, decrypt_stream_chunked,
-    decrypt_stream_chunked_range, encrypt_part_block, encrypt_stream_chunked,
-    read_part_block_plain_size, CryptoError,
+    decrypt_part_block, decrypt_part_block_range, decrypt_part_block_range_each,
+    decrypt_stream_chunked, decrypt_stream_chunked_each, decrypt_stream_chunked_range,
+    decrypt_stream_chunked_range_each, encrypt_part_block, encrypt_reader_chunked,
+    encrypt_stream_chunked, read_part_block_plain_size, CryptoError,
 };
 use crate::kms::KmsService;
+
+pub type PlaintextReadStream = std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>;
+
+pub struct StreamEncryptOutcome {
+    pub metadata: EncryptionMetadata,
+    pub plaintext_md5_hex: String,
+    pub plaintext_size: u64,
+}
+
+pub struct MpuStreamBlock {
+    pub block_offset: u64,
+    pub block_len: u64,
+    pub part_number: u32,
+    pub part_plaintext_size: u64,
+    pub plain_start: u64,
+    pub plain_end_inclusive: u64,
+}
 
 pub fn wrap_key_with(wrapping_key: &[u8; 32], data_key: &[u8; 32]) -> Result<String, CryptoError> {
     use aes_gcm::aead::Aead;
@@ -296,12 +314,10 @@ impl EncryptionService {
         .map_err(|e| CryptoError::Io(std::io::Error::other(e)))?
     }
 
-    pub async fn encrypt_object(
+    async fn prepare_encryption_keys(
         &self,
-        input_path: &Path,
-        output_path: &Path,
         ctx: &EncryptionContext,
-    ) -> Result<EncryptionMetadata, CryptoError> {
+    ) -> Result<([u8; 32], [u8; 12], Option<String>, Option<String>), CryptoError> {
         let (data_key, nonce) = self.generate_data_key();
 
         let (encrypted_data_key, kms_key_id) = match ctx.algorithm {
@@ -339,6 +355,18 @@ impl EncryptionService {
             data_key
         };
 
+        Ok((actual_key, nonce, encrypted_data_key, kms_key_id))
+    }
+
+    pub async fn encrypt_object(
+        &self,
+        input_path: &Path,
+        output_path: &Path,
+        ctx: &EncryptionContext,
+    ) -> Result<EncryptionMetadata, CryptoError> {
+        let (actual_key, nonce, encrypted_data_key, kms_key_id) =
+            self.prepare_encryption_keys(ctx).await?;
+
         let plaintext_size = tokio::fs::metadata(input_path)
             .await
             .map_err(CryptoError::Io)?
@@ -363,6 +391,149 @@ impl EncryptionService {
             chunk_size: Some(chunk_size),
             plaintext_size: Some(plaintext_size),
         })
+    }
+
+    pub async fn encrypt_stream_to_file(
+        &self,
+        reader: PlaintextReadStream,
+        output_path: &Path,
+        ctx: &EncryptionContext,
+    ) -> Result<StreamEncryptOutcome, CryptoError> {
+        let (actual_key, nonce, encrypted_data_key, kms_key_id) =
+            self.prepare_encryption_keys(ctx).await?;
+
+        let op = output_path.to_owned();
+        let chunk_size = self.config.chunk_size;
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut sync_reader = tokio_util::io::SyncIoBridge::new(reader);
+            encrypt_reader_chunked(&mut sync_reader, &op, &actual_key, &nonce, Some(chunk_size))
+        })
+        .await
+        .map_err(|e| CryptoError::Io(std::io::Error::other(e)))??;
+
+        Ok(StreamEncryptOutcome {
+            metadata: EncryptionMetadata {
+                algorithm: ctx.algorithm.as_str().to_string(),
+                nonce: B64.encode(nonce),
+                encrypted_data_key,
+                kms_key_id,
+                chunk_size: Some(chunk_size),
+                plaintext_size: Some(outcome.plaintext_size),
+            },
+            plaintext_md5_hex: outcome.plaintext_md5_hex,
+            plaintext_size: outcome.plaintext_size,
+        })
+    }
+
+    pub async fn decrypt_object_stream(
+        &self,
+        input_path: &Path,
+        enc_meta: &EncryptionMetadata,
+        customer_key: Option<&[u8]>,
+        range: Option<(u64, u64)>,
+        delete_input_when_done: bool,
+    ) -> Result<PlaintextReadStream, CryptoError> {
+        let (data_key, nonce) = self.resolve_data_key(enc_meta, customer_key).await?;
+        let range_params = match range {
+            Some((start, end)) => {
+                let chunk_size = enc_meta.chunk_size.ok_or_else(|| {
+                    CryptoError::EncryptionFailed(
+                        "chunk_size missing from encryption metadata".into(),
+                    )
+                })?;
+                let plaintext_size = enc_meta.plaintext_size.ok_or_else(|| {
+                    CryptoError::EncryptionFailed(
+                        "plaintext_size missing from encryption metadata".into(),
+                    )
+                })?;
+                Some((start, end, chunk_size, plaintext_size))
+            }
+            None => None,
+        };
+
+        let ip = input_path.to_owned();
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(4);
+        tokio::task::spawn_blocking(move || {
+            let sender = tx;
+            let mut sink = |data: &[u8]| -> std::io::Result<bool> {
+                Ok(sender
+                    .blocking_send(Ok(bytes::Bytes::copy_from_slice(data)))
+                    .is_ok())
+            };
+            let result = match range_params {
+                Some((start, end, chunk_size, plaintext_size)) => {
+                    decrypt_stream_chunked_range_each(
+                        &ip,
+                        &data_key,
+                        &nonce,
+                        chunk_size,
+                        plaintext_size,
+                        start,
+                        end,
+                        &mut sink,
+                    )
+                    .map(|_| ())
+                }
+                None => decrypt_stream_chunked_each(&ip, &data_key, &nonce, &mut sink).map(|_| ()),
+            };
+            if let Err(err) = result {
+                let _ = sender.blocking_send(Err(std::io::Error::other(err)));
+            }
+            if delete_input_when_done {
+                let _ = std::fs::remove_file(&ip);
+            }
+        });
+
+        Ok(Box::pin(tokio_util::io::StreamReader::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+
+    pub fn decrypt_mpu_blocks_stream(
+        &self,
+        object_path: &Path,
+        odk: [u8; 32],
+        chunk_size: usize,
+        blocks: Vec<MpuStreamBlock>,
+        delete_input_when_done: bool,
+    ) -> PlaintextReadStream {
+        let op = object_path.to_owned();
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(4);
+        tokio::task::spawn_blocking(move || {
+            let sender = tx;
+            for block in blocks {
+                if sender.is_closed() {
+                    break;
+                }
+                let mut sink = |data: &[u8]| -> std::io::Result<bool> {
+                    Ok(sender
+                        .blocking_send(Ok(bytes::Bytes::copy_from_slice(data)))
+                        .is_ok())
+                };
+                if let Err(err) = decrypt_part_block_range_each(
+                    &op,
+                    block.block_offset,
+                    block.block_len,
+                    &odk,
+                    block.part_number,
+                    chunk_size,
+                    block.part_plaintext_size,
+                    block.plain_start,
+                    block.plain_end_inclusive,
+                    &mut sink,
+                ) {
+                    let _ = sender.blocking_send(Err(std::io::Error::other(err)));
+                    break;
+                }
+            }
+            if delete_input_when_done {
+                let _ = std::fs::remove_file(&op);
+            }
+        });
+
+        Box::pin(tokio_util::io::StreamReader::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
     }
 
     async fn resolve_data_key(

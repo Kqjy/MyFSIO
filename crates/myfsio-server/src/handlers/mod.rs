@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod admin_peer;
+mod checksum_stream;
 mod chunked;
 mod config;
 pub mod kms;
@@ -18,10 +19,8 @@ use axum::response::{IntoResponse, Response};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use md5::Md5;
 use percent_encoding::percent_decode_str;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_common::types::PartInfo;
@@ -109,6 +108,17 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
     if let myfsio_storage::error::StorageError::Io(io_err) = &err {
         if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(io_err) {
             return bad_digest_response(message);
+        }
+        if let Some(message) = checksum_stream::upload_checksum_mismatch_message(io_err) {
+            return bad_digest_response(message);
+        }
+        if let Some(violation) = checksum_stream::post_content_length_violation(io_err) {
+            let code = if violation.too_large {
+                S3ErrorCode::EntityTooLarge
+            } else {
+                S3ErrorCode::EntityTooSmall
+            };
+            return s3_error_response(S3Error::new(code, violation.to_string()));
         }
         if let Some(response) = io_error_to_s3_response(io_err) {
             return response;
@@ -1798,10 +1808,42 @@ fn base64_header_bytes(headers: &HeaderMap, name: &str) -> Result<Option<Vec<u8>
         .map_err(|_| invalid_digest_response(format!("Invalid base64 value for {}", name)))
 }
 
-fn has_upload_checksum(headers: &HeaderMap) -> bool {
-    headers.contains_key("content-md5")
-        || headers.contains_key("x-amz-checksum-sha256")
-        || headers.contains_key("x-amz-checksum-crc32")
+fn expected_upload_checksums(
+    headers: &HeaderMap,
+) -> Result<checksum_stream::ExpectedUploadChecksums, Response> {
+    let mut expected = checksum_stream::ExpectedUploadChecksums::default();
+    if let Some(md5) = base64_header_bytes(headers, "content-md5")? {
+        if md5.len() != 16 {
+            return Err(invalid_digest_response(
+                "The Content-MD5 you specified is not a valid 16-byte MD5 digest",
+            ));
+        }
+        expected.md5 = Some(md5);
+    }
+    expected.sha256 = base64_header_bytes(headers, "x-amz-checksum-sha256")?;
+    if let Some(crc) = base64_header_bytes(headers, "x-amz-checksum-crc32")? {
+        let crc: [u8; 4] = crc.as_slice().try_into().map_err(|_| {
+            invalid_digest_response(
+                "The x-amz-checksum-crc32 you specified is not a valid 4-byte CRC32 value",
+            )
+        })?;
+        expected.crc32 = Some(crc);
+    }
+    Ok(expected)
+}
+
+fn apply_upload_checksum_verification(
+    stream: myfsio_storage::traits::AsyncReadStream,
+    headers: &HeaderMap,
+) -> Result<myfsio_storage::traits::AsyncReadStream, Response> {
+    let expected = expected_upload_checksums(headers)?;
+    if expected.is_empty() {
+        Ok(stream)
+    } else {
+        Ok(Box::pin(checksum_stream::ChecksumVerifyReader::new(
+            stream, expected,
+        )))
+    }
 }
 
 fn persist_additional_checksums(headers: &HeaderMap, metadata: &mut HashMap<String, String>) {
@@ -1839,139 +1881,6 @@ fn apply_stored_checksum_headers(resp_headers: &mut HeaderMap, metadata: &HashMa
             }
         }
     }
-}
-
-fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Response> {
-    if let Some(expected) = base64_header_bytes(headers, "content-md5")? {
-        if expected.len() != 16 {
-            return Err(invalid_digest_response(
-                "The Content-MD5 you specified is not a valid 16-byte MD5 digest",
-            ));
-        }
-        if Md5::digest(data).as_slice() != expected.as_slice() {
-            return Err(bad_digest_response(
-                "The Content-MD5 you specified did not match what we received",
-            ));
-        }
-    }
-
-    if let Some(expected) = base64_header_bytes(headers, "x-amz-checksum-sha256")? {
-        if Sha256::digest(data).as_slice() != expected.as_slice() {
-            return Err(bad_digest_response(
-                "The x-amz-checksum-sha256 you specified did not match what we received",
-            ));
-        }
-    }
-
-    if let Some(expected) = base64_header_bytes(headers, "x-amz-checksum-crc32")? {
-        let actual = crc32fast::hash(data).to_be_bytes();
-        if expected.as_slice() != actual {
-            return Err(bad_digest_response(
-                "The x-amz-checksum-crc32 you specified did not match what we received",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-async fn collect_upload_body(
-    body: Body,
-    aws_chunked: bool,
-    declared_len: Option<u64>,
-) -> Result<bytes::Bytes, Response> {
-    fn check_declared(len: usize, declared: Option<u64>) -> Result<(), Response> {
-        if let Some(expected) = declared {
-            if len as u64 != expected {
-                return Err(s3_error_response(S3Error::new(
-                    S3ErrorCode::IncompleteBody,
-                    myfsio_common::error::IncompleteBodyError {
-                        expected,
-                        received: len as u64,
-                    }
-                    .to_string(),
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    if aws_chunked {
-        let mut reader = chunked::decode_body(body);
-        let mut data: Vec<u8> = Vec::new();
-        let mut buf = [0u8; 65_536];
-        loop {
-            let n = reader.read(&mut buf).await.map_err(|err| {
-                if io_error_is_body_timeout(&err) {
-                    return request_timeout_response();
-                }
-                if let Some(expected) = declared_len {
-                    if (data.len() as u64) < expected {
-                        return s3_error_response(S3Error::new(
-                            S3ErrorCode::IncompleteBody,
-                            myfsio_common::error::IncompleteBodyError {
-                                expected,
-                                received: data.len() as u64,
-                            }
-                            .to_string(),
-                        ));
-                    }
-                }
-                s3_error_response(S3Error::new(
-                    S3ErrorCode::InvalidRequest,
-                    "Failed to read aws-chunked request body",
-                ))
-            })?;
-            if n == 0 {
-                break;
-            }
-            if data.len() + n > MAX_BUFFERED_UPLOAD_BYTES {
-                return Err(s3_error_response(S3Error::new(
-                    S3ErrorCode::EntityTooLarge,
-                    "Object exceeds the maximum size for a buffered upload",
-                )));
-            }
-            data.extend_from_slice(&buf[..n]);
-        }
-        check_declared(data.len(), declared_len)?;
-        return Ok(bytes::Bytes::from(data));
-    }
-
-    use futures::StreamExt;
-    let mut stream = body.into_data_stream();
-    let mut data: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| {
-            if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(&err) {
-                bad_digest_response(message)
-            } else if error_chain_has_body_timeout(&err) {
-                request_timeout_response()
-            } else if declared_len.is_some_and(|expected| (data.len() as u64) < expected) {
-                s3_error_response(S3Error::new(
-                    S3ErrorCode::IncompleteBody,
-                    myfsio_common::error::IncompleteBodyError {
-                        expected: declared_len.unwrap_or_default(),
-                        received: data.len() as u64,
-                    }
-                    .to_string(),
-                ))
-            } else {
-                s3_error_response(S3Error::new(
-                    S3ErrorCode::InvalidRequest,
-                    "Failed to read request body",
-                ))
-            }
-        })?;
-        if data.len() + chunk.len() > MAX_BUFFERED_UPLOAD_BYTES {
-            return Err(s3_error_response(S3Error::new(
-                S3ErrorCode::EntityTooLarge,
-                "Object exceeds the maximum size for a buffered upload",
-            )));
-        }
-        data.extend_from_slice(&chunk);
-    }
-    check_declared(data.len(), declared_len)?;
-    Ok(bytes::Bytes::from(data))
 }
 
 fn parse_tagging_header(value: &str) -> Result<Vec<myfsio_common::types::Tag>, Response> {
@@ -2250,133 +2159,144 @@ pub async fn put_object(
 
     let aws_chunked = is_aws_chunked(&headers);
     let declared_len = declared_body_length(&headers, aws_chunked);
-    let boxed: myfsio_storage::traits::AsyncReadStream = if has_upload_checksum(&headers) {
-        let data = match collect_upload_body(body, aws_chunked, declared_len).await {
-            Ok(data) => data,
-            Err(response) => return response,
-        };
-        if let Err(response) = validate_upload_checksums(&headers, &data) {
-            return response;
-        }
-        Box::pin(std::io::Cursor::new(data))
+    let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
+        Box::pin(chunked::decode_body(body))
     } else {
-        let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
-            Box::pin(chunked::decode_body(body))
-        } else {
-            Box::pin(tokio_util::io::StreamReader::new(
-                body.into_data_stream().map_err(std::io::Error::other),
-            ))
-        };
-        spool_upload_stream(
-            enforce_declared_length(raw, declared_len),
-            state.config.upload_stream_buffer_bytes,
-            state.config.stream_chunk_size,
-        )
+        Box::pin(tokio_util::io::StreamReader::new(
+            body.into_data_stream().map_err(std::io::Error::other),
+        ))
     };
+    let raw = match apply_upload_checksum_verification(
+        enforce_declared_length(raw, declared_len),
+        &headers,
+    ) {
+        Ok(stream) => stream,
+        Err(response) => return response,
+    };
+    let boxed = spool_upload_stream(
+        raw,
+        state.config.upload_stream_buffer_bytes,
+        state.config.stream_chunk_size,
+        state.disk_limiter.spool_gauge(),
+    );
+
+    let _disk_permit = match acquire_disk_write_permit(&state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+
+    let commit_options = myfsio_storage::traits::PutCommitOptions {
+        etag_override: None,
+        conditions: put_conditions_from_headers(&headers),
+        bypass_governance: bypass_governance_header(&headers),
+    };
+
+    if let Some(enc_ctx) = resolved_enc_ctx {
+        let Some(enc_svc) = state.encryption.as_ref() else {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "Encryption requested but the encryption service is disabled",
+            ));
+        };
+        let prepared = match state.storage.allocate_prepared_tmp_path() {
+            Ok(path) => path,
+            Err(e) => return storage_err_response(e),
+        };
+        let outcome = match enc_svc
+            .encrypt_stream_to_file(boxed, &prepared, &enc_ctx)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&prepared).await;
+                return match err {
+                    myfsio_crypto::aes_gcm::CryptoError::Io(io_err) => {
+                        storage_err_response(myfsio_storage::error::StorageError::Io(io_err))
+                    }
+                    other => s3_error_response(S3Error::new(
+                        S3ErrorCode::InternalError,
+                        format!("Encryption failed: {}", other),
+                    )),
+                };
+            }
+        };
+        let enc_size = match tokio::fs::metadata(&prepared).await {
+            Ok(m) => m.len(),
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&prepared).await;
+                return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+            }
+        };
+        let mut full_meta = metadata;
+        for (k, v) in outcome.metadata.to_metadata_map() {
+            full_meta.insert(k, v);
+        }
+        if let Some(ref ck) = enc_ctx.customer_key {
+            full_meta.insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
+        }
+
+        let meta = match state
+            .storage
+            .put_object_prepared(
+                &bucket,
+                &key,
+                &prepared,
+                enc_size,
+                outcome.plaintext_md5_hex.clone(),
+                Some(full_meta),
+                commit_options,
+            )
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        };
+        if let Some(ref tags) = tags {
+            if let Err(e) = state.storage.set_object_tags(&bucket, &key, tags).await {
+                return storage_err_response(e);
+            }
+        }
+
+        let mut resp_headers = HeaderMap::new();
+        if let Some(ref etag) = meta.etag {
+            resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+        }
+        if let Some(ref vid) = meta.version_id {
+            if let Ok(value) = vid.parse() {
+                resp_headers.insert("x-amz-version-id", value);
+            }
+        }
+        resp_headers.insert(
+            "x-amz-server-side-encryption",
+            enc_ctx.algorithm.as_str().parse().unwrap(),
+        );
+        apply_stored_response_headers(&mut resp_headers, &meta.internal_metadata);
+        apply_stored_checksum_headers(&mut resp_headers, &meta.internal_metadata);
+        apply_stored_encryption_headers(&mut resp_headers, &meta.internal_metadata, &headers);
+        notifications::emit_object_created(
+            &state,
+            &bucket,
+            &key,
+            outcome.plaintext_size,
+            meta.etag.as_deref(),
+            "",
+            "",
+            "",
+            "Put",
+        );
+        trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+        return (StatusCode::OK, resp_headers).into_response();
+    }
 
     match state
         .storage
-        .put_object(&bucket, &key, boxed, Some(metadata))
+        .put_object_with_commit(&bucket, &key, boxed, Some(metadata), commit_options)
         .await
     {
         Ok(meta) => {
             if let Some(ref tags) = tags {
                 if let Err(e) = state.storage.set_object_tags(&bucket, &key, tags).await {
                     return storage_err_response(e);
-                }
-            }
-            if let Some(enc_ctx) = resolved_enc_ctx {
-                if let Some(ref enc_svc) = state.encryption {
-                    let obj_path = match state.storage.get_object_path(&bucket, &key).await {
-                        Ok(p) => p,
-                        Err(e) => return storage_err_response(e),
-                    };
-                    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
-                    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-                    let enc_tmp = tmp_dir.join(format!("enc-{}", uuid::Uuid::new_v4()));
-
-                    match enc_svc.encrypt_object(&obj_path, &enc_tmp, &enc_ctx).await {
-                        Ok(enc_meta) => {
-                            if let Err(e) = tokio::fs::rename(&enc_tmp, &obj_path).await {
-                                let _ = tokio::fs::remove_file(&enc_tmp).await;
-                                return storage_err_response(
-                                    myfsio_storage::error::StorageError::Io(e),
-                                );
-                            }
-                            let enc_size = tokio::fs::metadata(&obj_path)
-                                .await
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-
-                            let mut enc_metadata = enc_meta.to_metadata_map();
-                            let all_meta: HashMap<String, String> = state
-                                .storage
-                                .get_object_metadata(&bucket, &key)
-                                .await
-                                .unwrap_or_default();
-                            for (k, v) in &all_meta {
-                                enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
-                            }
-                            enc_metadata.insert("__size__".to_string(), enc_size.to_string());
-                            if let Some(ref ck) = enc_ctx.customer_key {
-                                enc_metadata
-                                    .insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
-                            }
-                            let _ = state
-                                .storage
-                                .put_object_metadata(&bucket, &key, &enc_metadata)
-                                .await;
-
-                            let mut resp_headers = HeaderMap::new();
-                            if let Some(ref etag) = meta.etag {
-                                resp_headers
-                                    .insert("etag", format!("\"{}\"", etag).parse().unwrap());
-                            }
-                            if let Some(ref vid) = meta.version_id {
-                                if let Ok(value) = vid.parse() {
-                                    resp_headers.insert("x-amz-version-id", value);
-                                }
-                            }
-                            resp_headers.insert(
-                                "x-amz-server-side-encryption",
-                                enc_ctx.algorithm.as_str().parse().unwrap(),
-                            );
-                            apply_stored_response_headers(&mut resp_headers, &enc_metadata);
-                            apply_stored_checksum_headers(&mut resp_headers, &enc_metadata);
-                            apply_stored_encryption_headers(
-                                &mut resp_headers,
-                                &enc_metadata,
-                                &headers,
-                            );
-                            notifications::emit_object_created(
-                                &state,
-                                &bucket,
-                                &key,
-                                meta.size,
-                                meta.etag.as_deref(),
-                                "",
-                                "",
-                                "",
-                                "Put",
-                            );
-                            trigger_replication_for_request(
-                                &state,
-                                peer_marker,
-                                &bucket,
-                                &key,
-                                "write",
-                            );
-                            return (StatusCode::OK, resp_headers).into_response();
-                        }
-                        Err(e) => {
-                            let _ = tokio::fs::remove_file(&enc_tmp).await;
-                            let _ = state.storage.delete_object(&bucket, &key).await;
-                            return s3_error_response(S3Error::new(
-                                myfsio_common::error::S3ErrorCode::InternalError,
-                                format!("Encryption failed: {}", e),
-                            ));
-                        }
-                    }
                 }
             }
 
@@ -2467,17 +2387,33 @@ pub async fn get_object(
     let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
     let _ = tokio::fs::create_dir_all(&tmp_dir).await;
     let snap_link = tmp_dir.join(format!("src-{}", uuid::Uuid::new_v4()));
+    let part_window = match query.part_number {
+        Some(part_number) => {
+            let head = match version_id {
+                Some(v) => state.storage.head_object_version(&bucket, &key, v).await,
+                None => state.storage.head_object(&bucket, &key).await,
+            };
+            head.ok()
+                .and_then(|head_meta| resolve_part_view(&head_meta, part_number).ok())
+                .filter(|view| view.multipart && view.length > 0)
+                .map(|view| myfsio_storage::traits::RangeHint {
+                    start: Some(view.start),
+                    end: Some(view.start + view.length - 1),
+                })
+        }
+        None => None,
+    };
     let snap_res = match version_id {
         Some(v) => {
             state
                 .storage
-                .snapshot_object_version_to_link(&bucket, &key, v, &snap_link)
+                .snapshot_object_version_to_link_windowed(&bucket, &key, v, &snap_link, part_window)
                 .await
         }
         None => {
             state
                 .storage
-                .snapshot_object_to_link(&bucket, &key, &snap_link)
+                .snapshot_object_to_link_windowed(&bucket, &key, &snap_link, part_window)
                 .await
         }
     };
@@ -2541,6 +2477,14 @@ pub async fn get_object(
         return resp;
     }
 
+    let disk_permit = match acquire_disk_read_permit(&state).await {
+        Ok(permit) => permit,
+        Err(response) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return response;
+        }
+    };
+
     let enc_info =
         myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&snap_meta.internal_metadata);
 
@@ -2556,7 +2500,6 @@ pub async fn get_object(
                     return resp;
                 }
             }
-            let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
             let customer_key = match extract_sse_c_key(&headers) {
                 Ok(key) => key,
                 Err(resp) => {
@@ -2564,26 +2507,49 @@ pub async fn get_object(
                     return resp;
                 }
             };
-            let decrypt_res = enc_svc
-                .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
-                .await;
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            if let Err(e) = decrypt_res {
-                let _ = tokio::fs::remove_file(&dec_tmp).await;
-                return s3_error_response(S3Error::new(
-                    myfsio_common::error::S3ErrorCode::InternalError,
-                    format!("Decryption failed: {}", e),
-                ));
-            }
-            let file = match open_self_deleting(dec_tmp.clone()).await {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&dec_tmp).await;
-                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+            if let Some(plain_size) = enc_info.plaintext_size {
+                match enc_svc
+                    .decrypt_object_stream(
+                        &snap_link,
+                        enc_info,
+                        customer_key.as_deref(),
+                        None,
+                        true,
+                    )
+                    .await
+                {
+                    Ok(stream) => (stream, plain_size, Some(enc_info.algorithm.as_str())),
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&snap_link).await;
+                        return s3_error_response(S3Error::new(
+                            myfsio_common::error::S3ErrorCode::InternalError,
+                            format!("Decryption failed: {}", e),
+                        ));
+                    }
                 }
-            };
-            let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-            (Box::pin(file), file_size, Some(enc_info.algorithm.as_str()))
+            } else {
+                let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
+                let decrypt_res = enc_svc
+                    .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
+                    .await;
+                let _ = tokio::fs::remove_file(&snap_link).await;
+                if let Err(e) = decrypt_res {
+                    let _ = tokio::fs::remove_file(&dec_tmp).await;
+                    return s3_error_response(S3Error::new(
+                        myfsio_common::error::S3ErrorCode::InternalError,
+                        format!("Decryption failed: {}", e),
+                    ));
+                }
+                let file = match open_self_deleting(dec_tmp.clone()).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&dec_tmp).await;
+                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                    }
+                };
+                let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+                (Box::pin(file), file_size, Some(enc_info.algorithm.as_str()))
+            }
         }
         (Some(_), None) => {
             let _ = tokio::fs::remove_file(&snap_link).await;
@@ -2615,6 +2581,7 @@ pub async fn get_object(
         },
     };
 
+    let reader = attach_read_permit(reader, disk_permit);
     let stream = ReaderStream::with_capacity(reader, stream_cap);
     let body = Body::from_stream(stream);
 
@@ -2727,7 +2694,12 @@ pub async fn delete_object(
         }
         return match state
             .storage
-            .delete_object_version(&bucket, &key, version_id)
+            .delete_object_version_checked(
+                &bucket,
+                &key,
+                version_id,
+                bypass_governance_header(&headers),
+            )
             .await
         {
             Ok(outcome) => {
@@ -2754,7 +2726,11 @@ pub async fn delete_object(
         return response;
     }
 
-    match state.storage.delete_object(&bucket, &key).await {
+    match state
+        .storage
+        .delete_object_checked(&bucket, &key, bypass_governance_header(&headers))
+        .await
+    {
         Ok(outcome) => {
             let mut resp_headers = HeaderMap::new();
             if let Some(ref vid) = outcome.version_id {
@@ -3336,6 +3312,10 @@ async fn upload_part_handler_with_chunking(
         .await;
     }
 
+    let _disk_permit = match acquire_disk_write_permit(state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
         Box::pin(chunked::decode_body(body))
     } else {
@@ -3344,10 +3324,18 @@ async fn upload_part_handler_with_chunking(
         );
         Box::pin(stream)
     };
-    let boxed = spool_upload_stream(
+    let raw = match apply_upload_checksum_verification(
         enforce_declared_length(raw, declared_body_length(headers, aws_chunked)),
+        headers,
+    ) {
+        Ok(stream) => stream,
+        Err(response) => return response,
+    };
+    let boxed = spool_upload_stream(
+        raw,
         state.config.upload_stream_buffer_bytes,
         state.config.stream_chunk_size,
+        state.disk_limiter.spool_gauge(),
     );
 
     match state
@@ -3435,6 +3423,10 @@ async fn upload_part_sse_c(
     let plain_tmp = tmp_dir.join(format!("mpu-plain-{}", uuid::Uuid::new_v4()));
     let block_tmp = tmp_dir.join(format!("mpu-block-{}", uuid::Uuid::new_v4()));
 
+    let _disk_permit = match acquire_disk_write_permit(state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
         Box::pin(chunked::decode_body(body))
     } else {
@@ -3442,10 +3434,18 @@ async fn upload_part_sse_c(
             body.into_data_stream().map_err(std::io::Error::other),
         ))
     };
-    let boxed = spool_upload_stream(
+    let raw = match apply_upload_checksum_verification(
         enforce_declared_length(raw, declared_body_length(headers, aws_chunked)),
+        headers,
+    ) {
+        Ok(stream) => stream,
+        Err(response) => return response,
+    };
+    let boxed = spool_upload_stream(
+        raw,
         state.config.upload_stream_buffer_bytes,
         state.config.stream_chunk_size,
+        state.disk_limiter.spool_gauge(),
     );
 
     if let Err(resp) = drain_stream_to_file(boxed, &plain_tmp).await {
@@ -3492,10 +3492,40 @@ async fn upload_part_sse_c(
     }
 }
 
+struct SpoolTracker {
+    gauge: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    outstanding: std::sync::atomic::AtomicU64,
+}
+
+impl SpoolTracker {
+    fn record_buffered(&self, n: u64) {
+        use std::sync::atomic::Ordering;
+        self.outstanding.fetch_add(n, Ordering::Relaxed);
+        self.gauge.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn record_consumed(&self, n: u64) {
+        use std::sync::atomic::Ordering;
+        self.outstanding.fetch_sub(n, Ordering::Relaxed);
+        self.gauge.fetch_sub(n, Ordering::Relaxed);
+    }
+}
+
+impl Drop for SpoolTracker {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        let remaining = self.outstanding.load(Ordering::Relaxed);
+        if remaining > 0 {
+            self.gauge.fetch_sub(remaining, Ordering::Relaxed);
+        }
+    }
+}
+
 fn spool_upload_stream(
     stream: myfsio_storage::traits::AsyncReadStream,
     buffer_bytes: usize,
     chunk_size: usize,
+    gauge: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> myfsio_storage::traits::AsyncReadStream {
     if buffer_bytes == 0 {
         return stream;
@@ -3503,6 +3533,11 @@ fn spool_upload_stream(
     let chunk_size = chunk_size.clamp(64 * 1024, buffer_bytes.max(64 * 1024));
     let capacity = (buffer_bytes / chunk_size).max(1);
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(capacity);
+    let tracker = std::sync::Arc::new(SpoolTracker {
+        gauge,
+        outstanding: std::sync::atomic::AtomicU64::new(0),
+    });
+    let producer_tracker = tracker.clone();
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut stream = stream;
@@ -3511,6 +3546,7 @@ fn spool_upload_stream(
             match stream.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
+                    producer_tracker.record_buffered(n as u64);
                     if tx
                         .send(Ok(bytes::Bytes::copy_from_slice(&buf[..n])))
                         .await
@@ -3526,9 +3562,71 @@ fn spool_upload_stream(
             }
         }
     });
-    Box::pin(tokio_util::io::StreamReader::new(
-        tokio_stream::wrappers::ReceiverStream::new(rx),
+    use futures::StreamExt;
+    let consumer_stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(
+        move |item: std::io::Result<bytes::Bytes>| {
+            if let Ok(ref chunk) = item {
+                tracker.record_consumed(chunk.len() as u64);
+            }
+            item
+        },
+    );
+    Box::pin(tokio_util::io::StreamReader::new(consumer_stream))
+}
+
+struct PermitReader {
+    inner: myfsio_storage::traits::AsyncReadStream,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl tokio::io::AsyncRead for PermitReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+fn attach_read_permit(
+    reader: myfsio_storage::traits::AsyncReadStream,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> myfsio_storage::traits::AsyncReadStream {
+    match permit {
+        Some(_) => Box::pin(PermitReader {
+            inner: reader,
+            _permit: permit,
+        }),
+        None => reader,
+    }
+}
+
+fn slow_down_response() -> Response {
+    s3_error_response(S3Error::new(
+        S3ErrorCode::SlowDown,
+        "Storage is busy; reduce your request rate and retry",
     ))
+}
+
+async fn acquire_disk_read_permit(
+    state: &AppState,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Response> {
+    state
+        .disk_limiter
+        .acquire_read()
+        .await
+        .map_err(|_| slow_down_response())
+}
+
+async fn acquire_disk_write_permit(
+    state: &AppState,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Response> {
+    state
+        .disk_limiter
+        .acquire_write()
+        .await
+        .map_err(|_| slow_down_response())
 }
 
 async fn drain_stream_to_file(
@@ -3820,9 +3918,22 @@ async fn complete_multipart_handler(
         })
         .collect();
 
+    let _disk_permit = match acquire_disk_write_permit(state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     match state
         .storage
-        .complete_multipart(bucket, upload_id, &parts)
+        .complete_multipart_checked(
+            bucket,
+            upload_id,
+            &parts,
+            myfsio_storage::traits::PutCommitOptions {
+                etag_override: None,
+                conditions: put_conditions_from_headers(headers),
+                bypass_governance: bypass_governance_header(headers),
+            },
+        )
         .await
     {
         Ok(meta) => {
@@ -4800,10 +4911,20 @@ async fn delete_objects_handler(
                             Some(version_id) => {
                                 state
                                     .storage
-                                    .delete_object_version(&bucket, &obj.key, version_id)
+                                    .delete_object_version_checked(
+                                        &bucket,
+                                        &obj.key,
+                                        version_id,
+                                        bypass_governance,
+                                    )
                                     .await
                             }
-                            None => state.storage.delete_object(&bucket, &obj.key).await,
+                            None => {
+                                state
+                                    .storage
+                                    .delete_object_checked(&bucket, &obj.key, bypass_governance)
+                                    .await
+                            }
                         };
                         outcome.map_err(|e| {
                             let s3err = S3Error::from(e);
@@ -4858,6 +4979,28 @@ async fn range_get_handler(
     range_get_handler_inner(state, bucket, key, range_str, query, headers, None).await
 }
 
+fn parse_range_hint(range_str: &str) -> Option<myfsio_storage::traits::RangeHint> {
+    let spec = range_str.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (raw_start, raw_end) = spec.split_once('-')?;
+    let start = if raw_start.trim().is_empty() {
+        None
+    } else {
+        Some(raw_start.trim().parse::<u64>().ok()?)
+    };
+    let end = if raw_end.trim().is_empty() {
+        None
+    } else {
+        Some(raw_end.trim().parse::<u64>().ok()?)
+    };
+    if start.is_none() && end.is_none() {
+        return None;
+    }
+    Some(myfsio_storage::traits::RangeHint { start, end })
+}
+
 async fn range_get_handler_inner(
     state: &AppState,
     bucket: &str,
@@ -4873,17 +5016,18 @@ async fn range_get_handler_inner(
     let _ = tokio::fs::create_dir_all(&tmp_dir).await;
     let snap_link = tmp_dir.join(format!("rsrc-{}", uuid::Uuid::new_v4()));
 
+    let window = parse_range_hint(range_str);
     let snap_meta = match version_id {
         Some(v) => {
             state
                 .storage
-                .snapshot_object_version_to_link(bucket, key, v, &snap_link)
+                .snapshot_object_version_to_link_windowed(bucket, key, v, &snap_link, window)
                 .await
         }
         None => {
             state
                 .storage
-                .snapshot_object_to_link(bucket, key, &snap_link)
+                .snapshot_object_to_link_windowed(bucket, key, &snap_link, window)
                 .await
         }
     };
@@ -4949,6 +5093,14 @@ async fn serve_range_from_snapshot(
         .await;
     }
 
+    let disk_permit = match acquire_disk_read_permit(state).await {
+        Ok(permit) => permit,
+        Err(response) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return response;
+        }
+    };
+
     let enc_info =
         myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata);
 
@@ -4985,29 +5137,29 @@ async fn serve_range_from_snapshot(
                         }
                     };
 
-                    let dec_tmp = tmp_dir.join(format!("rdec-{}", uuid::Uuid::new_v4()));
-                    let res = enc_svc
-                        .decrypt_object_range(
+                    let stream = match enc_svc
+                        .decrypt_object_stream(
                             &snap_link,
-                            &dec_tmp,
                             enc_info,
                             customer_key.as_deref(),
-                            start,
-                            end,
+                            Some((start, end)),
+                            true,
                         )
-                        .await;
-                    let _ = tokio::fs::remove_file(&snap_link).await;
-                    if let Err(e) = res {
-                        let _ = tokio::fs::remove_file(&dec_tmp).await;
-                        return s3_error_response(S3Error::new(
-                            myfsio_common::error::S3ErrorCode::InternalError,
-                            format!("Decryption failed: {}", e),
-                        ));
-                    }
-
-                    return stream_partial_content(
-                        state,
-                        &dec_tmp,
+                        .await
+                    {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            let _ = tokio::fs::remove_file(&snap_link).await;
+                            return s3_error_response(S3Error::new(
+                                myfsio_common::error::S3ErrorCode::InternalError,
+                                format!("Decryption failed: {}", e),
+                            ));
+                        }
+                    };
+                    let stream = attach_read_permit(stream, disk_permit);
+                    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
+                    let body = Body::from_stream(ReaderStream::with_capacity(stream, stream_cap));
+                    let resp_headers = partial_content_headers(
                         start,
                         end,
                         plaintext_size,
@@ -5015,10 +5167,9 @@ async fn serve_range_from_snapshot(
                         key,
                         query,
                         Some(enc_info.algorithm.as_str()),
-                        true,
                         parts_count,
-                    )
-                    .await;
+                    );
+                    return (StatusCode::PARTIAL_CONTENT, resp_headers, body).into_response();
                 }
 
                 let dec_tmp = tmp_dir.join(format!("rdec-{}", uuid::Uuid::new_v4()));
@@ -5079,10 +5230,12 @@ async fn serve_range_from_snapshot(
         enc_header,
         false,
         parts_count,
+        disk_permit,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_partial_content(
     state: &AppState,
     body_path: &std::path::Path,
@@ -5095,6 +5248,7 @@ async fn stream_partial_content(
     enc_header: Option<&str>,
     already_trimmed: bool,
     parts_count: Option<u32>,
+    disk_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
     let length = end - start + 1;
 
@@ -5111,7 +5265,8 @@ async fn stream_partial_content(
             return storage_err_response(myfsio_storage::error::StorageError::Io(e));
         }
     }
-    let limited = file.take(length);
+    let limited: myfsio_storage::traits::AsyncReadStream = Box::pin(file.take(length));
+    let limited = attach_read_permit(limited, disk_permit);
 
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
     let stream = ReaderStream::with_capacity(limited, stream_cap);
@@ -5222,10 +5377,16 @@ async fn serve_range_from_segments(
     };
     let length = end - start + 1;
 
+    let disk_permit = match acquire_disk_read_permit(state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+
     let reader = match snap_source.into_range_stream(start, Some(length)).await {
         Ok(r) => r,
         Err(e) => return storage_err_response(myfsio_storage::error::StorageError::Io(e)),
     };
+    let reader = attach_read_permit(reader, disk_permit);
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
     let body = Body::from_stream(ReaderStream::with_capacity(reader, stream_cap));
 
@@ -5244,7 +5405,6 @@ async fn serve_mpu_sse_c(
     part_number: Option<u32>,
 ) -> Response {
     let key = meta.key.as_str();
-    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
 
     let Some(enc_svc) = state.encryption.as_ref() else {
         let _ = tokio::fs::remove_file(&snap_link).await;
@@ -5399,15 +5559,7 @@ async fn serve_mpu_sse_c(
         (0, total - 1, true)
     };
 
-    let dec_tmp = tmp_dir.join(format!("mpu-dec-{}", uuid::Uuid::new_v4()));
-    let mut dec_file = match tokio::fs::File::create(&dec_tmp).await {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-        }
-    };
-
+    let mut blocks: Vec<myfsio_crypto::encryption::MpuStreamBlock> = Vec::new();
     for i in 0..n_parts {
         if plain_sizes[i] == 0 {
             continue;
@@ -5419,63 +5571,34 @@ async fn serve_mpu_sse_c(
         }
         let ov_start = start.max(p_start);
         let ov_end = end.min(p_end);
-        let local_start = ov_start - p_start;
-        let local_end = ov_end - p_start;
-
-        let part_tmp = tmp_dir.join(format!("mpu-decpart-{}", uuid::Uuid::new_v4()));
-        let dec_res = enc_svc
-            .decrypt_mpu_part_range(
-                &snap_link,
-                &part_tmp,
-                block_offsets[i],
-                block_sizes[i],
-                odk,
-                part_numbers[i],
-                chunk_size,
-                plain_sizes[i],
-                local_start,
-                local_end,
-            )
-            .await;
-        if let Err(e) = dec_res {
-            let _ = tokio::fs::remove_file(&part_tmp).await;
-            let _ = tokio::fs::remove_file(&dec_tmp).await;
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::InternalError,
-                format!("Decryption failed: {}", e),
-            ));
-        }
-        let append_res = async {
-            let mut s = tokio::fs::File::open(&part_tmp).await?;
-            tokio::io::copy(&mut s, &mut dec_file).await
-        }
-        .await;
-        let _ = tokio::fs::remove_file(&part_tmp).await;
-        if let Err(e) = append_res {
-            let _ = tokio::fs::remove_file(&dec_tmp).await;
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-        }
+        blocks.push(myfsio_crypto::encryption::MpuStreamBlock {
+            block_offset: block_offsets[i],
+            block_len: block_sizes[i],
+            part_number: part_numbers[i],
+            part_plaintext_size: plain_sizes[i],
+            plain_start: ov_start - p_start,
+            plain_end_inclusive: ov_end - p_start,
+        });
     }
-    drop(dec_file);
-    let _ = tokio::fs::remove_file(&snap_link).await;
 
-    let file = match open_self_deleting(dec_tmp.clone()).await {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&dec_tmp).await;
-            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+    let disk_permit = match acquire_disk_read_permit(state).await {
+        Ok(permit) => permit,
+        Err(response) => {
+            let _ = tokio::fs::remove_file(&snap_link).await;
+            return response;
         }
     };
-    let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+
+    let body_len: u64 = if total == 0 { 0 } else { end - start + 1 };
+    let stream = enc_svc.decrypt_mpu_blocks_stream(&snap_link, odk, chunk_size, blocks, true);
+    let stream = attach_read_permit(stream, disk_permit);
 
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
-    let stream = ReaderStream::with_capacity(file, stream_cap);
+    let stream = ReaderStream::with_capacity(stream, stream_cap);
     let body = Body::from_stream(stream);
 
     let mut h = HeaderMap::new();
-    h.insert("content-length", file_size.to_string().parse().unwrap());
+    h.insert("content-length", body_len.to_string().parse().unwrap());
     if !is_full {
         h.insert(
             "content-range",
@@ -5725,6 +5848,35 @@ fn evaluate_copy_preconditions(
     None
 }
 
+fn bypass_governance_header(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-amz-bypass-governance-retention")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn put_conditions_from_headers(headers: &HeaderMap) -> myfsio_storage::traits::PutConditions {
+    myfsio_storage::traits::PutConditions {
+        if_match: headers
+            .get("if-match")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+        if_none_match: headers
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string),
+        if_unmodified_since: headers
+            .get("if-unmodified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date),
+        if_modified_since: headers
+            .get("if-modified-since")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date),
+    }
+}
+
 fn parse_http_date(value: &str) -> Option<DateTime<Utc>> {
     let trimmed = value.trim();
     if let Ok(dt) = DateTime::parse_from_rfc2822(trimmed) {
@@ -5953,7 +6105,6 @@ async fn resolve_encryption_context(
 }
 
 const SSE_C_KEY_MD5_META: &str = "x-amz-server-side-encryption-customer-key-MD5";
-const MAX_BUFFERED_UPLOAD_BYTES: usize = 5 * 1024 * 1024 * 1024;
 
 fn sse_c_key_md5(key: &[u8]) -> String {
     use base64::engine::general_purpose::STANDARD as B64;
@@ -6173,47 +6324,100 @@ async fn post_object_form_handler(
         .map_err(std::io::Error::other);
     let mut multipart = multer::Multipart::new(stream, boundary);
 
-    let mut fields: HashMap<String, String> = HashMap::new();
-    let mut file_bytes: Option<bytes::Bytes> = None;
-    let mut file_name: Option<String> = None;
+    enum PostFormEvent {
+        Text {
+            name: String,
+            value: String,
+        },
+        File {
+            file_name: Option<String>,
+            data: tokio::sync::mpsc::Receiver<std::io::Result<bytes::Bytes>>,
+        },
+    }
 
-    while let Some(mut field) = match multipart.next_field().await {
-        Ok(f) => f,
-        Err(e) => {
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::MalformedXML,
-                format!("Malformed multipart: {}", e),
-            ));
-        }
-    } {
-        let name = field.name().map(|s| s.to_string()).unwrap_or_default();
-        if name.eq_ignore_ascii_case("file") {
-            file_name = field.file_name().map(|s| s.to_string());
-            let mut buf: Vec<u8> = Vec::new();
-            loop {
-                match field.chunk().await {
-                    Ok(Some(chunk)) => {
-                        if buf.len() + chunk.len() > MAX_BUFFERED_UPLOAD_BYTES {
-                            return s3_error_response(S3Error::new(
-                                S3ErrorCode::EntityTooLarge,
-                                "Uploaded file exceeds the maximum allowed size",
-                            ));
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Result<PostFormEvent, String>>(8);
+    tokio::spawn(async move {
+        loop {
+            let mut field = match multipart.next_field().await {
+                Ok(Some(f)) => f,
+                Ok(None) => return,
+                Err(e) => {
+                    let _ = event_tx
+                        .send(Err(format!("Malformed multipart: {}", e)))
+                        .await;
+                    return;
+                }
+            };
+            let name = field.name().map(|s| s.to_string()).unwrap_or_default();
+            if name.eq_ignore_ascii_case("file") {
+                let file_name = field.file_name().map(|s| s.to_string());
+                let (data_tx, data_rx) =
+                    tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(4);
+                if event_tx
+                    .send(Ok(PostFormEvent::File {
+                        file_name,
+                        data: data_rx,
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                loop {
+                    match field.chunk().await {
+                        Ok(Some(chunk)) => {
+                            if data_tx.send(Ok(chunk)).await.is_err() {
+                                return;
+                            }
                         }
-                        buf.extend_from_slice(&chunk);
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = data_tx.send(Err(std::io::Error::other(e))).await;
+                            return;
+                        }
                     }
-                    Ok(None) => break,
+                }
+                return;
+            } else if !name.is_empty() {
+                match field.text().await {
+                    Ok(value) => {
+                        if event_tx
+                            .send(Ok(PostFormEvent::Text { name, value }))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                     Err(e) => {
-                        return s3_error_response(S3Error::new(
-                            S3ErrorCode::InternalError,
-                            format!("Failed to read file: {}", e),
-                        ));
+                        let _ = event_tx
+                            .send(Err(format!("Malformed multipart: {}", e)))
+                            .await;
+                        return;
                     }
                 }
             }
-            file_bytes = Some(bytes::Bytes::from(buf));
-        } else if !name.is_empty() {
-            if let Ok(t) = field.text().await {
-                fields.insert(name, t);
+        }
+    });
+
+    let mut fields: HashMap<String, String> = HashMap::new();
+    let mut file_stream: Option<tokio::sync::mpsc::Receiver<std::io::Result<bytes::Bytes>>> = None;
+    let mut file_name: Option<String> = None;
+    while let Some(event) = event_rx.recv().await {
+        match event {
+            Err(message) => {
+                return s3_error_response(S3Error::new(S3ErrorCode::MalformedXML, message));
+            }
+            Ok(PostFormEvent::Text { name, value }) => {
+                fields.insert(name, value);
+            }
+            Ok(PostFormEvent::File {
+                file_name: fname,
+                data,
+            }) => {
+                file_name = fname;
+                file_stream = Some(data);
+                break;
             }
         }
     }
@@ -6321,7 +6525,6 @@ async fn post_object_form_handler(
         }
     }
 
-    let content_length = file_bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
     let object_key = if key_template.contains("${filename}") {
         let fname = file_name.clone().unwrap_or_else(|| "upload".to_string());
         key_template.replace("${filename}", &fname)
@@ -6329,15 +6532,13 @@ async fn post_object_form_handler(
         key_template.clone()
     };
 
+    let mut length_range: Option<(u64, u64)> = None;
     if let Some(conditions) = policy_value.get("conditions").and_then(|v| v.as_array()) {
-        if let Err(msg) = validate_post_policy_conditions(
-            bucket,
-            &object_key,
-            conditions,
-            &fields,
-            content_length,
-        ) {
-            return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, msg));
+        match validate_post_policy_conditions(bucket, &object_key, conditions, &fields) {
+            Ok(range) => length_range = range,
+            Err(msg) => {
+                return s3_error_response(S3Error::new(S3ErrorCode::AccessDenied, msg));
+            }
         }
     }
 
@@ -6372,8 +6573,8 @@ async fn post_object_form_handler(
         ));
     }
 
-    let file_data = match file_bytes {
-        Some(b) => b,
+    let file_data = match file_stream {
+        Some(rx) => rx,
         None => {
             return s3_error_response(S3Error::new(
                 S3ErrorCode::InvalidArgument,
@@ -6406,8 +6607,23 @@ async fn post_object_form_handler(
         return response;
     }
 
-    let cursor = std::io::Cursor::new(file_data.to_vec());
-    let boxed: myfsio_storage::traits::AsyncReadStream = Box::pin(cursor);
+    let _disk_permit = match acquire_disk_write_permit(state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let raw: myfsio_storage::traits::AsyncReadStream = Box::pin(tokio_util::io::StreamReader::new(
+        tokio_stream::wrappers::ReceiverStream::new(file_data),
+    ));
+    let raw: myfsio_storage::traits::AsyncReadStream = match length_range {
+        Some((min, max)) => Box::pin(checksum_stream::LengthRangeReader::new(raw, min, max)),
+        None => raw,
+    };
+    let boxed = spool_upload_stream(
+        raw,
+        state.config.upload_stream_buffer_bytes,
+        state.config.stream_chunk_size,
+        state.disk_limiter.spool_gauge(),
+    );
 
     let meta = match state
         .storage
@@ -6455,8 +6671,8 @@ fn validate_post_policy_conditions(
     object_key: &str,
     conditions: &[serde_json::Value],
     form: &HashMap<String, String>,
-    content_length: u64,
-) -> Result<(), String> {
+) -> Result<Option<(u64, u64)>, String> {
+    let mut length_range: Option<(u64, u64)> = None;
     for cond in conditions {
         if let Some(obj) = cond.as_object() {
             for (k, v) in obj {
@@ -6524,18 +6740,16 @@ fn validate_post_policy_conditions(
                     }
                 }
             } else if op == "content-length-range" && arr.len() == 3 {
-                let min = arr[1].as_i64().unwrap_or(0) as u64;
-                let max = arr[2].as_i64().unwrap_or(0) as u64;
-                if content_length < min || content_length > max {
-                    return Err(format!(
-                        "Content length must be between {} and {}",
-                        min, max
-                    ));
-                }
+                let min = arr[1].as_i64().unwrap_or(0).max(0) as u64;
+                let max = arr[2].as_i64().unwrap_or(0).max(0) as u64;
+                length_range = Some(match length_range {
+                    Some((prev_min, prev_max)) => (prev_min.max(min), prev_max.min(max)),
+                    None => (min, max),
+                });
             }
         }
     }
-    Ok(())
+    Ok(length_range)
 }
 
 #[cfg(test)]

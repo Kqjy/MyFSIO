@@ -86,6 +86,7 @@ pub fn write_stub(path: &Path, header: &StubHeader) -> std::io::Result<()> {
         tracing::debug!(path = %path.display(), error = %e, "could not mark segment stub sparse; stub will occupy its logical size on disk");
     }
     file.set_len(header.total)?;
+    file.sync_all()?;
     Ok(())
 }
 

@@ -48,6 +48,7 @@ pub struct AppState {
     pub templates: Option<Arc<TemplateEngine>>,
     pub sessions: Arc<SessionStore>,
     pub access_logging: Arc<AccessLoggingService>,
+    pub disk_limiter: Arc<crate::services::disk_limiter::DiskLimiter>,
     pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
@@ -227,7 +228,10 @@ impl AppState {
             config.replication_max_failures_per_bucket,
             config.allow_internal_endpoints,
             Duration::from_secs(config.replication_part_stall_timeout_secs),
+            config.replication_concurrency,
+            config.replication_queue_capacity,
         ));
+        replication.clone().start_workers();
         if config.replication_healer_enabled {
             replication.clone().start_healer(
                 Duration::from_secs(config.replication_healer_interval_secs.max(1)),
@@ -302,6 +306,11 @@ impl AppState {
             &config.storage_root,
             config.audit_log_enabled,
         ));
+        let disk_limiter = Arc::new(crate::services::disk_limiter::DiskLimiter::new(
+            config.hdd_read_concurrency,
+            config.hdd_write_concurrency,
+            Duration::from_secs(config.disk_queue_timeout_secs),
+        ));
         Self {
             config,
             storage,
@@ -321,6 +330,7 @@ impl AppState {
             templates,
             sessions: Arc::new(SessionStore::new(session_ttl)),
             access_logging,
+            disk_limiter,
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),

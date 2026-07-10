@@ -318,6 +318,8 @@ fn storage_status(err: &StorageError) -> StatusCode {
         | StorageError::QuotaExceeded(_) => StatusCode::BAD_REQUEST,
         StorageError::BucketAlreadyExists(_) => StatusCode::CONFLICT,
         StorageError::BucketNotEmpty(_) => StatusCode::CONFLICT,
+        StorageError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
+        StorageError::ObjectLocked(_) => StatusCode::FORBIDDEN,
         StorageError::ObjectCorrupted { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         StorageError::Io(_) | StorageError::Json(_) | StorageError::Internal(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
@@ -542,15 +544,15 @@ async fn read_object_bytes_for_zip(
             .get_object_path(bucket, key)
             .await
             .map_err(|e| e.to_string())?;
-        let tmp_dir = state.config.storage_root.join(SYSTEM_ROOT).join("tmp");
-        let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-        let dec_tmp = tmp_dir.join(format!("zip-dec-{}", uuid::Uuid::new_v4()));
-        enc_svc
-            .decrypt_object(&obj_path, &dec_tmp, &enc_meta, None)
+        let mut stream = enc_svc
+            .decrypt_object_stream(&obj_path, &enc_meta, None, None, false)
             .await
             .map_err(|e| e.to_string())?;
-        let bytes = tokio::fs::read(&dec_tmp).await.map_err(|e| e.to_string())?;
-        let _ = tokio::fs::remove_file(&dec_tmp).await;
+        let mut bytes = Vec::new();
+        stream
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| e.to_string())?;
         return Ok(bytes);
     }
 
@@ -4731,6 +4733,7 @@ pub async fn collect_metrics(state: &AppState) -> Value {
     } else {
         0.0
     };
+    let disk_pressure = state.disk_limiter.snapshot();
 
     json!({
         "cpu_percent": cpu_percent,
@@ -4752,6 +4755,22 @@ pub async fn collect_metrics(state: &AppState) -> Value {
             "uptime_days": uptime_days.floor() as u64,
             "uptime_seconds": uptime_seconds,
             "uptime_display": uptime_display,
+        },
+        "disk_pressure": {
+            "enabled": state.disk_limiter.enabled(),
+            "read_limit": disk_pressure.read_limit,
+            "write_limit": disk_pressure.write_limit,
+            "read_permits_in_use": disk_pressure.read_permits_in_use,
+            "write_permits_in_use": disk_pressure.write_permits_in_use,
+            "queue_timeouts": disk_pressure.queue_timeouts,
+            "queue_waits": disk_pressure.queue_waits,
+            "queue_wait_ms_total": disk_pressure.queue_wait_ms_total,
+            "queue_wait_ms_avg": disk_pressure.queue_wait_ms_avg,
+            "upload_spool_bytes": disk_pressure.upload_spool_bytes,
+        },
+        "replication_queue": {
+            "depth": state.replication.queue_depth(),
+            "overflow_total": state.replication.queue_overflow_total(),
         },
     })
 }

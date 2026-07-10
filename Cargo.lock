@@ -2703,6 +2703,7 @@ version = "0.5.6"
 dependencies = [
  "aes-gcm",
  "base64",
+ "bytes",
  "chrono",
  "hex",
  "hkdf",
@@ -2715,6 +2716,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
  "uuid",
 ]
 

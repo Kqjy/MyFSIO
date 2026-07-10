@@ -2,6 +2,7 @@ pub mod access_logging;
 pub mod acl;
 pub mod audit_log;
 pub mod cluster_attest;
+pub mod disk_limiter;
 pub mod gc;
 pub mod integrity;
 pub mod lifecycle;

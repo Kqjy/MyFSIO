@@ -167,6 +167,16 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `RATE_LIMIT_ADMIN` | `60 per minute` | Override for `/myfsio/admin/*` |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Backend for rate-limit state. Only `memory://` is supported today |
 
+### Disk admission control
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HDD_READ_CONCURRENCY` | `0` (disabled) | Maximum concurrent S3 object data reads; `2` is recommended for HDD storage |
+| `HDD_WRITE_CONCURRENCY` | `0` (disabled) | Maximum concurrent S3 object data writes; `2` is recommended for HDD storage |
+| `DISK_QUEUE_TIMEOUT_SECONDS` | `15` | Maximum wait for a disk permit before returning `503 SlowDown` |
+
+These limits gate S3 object data reads and writes only. Admin and UI requests, HEAD requests, and metadata operations are unaffected.
+
 ### CORS and proxying
 
 | Variable | Default | Description |
@@ -220,6 +230,8 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `REPLICATION_MAX_RETRIES` | `2` | Replication retry count |
 | `REPLICATION_STREAMING_THRESHOLD_BYTES` | `10485760` | Switch to streaming for large copies |
 | `REPLICATION_MAX_FAILURES_PER_BUCKET` | `50` | Failure budget before a bucket is skipped |
+| `REPLICATION_CONCURRENCY` | `4` | Fixed number of replication worker tasks |
+| `REPLICATION_QUEUE_CAPACITY` | `10000` | Maximum queued replication events before overflow is persisted for healer retry |
 | `REPLICATION_HEALER_ENABLED` | `true` | Background worker that auto-retries persisted replication failures (set `false` to disable) |
 | `REPLICATION_HEALER_INTERVAL_SECONDS` | `60` | Healer pass interval; each pass re-runs eligible failures |
 | `REPLICATION_HEALER_MAX_ATTEMPTS` | `12` | Per-object retry cap; failures with `failure_count` at or above this are skipped (manual retry still works) |
@@ -544,6 +556,16 @@ Notes:
 
 - If `ENCRYPTION_ENABLED=true` and `SECRET_KEY` is not configured, the server still starts, but `--check-config` warns that secure-at-rest config encryption is unavailable.
 - KMS and the object encryption master key live under `data/.myfsio.sys/keys/`.
+- Encrypted PUTs stream the client body straight through the encryptor into a temp file and commit the ciphertext atomically; plaintext is never installed at the live key path. Encrypted GETs (full, ranged, and SSE-C multipart) decrypt chunk-by-chunk while streaming the response instead of materializing a decrypted temp file. Objects written by older builds without `x-amz-encryption-plaintext-size` metadata fall back to temp-file decryption.
+- One remaining non-atomic window: SSE-S3/SSE-KMS multipart uploads encrypt after CompleteMultipartUpload commits the assembled object; a crash inside that window can leave the assembled plaintext live. Per-part SSE-C multipart uploads are not affected.
+
+### Write integrity and conditional writes
+
+- `Content-MD5`, `x-amz-checksum-sha256`, and `x-amz-checksum-crc32` are verified while the body streams to disk (no in-memory buffering); a mismatch returns `BadDigest` and nothing is committed.
+- `If-Match` / `If-None-Match` / `If-Unmodified-Since` / `If-Modified-Since` on PutObject and CompleteMultipartUpload are re-evaluated inside the storage commit lock, so concurrent conditional writes cannot both succeed (`412 PreconditionFailed` on conflict).
+- Object lock (retention and legal hold) is enforced at the storage commit for destructive operations: unversioned overwrite/delete, suspended-versioning null-version replacement, and version deletion. This covers internal writers (replication, site sync, lifecycle) in addition to the S3 API.
+- Bucket quotas are checked under a per-bucket commit lock, so concurrent uploads to different keys cannot race past the limit.
+- Object data and multipart part files are fsynced before the commit rename, and parent directories are fsynced after rename (crash durability).
 
 ## 10. Docker
 

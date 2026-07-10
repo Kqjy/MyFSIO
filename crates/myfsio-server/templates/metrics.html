@@ -183,6 +183,67 @@
     </div>
   </div>
 
+  <div class="card shadow-sm border-0 mb-4 overflow-hidden">
+    <div class="card-header bg-body border-0 px-3 pt-3 pb-2 d-flex align-items-center justify-content-between gap-3">
+      <div class="d-flex align-items-center gap-2">
+        <div class="d-inline-flex align-items-center justify-content-center rounded-circle bg-warning-subtle" style="width: 28px; height: 28px;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-warning" viewBox="0 0 16 16">
+            <path d="M8 1a2 2 0 0 0-2 2v.5H4.5a.5.5 0 0 0 0 1H6V6H4.5a.5.5 0 0 0 0 1H6v1.5H4.5a.5.5 0 0 0 0 1H6V11a2 2 0 1 0 4 0V9.5h1.5a.5.5 0 0 0 0-1H10V7h1.5a.5.5 0 0 0 0-1H10V4.5h1.5a.5.5 0 0 0 0-1H10V3a2 2 0 0 0-2-2Zm1 10a1 1 0 1 1-2 0V3a1 1 0 0 1 2 0v8Z"/>
+          </svg>
+        </div>
+        <h6 class="card-subtitle text-uppercase small fw-bold mb-0">Disk pressure</h6>
+      </div>
+      <span id="diskPressureStatus" class="badge bg-secondary-subtle text-secondary">Loading</span>
+    </div>
+    <div class="card-body px-3 pt-2 pb-3">
+      <div id="diskPressureDisabledHint" class="small text-muted mb-3 d-none">Admission control disabled (HDD_READ_CONCURRENCY / HDD_WRITE_CONCURRENCY)</div>
+      <div class="row g-2">
+        <div class="col-6 col-md-4 col-xl">
+          <div class="bg-body-tertiary rounded-3 p-3 h-100">
+            <div class="small text-muted mb-1">Read permits</div>
+            <div class="fw-semibold" data-disk-pressure="read_permits">&mdash;</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl">
+          <div class="bg-body-tertiary rounded-3 p-3 h-100">
+            <div class="small text-muted mb-1">Write permits</div>
+            <div class="fw-semibold" data-disk-pressure="write_permits">&mdash;</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl">
+          <div class="bg-body-tertiary rounded-3 p-3 h-100">
+            <div class="small text-muted mb-1">Avg queue wait</div>
+            <div class="fw-semibold"><span data-disk-pressure="queue_wait_ms_avg">&mdash;</span> <span class="small text-muted">ms</span></div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl">
+          <div class="bg-body-tertiary rounded-3 p-3 h-100">
+            <div class="small text-muted mb-1">Queue timeouts</div>
+            <div class="fw-semibold" data-disk-pressure="queue_timeouts">&mdash;</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl">
+          <div class="bg-body-tertiary rounded-3 p-3 h-100">
+            <div class="small text-muted mb-1">Upload spool</div>
+            <div class="fw-semibold" data-disk-pressure="upload_spool_bytes">&mdash;</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl">
+          <div class="bg-body-tertiary rounded-3 p-3 h-100">
+            <div class="small text-muted mb-1">Replication queue</div>
+            <div class="fw-semibold" data-disk-pressure="replication_depth">&mdash;</div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl">
+          <div class="bg-body-tertiary rounded-3 p-3 h-100">
+            <div class="small text-muted mb-1">Queue overflow</div>
+            <div class="fw-semibold" data-disk-pressure="replication_overflow_total">&mdash;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   {% set has_issues = (cpu_percent > 80) or (memory.percent > 85) or (disk.percent > 90) %}
   <div id="healthBanner" class="card shadow-sm border-0 mb-4 overflow-hidden">
     <div class="card-body p-3 d-flex align-items-center gap-3" id="healthBannerBody"
@@ -488,6 +549,7 @@
 
 {% block extra_scripts %}
 <script src="{{ url_for(endpoint="static", filename="js/vendor/chart.umd.min.js") }}"></script>
+<script src="{{ url_for(endpoint="static", filename="js/metrics.js") }}"></script>
 <script>
 function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -641,6 +703,7 @@ function formatUptime(seconds) {
     fetch('/ui/metrics/api')
       .then(function(resp) { return resp.json(); })
       .then(function(data) {
+        if (window.renderDiskPressure) window.renderDiskPressure(data.disk_pressure, data.replication_queue);
         updateGauge(cpuGauge, data.cpu_percent);
         updateGauge(memGauge, data.memory.percent);
         updateGauge(diskGauge, data.disk.percent);
@@ -776,6 +839,7 @@ function formatUptime(seconds) {
     }
   });
 
+  updateMetrics();
   startPolling();
 
   function downloadJson(data, filename) {

@@ -66,10 +66,15 @@ pub struct ServerConfig {
     pub replication_max_retries: u32,
     pub replication_streaming_threshold_bytes: u64,
     pub replication_max_failures_per_bucket: usize,
+    pub replication_concurrency: usize,
+    pub replication_queue_capacity: usize,
     pub replication_healer_enabled: bool,
     pub replication_healer_interval_secs: u64,
     pub replication_healer_max_attempts: u32,
     pub replication_part_stall_timeout_secs: u64,
+    pub hdd_read_concurrency: usize,
+    pub hdd_write_concurrency: usize,
+    pub disk_queue_timeout_secs: u64,
     pub site_sync_enabled: bool,
     pub site_sync_interval_secs: u64,
     pub site_sync_batch_size: usize,
@@ -237,6 +242,12 @@ impl ServerConfig {
             parse_u64_env("REPLICATION_STREAMING_THRESHOLD_BYTES", 10_485_760);
         let replication_max_failures_per_bucket =
             parse_u64_env("REPLICATION_MAX_FAILURES_PER_BUCKET", 50) as usize;
+        let replication_concurrency = parse_usize_env("REPLICATION_CONCURRENCY", 4).max(1);
+        let replication_queue_capacity =
+            parse_usize_env("REPLICATION_QUEUE_CAPACITY", 10_000).max(1);
+        let hdd_read_concurrency = parse_usize_env("HDD_READ_CONCURRENCY", 0);
+        let hdd_write_concurrency = parse_usize_env("HDD_WRITE_CONCURRENCY", 0);
+        let disk_queue_timeout_secs = parse_u64_env("DISK_QUEUE_TIMEOUT_SECONDS", 15).max(1);
         let replication_healer_enabled = parse_bool_env("REPLICATION_HEALER_ENABLED", true);
         let replication_healer_interval_secs =
             parse_u64_env("REPLICATION_HEALER_INTERVAL_SECONDS", 60);
@@ -375,10 +386,15 @@ impl ServerConfig {
             replication_max_retries,
             replication_streaming_threshold_bytes,
             replication_max_failures_per_bucket,
+            replication_concurrency,
+            replication_queue_capacity,
             replication_healer_enabled,
             replication_healer_interval_secs,
             replication_healer_max_attempts,
             replication_part_stall_timeout_secs,
+            hdd_read_concurrency,
+            hdd_write_concurrency,
+            disk_queue_timeout_secs,
             site_sync_enabled,
             site_sync_interval_secs,
             site_sync_batch_size,
@@ -482,10 +498,15 @@ impl Default for ServerConfig {
             replication_max_retries: 2,
             replication_streaming_threshold_bytes: 10_485_760,
             replication_max_failures_per_bucket: 50,
+            replication_concurrency: 4,
+            replication_queue_capacity: 10_000,
             replication_healer_enabled: true,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
             replication_part_stall_timeout_secs: 300,
+            hdd_read_concurrency: 0,
+            hdd_write_concurrency: 0,
+            disk_queue_timeout_secs: 15,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,
