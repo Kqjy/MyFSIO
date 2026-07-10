@@ -79,6 +79,9 @@ impl AppState {
                 multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
                     &config.multipart_object_layout,
                 ),
+                metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
+                    &config.metadata_layout,
+                ),
             },
         ));
         let iam = Arc::new(IamService::new_with_secret(

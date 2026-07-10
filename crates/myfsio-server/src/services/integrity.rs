@@ -2,12 +2,13 @@ use myfsio_common::constants::{
     BUCKET_META_DIR, BUCKET_VERSIONS_DIR, DIR_MARKER_FILE, INDEX_FILE, KEY_DATA_MARKER_FILE,
     SYSTEM_BUCKETS_DIR, SYSTEM_ROOT,
 };
+use myfsio_crypto::encryption::EncryptionMetadata;
 use myfsio_storage::fs_backend::{
     is_multipart_etag, metadata_is_corrupted, FsStorageBackend, META_KEY_CORRUPTED,
     META_KEY_CORRUPTED_AT, META_KEY_CORRUPTION_DETAIL, META_KEY_QUARANTINE_PATH,
+    SIDECAR_ENTRY_NAME_FIELD, SIDECAR_FILE_EXT, SIDECAR_FILE_PREFIX,
 };
 use myfsio_storage::traits::StorageEngine;
-use myfsio_crypto::encryption::EncryptionMetadata;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -57,7 +58,10 @@ struct CorruptionCursor {
 }
 
 fn cursor_path_for(storage_root: &Path) -> PathBuf {
-    storage_root.join(SYSTEM_ROOT).join("config").join(CURSOR_FILE)
+    storage_root
+        .join(SYSTEM_ROOT)
+        .join("config")
+        .join(CURSOR_FILE)
 }
 
 fn load_cursor(path: &Path) -> CorruptionCursor {
@@ -197,10 +201,7 @@ struct ScanState {
 
 impl ScanState {
     fn push_issue(&mut self, issue_type: &str, bucket: &str, key: &str, detail: String) {
-        let count = self
-            .issue_counts
-            .entry(issue_type.to_string())
-            .or_insert(0);
+        let count = self.issue_counts.entry(issue_type.to_string()).or_insert(0);
         if *count < MAX_ISSUES_PER_TYPE {
             *count += 1;
             self.issues.push(json!({
@@ -249,11 +250,11 @@ impl IntegrityService {
 
     pub async fn status(&self) -> Value {
         let running = self.running.load(Ordering::SeqCst);
-        let scan_elapsed_seconds = self
-            .started_at
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|started| started.elapsed().as_secs_f64()));
+        let scan_elapsed_seconds = self.started_at.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|started| started.elapsed().as_secs_f64())
+        });
         json!({
             "enabled": true,
             "running": running,
@@ -326,14 +327,15 @@ impl IntegrityService {
         let storage_root = self.storage_root.clone();
         let batch_size = self.config.batch_size;
         let pacing_ms = self.config.scan_pacing_ms;
-        let scan_state =
-            tokio::task::spawn_blocking(move || scan_all_buckets(&storage_root, batch_size, pacing_ms))
-                .await
-                .unwrap_or_else(|e| {
-                    let mut st = ScanState::default();
-                    st.errors.push(format!("scan task failed: {}", e));
-                    st
-                });
+        let scan_state = tokio::task::spawn_blocking(move || {
+            scan_all_buckets(&storage_root, batch_size, pacing_ms)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            let mut st = ScanState::default();
+            st.errors.push(format!("scan task failed: {}", e));
+            st
+        });
 
         let heal_stats = if auto_heal && !dry_run {
             self.run_heal_phase(&scan_state).await
@@ -558,7 +560,12 @@ async fn heal_corrupted(
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::error!("Heal {}/{}: re-hash before quarantine failed: {}", bucket, key, e);
+                tracing::error!(
+                    "Heal {}/{}: re-hash before quarantine failed: {}",
+                    bucket,
+                    key,
+                    e
+                );
                 return HealStatus::Failed;
             }
         }
@@ -1018,6 +1025,7 @@ fn collect_index_entries(meta_root: &Path) -> HashMap<String, IndexEntryInfo> {
         return out;
     }
 
+    let mut sidecar_keys: HashSet<String> = HashSet::new();
     let mut stack: Vec<PathBuf> = vec![meta_root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let rd = match std::fs::read_dir(&dir) {
@@ -1050,7 +1058,54 @@ fn collect_index_entries(meta_root: &Path) -> HashMap<String, IndexEntryInfo> {
                     .join("/")
             };
 
-            if file_name == INDEX_FILE {
+            if file_name.starts_with(SIDECAR_FILE_PREFIX) && file_name.ends_with(SIDECAR_FILE_EXT) {
+                let fallback_name = file_name
+                    .strip_prefix(SIDECAR_FILE_PREFIX)
+                    .and_then(|s| s.strip_suffix(SIDECAR_FILE_EXT))
+                    .map(str::to_string);
+                let parsed: Option<Value> = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok());
+                let (entry_name, entry_val) = match parsed {
+                    Some(entry_val) => {
+                        let entry_name = entry_val
+                            .get(SIDECAR_ENTRY_NAME_FIELD)
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or(fallback_name);
+                        let Some(entry_name) = entry_name else {
+                            continue;
+                        };
+                        (entry_name, entry_val)
+                    }
+                    None => {
+                        let Some(entry_name) = fallback_name else {
+                            continue;
+                        };
+                        let entry_val = json!({
+                            "metadata": {
+                                META_KEY_CORRUPTED: "true",
+                                META_KEY_CORRUPTION_DETAIL: "metadata sidecar unreadable",
+                            }
+                        });
+                        (entry_name, entry_val)
+                    }
+                };
+                let full_key = if dir_prefix.is_empty() {
+                    entry_name.clone()
+                } else {
+                    format!("{}/{}", dir_prefix, entry_name)
+                };
+                sidecar_keys.insert(full_key.clone());
+                out.insert(
+                    full_key,
+                    IndexEntryInfo {
+                        entry: entry_val,
+                        index_file: path.clone(),
+                        key_name: entry_name,
+                    },
+                );
+            } else if file_name == INDEX_FILE {
                 let content = match std::fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(_) => continue,
@@ -1066,6 +1121,9 @@ fn collect_index_entries(meta_root: &Path) -> HashMap<String, IndexEntryInfo> {
                     } else {
                         format!("{}/{}", dir_prefix, key_name)
                     };
+                    if sidecar_keys.contains(&full_key) {
+                        continue;
+                    }
                     out.insert(
                         full_key,
                         IndexEntryInfo {
@@ -1258,11 +1316,9 @@ fn check_phantom(
                 .get("__part_sizes__")
                 .and_then(|raw| myfsio_storage::fs_backend::parse_part_sizes(raw));
             let intact = match (seg_dir, sizes) {
-                (Some(dir), Some(sizes)) => {
-                    myfsio_storage::segments::SegmentSet::new(dir, sizes)
-                        .verify_files()
-                        .is_ok()
-                }
+                (Some(dir), Some(sizes)) => myfsio_storage::segments::SegmentSet::new(dir, sizes)
+                    .verify_files()
+                    .is_ok(),
                 _ => false,
             };
             if !intact {
@@ -1914,7 +1970,11 @@ mod tests {
         save_cursor(&cursor_path_for(root), &cursor);
 
         let state = scan_all_buckets(root, 100, 0);
-        assert!(state.errors.is_empty(), "unexpected errors: {:?}", state.errors);
+        assert!(
+            state.errors.is_empty(),
+            "unexpected errors: {:?}",
+            state.errors
+        );
         let after = load_cursor(&cursor_path_for(root));
         assert_eq!(
             after.bucket, "",
@@ -1960,16 +2020,12 @@ mod tests {
         let phantom_in_list = state
             .issues
             .iter()
-            .filter(|i| {
-                i.get("issue_type").and_then(|v| v.as_str()) == Some("phantom_metadata")
-            })
+            .filter(|i| i.get("issue_type").and_then(|v| v.as_str()) == Some("phantom_metadata"))
             .count();
         let corrupted_in_list = state
             .issues
             .iter()
-            .filter(|i| {
-                i.get("issue_type").and_then(|v| v.as_str()) == Some("corrupted_object")
-            })
+            .filter(|i| i.get("issue_type").and_then(|v| v.as_str()) == Some("corrupted_object"))
             .count();
 
         assert_eq!(

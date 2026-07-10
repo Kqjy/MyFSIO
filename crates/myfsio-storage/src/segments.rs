@@ -241,7 +241,9 @@ impl Read for SegmentChainRead {
                 continue;
             }
             let file = self.current.as_mut().expect("current segment file");
-            let want = buf.len().min(self.seg_remaining.min(usize::MAX as u64) as usize);
+            let want = buf
+                .len()
+                .min(self.seg_remaining.min(usize::MAX as u64) as usize);
             let n = file.read(&mut buf[..want])?;
             if n == 0 {
                 return Err(std::io::Error::new(
@@ -309,14 +311,12 @@ impl Read for OpenSegmentsRead {
             }
             if self.seg_remaining == 0 {
                 self.idx += 1;
-                self.seg_remaining = self
-                    .files
-                    .get(self.idx)
-                    .map(|(_, size)| *size)
-                    .unwrap_or(0);
+                self.seg_remaining = self.files.get(self.idx).map(|(_, size)| *size).unwrap_or(0);
                 continue;
             }
-            let want = buf.len().min(self.seg_remaining.min(usize::MAX as u64) as usize);
+            let want = buf
+                .len()
+                .min(self.seg_remaining.min(usize::MAX as u64) as usize);
             let n = self.files[self.idx].0.read(&mut buf[..want])?;
             if n == 0 {
                 return Err(std::io::Error::new(
@@ -395,11 +395,7 @@ impl AsyncRead for SegmentRangeReader {
             }
             if self.seg_remaining == 0 {
                 self.idx += 1;
-                self.seg_remaining = self
-                    .files
-                    .get(self.idx)
-                    .map(|(_, take)| *take)
-                    .unwrap_or(0);
+                self.seg_remaining = self.files.get(self.idx).map(|(_, take)| *take).unwrap_or(0);
                 continue;
             }
             let want = (self.seg_remaining.min(buf.remaining() as u64)) as usize;
@@ -592,14 +588,13 @@ mod tests {
         let files = {
             let mut v = Vec::new();
             for (i, size) in set.sizes.iter().enumerate() {
-                v.push((
-                    tokio::fs::File::open(set.seg_path(i)).await.unwrap(),
-                    *size,
-                ));
+                v.push((tokio::fs::File::open(set.seg_path(i)).await.unwrap(), *size));
             }
             v
         };
-        let mut reader = SegmentRangeReader::from_files(files, 999, 502).await.unwrap();
+        let mut reader = SegmentRangeReader::from_files(files, 999, 502)
+            .await
+            .unwrap();
         let mut out = Vec::new();
         reader.read_to_end(&mut out).await.unwrap();
         assert_eq!(out, &full[999..1501]);

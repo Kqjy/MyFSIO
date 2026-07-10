@@ -92,11 +92,7 @@ impl PeerFetcher {
             }
         };
 
-        let expected_etag = resp
-            .e_tag()
-            .unwrap_or("")
-            .trim_matches('"')
-            .to_string();
+        let expected_etag = resp.e_tag().unwrap_or("").trim_matches('"').to_string();
         let metadata: Option<HashMap<String, String>> = resp
             .metadata()
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
@@ -146,12 +142,7 @@ impl PeerFetcher {
                     }
                 }
                 Err(err) => {
-                    tracing::error!(
-                        "Pull body read failed {}/{}: {}",
-                        local_bucket,
-                        key,
-                        err
-                    );
+                    tracing::error!("Pull body read failed {}/{}: {}", local_bucket, key, err);
                     let _ = tokio::fs::remove_file(&tmp_path).await;
                     return false;
                 }

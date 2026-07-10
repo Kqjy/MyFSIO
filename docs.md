@@ -82,6 +82,10 @@ cargo run -p myfsio-server -- --reset-cred
 # One-shot: tag existing peer_inbound_access_key entries as peer credentials
 # (restricts them to cluster overview and peer relay paths, and clears their IAM policies)
 cargo run -p myfsio-server -- --migrate-peer-creds
+
+# One-shot: convert aggregate _index.json metadata to per-object sidecar files.
+# Run with the server stopped. Older binaries cannot read migrated metadata.
+cargo run -p myfsio-server -- --migrate-meta
 ```
 
 If you are running a release build instead of `cargo run`, replace the `cargo run ... --` prefix with the binary path.
@@ -142,6 +146,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `UPLOAD_STREAM_BUFFER_BYTES` | `8388608` | In-memory buffer between client stream and disk writer for uploads (8 MiB); `0` disables |
 | `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum part size enforced where applicable (5 MiB) |
 | `MULTIPART_OBJECT_LAYOUT` | `segments` | How completed multipart objects are stored: `segments` keeps part files and completes in O(metadata) (recommended, especially on HDD/ext4); `concat` assembles one file like older releases. Affects new completes only; both layouts stay readable. Note: binaries older than this feature cannot read `segments` objects |
+| `METADATA_LAYOUT` | `sidecar` | How object metadata is written: `sidecar` writes one `.__myfsio_meta__<name>.json` file per object (O(1) metadata updates, no shared rewrite); `index` keeps appending to the legacy per-directory `_index.json` (every update rewrites the whole directory index). Affects writes only; both layouts stay readable forever, and sidecars always take precedence over index entries. Note: binaries older than this feature cannot read sidecar metadata |
 | `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Age before an orphaned (unreferenced) multipart segment directory is garbage-collected |
 | `BULK_DELETE_MAX_KEYS` | `1000` | Maximum keys per UI bulk-delete request |
 | `STREAM_CHUNK_SIZE` | `1048576` | Default streaming chunk size for opt-in routes |
@@ -383,7 +388,8 @@ data/
       operation_metrics.json             # API operation metrics (if enabled)
     buckets/<bucket>/
       .bucket.json                       # bucket config (versioning, cors, lifecycle, etc.)
-      meta/                              # per-object metadata
+      meta/                              # per-object metadata sidecars (.__myfsio_meta__*.json)
+                                         # plus legacy per-directory _index.json files
       versions/                          # archived versions (if versioning enabled)
       segments/                          # completed multipart segment files by upload id
       lifecycle_history.json             # lifecycle action log (if any rule has fired)
@@ -398,10 +404,25 @@ data/
 Notable files:
 
 - With the default `MULTIPART_OBJECT_LAYOUT=segments`, completed multipart key paths are sparse stubs; the bytes live in the matching `segments/<upload_id>/seg-NNNNN` directory.
+- With the default `METADATA_LAYOUT=sidecar`, each object's metadata lives in its own `meta/<dirs>/.__myfsio_meta__<name>.json` file (over-long names fall back to a SHA-256-derived filename; the real entry name is embedded in the JSON as `__entry_name__`). Deployments upgraded from older releases keep their `_index.json` files readable forever; a sidecar always wins over an index entry for the same object.
 - `iam.json` is Fernet-encrypted at rest when `SECRET_KEY` is set.
 - `bucket_policies.json` is read only as a fallback for policies that pre-date per-bucket `.bucket.json`.
 - `kms_master.key` is plaintext on disk — protect `keys/` with filesystem permissions.
 - `*_history.json` files only appear when their owning service has been enabled at least once.
+
+### Metadata layout migration
+
+Existing deployments need no migration: the server reads sidecars first, then `_index.json`, then the pre-index legacy `.meta/<key>.meta.json` form. Objects migrate themselves to sidecars whenever their metadata is next written. To convert everything at once:
+
+```bash
+myfsio-server --migrate-meta
+```
+
+Run it with the server stopped. It walks every bucket's `meta/` tree, writes one sidecar per index entry (skipping entries that already have a valid sidecar), and deletes each `_index.json` only after all of its entries were written successfully. Corrupt indexes and unreadable sidecars are reported and left in place. Re-running is safe.
+
+**Warning:** once metadata exists in sidecar form — via `--migrate-meta` or simply by writing objects with a `METADATA_LAYOUT=sidecar` (default) server — older `myfsio-server` binaries cannot read that metadata. There is no rollback tool; do not downgrade past this feature after migrating. Setting `METADATA_LAYOUT=index` restores legacy-format *writes* for new objects but does not convert existing sidecars back.
+
+A corrupt `_index.json` or sidecar now **fails closed**: affected objects return `422 ObjectCorrupted` instead of silently losing metadata, and the server refuses to rewrite a corrupt index (previously a corrupt index was treated as empty and the next write destroyed metadata for every sibling object in that directory).
 
 ## 8. Background Services
 

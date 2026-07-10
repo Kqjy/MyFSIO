@@ -107,6 +107,7 @@ pub struct ServerConfig {
     pub request_body_timeout_secs: u64,
     pub upload_stream_buffer_bytes: usize,
     pub multipart_object_layout: String,
+    pub metadata_layout: String,
     pub ratelimit_default: RateLimitSetting,
     pub ratelimit_list_buckets: RateLimitSetting,
     pub ratelimit_bucket_ops: RateLimitSetting,
@@ -303,6 +304,8 @@ impl ServerConfig {
         let upload_stream_buffer_bytes = parse_usize_env("UPLOAD_STREAM_BUFFER_BYTES", 8_388_608);
         let multipart_object_layout =
             std::env::var("MULTIPART_OBJECT_LAYOUT").unwrap_or_else(|_| "segments".to_string());
+        let metadata_layout =
+            std::env::var("METADATA_LAYOUT").unwrap_or_else(|_| "sidecar".to_string());
         let ratelimit_default =
             parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(50_000, 60));
         let ratelimit_list_buckets =
@@ -413,6 +416,7 @@ impl ServerConfig {
             request_body_timeout_secs,
             upload_stream_buffer_bytes,
             multipart_object_layout,
+            metadata_layout,
             ratelimit_default,
             ratelimit_list_buckets,
             ratelimit_bucket_ops,
@@ -526,6 +530,7 @@ impl Default for ServerConfig {
             request_body_timeout_secs: 300,
             upload_stream_buffer_bytes: 8_388_608,
             multipart_object_layout: "segments".to_string(),
+            metadata_layout: "sidecar".to_string(),
             ratelimit_default: RateLimitSetting::new(50_000, 60),
             ratelimit_list_buckets: RateLimitSetting::new(50_000, 60),
             ratelimit_bucket_ops: RateLimitSetting::new(50_000, 60),

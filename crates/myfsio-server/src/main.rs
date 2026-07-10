@@ -22,6 +22,13 @@ struct Cli {
                 lose any S3 policies; reissue separate creds for site_sync if needed."
     )]
     migrate_peer_creds: bool,
+    #[arg(
+        long,
+        help = "Convert aggregate _index.json metadata to per-object sidecar files (one-shot). \
+                Run with the server stopped. After migration, older myfsio-server binaries \
+                cannot read the migrated metadata."
+    )]
+    migrate_meta: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -47,6 +54,10 @@ async fn main() {
     }
     if cli.migrate_peer_creds {
         migrate_peer_credentials(&config);
+        return;
+    }
+    if cli.migrate_meta {
+        migrate_metadata_to_sidecars(&config);
         return;
     }
     if cli.check_config || cli.show_config {
@@ -83,6 +94,21 @@ async fn main() {
     }
     tracing::info!("Storage root: {}", config.storage_root.display());
     tracing::info!("Region: {}", config.region);
+    if myfsio_storage::fs_backend::MetadataLayout::from_env_str(&config.metadata_layout)
+        == myfsio_storage::fs_backend::MetadataLayout::Sidecar
+    {
+        tracing::info!(
+            "Metadata layout: sidecar (per-object). New and updated objects write \
+             .__myfsio_meta__*.json sidecar files that older myfsio-server binaries cannot \
+             read; do not downgrade after objects have been written. Set METADATA_LAYOUT=index \
+             to keep writing the legacy aggregate _index.json layout."
+        );
+    } else {
+        tracing::info!(
+            "Metadata layout: index (legacy aggregate _index.json). Existing sidecar files \
+             still take precedence when present."
+        );
+    }
     tracing::info!(
         "Encryption: {}, KMS: {}, GC: {}, Lifecycle: {}, Integrity: {}, Metrics History: {}, Operation Metrics: {}, UI: {}",
         config.encryption_enabled,
@@ -621,6 +647,60 @@ fn migrate_peer_credentials(config: &ServerConfig) {
     }
     println!("============================================================");
     if !errors.is_empty() {
+        std::process::exit(1);
+    }
+}
+
+fn migrate_metadata_to_sidecars(config: &ServerConfig) {
+    use myfsio_storage::fs_backend::{FsStorageBackend, FsStorageBackendConfig, MetadataLayout};
+
+    println!("============================================================");
+    println!("METADATA MIGRATION: _index.json -> per-object sidecars");
+    println!("============================================================");
+    println!("Storage root: {}", config.storage_root.display());
+    println!("NOTE: run this with the server stopped; the migration does not");
+    println!("coordinate with a running myfsio-server process.");
+    println!();
+
+    let backend = FsStorageBackend::new_with_config(
+        config.storage_root.clone(),
+        FsStorageBackendConfig {
+            metadata_layout: MetadataLayout::Sidecar,
+            ..FsStorageBackendConfig::default()
+        },
+    );
+    let report = backend.migrate_meta_indexes_to_sidecars();
+
+    println!("Index files migrated : {}", report.index_files_migrated);
+    println!("Index files failed   : {}", report.index_files_failed);
+    println!("Entries written      : {}", report.entries_written);
+    println!(
+        "Entries skipped      : {} (sidecar already present)",
+        report.entries_skipped
+    );
+    if !report.failures.is_empty() {
+        println!();
+        println!("Failures ({}):", report.failures.len());
+        for failure in &report.failures {
+            println!("  - {}", failure);
+        }
+    }
+    println!();
+    println!("============================================================");
+    println!("WARNING");
+    println!("============================================================");
+    println!("- Object metadata now lives in per-object sidecar files");
+    println!("  (.__myfsio_meta__*.json) under .myfsio.sys/buckets/<bucket>/meta/.");
+    println!("- Older myfsio-server binaries CANNOT read sidecar metadata.");
+    println!("  Do not downgrade this deployment after migrating; there is no");
+    println!("  rollback tool.");
+    println!("- Cleanly migrated _index.json files were removed. Corrupt or");
+    println!("  partially migrated indexes were left in place (see failures");
+    println!("  above) and keep serving reads until fixed.");
+    println!("- Re-running this command is safe; already-migrated entries are");
+    println!("  skipped.");
+    println!("============================================================");
+    if !report.failures.is_empty() {
         std::process::exit(1);
     }
 }

@@ -63,7 +63,10 @@ pub fn ensure_retention_mutable(
         return Ok(());
     }
     match existing.mode {
-        RetentionMode::COMPLIANCE => Err("Cannot modify retention on object with COMPLIANCE mode until retention expires".to_string()),
+        RetentionMode::COMPLIANCE => Err(
+            "Cannot modify retention on object with COMPLIANCE mode until retention expires"
+                .to_string(),
+        ),
         RetentionMode::GOVERNANCE if !bypass_governance => Err(
             "Cannot modify GOVERNANCE retention without bypass-governance permission".to_string(),
         ),

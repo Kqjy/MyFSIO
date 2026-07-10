@@ -183,6 +183,11 @@ cargo build --release -p myfsio-server
                 <td>Storage layout for completed multipart objects. <code>segments</code> keeps the uploaded parts as immutable segment files so CompleteMultipartUpload finishes in milliseconds on any filesystem (recommended, especially on HDD/ext4). <code>concat</code> assembles one file like older releases. Applies to new completes only; both layouts remain readable. Binaries older than this feature cannot read <code>segments</code> objects.</td>
               </tr>
               <tr>
+                <td><code>METADATA_LAYOUT</code></td>
+                <td><code>sidecar</code></td>
+                <td>How object metadata is written. <code>sidecar</code> writes one <code>.__myfsio_meta__&lt;name&gt;.json</code> file per object, so a metadata update touches only that object (recommended, especially on HDD). <code>index</code> keeps the legacy per-directory <code>_index.json</code>, which is fully rewritten on every update. Applies to writes only; both layouts remain readable and a sidecar always wins over an index entry. Binaries older than this feature cannot read sidecar metadata. Convert existing deployments in bulk with <code>myfsio-server --migrate-meta</code> (run with the server stopped; there is no rollback tool).</td>
+              </tr>
+              <tr>
                 <td><code>BULK_DELETE_MAX_KEYS</code></td>
                 <td><code>1000</code></td>
                 <td>Maximum keys accepted by the UI bulk-delete endpoint.</td>

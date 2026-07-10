@@ -23,6 +23,12 @@ pub const META_KEY_CORRUPTION_DETAIL: &str = "__corruption_detail__";
 pub const META_KEY_QUARANTINE_PATH: &str = "__quarantine_path__";
 pub const META_KEY_PART_SIZES: &str = "__part_sizes__";
 
+pub const SIDECAR_FILE_PREFIX: &str = ".__myfsio_meta__";
+pub const SIDECAR_FILE_EXT: &str = ".json";
+pub const SIDECAR_ENTRY_NAME_FIELD: &str = "__entry_name__";
+pub const META_KEY_UNREADABLE: &str = "__meta_unreadable__";
+const SIDECAR_MAX_FILE_NAME_BYTES: usize = 255;
+
 const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
     "__etag__",
     "__size__",
@@ -283,6 +289,15 @@ struct ShallowCacheEntry {
 
 const OBJECT_LOCK_STRIPES: usize = 2048;
 
+#[derive(Debug, Default)]
+pub struct MetaMigrationReport {
+    pub index_files_migrated: usize,
+    pub index_files_failed: usize,
+    pub entries_written: usize,
+    pub entries_skipped: usize,
+    pub failures: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MultipartLayout {
     #[default]
@@ -299,12 +314,29 @@ impl MultipartLayout {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MetadataLayout {
+    #[default]
+    Sidecar,
+    Index,
+}
+
+impl MetadataLayout {
+    pub fn from_env_str(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "index" => Self::Index,
+            _ => Self::Sidecar,
+        }
+    }
+}
+
 pub struct FsStorageBackend {
     root: PathBuf,
     object_key_max_length_bytes: usize,
     object_cache_max_size: usize,
     stream_chunk_size: usize,
     multipart_layout: MultipartLayout,
+    metadata_layout: MetadataLayout,
     bucket_config_cache: DashMap<String, (BucketConfig, Instant)>,
     bucket_config_cache_ttl: std::time::Duration,
     meta_read_cache: DashMap<(String, String), Option<HashMap<String, Value>>>,
@@ -326,6 +358,7 @@ pub struct FsStorageBackendConfig {
     pub bucket_config_cache_ttl: std::time::Duration,
     pub stream_chunk_size: usize,
     pub multipart_layout: MultipartLayout,
+    pub metadata_layout: MetadataLayout,
 }
 
 impl Default for FsStorageBackendConfig {
@@ -336,6 +369,7 @@ impl Default for FsStorageBackendConfig {
             bucket_config_cache_ttl: std::time::Duration::from_secs(30),
             stream_chunk_size: STREAM_CHUNK_SIZE,
             multipart_layout: MultipartLayout::default(),
+            metadata_layout: MetadataLayout::default(),
         }
     }
 }
@@ -361,6 +395,7 @@ impl FsStorageBackend {
             object_cache_max_size: config.object_cache_max_size,
             stream_chunk_size,
             multipart_layout: config.multipart_layout,
+            metadata_layout: config.metadata_layout,
             bucket_config_cache: DashMap::new(),
             bucket_config_cache_ttl: config.bucket_config_cache_ttl,
             meta_read_cache: DashMap::new(),
@@ -448,10 +483,7 @@ impl FsStorageBackend {
         segment_id: &str,
         sizes: Vec<u64>,
     ) -> crate::segments::SegmentSet {
-        crate::segments::SegmentSet::new(
-            self.segments_bucket_root(bucket).join(segment_id),
-            sizes,
-        )
+        crate::segments::SegmentSet::new(self.segments_bucket_root(bucket).join(segment_id), sizes)
     }
 
     fn open_object_for_read_sync(
@@ -819,38 +851,182 @@ impl FsStorageBackend {
         rel_dir: &Path,
     ) -> HashMap<String, (Option<String>, Option<String>, Option<String>)> {
         let index_path = self.index_file_for_dir(bucket_name, rel_dir);
-        if !index_path.exists() {
-            return HashMap::new();
+        let mut out = HashMap::new();
+        if index_path.exists() {
+            if let Ok(text) = std::fs::read_to_string(&index_path) {
+                match serde_json::from_str::<HashMap<String, Value>>(&text) {
+                    Ok(index) => {
+                        for (name, entry) in index {
+                            let fields = Self::listing_fields_from_meta(
+                                entry.get("metadata").and_then(|m| m.as_object()),
+                            );
+                            out.insert(name, fields);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "corrupt metadata index {} ignored during listing: {}",
+                            index_path.display(),
+                            err
+                        );
+                    }
+                }
+            }
         }
-        let Ok(text) = std::fs::read_to_string(&index_path) else {
-            return HashMap::new();
-        };
-        let Ok(index) = serde_json::from_str::<HashMap<String, Value>>(&text) else {
-            return HashMap::new();
-        };
-        let mut out = HashMap::with_capacity(index.len());
-        for (name, entry) in index {
-            let meta = entry.get("metadata").and_then(|m| m.as_object());
-            let etag = meta
-                .and_then(|m| m.get("__etag__"))
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned);
-            let version_id = meta
-                .and_then(|m| m.get("__version_id__"))
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned);
-            let owner = meta
-                .and_then(|m| m.get("__acl__"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .and_then(|acl| {
-                    acl.get("owner")
-                        .and_then(|v| v.as_str())
-                        .map(ToOwned::to_owned)
-                });
-            out.insert(name, (etag, version_id, owner));
+
+        let dir = index_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.bucket_meta_root(bucket_name));
+        if let Ok(read_dir) = std::fs::read_dir(&dir) {
+            for dirent in read_dir.flatten() {
+                let file_name = dirent.file_name();
+                let Some(name) = file_name.to_str() else {
+                    continue;
+                };
+                if !Self::is_sidecar_file_name(name) {
+                    continue;
+                }
+                if !dirent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    continue;
+                }
+                let fallback_name = name
+                    .strip_prefix(SIDECAR_FILE_PREFIX)
+                    .and_then(|s| s.strip_suffix(SIDECAR_FILE_EXT))
+                    .map(ToOwned::to_owned);
+                let path = dirent.path();
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    if let Some(fallback) = fallback_name {
+                        out.insert(fallback, (None, None, None));
+                    }
+                    continue;
+                };
+                let Ok(entry) = serde_json::from_str::<HashMap<String, Value>>(&text) else {
+                    tracing::warn!(
+                        "corrupt metadata sidecar {} blanks its listing entry",
+                        path.display()
+                    );
+                    if let Some(fallback) = fallback_name {
+                        out.insert(fallback, (None, None, None));
+                    }
+                    continue;
+                };
+                let Some(entry_name) = Self::sidecar_entry_name_from_file(name, &entry) else {
+                    continue;
+                };
+                let fields = Self::listing_fields_from_meta(
+                    entry.get("metadata").and_then(|m| m.as_object()),
+                );
+                out.insert(entry_name, fields);
+            }
         }
         out
+    }
+
+    fn listing_fields_from_meta(
+        meta: Option<&serde_json::Map<String, Value>>,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let etag = meta
+            .and_then(|m| m.get("__etag__"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        let version_id = meta
+            .and_then(|m| m.get("__version_id__"))
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        let owner = meta
+            .and_then(|m| m.get("__acl__"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|acl| {
+                acl.get("owner")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned)
+            });
+        (etag, version_id, owner)
+    }
+
+    fn sidecar_file_name(entry_name: &str) -> String {
+        let plain = format!("{}{}{}", SIDECAR_FILE_PREFIX, entry_name, SIDECAR_FILE_EXT);
+        if plain.len() <= SIDECAR_MAX_FILE_NAME_BYTES {
+            return plain;
+        }
+        let digest = hex::encode(sha2::Sha256::digest(entry_name.as_bytes()));
+        format!("{}{}{}", SIDECAR_FILE_PREFIX, digest, SIDECAR_FILE_EXT)
+    }
+
+    fn is_sidecar_file_name(name: &str) -> bool {
+        name.len() > SIDECAR_FILE_PREFIX.len() + SIDECAR_FILE_EXT.len()
+            && name.starts_with(SIDECAR_FILE_PREFIX)
+            && name.ends_with(SIDECAR_FILE_EXT)
+    }
+
+    fn sidecar_entry_name_from_file(
+        file_name: &str,
+        entry: &HashMap<String, Value>,
+    ) -> Option<String> {
+        if let Some(Value::String(name)) = entry.get(SIDECAR_ENTRY_NAME_FIELD) {
+            return Some(name.clone());
+        }
+        file_name
+            .strip_prefix(SIDECAR_FILE_PREFIX)?
+            .strip_suffix(SIDECAR_FILE_EXT)
+            .map(ToOwned::to_owned)
+    }
+
+    fn sidecar_file_for_key(&self, bucket_name: &str, key: &str) -> (PathBuf, String) {
+        let (index_path, entry_name) = self.index_file_for_key(bucket_name, key);
+        let dir = index_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.bucket_meta_root(bucket_name));
+        (dir.join(Self::sidecar_file_name(&entry_name)), entry_name)
+    }
+
+    fn corrupt_metadata_entry(detail: String) -> HashMap<String, Value> {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            META_KEY_CORRUPTED.to_string(),
+            Value::String("true".to_string()),
+        );
+        meta.insert(
+            META_KEY_CORRUPTED_AT.to_string(),
+            Value::String(Utc::now().to_rfc3339()),
+        );
+        meta.insert(
+            META_KEY_CORRUPTION_DETAIL.to_string(),
+            Value::String(detail),
+        );
+        meta.insert(
+            META_KEY_UNREADABLE.to_string(),
+            Value::String("true".to_string()),
+        );
+        let mut entry = HashMap::new();
+        entry.insert("metadata".to_string(), Value::Object(meta));
+        entry
+    }
+
+    fn entry_marks_unreadable_metadata(entry: &HashMap<String, Value>) -> bool {
+        entry
+            .get("metadata")
+            .and_then(|m| m.as_object())
+            .and_then(|m| m.get(META_KEY_UNREADABLE))
+            .and_then(|v| v.as_str())
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    fn fsync_dir_best_effort(dir: &Path) {
+        #[cfg(unix)]
+        {
+            if let Ok(handle) = std::fs::File::open(dir) {
+                let _ = handle.sync_all();
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = dir;
+        }
     }
 
     fn get_meta_index_lock(&self, index_path: &str) -> Arc<Mutex<()>> {
@@ -993,8 +1169,7 @@ impl FsStorageBackend {
         let result = (|| {
             let file = std::fs::File::create(&tmp_path)?;
             let mut writer = std::io::BufWriter::new(file);
-            serde_json::to_writer(&mut writer, data)
-                .map_err(std::io::Error::other)?;
+            serde_json::to_writer(&mut writer, data).map_err(std::io::Error::other)?;
             let file = writer.into_inner()?;
             if sync {
                 file.sync_all()?;
@@ -1019,22 +1194,61 @@ impl FsStorageBackend {
             return entry.value().clone();
         }
 
-        let (index_path, entry_name) = self.index_file_for_key(bucket_name, key);
-        let result = if index_path.exists() {
-            std::fs::read_to_string(&index_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<HashMap<String, Value>>(&s).ok())
-                .and_then(|index| {
-                    index.get(&entry_name).and_then(|v| {
+        let (sidecar_path, entry_name) = self.sidecar_file_for_key(bucket_name, key);
+        let result = if sidecar_path.exists() {
+            match std::fs::read_to_string(&sidecar_path)
+                .map_err(|e| e.to_string())
+                .and_then(|s| {
+                    serde_json::from_str::<HashMap<String, Value>>(&s).map_err(|e| e.to_string())
+                }) {
+                Ok(entry) => Some(entry),
+                Err(err) => {
+                    tracing::warn!(
+                        "unreadable metadata sidecar {} for {}/{}: {}; failing closed",
+                        sidecar_path.display(),
+                        bucket_name,
+                        key,
+                        err
+                    );
+                    Some(Self::corrupt_metadata_entry(format!(
+                        "metadata sidecar unreadable: {}",
+                        err
+                    )))
+                }
+            }
+        } else {
+            let (index_path, _) = self.index_file_for_key(bucket_name, key);
+            if index_path.exists() {
+                match std::fs::read_to_string(&index_path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| {
+                        serde_json::from_str::<HashMap<String, Value>>(&s)
+                            .map_err(|e| e.to_string())
+                    }) {
+                    Ok(index) => index.get(&entry_name).and_then(|v| {
                         if let Value::Object(map) = v {
                             Some(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         } else {
                             None
                         }
-                    })
-                })
-        } else {
-            None
+                    }),
+                    Err(err) => {
+                        tracing::warn!(
+                            "corrupt metadata index {} while reading {}/{}: {}; failing closed",
+                            index_path.display(),
+                            bucket_name,
+                            key,
+                            err
+                        );
+                        Some(Self::corrupt_metadata_entry(format!(
+                            "metadata index unreadable: {}",
+                            err
+                        )))
+                    }
+                }
+            } else {
+                None
+            }
         };
 
         self.meta_read_cache.insert(cache_key, result.clone());
@@ -1048,32 +1262,55 @@ impl FsStorageBackend {
         key: &str,
         entry: &HashMap<String, Value>,
     ) -> std::io::Result<()> {
+        if Self::entry_marks_unreadable_metadata(entry) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to persist metadata for {}/{}: the existing metadata record is \
+                     unreadable; repair or delete the object first",
+                    bucket_name, key
+                ),
+            ));
+        }
         let (index_path, entry_name) = self.index_file_for_key(bucket_name, key);
-        let lock = self.get_meta_index_lock(&index_path.to_string_lossy());
-        let _guard = lock.lock();
-
         if let Some(parent) = index_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, key);
 
-        let mut index_data: HashMap<String, Value> = if index_path.exists() {
-            std::fs::read_to_string(&index_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
-        } else {
-            HashMap::new()
-        };
-
-        index_data.insert(
-            entry_name,
-            serde_json::to_value(entry)
-                .map_err(std::io::Error::other)?,
-        );
-
-        let json_val = serde_json::to_value(&index_data)
-            .map_err(std::io::Error::other)?;
-        Self::atomic_write_json_sync(&index_path, &json_val, true)?;
+        match self.metadata_layout {
+            MetadataLayout::Sidecar => {
+                self.write_sidecar_file(&sidecar_path, &entry_name, entry)?;
+            }
+            MetadataLayout::Index => {
+                let lock = self.get_meta_index_lock(&index_path.to_string_lossy());
+                let _guard = lock.lock();
+                let mut index_data: HashMap<String, Value> = if index_path.exists() {
+                    let text = std::fs::read_to_string(&index_path)?;
+                    serde_json::from_str(&text).map_err(|err| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "refusing to rewrite corrupt metadata index {}: {}",
+                                index_path.display(),
+                                err
+                            ),
+                        )
+                    })?
+                } else {
+                    HashMap::new()
+                };
+                index_data.insert(
+                    entry_name.clone(),
+                    serde_json::to_value(entry).map_err(std::io::Error::other)?,
+                );
+                if sidecar_path.exists() {
+                    self.write_sidecar_file(&sidecar_path, &entry_name, entry)?;
+                }
+                let json_val = serde_json::to_value(&index_data).map_err(std::io::Error::other)?;
+                Self::atomic_write_json_sync(&index_path, &json_val, true)?;
+            }
+        }
 
         let cache_key = (bucket_name.to_string(), key.to_string());
         self.meta_read_cache.remove(&cache_key);
@@ -1081,35 +1318,233 @@ impl FsStorageBackend {
         Ok(())
     }
 
+    fn write_sidecar_file(
+        &self,
+        sidecar_path: &Path,
+        entry_name: &str,
+        entry: &HashMap<String, Value>,
+    ) -> std::io::Result<()> {
+        let mut sidecar_entry = entry.clone();
+        sidecar_entry.insert(
+            SIDECAR_ENTRY_NAME_FIELD.to_string(),
+            Value::String(entry_name.to_string()),
+        );
+        let json_val = serde_json::to_value(&sidecar_entry).map_err(std::io::Error::other)?;
+        let lock = self.get_meta_index_lock(&sidecar_path.to_string_lossy());
+        let _guard = lock.lock();
+        Self::atomic_write_json_sync(sidecar_path, &json_val, true)
+    }
+
     fn delete_index_entry_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<()> {
         let (index_path, entry_name) = self.index_file_for_key(bucket_name, key);
-        if !index_path.exists() {
-            let cache_key = (bucket_name.to_string(), key.to_string());
-            self.meta_read_cache.remove(&cache_key);
-            return Ok(());
+        let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, key);
+        if sidecar_path.exists() {
+            let lock = self.get_meta_index_lock(&sidecar_path.to_string_lossy());
+            let _guard = lock.lock();
+            std::fs::remove_file(&sidecar_path)?;
         }
-
-        let lock = self.get_meta_index_lock(&index_path.to_string_lossy());
-        let _guard = lock.lock();
-
-        let mut index_data: HashMap<String, Value> = std::fs::read_to_string(&index_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-
-        if index_data.remove(&entry_name).is_some() {
-            if index_data.is_empty() {
-                let _ = std::fs::remove_file(&index_path);
-            } else {
-                let json_val = serde_json::to_value(&index_data)
-                    .map_err(std::io::Error::other)?;
-                Self::atomic_write_json_sync(&index_path, &json_val, true)?;
-            }
-        }
+        self.remove_index_entry_best_effort(&index_path, &entry_name);
 
         let cache_key = (bucket_name.to_string(), key.to_string());
         self.meta_read_cache.remove(&cache_key);
         Ok(())
+    }
+
+    fn remove_index_entry_best_effort(&self, index_path: &Path, entry_name: &str) {
+        if !index_path.exists() {
+            return;
+        }
+        let lock = self.get_meta_index_lock(&index_path.to_string_lossy());
+        let _guard = lock.lock();
+        let text = match std::fs::read_to_string(index_path) {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::warn!(
+                    "failed to read metadata index {} while removing entry {}: {}",
+                    index_path.display(),
+                    entry_name,
+                    err
+                );
+                return;
+            }
+        };
+        let mut index_data: HashMap<String, Value> = match serde_json::from_str(&text) {
+            Ok(data) => data,
+            Err(err) => {
+                tracing::warn!(
+                    "corrupt metadata index {} left untouched while removing entry {}: {}",
+                    index_path.display(),
+                    entry_name,
+                    err
+                );
+                return;
+            }
+        };
+        if index_data.remove(entry_name).is_none() {
+            return;
+        }
+        let result = if index_data.is_empty() {
+            std::fs::remove_file(index_path)
+        } else {
+            serde_json::to_value(&index_data)
+                .map_err(std::io::Error::other)
+                .and_then(|json_val| Self::atomic_write_json_sync(index_path, &json_val, true))
+        };
+        if let Err(err) = result {
+            tracing::warn!(
+                "failed to update metadata index {} after removing entry {}: {}",
+                index_path.display(),
+                entry_name,
+                err
+            );
+        }
+    }
+
+    pub fn migrate_meta_indexes_to_sidecars(&self) -> MetaMigrationReport {
+        let mut report = MetaMigrationReport::default();
+        let buckets_root = self.system_buckets_root();
+        let Ok(buckets) = std::fs::read_dir(&buckets_root) else {
+            return report;
+        };
+        for bucket_entry in buckets.flatten() {
+            let meta_root = bucket_entry.path().join(BUCKET_META_DIR);
+            if !meta_root.is_dir() {
+                continue;
+            }
+            let mut stack = vec![meta_root];
+            while let Some(dir) = stack.pop() {
+                let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                    report
+                        .failures
+                        .push(format!("unreadable directory {}", dir.display()));
+                    continue;
+                };
+                let mut index_path = None;
+                for dirent in read_dir.flatten() {
+                    let path = dirent.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if dirent.file_name() == INDEX_FILE {
+                        index_path = Some(path);
+                    }
+                }
+                if let Some(index_path) = index_path {
+                    self.migrate_one_index(&index_path, &mut report);
+                }
+            }
+        }
+        self.meta_read_cache.clear();
+        report
+    }
+
+    fn migrate_one_index(&self, index_path: &Path, report: &mut MetaMigrationReport) {
+        let lock = self.get_meta_index_lock(&index_path.to_string_lossy());
+        let _guard = lock.lock();
+        let text = match std::fs::read_to_string(index_path) {
+            Ok(text) => text,
+            Err(err) => {
+                report.index_files_failed += 1;
+                report
+                    .failures
+                    .push(format!("{}: read failed: {}", index_path.display(), err));
+                return;
+            }
+        };
+        let index: HashMap<String, Value> = match serde_json::from_str(&text) {
+            Ok(index) => index,
+            Err(err) => {
+                report.index_files_failed += 1;
+                report.failures.push(format!(
+                    "{}: corrupt JSON (left in place): {}",
+                    index_path.display(),
+                    err
+                ));
+                return;
+            }
+        };
+        let Some(dir) = index_path.parent() else {
+            return;
+        };
+        let mut all_ok = true;
+        for (entry_name, entry) in &index {
+            let sidecar_path = dir.join(Self::sidecar_file_name(entry_name));
+            if sidecar_path.exists() {
+                let existing = std::fs::read_to_string(&sidecar_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<HashMap<String, Value>>(&s).ok());
+                match existing {
+                    Some(existing) => {
+                        let sidecar_name = sidecar_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let matches = Self::sidecar_entry_name_from_file(&sidecar_name, &existing)
+                            .as_deref()
+                            == Some(entry_name.as_str());
+                        if matches {
+                            report.entries_skipped += 1;
+                        } else {
+                            all_ok = false;
+                            report.failures.push(format!(
+                                "{}: sidecar name collision for entry {}",
+                                sidecar_path.display(),
+                                entry_name
+                            ));
+                        }
+                    }
+                    None => {
+                        all_ok = false;
+                        report.failures.push(format!(
+                            "{}: existing sidecar unreadable for entry {} (left in place)",
+                            sidecar_path.display(),
+                            entry_name
+                        ));
+                    }
+                }
+                continue;
+            }
+            let Some(entry_obj) = entry.as_object() else {
+                all_ok = false;
+                report.failures.push(format!(
+                    "{}: entry {} is not an object",
+                    index_path.display(),
+                    entry_name
+                ));
+                continue;
+            };
+            let entry_map: HashMap<String, Value> = entry_obj
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            match self.write_sidecar_file(&sidecar_path, entry_name, &entry_map) {
+                Ok(()) => report.entries_written += 1,
+                Err(err) => {
+                    all_ok = false;
+                    report.failures.push(format!(
+                        "{}: failed writing sidecar for {}: {}",
+                        index_path.display(),
+                        entry_name,
+                        err
+                    ));
+                }
+            }
+        }
+        if all_ok {
+            Self::fsync_dir_best_effort(dir);
+            match std::fs::remove_file(index_path) {
+                Ok(()) => report.index_files_migrated += 1,
+                Err(err) => {
+                    report.index_files_failed += 1;
+                    report.failures.push(format!(
+                        "{}: sidecars written but index removal failed: {}",
+                        index_path.display(),
+                        err
+                    ));
+                }
+            }
+        } else {
+            report.index_files_failed += 1;
+        }
     }
 
     fn read_metadata_sync(&self, bucket_name: &str, key: &str) -> HashMap<String, String> {
@@ -1155,8 +1590,7 @@ impl FsStorageBackend {
         }
 
         let mut entry = HashMap::new();
-        let meta_value = serde_json::to_value(metadata)
-            .map_err(std::io::Error::other)?;
+        let meta_value = serde_json::to_value(metadata).map_err(std::io::Error::other)?;
         entry.insert("metadata".to_string(), meta_value);
         self.write_index_entry_sync(bucket_name, key, &entry)?;
 
@@ -1243,9 +1677,7 @@ impl FsStorageBackend {
             }
             Err(join_err) => {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(StorageError::Io(std::io::Error::other(
-                    join_err,
-                )));
+                return Err(StorageError::Io(std::io::Error::other(join_err)));
             }
         };
 
@@ -1344,8 +1776,7 @@ impl FsStorageBackend {
         config: &BucketConfig,
     ) -> std::io::Result<()> {
         let config_path = self.bucket_config_path(bucket_name);
-        let json_val = serde_json::to_value(config)
-            .map_err(std::io::Error::other)?;
+        let json_val = serde_json::to_value(config).map_err(std::io::Error::other)?;
         Self::atomic_write_json_sync(&config_path, &json_val, true)?;
         if config.policy.is_none() {
             self.remove_legacy_bucket_policy_sync(bucket_name)?;
@@ -1712,7 +2143,6 @@ impl FsStorageBackend {
         Self::cleanup_empty_parents(&manifest_path, &versions_root);
         Ok(())
     }
-
 
     fn validate_version_id(bucket_name: &str, key: &str, version_id: &str) -> StorageResult<()> {
         const MAX_VERSION_ID_LEN: usize = 128;
@@ -2288,10 +2718,7 @@ impl FsStorageBackend {
                             .map(|d| d.as_secs_f64())
                             .unwrap_or(0.0);
                         let lm = Utc
-                            .timestamp_opt(
-                                mtime as i64,
-                                ((mtime % 1.0) * 1_000_000_000.0) as u32,
-                            )
+                            .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
                             .single()
                             .unwrap_or_else(Utc::now);
                         let rel = format!("{}{}", rel_dir_prefix, display_name);
@@ -2325,8 +2752,7 @@ impl FsStorageBackend {
                                 )
                                 .single()
                                 .unwrap_or_else(Utc::now);
-                            let mut obj =
-                                ObjectMeta::new(rel_dir_prefix.clone(), meta.len(), lm);
+                            let mut obj = ObjectMeta::new(rel_dir_prefix.clone(), meta.len(), lm);
                             obj.etag = None;
                             files.push(obj);
                         }
@@ -2842,22 +3268,24 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         link_path: &std::path::Path,
     ) -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
         let link_owned = link_path.to_owned();
-        run_blocking(|| -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            let (obj, content) = self.open_object_for_read_locked_sync(bucket, key)?;
-            match content {
-                OpenedObjectContent::Single(_) => {
-                    let path = self.object_path(bucket, key)?;
-                    if let Some(parent) = link_owned.parent() {
-                        std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+        run_blocking(
+            || -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
+                let _guard = self.get_object_lock(bucket, key).read();
+                let (obj, content) = self.open_object_for_read_locked_sync(bucket, key)?;
+                match content {
+                    OpenedObjectContent::Single(_) => {
+                        let path = self.object_path(bucket, key)?;
+                        if let Some(parent) = link_owned.parent() {
+                            std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+                        }
+                        let _ = std::fs::remove_file(&link_owned);
+                        std::fs::hard_link(&path, &link_owned).map_err(StorageError::Io)?;
+                        Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
                     }
-                    let _ = std::fs::remove_file(&link_owned);
-                    std::fs::hard_link(&path, &link_owned).map_err(StorageError::Io)?;
-                    Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
+                    segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
                 }
-                segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
-            }
-        })
+            },
+        )
     }
 
     async fn snapshot_object_version_to_link(
@@ -2868,24 +3296,26 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         link_path: &std::path::Path,
     ) -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
         let link_owned = link_path.to_owned();
-        run_blocking(|| -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
-            let _guard = self.get_object_lock(bucket, key).read();
-            let (obj, content) =
-                self.open_version_for_read_locked_sync(bucket, key, version_id)?;
-            match content {
-                OpenedObjectContent::Single(_) => {
-                    let (_, data_path) =
-                        self.read_version_record_sync(bucket, key, version_id)?;
-                    if let Some(parent) = link_owned.parent() {
-                        std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+        run_blocking(
+            || -> StorageResult<(ObjectMeta, crate::traits::SnapshotSource)> {
+                let _guard = self.get_object_lock(bucket, key).read();
+                let (obj, content) =
+                    self.open_version_for_read_locked_sync(bucket, key, version_id)?;
+                match content {
+                    OpenedObjectContent::Single(_) => {
+                        let (_, data_path) =
+                            self.read_version_record_sync(bucket, key, version_id)?;
+                        if let Some(parent) = link_owned.parent() {
+                            std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+                        }
+                        let _ = std::fs::remove_file(&link_owned);
+                        std::fs::hard_link(&data_path, &link_owned).map_err(StorageError::Io)?;
+                        Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
                     }
-                    let _ = std::fs::remove_file(&link_owned);
-                    std::fs::hard_link(&data_path, &link_owned).map_err(StorageError::Io)?;
-                    Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
+                    segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
                 }
-                segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
-            }
-        })
+            },
+        )
     }
 
     async fn materialize_object_to_tmp(&self, bucket: &str, key: &str) -> StorageResult<PathBuf> {
@@ -3330,8 +3760,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let copy_res = run_blocking(
             || -> StorageResult<(String, u64, HashMap<String, String>)> {
                 let _src_guard = self.get_object_lock(src_bucket, src_key).read();
-                let (obj, content) =
-                    self.open_object_for_read_locked_sync(src_bucket, src_key)?;
+                let (obj, content) = self.open_object_for_read_locked_sync(src_bucket, src_key)?;
 
                 use std::io::{BufReader, BufWriter, Read, Write};
                 let mut reader: Box<dyn Read> = match content {
@@ -3453,8 +3882,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 return Ok(());
             }
 
-            let (manifest_path, _data_path) =
-                self.version_record_paths(bucket, key, version_id);
+            let (manifest_path, _data_path) = self.version_record_paths(bucket, key, version_id);
             if !manifest_path.is_file() {
                 return Err(StorageError::VersionNotFound {
                     bucket: bucket.to_string(),
@@ -3463,8 +3891,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 });
             }
             let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-            let mut record: Value =
-                serde_json::from_str(&content).map_err(StorageError::Json)?;
+            let mut record: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
             let meta_map: serde_json::Map<String, Value> = metadata
                 .iter()
                 .map(|(k, v)| (k.clone(), Value::String(v.clone())))
@@ -3579,9 +4006,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             Err(join) => {
                 let _ = tokio::fs::remove_file(&tmp_file).await;
-                return Err(StorageError::Io(std::io::Error::other(
-                    join,
-                )));
+                return Err(StorageError::Io(std::io::Error::other(join)));
             }
         };
 
@@ -3667,7 +4092,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let mut src: Box<dyn Read> = match content {
                 OpenedObjectContent::Single(mut file) => {
                     if start > 0 {
-                        file.seek(SeekFrom::Start(start)).map_err(StorageError::Io)?;
+                        file.seek(SeekFrom::Start(start))
+                            .map_err(StorageError::Io)?;
                     }
                     Box::new(std::io::BufReader::with_capacity(chunk_size, file))
                 }
@@ -3816,8 +4242,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         _ => {
                             let reader =
                                 std::fs::File::open(&part_file).map_err(StorageError::Io)?;
-                            let mut reader =
-                                std::io::BufReader::with_capacity(chunk_size, reader);
+                            let mut reader = std::io::BufReader::with_capacity(chunk_size, reader);
                             let mut part_hasher = Md5::new();
                             let mut buf = vec![0u8; chunk_size];
                             loop {
@@ -3839,8 +4264,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let etag = format!("{:x}-{}", composite_hasher.finalize(), part_infos.len());
 
                 if part_infos.len() == 1 {
-                    let part_file =
-                        upload_dir_owned.join(format!("part-{:05}.part", part_infos[0].part_number));
+                    let part_file = upload_dir_owned
+                        .join(format!("part-{:05}.part", part_infos[0].part_number));
                     if std::fs::rename(&part_file, &tmp_path_owned).is_err() {
                         std::fs::copy(&part_file, &tmp_path_owned).map_err(StorageError::Io)?;
                     }
@@ -3855,8 +4280,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     for (ordinal, part_info) in part_infos.iter().enumerate() {
                         let part_file = upload_dir_owned
                             .join(format!("part-{:05}.part", part_info.part_number));
-                        let seg_file = segment_dir
-                            .join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                        let seg_file =
+                            segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
                         match std::fs::rename(&part_file, &seg_file) {
                             Ok(()) => moved.push((seg_file, part_file)),
                             Err(e) => {
@@ -3891,8 +4316,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let mut out_file =
                     std::fs::File::create(&tmp_path_owned).map_err(StorageError::Io)?;
                 for (part_info, expected) in part_infos.iter().zip(&part_sizes) {
-                    let part_file = upload_dir_owned
-                        .join(format!("part-{:05}.part", part_info.part_number));
+                    let part_file =
+                        upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
                     let mut src = std::fs::File::open(&part_file).map_err(StorageError::Io)?;
                     let copied =
                         std::io::copy(&mut src, &mut out_file).map_err(StorageError::Io)?;
@@ -3916,14 +4341,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             Err(join) => {
                 let _ = std::fs::remove_file(&tmp_path);
-                return Err(StorageError::Io(std::io::Error::other(
-                    join,
-                )));
+                return Err(StorageError::Io(std::io::Error::other(join)));
             }
         };
 
         let mut metadata = metadata;
-        metadata.insert(META_KEY_PART_SIZES.to_string(), encode_part_sizes(&part_sizes));
+        metadata.insert(
+            META_KEY_PART_SIZES.to_string(),
+            encode_part_sizes(&part_sizes),
+        );
         if let Some(ref seg_id) = segmented_as {
             metadata.insert(
                 crate::segments::META_KEY_SEGMENTS.to_string(),
@@ -3963,8 +4389,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         for (ordinal, part_info) in parts.iter().enumerate() {
                             let seg_file =
                                 seg_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
-                            let part_file = upload_dir
-                                .join(format!("part-{:05}.part", part_info.part_number));
+                            let part_file =
+                                upload_dir.join(format!("part-{:05}.part", part_info.part_number));
                             let _ = std::fs::rename(&seg_file, &part_file);
                         }
                         let _ = std::fs::remove_dir(&seg_dir);
@@ -4490,10 +4916,7 @@ mod tests {
             .await
             .expect("PUT 'folder' after 'folder/file' should succeed");
 
-        let (obj, mut stream) = backend
-            .get_object("test-bucket", "folder")
-            .await
-            .unwrap();
+        let (obj, mut stream) = backend.get_object("test-bucket", "folder").await.unwrap();
         assert_eq!(obj.size, 5);
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
@@ -4559,10 +4982,7 @@ mod tests {
             .await
             .expect("PUT 'folder/file' after 'folder' should succeed");
 
-        let (_, mut stream) = backend
-            .get_object("test-bucket", "folder")
-            .await
-            .unwrap();
+        let (_, mut stream) = backend.get_object("test-bucket", "folder").await.unwrap();
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"outer");
@@ -4692,8 +5112,7 @@ mod tests {
             .list_objects_shallow("test-bucket", &shallow_params)
             .await
             .unwrap();
-        let shallow_keys: Vec<&str> =
-            shallow.objects.iter().map(|o| o.key.as_str()).collect();
+        let shallow_keys: Vec<&str> = shallow.objects.iter().map(|o| o.key.as_str()).collect();
         assert!(
             shallow_keys.contains(&"folder"),
             "shallow list missing 'folder': {:?}",
@@ -5064,9 +5483,13 @@ mod tests {
         let parts_data = segmented_parts();
         let full: Vec<u8> = parts_data.concat();
 
-        let (upload_id, obj) = seed_segmented_object(&backend, "seg-bkt", "v.bin", &parts_data).await;
+        let (upload_id, obj) =
+            seed_segmented_object(&backend, "seg-bkt", "v.bin", &parts_data).await;
         assert_eq!(obj.size, full.len() as u64);
-        assert_eq!(obj.etag.as_deref(), Some(expected_composite_etag(&parts_data).as_str()));
+        assert_eq!(
+            obj.etag.as_deref(),
+            Some(expected_composite_etag(&parts_data).as_str())
+        );
 
         let stored = backend
             .get_object_metadata("seg-bkt", "v.bin")
@@ -5247,7 +5670,10 @@ mod tests {
             .delete_object_version("segver-bkt", "vv.bin", &v1)
             .await
             .unwrap();
-        assert!(!seg_dir.exists(), "deleting the last owner must release segments");
+        assert!(
+            !seg_dir.exists(),
+            "deleting the last owner must release segments"
+        );
     }
 
     #[tokio::test]
@@ -6006,7 +6432,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let mut i: u8 = 0;
                 while !stop.load(Ordering::Relaxed) {
-                    let fill = b'a'.wrapping_add(w * 8 + i  );
+                    let fill = b'a'.wrapping_add(w * 8 + i);
                     let body = vec![fill; SIZE];
                     let data: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
                     let _ = b.put_object("race-bucket", "hot", data, None).await;
@@ -6050,5 +6476,421 @@ mod tests {
             "observed {} ETag/body mismatches out of {} reads",
             m, r
         );
+    }
+
+    fn create_index_layout_backend() -> (tempfile::TempDir, FsStorageBackend) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig {
+                metadata_layout: MetadataLayout::Index,
+                ..FsStorageBackendConfig::default()
+            },
+        );
+        (dir, backend)
+    }
+
+    #[tokio::test]
+    async fn test_sidecar_layout_writes_sidecar_not_index() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("sc-bkt").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"hello".to_vec()));
+        backend
+            .put_object("sc-bkt", "photos/cat.jpg", data, None)
+            .await
+            .unwrap();
+
+        let meta_dir = backend.bucket_meta_root("sc-bkt").join("photos");
+        let sidecar = meta_dir.join(FsStorageBackend::sidecar_file_name("cat.jpg"));
+        assert!(sidecar.is_file(), "sidecar must exist at {:?}", sidecar);
+        assert!(
+            !meta_dir.join(INDEX_FILE).exists(),
+            "_index.json must not be created by sidecar layout"
+        );
+
+        let stored = backend
+            .get_object_metadata("sc-bkt", "photos/cat.jpg")
+            .await
+            .unwrap();
+        assert!(stored.contains_key("__etag__"));
+
+        let listing = backend
+            .list_objects("sc-bkt", &ListParams::default())
+            .await
+            .unwrap();
+        let entry = listing
+            .objects
+            .iter()
+            .find(|o| o.key == "photos/cat.jpg")
+            .expect("listed");
+        assert!(entry.etag.is_some(), "listing must surface sidecar etag");
+    }
+
+    #[tokio::test]
+    async fn test_sidecar_shadows_stale_index_entry() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("shadow-bkt").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v1".to_vec()));
+        backend
+            .put_object("shadow-bkt", "a/k.txt", data, None)
+            .await
+            .unwrap();
+
+        let index_path = backend
+            .bucket_meta_root("shadow-bkt")
+            .join("a")
+            .join(INDEX_FILE);
+        let stale = serde_json::json!({
+            "k.txt": {"metadata": {"__etag__": "stale-etag", "stale": "yes"}}
+        });
+        std::fs::write(&index_path, serde_json::to_string(&stale).unwrap()).unwrap();
+        backend.meta_read_cache.clear();
+
+        let stored = backend
+            .get_object_metadata("shadow-bkt", "a/k.txt")
+            .await
+            .unwrap();
+        assert_ne!(
+            stored.get("__etag__").map(String::as_str),
+            Some("stale-etag"),
+            "sidecar must shadow stale index entry"
+        );
+        assert!(!stored.contains_key("stale"));
+    }
+
+    #[tokio::test]
+    async fn test_legacy_index_entry_still_readable_and_listed() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("legacy-bkt").await.unwrap();
+        std::fs::write(backend.bucket_path("legacy-bkt").join("old.txt"), b"old").unwrap();
+        let index_path = backend.bucket_meta_root("legacy-bkt").join(INDEX_FILE);
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        let legacy = serde_json::json!({
+            "old.txt": {"metadata": {"__etag__": "legacy-etag", "__size__": "3"}}
+        });
+        std::fs::write(&index_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let stored = backend
+            .get_object_metadata("legacy-bkt", "old.txt")
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.get("__etag__").map(String::as_str),
+            Some("legacy-etag")
+        );
+
+        let listing = backend
+            .list_objects("legacy-bkt", &ListParams::default())
+            .await
+            .unwrap();
+        let entry = listing
+            .objects
+            .iter()
+            .find(|o| o.key == "old.txt")
+            .expect("listed");
+        assert_eq!(entry.etag.as_deref(), Some("legacy-etag"));
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_index_fails_closed_on_read() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("rot-bkt").await.unwrap();
+        std::fs::write(backend.bucket_path("rot-bkt").join("f.txt"), b"data").unwrap();
+        let index_path = backend.bucket_meta_root("rot-bkt").join(INDEX_FILE);
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        std::fs::write(&index_path, b"{not valid json").unwrap();
+
+        let stored = backend
+            .get_object_metadata("rot-bkt", "f.txt")
+            .await
+            .unwrap();
+        assert!(
+            metadata_is_corrupted(&stored),
+            "corrupt index must fail closed, got {:?}",
+            stored
+        );
+        assert!(backend.get_object("rot-bkt", "f.txt").await.is_err());
+        assert!(
+            std::fs::read(&index_path).unwrap() == b"{not valid json",
+            "corrupt index must never be rewritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_sidecar_fails_closed_without_index_fallback() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("rot2-bkt").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"body".to_vec()));
+        backend
+            .put_object("rot2-bkt", "x.txt", data, None)
+            .await
+            .unwrap();
+        let sidecar = backend
+            .bucket_meta_root("rot2-bkt")
+            .join(FsStorageBackend::sidecar_file_name("x.txt"));
+        std::fs::write(&sidecar, b"garbage").unwrap();
+        let index_path = backend.bucket_meta_root("rot2-bkt").join(INDEX_FILE);
+        let stale = serde_json::json!({
+            "x.txt": {"metadata": {"__etag__": "stale"}}
+        });
+        std::fs::write(&index_path, serde_json::to_string(&stale).unwrap()).unwrap();
+        backend.meta_read_cache.clear();
+
+        let stored = backend
+            .get_object_metadata("rot2-bkt", "x.txt")
+            .await
+            .unwrap();
+        assert!(
+            metadata_is_corrupted(&stored),
+            "corrupt sidecar must fail closed instead of serving stale index data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_layout_write_fails_closed_on_corrupt_index() {
+        let (_dir, backend) = create_index_layout_backend();
+        backend.create_bucket("idx-bkt").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"one".to_vec()));
+        backend
+            .put_object("idx-bkt", "keep.txt", data, None)
+            .await
+            .unwrap();
+        let index_path = backend.bucket_meta_root("idx-bkt").join(INDEX_FILE);
+        assert!(index_path.is_file(), "index layout must write _index.json");
+        std::fs::write(&index_path, b"{broken").unwrap();
+
+        let mut meta = HashMap::new();
+        meta.insert("__etag__".to_string(), "abc".to_string());
+        let err = backend
+            .put_object_metadata("idx-bkt", "keep.txt", &meta)
+            .await
+            .expect_err("corrupt index must reject writes in index layout");
+        drop(err);
+        assert_eq!(
+            std::fs::read(&index_path).unwrap(),
+            b"{broken",
+            "corrupt index must not be replaced by an empty map"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_removes_sidecar() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("del-bkt").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"z".to_vec()));
+        backend
+            .put_object("del-bkt", "gone.txt", data, None)
+            .await
+            .unwrap();
+        let sidecar = backend
+            .bucket_meta_root("del-bkt")
+            .join(FsStorageBackend::sidecar_file_name("gone.txt"));
+        assert!(sidecar.is_file());
+        backend.delete_object("del-bkt", "gone.txt").await.unwrap();
+        assert!(!sidecar.exists(), "delete must remove the sidecar");
+        let stored = backend
+            .get_object_metadata("del-bkt", "gone.txt")
+            .await
+            .unwrap();
+        assert!(stored.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_long_entry_name_uses_hashed_sidecar() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("long-bkt").await.unwrap();
+        let long_name = "l".repeat(240);
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"long".to_vec()));
+        backend
+            .put_object("long-bkt", &long_name, data, None)
+            .await
+            .unwrap();
+
+        let sidecar_name = FsStorageBackend::sidecar_file_name(&long_name);
+        assert!(
+            sidecar_name.len() <= SIDECAR_MAX_FILE_NAME_BYTES,
+            "hashed sidecar name must stay within filesystem limits"
+        );
+        let sidecar = backend.bucket_meta_root("long-bkt").join(&sidecar_name);
+        assert!(sidecar.is_file());
+
+        let stored = backend
+            .get_object_metadata("long-bkt", &long_name)
+            .await
+            .unwrap();
+        assert!(stored.contains_key("__etag__"));
+
+        let listing = backend
+            .list_objects("long-bkt", &ListParams::default())
+            .await
+            .unwrap();
+        let entry = listing
+            .objects
+            .iter()
+            .find(|o| o.key == long_name)
+            .expect("listed");
+        assert!(
+            entry.etag.is_some(),
+            "hashed sidecar must resolve entry name from embedded field"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_migrate_meta_indexes_to_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig {
+                metadata_layout: MetadataLayout::Index,
+                ..FsStorageBackendConfig::default()
+            },
+        );
+        index_backend.create_bucket("mig-bkt").await.unwrap();
+        for key in ["a.txt", "sub/b.txt", "sub/c.txt"] {
+            let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"m".to_vec()));
+            index_backend
+                .put_object("mig-bkt", key, data, None)
+                .await
+                .unwrap();
+        }
+        let root_index = index_backend.bucket_meta_root("mig-bkt").join(INDEX_FILE);
+        let sub_index = index_backend
+            .bucket_meta_root("mig-bkt")
+            .join("sub")
+            .join(INDEX_FILE);
+        assert!(root_index.is_file());
+        assert!(sub_index.is_file());
+
+        let report = index_backend.migrate_meta_indexes_to_sidecars();
+        assert_eq!(report.index_files_migrated, 2);
+        assert_eq!(report.index_files_failed, 0);
+        assert_eq!(report.entries_written, 3);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!root_index.exists());
+        assert!(!sub_index.exists());
+
+        let sidecar_backend = FsStorageBackend::new(dir.path().to_path_buf());
+        for key in ["a.txt", "sub/b.txt", "sub/c.txt"] {
+            let stored = sidecar_backend
+                .get_object_metadata("mig-bkt", key)
+                .await
+                .unwrap();
+            assert!(
+                stored.contains_key("__etag__"),
+                "metadata for {} must survive migration",
+                key
+            );
+        }
+
+        let rerun = sidecar_backend.migrate_meta_indexes_to_sidecars();
+        assert_eq!(rerun.index_files_migrated, 0);
+        assert_eq!(rerun.entries_written, 0);
+        assert!(rerun.failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_migrate_leaves_corrupt_index_in_place() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("migrot-bkt").await.unwrap();
+        let index_path = backend.bucket_meta_root("migrot-bkt").join(INDEX_FILE);
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        std::fs::write(&index_path, b"][").unwrap();
+
+        let report = backend.migrate_meta_indexes_to_sidecars();
+        assert_eq!(report.index_files_failed, 1);
+        assert!(index_path.is_file(), "corrupt index must be preserved");
+    }
+
+    #[tokio::test]
+    async fn test_rmw_rejected_on_unreadable_sidecar() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("rmw-bkt").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"body".to_vec()));
+        backend
+            .put_object("rmw-bkt", "k.txt", data, None)
+            .await
+            .unwrap();
+        let sidecar = backend
+            .bucket_meta_root("rmw-bkt")
+            .join(FsStorageBackend::sidecar_file_name("k.txt"));
+        std::fs::write(&sidecar, b"garbage").unwrap();
+        backend.meta_read_cache.clear();
+
+        let tags = vec![Tag {
+            key: "a".to_string(),
+            value: "b".to_string(),
+        }];
+        assert!(
+            backend
+                .set_object_tags("rmw-bkt", "k.txt", &tags)
+                .await
+                .is_err(),
+            "tagging must not rewrite an unreadable metadata record"
+        );
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            b"garbage",
+            "corrupt sidecar must be preserved as evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_listing_blanks_fields_for_corrupt_sidecar() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("lb-bkt").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"x".to_vec()));
+        backend
+            .put_object("lb-bkt", "f.txt", data, None)
+            .await
+            .unwrap();
+        let stale = serde_json::json!({
+            "f.txt": {"metadata": {"__etag__": "stale-etag"}}
+        });
+        std::fs::write(
+            backend.bucket_meta_root("lb-bkt").join(INDEX_FILE),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            backend
+                .bucket_meta_root("lb-bkt")
+                .join(FsStorageBackend::sidecar_file_name("f.txt")),
+            b"garbage",
+        )
+        .unwrap();
+        backend.meta_read_cache.clear();
+        backend.invalidate_bucket_caches("lb-bkt");
+
+        let listing = backend
+            .list_objects("lb-bkt", &ListParams::default())
+            .await
+            .unwrap();
+        let entry = listing
+            .objects
+            .iter()
+            .find(|o| o.key == "f.txt")
+            .expect("listed");
+        assert_eq!(
+            entry.etag, None,
+            "corrupt sidecar must blank listing fields, not expose stale index data"
+        );
+    }
+
+    #[test]
+    fn test_sidecar_names_reserved_in_validation() {
+        assert!(crate::validation::validate_object_key(
+            ".__myfsio_meta__x.json",
+            DEFAULT_OBJECT_KEY_MAX_BYTES,
+            cfg!(windows),
+            None
+        )
+        .is_some());
+        assert!(crate::validation::validate_object_key(
+            "dir/.__myfsio_meta__x.json",
+            DEFAULT_OBJECT_KEY_MAX_BYTES,
+            cfg!(windows),
+            None
+        )
+        .is_some());
     }
 }

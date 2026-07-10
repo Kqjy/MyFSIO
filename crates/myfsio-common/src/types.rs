@@ -233,14 +233,14 @@ pub struct QuotaConfig {
     pub max_objects: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PrincipalKind {
     #[default]
     User,
-    Peer { site_id: String },
+    Peer {
+        site_id: String,
+    },
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -262,7 +262,12 @@ impl Principal {
         }
     }
 
-    pub fn peer(access_key: String, user_id: String, display_name: String, site_id: String) -> Self {
+    pub fn peer(
+        access_key: String,
+        user_id: String,
+        display_name: String,
+        site_id: String,
+    ) -> Self {
         Self {
             access_key,
             user_id,

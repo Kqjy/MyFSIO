@@ -341,7 +341,9 @@ pub fn read_part_block_salt(
     block_offset: u64,
 ) -> Result<[u8; PART_BLOCK_SALT_LEN], CryptoError> {
     let mut f = File::open(object_path)?;
-    f.seek(SeekFrom::Start(block_offset + PART_BLOCK_PLAIN_SIZE_LEN as u64))?;
+    f.seek(SeekFrom::Start(
+        block_offset + PART_BLOCK_PLAIN_SIZE_LEN as u64,
+    ))?;
     let mut salt = [0u8; PART_BLOCK_SALT_LEN];
     f.read_exact(&mut salt)?;
     Ok(salt)

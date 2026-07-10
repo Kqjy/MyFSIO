@@ -88,8 +88,7 @@ impl AccessLoggingService {
                 target_prefix: config.target_prefix.clone(),
             }),
         };
-        let json = serde_json::to_string_pretty(&stored)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&stored).map_err(std::io::Error::other)?;
         std::fs::write(&path, json)?;
         self.cache.write().insert(bucket.to_string(), Some(config));
         Ok(())

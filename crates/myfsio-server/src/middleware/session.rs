@@ -276,11 +276,10 @@ pub async fn csrf_layer(
         let new_body = if prefix_eof {
             axum::body::Body::from_stream(prefix_stream)
         } else {
-            let rest_stream = frames
-                .map(|res| {
-                    res.map(|frame| frame.into_data().unwrap_or_default())
-                        .map_err(std::io::Error::other)
-                });
+            let rest_stream = frames.map(|res| {
+                res.map(|frame| frame.into_data().unwrap_or_default())
+                    .map_err(std::io::Error::other)
+            });
             axum::body::Body::from_stream(prefix_stream.chain(rest_stream))
         };
         let req = Request::from_parts(parts, new_body);

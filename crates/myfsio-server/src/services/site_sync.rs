@@ -304,10 +304,7 @@ impl SiteSyncWorker {
                         continue;
                     }
                 };
-                let current_etag = current_meta
-                    .get("__etag__")
-                    .cloned()
-                    .unwrap_or_default();
+                let current_etag = current_meta.get("__etag__").cloned().unwrap_or_default();
                 let current_last_modified = current_meta
                     .get("__last_modified__")
                     .and_then(|s| s.parse::<f64>().ok())

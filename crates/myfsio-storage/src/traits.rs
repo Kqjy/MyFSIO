@@ -112,8 +112,7 @@ pub trait StorageEngine: Send + Sync {
         link_path: &std::path::Path,
     ) -> StorageResult<(ObjectMeta, SnapshotSource)>;
 
-    async fn materialize_object_to_tmp(&self, bucket: &str, key: &str)
-        -> StorageResult<PathBuf>;
+    async fn materialize_object_to_tmp(&self, bucket: &str, key: &str) -> StorageResult<PathBuf>;
 
     async fn head_object(&self, bucket: &str, key: &str) -> StorageResult<ObjectMeta>;
 

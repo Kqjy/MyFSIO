@@ -287,10 +287,7 @@ fn parse_acl_xml(xml: &str, strict: bool) -> Option<Acl> {
         }
         if strict {
             if let Some(node) = grantee_node {
-                if !validate_unique_children(
-                    &node,
-                    &["URI", "ID", "DisplayName", "EmailAddress"],
-                ) {
+                if !validate_unique_children(&node, &["URI", "ID", "DisplayName", "EmailAddress"]) {
                     return None;
                 }
                 if !validate_grantee_identity(&node) {
@@ -473,7 +470,10 @@ mod tests {
     #[test]
     fn strict_rejects_wrong_root_element() {
         assert!(acl_from_xml_strict("<foo/>").is_none());
-        assert!(acl_from_xml_strict("<NotAcl><Owner><ID>x</ID></Owner><AccessControlList/></NotAcl>").is_none());
+        assert!(acl_from_xml_strict(
+            "<NotAcl><Owner><ID>x</ID></Owner><AccessControlList/></NotAcl>"
+        )
+        .is_none());
     }
 
     #[test]
@@ -619,13 +619,7 @@ mod tests {
 
     #[test]
     fn strict_accepts_all_known_permissions() {
-        for p in [
-            "FULL_CONTROL",
-            "WRITE",
-            "WRITE_ACP",
-            "READ",
-            "READ_ACP",
-        ] {
+        for p in ["FULL_CONTROL", "WRITE", "WRITE_ACP", "READ", "READ_ACP"] {
             let xml = format!(
                 "<AccessControlPolicy>\
                 <Owner><ID>owner</ID></Owner>\

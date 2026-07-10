@@ -3,10 +3,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
-use std::collections::HashMap;
-use std::sync::Arc;
 use myfsio_common::types::Principal;
 use myfsio_storage::traits::StorageEngine;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::services::site_registry::{PeerSite, SiteInfo};
 use crate::services::website_domains::{is_valid_domain, normalize_domain};
@@ -96,9 +96,7 @@ fn validate_peer_endpoint(state: &AppState, endpoint: &str) -> Option<String> {
         return Some(err);
     }
     if state.config.peer_require_https && !endpoint.starts_with("https://") {
-        return Some(
-            "Endpoint must be https when PEER_REQUIRE_HTTPS=true".to_string(),
-        );
+        return Some("Endpoint must be https when PEER_REQUIRE_HTTPS=true".to_string());
     }
     None
 }
@@ -1490,7 +1488,10 @@ pub async fn list_peer_credentials(
         return err;
     }
     let entries = state.iam.list_peer_credentials();
-    json_response(StatusCode::OK, serde_json::json!({ "credentials": entries }))
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({ "credentials": entries }),
+    )
 }
 
 pub async fn create_peer_credential(
@@ -1503,7 +1504,13 @@ pub async fn create_peer_credential(
     }
     let payload = match read_json_body(body).await {
         Some(v) => v,
-        None => return json_error("InvalidArgument", "Invalid JSON body", StatusCode::BAD_REQUEST),
+        None => {
+            return json_error(
+                "InvalidArgument",
+                "Invalid JSON body",
+                StatusCode::BAD_REQUEST,
+            )
+        }
     };
     let site_id = match payload
         .get("site_id")
@@ -1659,8 +1666,7 @@ pub async fn get_cluster_overview(
     if let Some(obj) = value.as_object_mut() {
         obj.insert("peers".to_string(), serde_json::Value::Array(peers_array));
     }
-    *state.cluster_overview_cache.lock() =
-        Some((std::time::Instant::now(), value.clone()));
+    *state.cluster_overview_cache.lock() = Some((std::time::Instant::now(), value.clone()));
     json_response(StatusCode::OK, value)
 }
 

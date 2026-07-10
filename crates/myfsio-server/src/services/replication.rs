@@ -950,8 +950,7 @@ impl ReplicationManager {
 
         if rule_requires_inbound_ak(&rule.mode) {
             if let Some(registry) = self.site_registry.as_ref() {
-                if let Some(peer) =
-                    registry.find_peer_by_connection_id(&rule.target_connection_id)
+                if let Some(peer) = registry.find_peer_by_connection_id(&rule.target_connection_id)
                 {
                     let ak_set = peer
                         .peer_inbound_access_key
@@ -1090,8 +1089,7 @@ impl ReplicationManager {
             .get_object_metadata(bucket, object_key)
             .await
             .unwrap_or_default();
-        let segmented =
-            stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
+        let segmented = stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
         let (src_path, _materialized_guard) = if segmented {
             match self
                 .storage
@@ -1295,16 +1293,20 @@ impl ReplicationManager {
             Err(err) => {
                 let code = err.code.clone();
                 let clears_pending = err.clears_pending;
-                let (pending_upload_id, pending_source_size, pending_source_etag, pending_part_size) =
-                    match err.pending_mpu.clone() {
-                        Some(p) => (
-                            Some(p.upload_id),
-                            Some(p.source_size),
-                            Some(p.source_etag),
-                            Some(p.part_size),
-                        ),
-                        None => (None, None, None, None),
-                    };
+                let (
+                    pending_upload_id,
+                    pending_source_size,
+                    pending_source_etag,
+                    pending_part_size,
+                ) = match err.pending_mpu.clone() {
+                    Some(p) => (
+                        Some(p.upload_id),
+                        Some(p.source_size),
+                        Some(p.source_etag),
+                        Some(p.part_size),
+                    ),
+                    None => (None, None, None, None),
+                };
                 let msg = err.to_string();
                 tracing::error!("Replication failed {}/{}: {}", bucket, object_key, msg);
                 if clears_pending {
@@ -1608,7 +1610,8 @@ impl ReplicationManager {
                 healed += 1;
             }
         }
-        self.healer_last_pass_healed.store(healed, Ordering::Relaxed);
+        self.healer_last_pass_healed
+            .store(healed, Ordering::Relaxed);
         self.healer_last_pass_skipped
             .store(skipped, Ordering::Relaxed);
         *self.healer_last_pass_at.lock() = Some(now_secs());
@@ -1758,8 +1761,16 @@ async fn upload_object(
         )
         .await
     } else {
-        upload_object_single(client, bucket, key, path, file_size, streaming_threshold, obj_meta)
-            .await
+        upload_object_single(
+            client,
+            bucket,
+            key,
+            path,
+            file_size,
+            streaming_threshold,
+            obj_meta,
+        )
+        .await
     }
 }
 
@@ -1788,13 +1799,15 @@ async fn upload_object_single(
                 clears_pending: false,
             })?
     } else {
-        let bytes = tokio::fs::read(path).await.map_err(|e| ReplicationUploadError {
-            code: None,
-            message: format!("failed to read {}: {}", path.display(), e),
-            is_no_such_bucket: false,
-            pending_mpu: None,
-            clears_pending: false,
-        })?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| ReplicationUploadError {
+                code: None,
+                message: format!("failed to read {}: {}", path.display(), e),
+                is_no_such_bucket: false,
+                pending_mpu: None,
+                clears_pending: false,
+            })?;
         ByteStream::from(bytes)
     };
 
@@ -2403,8 +2416,9 @@ async fn upload_one_part(
 
     let send_fut = async {
         if lower_sdk_retry {
-            let override_cfg = aws_sdk_s3::config::Builder::default()
-                .retry_config(aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(1));
+            let override_cfg = aws_sdk_s3::config::Builder::default().retry_config(
+                aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(1),
+            );
             req.customize()
                 .config_override(override_cfg)
                 .send()
@@ -2464,10 +2478,10 @@ async fn build_progress_body(
     use futures::stream::TryStreamExt;
     let framed = stream.map_ok(http_body::Frame::data);
     let body = http_body_util::StreamBody::new(framed);
-    let mapped = http_body_util::BodyExt::map_err(
-        body,
-        |e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) },
-    );
+    let mapped =
+        http_body_util::BodyExt::map_err(body, |e| -> Box<dyn std::error::Error + Send + Sync> {
+            Box::new(e)
+        });
     let sdk_body = aws_smithy_types::body::SdkBody::from_body_1_x(mapped);
     Ok(ByteStream::new(sdk_body))
 }
@@ -2870,7 +2884,10 @@ mod tests {
 
     #[test]
     fn is_transient_classifies_transport_errors_as_retryable() {
-        assert!(is_transient_upload_error(&upload_err(None, "connection reset")));
+        assert!(is_transient_upload_error(&upload_err(
+            None,
+            "connection reset"
+        )));
     }
 
     #[test]
@@ -2944,7 +2961,10 @@ mod tests {
     fn failure_store_preserves_pending_upload_id_when_new_failure_has_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
-        store.add("b", failure_with_pending("k", "upload-1", 2048, "etag-1", 256));
+        store.add(
+            "b",
+            failure_with_pending("k", "upload-1", 2048, "etag-1", 256),
+        );
         store.add("b", empty_failure("k"));
         let got = store.get("b", "k").expect("present");
         assert_eq!(got.pending_upload_id.as_deref(), Some("upload-1"));
@@ -2958,8 +2978,14 @@ mod tests {
     fn failure_store_overwrites_pending_upload_id_and_identity_when_new_failure_has_one() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
-        store.add("b", failure_with_pending("k", "upload-1", 2048, "etag-1", 256));
-        store.add("b", failure_with_pending("k", "upload-2", 4096, "etag-2", 512));
+        store.add(
+            "b",
+            failure_with_pending("k", "upload-1", 2048, "etag-1", 256),
+        );
+        store.add(
+            "b",
+            failure_with_pending("k", "upload-2", 4096, "etag-2", 512),
+        );
         let got = store.get("b", "k").expect("present");
         assert_eq!(got.pending_upload_id.as_deref(), Some("upload-2"));
         assert_eq!(got.pending_source_size, Some(4096));
@@ -3110,7 +3136,12 @@ mod tests {
         let huge: u64 = 200 * 1024 * 1024 * 1024;
         let part_size = compute_part_size(huge, &tuning);
         let parts = huge.div_ceil(part_size);
-        assert!(parts <= MULTIPART_MAX_PARTS, "{} > {}", parts, MULTIPART_MAX_PARTS);
+        assert!(
+            parts <= MULTIPART_MAX_PARTS,
+            "{} > {}",
+            parts,
+            MULTIPART_MAX_PARTS
+        );
         assert!(part_size > 5 * 1024 * 1024);
     }
 

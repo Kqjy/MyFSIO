@@ -196,8 +196,7 @@ impl PeerAdminClient {
 
         let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
         let string_to_sign = build_string_to_sign(&amz_date, &credential_scope, &canonical_request);
-        let signing_key =
-            derive_signing_key(&connection.secret_key, &date_stamp, &region, service);
+        let signing_key = derive_signing_key(&connection.secret_key, &date_stamp, &region, service);
         let signature = compute_signature(&signing_key, &string_to_sign);
 
         let authorization = format!(
@@ -235,7 +234,10 @@ impl PeerAdminClient {
         path_and_query: &str,
         connection: &RemoteConnection,
     ) -> Result<Value, String> {
-        match self.fetch_admin_status(endpoint, path_and_query, connection).await {
+        match self
+            .fetch_admin_status(endpoint, path_and_query, connection)
+            .await
+        {
             PeerAdminStatus::Ok(v) => Ok(v),
             PeerAdminStatus::Unauthorized(detail) => Err(detail),
             PeerAdminStatus::HttpError { status, detail } => {
@@ -261,9 +263,7 @@ impl PeerAdminClient {
         };
         let resp = match req.send().await {
             Ok(r) => r,
-            Err(e) => {
-                return PeerAdminStatus::Unreachable(format!("request failed: {}", e))
-            }
+            Err(e) => return PeerAdminStatus::Unreachable(format!("request failed: {}", e)),
         };
         let status = resp.status();
         if status.is_success() {
@@ -294,8 +294,12 @@ impl PeerAdminClient {
         endpoint: &str,
         connection: &RemoteConnection,
     ) -> Result<Value, String> {
-        self.fetch_admin_json(endpoint, "/myfsio/admin/cluster/overview?local_only=1", connection)
-            .await
+        self.fetch_admin_json(
+            endpoint,
+            "/myfsio/admin/cluster/overview?local_only=1",
+            connection,
+        )
+        .await
     }
 
     pub async fn check_peer_endpoint_health(
@@ -304,7 +308,11 @@ impl PeerAdminClient {
         connection: &RemoteConnection,
     ) -> Result<(), String> {
         match self
-            .fetch_admin_status(endpoint, "/myfsio/admin/cluster/overview?local_only=1", connection)
+            .fetch_admin_status(
+                endpoint,
+                "/myfsio/admin/cluster/overview?local_only=1",
+                connection,
+            )
             .await
         {
             PeerAdminStatus::Ok(_) => Ok(()),
@@ -375,8 +383,12 @@ impl PeerAdminClient {
         let payload_hash = sha256_hex(&body);
         let nonce = uuid::Uuid::new_v4().simple().to_string();
 
-        let cluster_attest =
-            crate::services::cluster_attest::cluster_attest(cluster_psk, &amz_date, origin_site_id, idempotency_key);
+        let cluster_attest = crate::services::cluster_attest::cluster_attest(
+            cluster_psk,
+            &amz_date,
+            origin_site_id,
+            idempotency_key,
+        );
         let admin_attest_value = crate::services::cluster_attest::admin_attest(
             cluster_psk,
             &amz_date,
@@ -393,13 +405,28 @@ impl PeerAdminClient {
             ("host".to_string(), host_with_port.clone()),
             ("x-amz-content-sha256".to_string(), payload_hash.clone()),
             ("x-amz-date".to_string(), amz_date.clone()),
-            ("x-myfsio-admin-attest".to_string(), admin_attest_value.clone()),
+            (
+                "x-myfsio-admin-attest".to_string(),
+                admin_attest_value.clone(),
+            ),
             ("x-myfsio-admin-user".to_string(), admin_user_id.to_string()),
-            ("x-myfsio-cluster-attest".to_string(), cluster_attest.clone()),
-            ("x-myfsio-correlation-id".to_string(), correlation_id.to_string()),
-            ("x-myfsio-idempotency-key".to_string(), idempotency_key.to_string()),
+            (
+                "x-myfsio-cluster-attest".to_string(),
+                cluster_attest.clone(),
+            ),
+            (
+                "x-myfsio-correlation-id".to_string(),
+                correlation_id.to_string(),
+            ),
+            (
+                "x-myfsio-idempotency-key".to_string(),
+                idempotency_key.to_string(),
+            ),
             ("x-myfsio-nonce".to_string(), nonce.clone()),
-            ("x-myfsio-origin-site".to_string(), origin_site_id.to_string()),
+            (
+                "x-myfsio-origin-site".to_string(),
+                origin_site_id.to_string(),
+            ),
         ];
         header_pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -442,8 +469,7 @@ impl PeerAdminClient {
 
         let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
         let string_to_sign = build_string_to_sign(&amz_date, &credential_scope, &canonical_request);
-        let signing_key =
-            derive_signing_key(&connection.secret_key, &date_stamp, &region, service);
+        let signing_key = derive_signing_key(&connection.secret_key, &date_stamp, &region, service);
         let signature = compute_signature(&signing_key, &string_to_sign);
 
         let authorization = format!(

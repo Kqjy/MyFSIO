@@ -135,7 +135,9 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
 fn error_chain_has_body_timeout(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(e) = cur {
-        if e.downcast_ref::<tower_http::timeout::TimeoutError>().is_some() {
+        if e.downcast_ref::<tower_http::timeout::TimeoutError>()
+            .is_some()
+        {
             return true;
         }
         cur = e.source();
@@ -1028,9 +1030,7 @@ async fn list_with_arbitrary_delimiter(
     const SCAN_PAGE_SIZE: usize = 1000;
     let prefix_len = prefix.len();
 
-    let initial_skip = continuation_token
-        .clone()
-        .or_else(|| start_after.clone());
+    let initial_skip = continuation_token.clone().or_else(|| start_after.clone());
 
     let mut storage_cursor: Option<String> = initial_skip.clone();
     if let Some(token) = initial_skip.as_deref() {
@@ -1391,6 +1391,103 @@ fn is_aws_chunked(headers: &HeaderMap) -> bool {
         return true;
     }
     false
+}
+
+fn declared_body_length(headers: &HeaderMap, aws_chunked: bool) -> Option<u64> {
+    let name = if aws_chunked {
+        "x-amz-decoded-content-length"
+    } else {
+        "content-length"
+    };
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+fn incomplete_body_io_error(expected: u64, received: u64) -> std::io::Error {
+    let kind = if received < expected {
+        std::io::ErrorKind::UnexpectedEof
+    } else {
+        std::io::ErrorKind::InvalidData
+    };
+    std::io::Error::new(
+        kind,
+        myfsio_common::error::IncompleteBodyError { expected, received },
+    )
+}
+
+struct DeclaredLengthReader {
+    inner: myfsio_storage::traits::AsyncReadStream,
+    expected: u64,
+    seen: u64,
+}
+
+impl tokio::io::AsyncRead for DeclaredLengthReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let had_capacity = buf.remaining() > 0;
+        let before = buf.filled().len();
+        match this.inner.as_mut().poll_read(cx, buf) {
+            std::task::Poll::Ready(Ok(())) => {
+                let n = (buf.filled().len() - before) as u64;
+                if n == 0 {
+                    if had_capacity && this.seen != this.expected {
+                        return std::task::Poll::Ready(Err(incomplete_body_io_error(
+                            this.expected,
+                            this.seen,
+                        )));
+                    }
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                this.seen += n;
+                if this.seen > this.expected {
+                    buf.set_filled(before);
+                    return std::task::Poll::Ready(Err(incomplete_body_io_error(
+                        this.expected,
+                        this.seen,
+                    )));
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(Err(err)) => {
+                let err = if this.seen != this.expected
+                    && !error_chain_has_body_timeout(&err)
+                    && crate::middleware::sha_body::sha256_mismatch_message(&err).is_none()
+                {
+                    tracing::debug!(
+                        "request body ended with a transport error after {} of {} declared bytes: {}",
+                        this.seen,
+                        this.expected,
+                        err
+                    );
+                    incomplete_body_io_error(this.expected, this.seen)
+                } else {
+                    err
+                };
+                std::task::Poll::Ready(Err(err))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+fn enforce_declared_length(
+    stream: myfsio_storage::traits::AsyncReadStream,
+    expected: Option<u64>,
+) -> myfsio_storage::traits::AsyncReadStream {
+    match expected {
+        Some(expected) => Box::pin(DeclaredLengthReader {
+            inner: stream,
+            expected,
+            seen: 0,
+        }),
+        None => stream,
+    }
 }
 
 fn insert_content_type(headers: &mut HeaderMap, key: &str, explicit: Option<&str>) {
@@ -1778,7 +1875,27 @@ fn validate_upload_checksums(headers: &HeaderMap, data: &[u8]) -> Result<(), Res
     Ok(())
 }
 
-async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Bytes, Response> {
+async fn collect_upload_body(
+    body: Body,
+    aws_chunked: bool,
+    declared_len: Option<u64>,
+) -> Result<bytes::Bytes, Response> {
+    fn check_declared(len: usize, declared: Option<u64>) -> Result<(), Response> {
+        if let Some(expected) = declared {
+            if len as u64 != expected {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::IncompleteBody,
+                    myfsio_common::error::IncompleteBodyError {
+                        expected,
+                        received: len as u64,
+                    }
+                    .to_string(),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     if aws_chunked {
         let mut reader = chunked::decode_body(body);
         let mut data: Vec<u8> = Vec::new();
@@ -1787,6 +1904,18 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
             let n = reader.read(&mut buf).await.map_err(|err| {
                 if io_error_is_body_timeout(&err) {
                     return request_timeout_response();
+                }
+                if let Some(expected) = declared_len {
+                    if (data.len() as u64) < expected {
+                        return s3_error_response(S3Error::new(
+                            S3ErrorCode::IncompleteBody,
+                            myfsio_common::error::IncompleteBodyError {
+                                expected,
+                                received: data.len() as u64,
+                            }
+                            .to_string(),
+                        ));
+                    }
                 }
                 s3_error_response(S3Error::new(
                     S3ErrorCode::InvalidRequest,
@@ -1804,6 +1933,7 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
             }
             data.extend_from_slice(&buf[..n]);
         }
+        check_declared(data.len(), declared_len)?;
         return Ok(bytes::Bytes::from(data));
     }
 
@@ -1816,6 +1946,15 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
                 bad_digest_response(message)
             } else if error_chain_has_body_timeout(&err) {
                 request_timeout_response()
+            } else if declared_len.is_some_and(|expected| (data.len() as u64) < expected) {
+                s3_error_response(S3Error::new(
+                    S3ErrorCode::IncompleteBody,
+                    myfsio_common::error::IncompleteBodyError {
+                        expected: declared_len.unwrap_or_default(),
+                        received: data.len() as u64,
+                    }
+                    .to_string(),
+                ))
             } else {
                 s3_error_response(S3Error::new(
                     S3ErrorCode::InvalidRequest,
@@ -1831,6 +1970,7 @@ async fn collect_upload_body(body: Body, aws_chunked: bool) -> Result<bytes::Byt
         }
         data.extend_from_slice(&chunk);
     }
+    check_declared(data.len(), declared_len)?;
     Ok(bytes::Bytes::from(data))
 }
 
@@ -1988,14 +2128,9 @@ pub async fn put_object(
         return resp;
     }
     if query.legal_hold.is_some() {
-        let resp = config::put_object_legal_hold(
-            &state,
-            &bucket,
-            &key,
-            query.version_id.as_deref(),
-            body,
-        )
-        .await;
+        let resp =
+            config::put_object_legal_hold(&state, &bucket, &key, query.version_id.as_deref(), body)
+                .await;
         if resp.status().is_success() {
             trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
         }
@@ -2045,15 +2180,8 @@ pub async fn put_object(
         .get("x-amz-copy-source")
         .and_then(|v| v.to_str().ok())
     {
-        return copy_object_handler(
-            &state,
-            copy_source,
-            &bucket,
-            &key,
-            peer_marker,
-            &headers,
-        )
-        .await;
+        return copy_object_handler(&state, copy_source, &bucket, &key, peer_marker, &headers)
+            .await;
     }
 
     if let Err(response) =
@@ -2121,8 +2249,9 @@ pub async fn put_object(
     persist_additional_checksums(&headers, &mut metadata);
 
     let aws_chunked = is_aws_chunked(&headers);
+    let declared_len = declared_body_length(&headers, aws_chunked);
     let boxed: myfsio_storage::traits::AsyncReadStream = if has_upload_checksum(&headers) {
-        let data = match collect_upload_body(body, aws_chunked).await {
+        let data = match collect_upload_body(body, aws_chunked, declared_len).await {
             Ok(data) => data,
             Err(response) => return response,
         };
@@ -2139,7 +2268,7 @@ pub async fn put_object(
             ))
         };
         spool_upload_stream(
-            raw,
+            enforce_declared_length(raw, declared_len),
             state.config.upload_stream_buffer_bytes,
             state.config.stream_chunk_size,
         )
@@ -2294,34 +2423,19 @@ pub async fn get_object(
 ) -> Response {
     let key = normalize_object_key(key);
     if query.tagging.is_some() {
-        return config::get_object_tagging(
-            &state,
-            &bucket,
-            &key,
-            query.version_id.as_deref(),
-        )
-        .await;
+        return config::get_object_tagging(&state, &bucket, &key, query.version_id.as_deref())
+            .await;
     }
     if query.acl.is_some() {
         return config::get_object_acl(&state, &bucket, &key).await;
     }
     if query.retention.is_some() {
-        return config::get_object_retention(
-            &state,
-            &bucket,
-            &key,
-            query.version_id.as_deref(),
-        )
-        .await;
+        return config::get_object_retention(&state, &bucket, &key, query.version_id.as_deref())
+            .await;
     }
     if query.legal_hold.is_some() {
-        return config::get_object_legal_hold(
-            &state,
-            &bucket,
-            &key,
-            query.version_id.as_deref(),
-        )
-        .await;
+        return config::get_object_legal_hold(&state, &bucket, &key, query.version_id.as_deref())
+            .await;
     }
     if query.attributes.is_some() {
         return object_attributes_handler(&state, &bucket, &key, &headers).await;
@@ -2398,8 +2512,7 @@ pub async fn get_object(
                         return resp;
                     }
                     let _ = tokio::fs::remove_file(&snap_link).await;
-                    let mut h =
-                        build_part_response_headers(&key, &snap_meta, &view, &query);
+                    let mut h = build_part_response_headers(&key, &snap_meta, &view, &query);
                     apply_user_metadata(&mut h, &snap_meta.metadata);
                     return (StatusCode::PARTIAL_CONTENT, h).into_response();
                 }
@@ -2438,8 +2551,7 @@ pub async fn get_object(
     ) = match (enc_info.as_ref(), state.encryption.as_ref()) {
         (Some(enc_info), Some(enc_svc)) => {
             if enc_info.algorithm == "AES256" && enc_info.encrypted_data_key.is_none() {
-                if let Err(resp) = require_sse_c_key_match(&headers, &snap_meta.internal_metadata)
-                {
+                if let Err(resp) = require_sse_c_key_match(&headers, &snap_meta.internal_metadata) {
                     let _ = tokio::fs::remove_file(&snap_link).await;
                     return resp;
                 }
@@ -3147,8 +3259,7 @@ async fn initiate_multipart_handler(
                     }
                     if let Some(ref kid) = ctx.kms_key_id {
                         if let Ok(value) = kid.parse() {
-                            headers
-                                .insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+                            headers.insert("x-amz-server-side-encryption-aws-kms-key-id", value);
                         }
                     }
                 }
@@ -3163,7 +3274,10 @@ async fn read_pending_multipart_sse(
     state: &AppState,
     bucket: &str,
     key: &str,
-) -> Option<(myfsio_crypto::encryption::EncryptionContext, HashMap<String, String>)> {
+) -> Option<(
+    myfsio_crypto::encryption::EncryptionContext,
+    HashMap<String, String>,
+)> {
     let stored = state.storage.get_object_metadata(bucket, key).await.ok()?;
     let alg = stored.get(MULTIPART_PENDING_SSE_ALG)?.clone();
     let kms_key_id = stored.get(MULTIPART_PENDING_SSE_KMS_KEY).cloned();
@@ -3199,7 +3313,11 @@ async fn upload_part_handler_with_chunking(
     body: Body,
     aws_chunked: bool,
 ) -> Response {
-    let pending = match state.storage.get_multipart_metadata(bucket, upload_id).await {
+    let pending = match state
+        .storage
+        .get_multipart_metadata(bucket, upload_id)
+        .await
+    {
         Ok(m) => m,
         Err(e) => return storage_err_response(e),
     };
@@ -3222,13 +3340,12 @@ async fn upload_part_handler_with_chunking(
         Box::pin(chunked::decode_body(body))
     } else {
         let stream = tokio_util::io::StreamReader::new(
-            body.into_data_stream()
-                .map_err(std::io::Error::other),
+            body.into_data_stream().map_err(std::io::Error::other),
         );
         Box::pin(stream)
     };
     let boxed = spool_upload_stream(
-        raw,
+        enforce_declared_length(raw, declared_body_length(headers, aws_chunked)),
         state.config.upload_stream_buffer_bytes,
         state.config.stream_chunk_size,
     );
@@ -3277,7 +3394,10 @@ async fn upload_part_sse_c(
     };
 
     if let Some(stored_md5) = pending.get(SSE_C_KEY_MD5_META) {
-        if !constant_time_eq(sse_c_key_md5(&customer_key).as_bytes(), stored_md5.as_bytes()) {
+        if !constant_time_eq(
+            sse_c_key_md5(&customer_key).as_bytes(),
+            stored_md5.as_bytes(),
+        ) {
             return s3_error_response(S3Error::new(
                 S3ErrorCode::AccessDenied,
                 "The SSE-C customer key does not match the key used to initiate this upload",
@@ -3323,7 +3443,7 @@ async fn upload_part_sse_c(
         ))
     };
     let boxed = spool_upload_stream(
-        raw,
+        enforce_declared_length(raw, declared_body_length(headers, aws_chunked)),
         state.config.upload_stream_buffer_bytes,
         state.config.stream_chunk_size,
     );
@@ -3417,7 +3537,11 @@ async fn drain_stream_to_file(
 ) -> Result<u64, Response> {
     let mut file = match tokio::fs::File::create(path).await {
         Ok(f) => f,
-        Err(e) => return Err(storage_err_response(myfsio_storage::error::StorageError::Io(e))),
+        Err(e) => {
+            return Err(storage_err_response(
+                myfsio_storage::error::StorageError::Io(e),
+            ))
+        }
     };
     let copied = tokio::io::copy(&mut stream, &mut file)
         .await
@@ -3737,9 +3861,9 @@ async fn complete_multipart_handler(
                         if let Err(e) = tokio::fs::rename(&enc_tmp, &obj_path).await {
                             let _ = tokio::fs::remove_file(&enc_tmp).await;
                             let _ = state.storage.delete_object(bucket, key).await;
-                            return storage_err_response(
-                                myfsio_storage::error::StorageError::Io(e),
-                            );
+                            return storage_err_response(myfsio_storage::error::StorageError::Io(
+                                e,
+                            ));
                         }
                         let enc_size = tokio::fs::metadata(&obj_path)
                             .await
@@ -3832,8 +3956,7 @@ async fn complete_multipart_handler(
             }
             if let Some(kid) = sse_kms_id_response {
                 if let Ok(value) = kid.parse() {
-                    resp_headers
-                        .insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+                    resp_headers.insert("x-amz-server-side-encryption-aws-kms-key-id", value);
                 }
             }
             if let Some(md5) = sse_c_md5_response {
@@ -3921,7 +4044,11 @@ async fn finalize_mpu_sse_c_metadata(
 
     let md5 = all_meta.get(SSE_C_KEY_MD5_META).cloned();
 
-    if let Err(e) = state.storage.put_object_metadata(bucket, key, &all_meta).await {
+    if let Err(e) = state
+        .storage
+        .put_object_metadata(bucket, key, &all_meta)
+        .await
+    {
         return Err(storage_err_response(e));
     }
 
@@ -3945,7 +4072,10 @@ async fn apply_pending_multipart_tagging(state: &AppState, bucket: &str, key: &s
                 key = key,
                 "discarding malformed __pending_tagging__ value from multipart manifest"
             );
-            let _ = state.storage.put_object_metadata(bucket, key, &stored).await;
+            let _ = state
+                .storage
+                .put_object_metadata(bucket, key, &stored)
+                .await;
             return;
         }
     };
@@ -3955,7 +4085,10 @@ async fn apply_pending_multipart_tagging(state: &AppState, bucket: &str, key: &s
             key = key,
             "skipping multipart tagging: exceeds object_tag_limit"
         );
-        let _ = state.storage.put_object_metadata(bucket, key, &stored).await;
+        let _ = state
+            .storage
+            .put_object_metadata(bucket, key, &stored)
+            .await;
         return;
     }
     if !tags.is_empty() {
@@ -3968,7 +4101,11 @@ async fn apply_pending_multipart_tagging(state: &AppState, bucket: &str, key: &s
             );
         }
     }
-    if let Err(e) = state.storage.put_object_metadata(bucket, key, &stored).await {
+    if let Err(e) = state
+        .storage
+        .put_object_metadata(bucket, key, &stored)
+        .await
+    {
         tracing::error!(
             bucket = bucket,
             key = key,
@@ -4408,8 +4545,7 @@ async fn copy_object_handler(
         m
     };
 
-    let src_enc_info =
-        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(snap_internal);
+    let src_enc_info = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(snap_internal);
 
     let plaintext_path = if let Some(enc_info) = src_enc_info.as_ref() {
         let Some(enc_svc) = state.encryption.as_ref() else {
@@ -4449,52 +4585,52 @@ async fn copy_object_handler(
     dst_metadata.remove(myfsio_storage::segments::META_KEY_SEGMENTS);
     dst_metadata.remove("__part_sizes__");
 
-    let (publish_path, publish_metadata, plaintext_etag_override) =
-        if let Some(enc_ctx) = dst_enc_ctx {
-            let Some(enc_svc) = state.encryption.as_ref() else {
-                let _ = tokio::fs::remove_file(&plaintext_path).await;
-                return s3_error_response(S3Error::new(
-                    S3ErrorCode::InternalError,
-                    "Encryption requested but encryption service is disabled",
-                ));
-            };
-            let plaintext_md5 = if enc_ctx.algorithm
-                == myfsio_crypto::encryption::SseAlgorithm::Aes256
-            {
-                match compute_plaintext_md5(&plaintext_path).await {
-                    Ok(md5) => Some(md5),
-                    Err(e) => {
-                        let _ = tokio::fs::remove_file(&plaintext_path).await;
-                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-                    }
-                }
-            } else {
-                None
-            };
-            let enc_tmp = tmp_dir.join(format!("copy-enc-{}", uuid::Uuid::new_v4()));
-            let enc_meta = match enc_svc
-                .encrypt_object(&plaintext_path, &enc_tmp, &enc_ctx)
-                .await
-            {
-                Ok(m) => m,
+    let (publish_path, publish_metadata, plaintext_etag_override) = if let Some(enc_ctx) =
+        dst_enc_ctx
+    {
+        let Some(enc_svc) = state.encryption.as_ref() else {
+            let _ = tokio::fs::remove_file(&plaintext_path).await;
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "Encryption requested but encryption service is disabled",
+            ));
+        };
+        let plaintext_md5 = if enc_ctx.algorithm == myfsio_crypto::encryption::SseAlgorithm::Aes256
+        {
+            match compute_plaintext_md5(&plaintext_path).await {
+                Ok(md5) => Some(md5),
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&plaintext_path).await;
-                    let _ = tokio::fs::remove_file(&enc_tmp).await;
-                    return s3_error_response(S3Error::new(
-                        S3ErrorCode::InternalError,
-                        format!("Destination encryption failed: {}", e),
-                    ));
+                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
                 }
-            };
-            let _ = tokio::fs::remove_file(&plaintext_path).await;
-            let mut merged = dst_metadata;
-            for (k, v) in enc_meta.to_metadata_map() {
-                merged.insert(k, v);
             }
-            (enc_tmp, merged, plaintext_md5)
         } else {
-            (plaintext_path, dst_metadata, None)
+            None
         };
+        let enc_tmp = tmp_dir.join(format!("copy-enc-{}", uuid::Uuid::new_v4()));
+        let enc_meta = match enc_svc
+            .encrypt_object(&plaintext_path, &enc_tmp, &enc_ctx)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&plaintext_path).await;
+                let _ = tokio::fs::remove_file(&enc_tmp).await;
+                return s3_error_response(S3Error::new(
+                    S3ErrorCode::InternalError,
+                    format!("Destination encryption failed: {}", e),
+                ));
+            }
+        };
+        let _ = tokio::fs::remove_file(&plaintext_path).await;
+        let mut merged = dst_metadata;
+        for (k, v) in enc_meta.to_metadata_map() {
+            merged.insert(k, v);
+        }
+        (enc_tmp, merged, plaintext_md5)
+    } else {
+        (plaintext_path, dst_metadata, None)
+    };
 
     let publish_file = match tokio::fs::File::open(&publish_path).await {
         Ok(f) => f,
@@ -4756,8 +4892,16 @@ async fn range_get_handler_inner(
         Err(e) => return storage_err_response(e),
     };
 
-    serve_range_from_snapshot(state, snap_source, meta, range_str, query, headers, parts_count)
-        .await
+    serve_range_from_snapshot(
+        state,
+        snap_source,
+        meta,
+        range_str,
+        query,
+        headers,
+        parts_count,
+    )
+    .await
 }
 
 async fn serve_range_from_snapshot(
@@ -4793,7 +4937,16 @@ async fn serve_range_from_snapshot(
     }
 
     if mpu_is_sse_c(&meta.internal_metadata) {
-        return serve_mpu_sse_c(state, snap_link, meta, headers, query, Some(range_str), None).await;
+        return serve_mpu_sse_c(
+            state,
+            snap_link,
+            meta,
+            headers,
+            query,
+            Some(range_str),
+            None,
+        )
+        .await;
     }
 
     let enc_info =
@@ -6503,16 +6656,93 @@ mod tests {
 
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "gzip, aws-chunked".parse().unwrap());
-        h.insert(
-            "x-amz-content-sha256",
-            "abcd".repeat(16).parse().unwrap(),
-        );
+        h.insert("x-amz-content-sha256", "abcd".repeat(16).parse().unwrap());
         assert!(!is_aws_chunked(&h));
 
         let mut h = HeaderMap::new();
         h.insert("content-encoding", "gzip".parse().unwrap());
         h.insert("x-amz-content-sha256", "abcd".repeat(16).parse().unwrap());
         assert!(!is_aws_chunked(&h));
+    }
+
+    #[test]
+    fn declared_body_length_picks_right_header() {
+        let mut h = HeaderMap::new();
+        h.insert("content-length", "10".parse().unwrap());
+        h.insert("x-amz-decoded-content-length", "7".parse().unwrap());
+        assert_eq!(declared_body_length(&h, false), Some(10));
+        assert_eq!(declared_body_length(&h, true), Some(7));
+        assert_eq!(declared_body_length(&HeaderMap::new(), false), None);
+        assert_eq!(declared_body_length(&HeaderMap::new(), true), None);
+    }
+
+    fn io_error_is_incomplete_body(err: &std::io::Error) -> bool {
+        let mut source: Option<&(dyn std::error::Error + 'static)> = err.get_ref().map(|e| e as _);
+        while let Some(e) = source {
+            if e.downcast_ref::<myfsio_common::error::IncompleteBodyError>()
+                .is_some()
+            {
+                return true;
+            }
+            source = e.source();
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn enforce_declared_length_rejects_short_stream() {
+        use tokio::io::AsyncReadExt;
+        let stream: myfsio_storage::traits::AsyncReadStream =
+            Box::pin(std::io::Cursor::new(b"abc".to_vec()));
+        let mut wrapped = enforce_declared_length(stream, Some(5));
+        let mut buf = Vec::new();
+        let err = wrapped.read_to_end(&mut buf).await.unwrap_err();
+        assert!(io_error_is_incomplete_body(&err));
+    }
+
+    #[tokio::test]
+    async fn enforce_declared_length_rejects_excess_stream() {
+        use tokio::io::AsyncReadExt;
+        let stream: myfsio_storage::traits::AsyncReadStream =
+            Box::pin(std::io::Cursor::new(b"abcdef".to_vec()));
+        let mut wrapped = enforce_declared_length(stream, Some(4));
+        let mut buf = Vec::new();
+        let err = wrapped.read_to_end(&mut buf).await.unwrap_err();
+        assert!(io_error_is_incomplete_body(&err));
+    }
+
+    #[tokio::test]
+    async fn enforce_declared_length_maps_transport_error_to_incomplete_body() {
+        use tokio::io::AsyncReadExt;
+        let stream = futures::stream::iter(vec![
+            Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from_static(b"ab")),
+            Err(std::io::Error::other("connection reset by peer")),
+        ]);
+        let reader: myfsio_storage::traits::AsyncReadStream =
+            Box::pin(tokio_util::io::StreamReader::new(stream));
+        let mut wrapped = enforce_declared_length(reader, Some(5));
+        let mut buf = Vec::new();
+        let err = wrapped.read_to_end(&mut buf).await.unwrap_err();
+        assert!(io_error_is_incomplete_body(&err));
+    }
+
+    #[tokio::test]
+    async fn enforce_declared_length_accepts_exact_stream() {
+        use tokio::io::AsyncReadExt;
+        let stream: myfsio_storage::traits::AsyncReadStream =
+            Box::pin(std::io::Cursor::new(b"abcd".to_vec()));
+        let mut wrapped = enforce_declared_length(stream, Some(4));
+        let mut buf = Vec::new();
+        wrapped.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"abcd");
+    }
+
+    #[tokio::test]
+    async fn incomplete_body_maps_to_s3_error_code() {
+        let io_err = incomplete_body_io_error(5, 3);
+        let s3: S3Error = myfsio_storage::error::StorageError::Io(io_err).into();
+        assert_eq!(s3.code, S3ErrorCode::IncompleteBody);
+        assert_eq!(s3.http_status(), 400);
     }
 
     #[test]
@@ -6534,10 +6764,7 @@ mod tests {
     fn aws_chunked_is_stripped_from_stored_content_encoding_regardless_of_transport() {
         let mut headers = HeaderMap::new();
         headers.insert("content-encoding", "gzip, aws-chunked".parse().unwrap());
-        headers.insert(
-            "x-amz-content-sha256",
-            "abcd".repeat(16).parse().unwrap(),
-        );
+        headers.insert("x-amz-content-sha256", "abcd".repeat(16).parse().unwrap());
         let mut metadata = HashMap::new();
         insert_standard_object_metadata(&headers, &mut metadata).unwrap();
         assert_eq!(
@@ -6759,8 +6986,14 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(!body.contains("attacker"), "owner must not be the spoofed id; got: {body}");
-        assert!(body.contains("myfsio"), "owner must remain the existing one; got: {body}");
+        assert!(
+            !body.contains("attacker"),
+            "owner must not be the spoofed id; got: {body}"
+        );
+        assert!(
+            body.contains("myfsio"),
+            "owner must remain the existing one; got: {body}"
+        );
     }
 
     #[tokio::test]
@@ -6877,30 +7110,32 @@ mod tests {
         let page1 = list_with_arbitrary_delimiter(&state, "arb2", "", "/", 2, None, None)
             .await
             .unwrap();
-        assert!(page1.is_truncated, "max_keys=2 against 4 distinct items must be truncated");
+        assert!(
+            page1.is_truncated,
+            "max_keys=2 against 4 distinct items must be truncated"
+        );
         let token = page1
             .next_token
             .clone()
             .expect("truncated response must include a continuation token");
         assert_eq!(
-            page1.objects.iter().map(|o| o.key.clone()).collect::<Vec<_>>(),
+            page1
+                .objects
+                .iter()
+                .map(|o| o.key.clone())
+                .collect::<Vec<_>>(),
             vec!["alpha".to_string()]
         );
         assert_eq!(page1.common_prefixes, vec!["ba/".to_string()]);
         assert_eq!(token, "ba/");
 
-        let page2 = list_with_arbitrary_delimiter(
-            &state,
-            "arb2",
-            "",
-            "/",
-            10,
-            Some(token),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(page2.common_prefixes.is_empty(), "ba/ must not be re-emitted on resume");
+        let page2 = list_with_arbitrary_delimiter(&state, "arb2", "", "/", 10, Some(token), None)
+            .await
+            .unwrap();
+        assert!(
+            page2.common_prefixes.is_empty(),
+            "ba/ must not be re-emitted on resume"
+        );
         let got: Vec<String> = page2.objects.iter().map(|o| o.key.clone()).collect();
         assert_eq!(got, vec!["beta".to_string(), "gamma".to_string()]);
         assert!(!page2.is_truncated);

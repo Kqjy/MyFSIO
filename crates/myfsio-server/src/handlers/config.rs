@@ -395,7 +395,9 @@ fn render_encryption_xml(value: &serde_json::Value) -> String {
     if let Some(key) = kms_key_id {
         xml.push_str(&format!("<KMSMasterKeyID>{}</KMSMasterKeyID>", key));
     }
-    xml.push_str("</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>");
+    xml.push_str(
+        "</ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>",
+    );
     xml
 }
 
@@ -485,7 +487,9 @@ pub async fn get_lifecycle(state: &AppState, bucket: &str) -> Response {
             if let Some(lc) = &config.lifecycle {
                 xml_response(StatusCode::OK, stored_xml(lc))
             } else {
-                xml_error_response(S3Error::from_code(S3ErrorCode::NoSuchLifecycleConfiguration))
+                xml_error_response(S3Error::from_code(
+                    S3ErrorCode::NoSuchLifecycleConfiguration,
+                ))
             }
         }
         Err(e) => storage_err(e),
@@ -524,9 +528,9 @@ fn validate_lifecycle_days(raw: &str) -> Result<(), String> {
                 if text.is_empty() {
                     continue;
                 }
-                let parsed: i64 = text.parse().map_err(|_| {
-                    format!("Lifecycle '{}' must be a positive integer", name)
-                })?;
+                let parsed: i64 = text
+                    .parse()
+                    .map_err(|_| format!("Lifecycle '{}' must be a positive integer", name))?;
                 if parsed < 1 {
                     return Err(format!(
                         "Lifecycle '{}' must be a positive integer (>= 1)",
@@ -2221,7 +2225,8 @@ mod tagging_xml_tests {
 
     #[test]
     fn parse_compact_tagging() {
-        let xml = "<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>";
+        let xml =
+            "<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>";
         let tags = parse_tagging_xml(xml);
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].key, "env");
@@ -2285,7 +2290,8 @@ mod tagging_xml_tests {
 
     #[test]
     fn parse_compact_tagging_preserves_leading_and_trailing_spaces() {
-        let xml = "<Tagging><TagSet><Tag><Key>k</Key><Value>  hello  </Value></Tag></TagSet></Tagging>";
+        let xml =
+            "<Tagging><TagSet><Tag><Key>k</Key><Value>  hello  </Value></Tag></TagSet></Tagging>";
         let tags = parse_tagging_xml(xml);
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0].value, "  hello  ");

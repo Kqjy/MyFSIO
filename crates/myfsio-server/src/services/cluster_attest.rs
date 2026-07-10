@@ -3,7 +3,12 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub fn cluster_attest(psk: &str, amz_date: &str, origin_site_id: &str, idempotency_key: &str) -> String {
+pub fn cluster_attest(
+    psk: &str,
+    amz_date: &str,
+    origin_site_id: &str,
+    idempotency_key: &str,
+) -> String {
     let mut mac = HmacSha256::new_from_slice(psk.as_bytes()).expect("HMAC accepts any key length");
     mac.update(amz_date.as_bytes());
     mac.update(b"|");
@@ -89,15 +94,47 @@ mod tests {
 
     #[test]
     fn admin_attest_changes_when_method_changes() {
-        let a = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/myfsio/admin/peer/iam", "abc", "k1");
-        let b = admin_attest("psk", "20260101T000000Z", "u-1", "POST", "/myfsio/admin/peer/iam", "abc", "k1");
+        let a = admin_attest(
+            "psk",
+            "20260101T000000Z",
+            "u-1",
+            "GET",
+            "/myfsio/admin/peer/iam",
+            "abc",
+            "k1",
+        );
+        let b = admin_attest(
+            "psk",
+            "20260101T000000Z",
+            "u-1",
+            "POST",
+            "/myfsio/admin/peer/iam",
+            "abc",
+            "k1",
+        );
         assert_ne!(a, b);
     }
 
     #[test]
     fn admin_attest_changes_when_path_changes() {
-        let a = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/myfsio/admin/peer/iam", "abc", "k1");
-        let b = admin_attest("psk", "20260101T000000Z", "u-1", "GET", "/myfsio/admin/peer/sites", "abc", "k1");
+        let a = admin_attest(
+            "psk",
+            "20260101T000000Z",
+            "u-1",
+            "GET",
+            "/myfsio/admin/peer/iam",
+            "abc",
+            "k1",
+        );
+        let b = admin_attest(
+            "psk",
+            "20260101T000000Z",
+            "u-1",
+            "GET",
+            "/myfsio/admin/peer/sites",
+            "abc",
+            "k1",
+        );
         assert_ne!(a, b);
     }
 

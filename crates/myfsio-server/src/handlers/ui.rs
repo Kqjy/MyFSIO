@@ -317,10 +317,7 @@ fn forbid(
     if wants_json {
         return (
             StatusCode::FORBIDDEN,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "application/json",
-            )],
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
             serde_json::json!({ "error": message }).to_string(),
         )
             .into_response();
