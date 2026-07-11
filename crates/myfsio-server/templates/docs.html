@@ -188,6 +188,11 @@ cargo build --release -p myfsio-server
                 <td>How object metadata is written. <code>sidecar</code> writes one <code>.__myfsio_meta__&lt;name&gt;.json</code> file per object, so a metadata update touches only that object (recommended, especially on HDD). <code>index</code> keeps the legacy per-directory <code>_index.json</code>, which is fully rewritten on every update. Applies to writes only; both layouts remain readable and a sidecar always wins over an index entry. Binaries older than this feature cannot read sidecar metadata. Convert existing deployments in bulk with <code>myfsio-server --migrate-meta</code> (run with the server stopped; there is no rollback tool).</td>
               </tr>
               <tr>
+                <td><code>LISTING_INDEX_ENABLED</code></td>
+                <td><code>true</code></td>
+                <td>Persistent per-bucket listing index. Flat ListObjectsV2 is served from an ordered index (<code>snapshot.json</code> + <code>journal.jsonl</code> under <code>.myfsio.sys/buckets/&lt;bucket&gt;/listing/</code>) that is built once, survives restarts, and is updated incrementally on writes — no full-bucket walk per LIST. Derived data: object sidecars remain the source of truth and any corruption triggers an automatic rebuild. Set <code>false</code> for the legacy walk-per-LIST behavior; force a rebuild with <code>myfsio-server --rebuild-listing</code> (server stopped).</td>
+              </tr>
+              <tr>
                 <td><code>BULK_DELETE_MAX_KEYS</code></td>
                 <td><code>1000</code></td>
                 <td>Maximum keys accepted by the UI bulk-delete endpoint.</td>

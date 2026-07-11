@@ -29,6 +29,12 @@ struct Cli {
                 cannot read the migrated metadata."
     )]
     migrate_meta: bool,
+    #[arg(
+        long,
+        help = "Rebuild the persistent per-bucket listing index from object metadata (one-shot). \
+                Run with the server stopped. Safe to run anytime; the index is derived data."
+    )]
+    rebuild_listing: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -58,6 +64,10 @@ async fn main() {
     }
     if cli.migrate_meta {
         migrate_metadata_to_sidecars(&config);
+        return;
+    }
+    if cli.rebuild_listing {
+        rebuild_listing_indexes(&config);
         return;
     }
     if cli.check_config || cli.show_config {
@@ -701,6 +711,67 @@ fn migrate_metadata_to_sidecars(config: &ServerConfig) {
     println!("  skipped.");
     println!("============================================================");
     if !report.failures.is_empty() {
+        std::process::exit(1);
+    }
+}
+
+fn rebuild_listing_indexes(config: &ServerConfig) {
+    use myfsio_storage::fs_backend::{FsStorageBackend, FsStorageBackendConfig};
+
+    println!("============================================================");
+    println!("LISTING INDEX REBUILD");
+    println!("============================================================");
+    println!("Storage root: {}", config.storage_root.display());
+    println!("NOTE: run this with the server stopped; the rebuild does not");
+    println!("coordinate with a running myfsio-server process.");
+    println!();
+
+    let backend = FsStorageBackend::new_with_config(
+        config.storage_root.clone(),
+        FsStorageBackendConfig::default(),
+    );
+
+    let mut buckets: Vec<String> = Vec::new();
+    match std::fs::read_dir(&config.storage_root) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == ".myfsio.sys" {
+                    continue;
+                }
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    buckets.push(name);
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "Failed to read storage root {}: {}",
+                config.storage_root.display(),
+                err
+            );
+            std::process::exit(1);
+        }
+    }
+    buckets.sort();
+
+    let mut failures = 0usize;
+    for bucket in &buckets {
+        match backend.rebuild_listing_index_sync(bucket) {
+            Ok(count) => println!("  {bucket}: {count} entries"),
+            Err(err) => {
+                failures += 1;
+                eprintln!("  {bucket}: FAILED ({err})");
+            }
+        }
+    }
+    println!();
+    println!(
+        "Rebuilt {} of {} bucket listing indexes.",
+        buckets.len() - failures,
+        buckets.len()
+    );
+    if failures > 0 {
         std::process::exit(1);
     }
 }

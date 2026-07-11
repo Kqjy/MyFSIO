@@ -171,7 +171,7 @@
               </tr>
             </thead>
             <tbody>
-              {% for exec in gc_history %}
+              {% for exec in gc_history | slice(end=10) %}
               <tr>
                 <td class="text-nowrap">{{ exec.timestamp_display }}</td>
                 <td class="text-center">
@@ -312,7 +312,7 @@
               </tr>
             </thead>
             <tbody>
-              {% for exec in integrity_history %}
+              {% for exec in integrity_history | slice(end=10) %}
               <tr>
                 <td class="text-nowrap">{{ exec.timestamp_display }}</td>
                 <td class="text-center">{{ exec.result.objects_scanned| default(value=0) }}</td>

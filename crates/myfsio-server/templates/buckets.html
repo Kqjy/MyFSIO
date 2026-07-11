@@ -55,7 +55,7 @@
 <div class="row g-3" id="buckets-container">
   {% for bucket in buckets %}
   <div class="col-md-6 col-xl-4 bucket-item" data-access="{{ bucket.access_kind }}">
-    <div class="card h-100 shadow-sm bucket-card" data-bucket-row data-href="{{ bucket.detail_url }}">
+    <div class="card h-100 shadow-sm bucket-card" data-bucket-row data-href="{{ bucket.detail_url }}" role="link" tabindex="0" aria-label="Open bucket {{ bucket.meta.name }}">
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-start mb-2">
           <div class="d-flex align-items-center gap-3">
@@ -127,12 +127,13 @@
         </h1>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="{{ url_for(endpoint="ui.create_bucket") }}" id="createBucketForm">
+      <form method="post" action="{{ url_for(endpoint="ui.create_bucket") }}" id="createBucketForm" novalidate>
         <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body pt-0">
-          <label class="form-label fw-medium">Bucket name</label>
-          <input class="form-control" type="text" name="bucket_name" pattern="[a-z0-9.\-]{3,63}" placeholder="my-bucket-name" required autofocus />
-          <div class="form-text">Use 3-63 characters: lowercase letters, numbers, dots, or hyphens.</div>
+          <label class="form-label fw-medium" for="createBucketName">Bucket name</label>
+          <input class="form-control" id="createBucketName" type="text" name="bucket_name" pattern="[a-z0-9.\-]{3,63}" placeholder="my-bucket-name" required autofocus aria-describedby="createBucketHelp" />
+          <div class="invalid-feedback">Use 3-63 characters: lowercase letters, numbers, dots, or hyphens only.</div>
+          <div class="form-text" id="createBucketHelp">Use 3-63 characters: lowercase letters, numbers, dots, or hyphens.</div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -242,7 +243,7 @@
 
     const rows = document.querySelectorAll('[data-bucket-row]');
     rows.forEach((row) => {
-      row.addEventListener('click', (event) => {
+      const navigate = (event) => {
         if (event.target.closest('[data-ignore-row-click]')) {
           return;
         }
@@ -250,14 +251,35 @@
         if (href) {
           window.location.href = href;
         }
+      };
+      row.addEventListener('click', navigate);
+      row.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+          event.preventDefault();
+          navigate(event);
+        }
       });
       row.style.cursor = 'pointer';
     });
 
     var createForm = document.getElementById('createBucketForm');
     if (createForm) {
+      var createNameInput = document.getElementById('createBucketName');
+      if (createNameInput) {
+        createNameInput.addEventListener('input', function() {
+          createNameInput.classList.remove('is-invalid');
+        });
+      }
       createForm.addEventListener('submit', function(e) {
         e.preventDefault();
+        if (createNameInput && !createNameInput.checkValidity()) {
+          createNameInput.classList.add('is-invalid');
+          createNameInput.focus();
+          return;
+        }
+        if (createNameInput) {
+          createNameInput.classList.remove('is-invalid');
+        }
         window.UICore.submitFormAjax(createForm, {
           successMessage: 'Bucket created',
           onSuccess: function(data) {

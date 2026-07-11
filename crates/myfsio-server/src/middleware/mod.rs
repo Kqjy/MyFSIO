@@ -26,10 +26,31 @@ pub async fn server_header(req: Request, next: Next) -> Response {
     resp
 }
 
+fn redact_sensitive_query(uri: &axum::http::Uri) -> String {
+    match uri.query() {
+        None => uri.path().to_string(),
+        Some(query) => {
+            let redacted: Vec<String> = query
+                .split('&')
+                .map(|pair| {
+                    let key = pair.split('=').next().unwrap_or("");
+                    let lower = key.to_ascii_lowercase();
+                    if lower == "x-amz-signature" || lower == "x-amz-security-token" {
+                        format!("{}=REDACTED", key)
+                    } else {
+                        pair.to_string()
+                    }
+                })
+                .collect();
+            format!("{}?{}", uri.path(), redacted.join("&"))
+        }
+    }
+}
+
 pub async fn request_log_layer(req: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = req.method().clone();
-    let uri = req.uri().clone();
+    let uri = redact_sensitive_query(req.uri());
     let version = req.version();
     let remote = req
         .extensions()

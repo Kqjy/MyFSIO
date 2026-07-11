@@ -420,8 +420,9 @@
         toastEl.classList.remove('text-bg-primary', 'text-bg-success', 'text-bg-danger', 'text-bg-warning');
         
         if (type === 'success') toastEl.classList.add('text-bg-success');
-        if (type === 'error') toastEl.classList.add('text-bg-danger');
+        if (type === 'error' || type === 'danger') toastEl.classList.add('text-bg-danger');
         if (type === 'warning') toastEl.classList.add('text-bg-warning');
+        if (type === 'info') toastEl.classList.add('text-bg-primary');
         
         const toast = new bootstrap.Toast(toastEl);
         toast.show();

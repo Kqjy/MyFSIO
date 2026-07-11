@@ -113,6 +113,7 @@ pub struct ServerConfig {
     pub upload_stream_buffer_bytes: usize,
     pub multipart_object_layout: String,
     pub metadata_layout: String,
+    pub listing_index_enabled: bool,
     pub ratelimit_default: RateLimitSetting,
     pub ratelimit_list_buckets: RateLimitSetting,
     pub ratelimit_bucket_ops: RateLimitSetting,
@@ -317,6 +318,7 @@ impl ServerConfig {
             std::env::var("MULTIPART_OBJECT_LAYOUT").unwrap_or_else(|_| "segments".to_string());
         let metadata_layout =
             std::env::var("METADATA_LAYOUT").unwrap_or_else(|_| "sidecar".to_string());
+        let listing_index_enabled = parse_bool_env("LISTING_INDEX_ENABLED", true);
         let ratelimit_default =
             parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(50_000, 60));
         let ratelimit_list_buckets =
@@ -433,6 +435,7 @@ impl ServerConfig {
             upload_stream_buffer_bytes,
             multipart_object_layout,
             metadata_layout,
+            listing_index_enabled,
             ratelimit_default,
             ratelimit_list_buckets,
             ratelimit_bucket_ops,
@@ -552,6 +555,7 @@ impl Default for ServerConfig {
             upload_stream_buffer_bytes: 8_388_608,
             multipart_object_layout: "segments".to_string(),
             metadata_layout: "sidecar".to_string(),
+            listing_index_enabled: true,
             ratelimit_default: RateLimitSetting::new(50_000, 60),
             ratelimit_list_buckets: RateLimitSetting::new(50_000, 60),
             ratelimit_bucket_ops: RateLimitSetting::new(50_000, 60),

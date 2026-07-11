@@ -147,6 +147,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum part size enforced where applicable (5 MiB) |
 | `MULTIPART_OBJECT_LAYOUT` | `segments` | How completed multipart objects are stored: `segments` keeps part files and completes in O(metadata) (recommended, especially on HDD/ext4); `concat` assembles one file like older releases. Affects new completes only; both layouts stay readable. Note: binaries older than this feature cannot read `segments` objects |
 | `METADATA_LAYOUT` | `sidecar` | How object metadata is written: `sidecar` writes one `.__myfsio_meta__<name>.json` file per object (O(1) metadata updates, no shared rewrite); `index` keeps appending to the legacy per-directory `_index.json` (every update rewrites the whole directory index). Affects writes only; both layouts stay readable forever, and sidecars always take precedence over index entries. Note: binaries older than this feature cannot read sidecar metadata |
+| `LISTING_INDEX_ENABLED` | `true` | Persistent per-bucket listing index. Flat (no-delimiter) ListObjectsV2 is served from an ordered index persisted as `snapshot.json` + `journal.jsonl` under `.myfsio.sys/buckets/<bucket>/listing/`, built once per bucket and updated incrementally on every write — no full-bucket walk per LIST and no cold walk after restart. The index is derived data: object sidecars remain the source of truth, and corruption or version mismatch triggers an automatic rebuild. Set `false` to restore the legacy walk-per-LIST behavior. Force a rebuild anytime with `myfsio-server --rebuild-listing` (server stopped) |
 | `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Age before an orphaned (unreferenced) multipart segment directory is garbage-collected |
 | `BULK_DELETE_MAX_KEYS` | `1000` | Maximum keys per UI bulk-delete request |
 | `STREAM_CHUNK_SIZE` | `1048576` | Default streaming chunk size for opt-in routes |
@@ -417,6 +418,7 @@ Notable files:
 
 - With the default `MULTIPART_OBJECT_LAYOUT=segments`, completed multipart key paths are sparse stubs; the bytes live in the matching `segments/<upload_id>/seg-NNNNN` directory.
 - With the default `METADATA_LAYOUT=sidecar`, each object's metadata lives in its own `meta/<dirs>/.__myfsio_meta__<name>.json` file (over-long names fall back to a SHA-256-derived filename; the real entry name is embedded in the JSON as `__entry_name__`). Deployments upgraded from older releases keep their `_index.json` files readable forever; a sidecar always wins over an index entry for the same object.
+- With the default `LISTING_INDEX_ENABLED=true`, each bucket keeps a derived listing index under `.myfsio.sys/buckets/<bucket>/listing/` (`snapshot.json` + `journal.jsonl`). It is a disposable cache over the sidecars: deleting the directory is always safe and simply triggers a rebuild on the next listing (or via `--rebuild-listing`).
 - `iam.json` is Fernet-encrypted at rest when `SECRET_KEY` is set.
 - `bucket_policies.json` is read only as a fallback for policies that pre-date per-bucket `.bucket.json`.
 - `kms_master.key` is plaintext on disk — protect `keys/` with filesystem permissions.

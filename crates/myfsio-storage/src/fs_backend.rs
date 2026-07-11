@@ -1,4 +1,5 @@
 use crate::error::StorageError;
+use crate::listing_index::{BucketListingIndex, ListingRecord};
 use crate::traits::{AsyncReadStream, StorageResult};
 use crate::validation;
 use myfsio_common::constants::*;
@@ -343,19 +344,25 @@ pub struct FsStorageBackend {
     stream_chunk_size: usize,
     multipart_layout: MultipartLayout,
     metadata_layout: MetadataLayout,
+    listing_index_enabled: bool,
+    listing_index_compact_min_ops: usize,
     bucket_config_cache: DashMap<String, (BucketConfig, Instant)>,
     bucket_config_cache_ttl: std::time::Duration,
     meta_read_cache: DashMap<(String, String), Option<HashMap<String, Value>>>,
     meta_index_locks: DashMap<String, Arc<Mutex<()>>>,
+    bucket_config_locks: DashMap<String, Arc<Mutex<()>>>,
     quota_locks: DashMap<String, Arc<Mutex<()>>>,
     object_lock_stripes: Box<[RwLock<()>]>,
     stats_cache: DashMap<String, (BucketStats, Instant)>,
     stats_cache_ttl: std::time::Duration,
     list_cache: DashMap<String, (Arc<Vec<ListCacheEntry>>, Instant)>,
+    listing_indexes: DashMap<String, Arc<Mutex<BucketListingIndex>>>,
     shallow_cache: DashMap<(String, PathBuf, String), (Arc<ShallowCacheEntry>, Instant)>,
     list_rebuild_locks: DashMap<String, Arc<Mutex<()>>>,
     shallow_rebuild_locks: DashMap<(String, PathBuf, String), Arc<Mutex<()>>>,
     list_cache_ttl: std::time::Duration,
+    #[cfg(test)]
+    listing_full_builds: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +373,8 @@ pub struct FsStorageBackendConfig {
     pub stream_chunk_size: usize,
     pub multipart_layout: MultipartLayout,
     pub metadata_layout: MetadataLayout,
+    pub listing_index_enabled: bool,
+    pub listing_index_compact_min_ops: usize,
 }
 
 impl Default for FsStorageBackendConfig {
@@ -377,6 +386,8 @@ impl Default for FsStorageBackendConfig {
             stream_chunk_size: STREAM_CHUNK_SIZE,
             multipart_layout: MultipartLayout::default(),
             metadata_layout: MetadataLayout::default(),
+            listing_index_enabled: true,
+            listing_index_compact_min_ops: 4096,
         }
     }
 }
@@ -403,19 +414,25 @@ impl FsStorageBackend {
             stream_chunk_size,
             multipart_layout: config.multipart_layout,
             metadata_layout: config.metadata_layout,
+            listing_index_enabled: config.listing_index_enabled,
+            listing_index_compact_min_ops: config.listing_index_compact_min_ops,
             bucket_config_cache: DashMap::new(),
             bucket_config_cache_ttl: config.bucket_config_cache_ttl,
             meta_read_cache: DashMap::new(),
             meta_index_locks: DashMap::new(),
+            bucket_config_locks: DashMap::new(),
             quota_locks: DashMap::new(),
             object_lock_stripes,
             stats_cache: DashMap::new(),
             stats_cache_ttl: std::time::Duration::from_secs(60),
             list_cache: DashMap::new(),
+            listing_indexes: DashMap::new(),
             shallow_cache: DashMap::new(),
             list_rebuild_locks: DashMap::new(),
             shallow_rebuild_locks: DashMap::new(),
             list_cache_ttl: std::time::Duration::from_secs(5),
+            #[cfg(test)]
+            listing_full_builds: std::sync::atomic::AtomicUsize::new(0),
         };
         backend.ensure_system_roots();
         backend
@@ -425,6 +442,13 @@ impl FsStorageBackend {
         self.stats_cache.remove(bucket_name);
         self.list_cache.remove(bucket_name);
         self.shallow_cache.retain(|(b, _, _), _| b != bucket_name);
+    }
+
+    fn get_list_rebuild_lock(&self, bucket_name: &str) -> Arc<Mutex<()>> {
+        self.list_rebuild_locks
+            .entry(bucket_name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     fn ensure_system_roots(&self) {
@@ -457,6 +481,10 @@ impl FsStorageBackend {
 
     fn system_bucket_root(&self, bucket_name: &str) -> PathBuf {
         self.system_buckets_root().join(bucket_name)
+    }
+
+    fn bucket_listing_dir(&self, bucket_name: &str) -> PathBuf {
+        self.system_bucket_root(bucket_name).join("listing")
     }
 
     fn bucket_meta_root(&self, bucket_name: &str) -> PathBuf {
@@ -1066,17 +1094,20 @@ impl FsStorageBackend {
             .unwrap_or(false)
     }
 
-    fn fsync_dir_best_effort(dir: &Path) {
+    fn fsync_dir(dir: &Path) -> std::io::Result<()> {
         #[cfg(unix)]
         {
-            if let Ok(handle) = std::fs::File::open(dir) {
-                let _ = handle.sync_all();
-            }
+            std::fs::File::open(dir)?.sync_all()
         }
         #[cfg(not(unix))]
         {
             let _ = dir;
+            Ok(())
         }
+    }
+
+    fn fsync_dir_best_effort(dir: &Path) {
+        let _ = Self::fsync_dir(dir);
     }
 
     fn get_meta_index_lock(&self, index_path: &str) -> Arc<Mutex<()>> {
@@ -1303,7 +1334,7 @@ impl FsStorageBackend {
             std::fs::rename(&tmp_path, path)?;
             if sync {
                 if let Some(parent) = path.parent() {
-                    Self::fsync_dir_best_effort(parent);
+                    Self::fsync_dir(parent)?;
                 }
             }
             Ok(())
@@ -1754,7 +1785,12 @@ impl FsStorageBackend {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).write();
             self.delete_metadata_sync(bucket, key)
-                .map_err(StorageError::Io)
+                .map_err(StorageError::Io)?;
+            if self.listing_index_enabled {
+                self.invalidate_bucket_caches(bucket);
+            }
+            self.update_listing_index_after_commit(bucket, key);
+            Ok(())
         })
     }
 
@@ -1975,6 +2011,28 @@ impl FsStorageBackend {
         self.bucket_config_cache
             .insert(bucket_name.to_string(), (config.clone(), Instant::now()));
         Ok(())
+    }
+
+    pub async fn mutate_bucket_config<F>(
+        &self,
+        bucket_name: &str,
+        f: F,
+    ) -> StorageResult<BucketConfig>
+    where
+        F: FnOnce(&mut BucketConfig),
+    {
+        self.require_bucket(bucket_name)?;
+        let lock = self
+            .bucket_config_locks
+            .entry(bucket_name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+        let mut config = self.read_bucket_config_sync(bucket_name);
+        f(&mut config);
+        self.write_bucket_config_sync(bucket_name, &config)
+            .map_err(StorageError::Io)?;
+        Ok(config)
     }
 
     fn check_bucket_contents_sync(&self, bucket_path: &Path) -> (bool, bool, bool) {
@@ -2642,10 +2700,13 @@ impl FsStorageBackend {
         Ok(stats)
     }
 
-    fn build_full_listing_sync(
+    fn build_full_listing_entries_sync(
         &self,
         bucket_name: &str,
-    ) -> StorageResult<Arc<Vec<ListCacheEntry>>> {
+    ) -> StorageResult<Vec<ListCacheEntry>> {
+        #[cfg(test)]
+        self.listing_full_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bucket_path = self.require_bucket(bucket_name)?;
 
         let mut all_keys: Vec<ListCacheEntry> = Vec::new();
@@ -2747,7 +2808,284 @@ impl FsStorageBackend {
         }
 
         all_keys.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(Arc::new(all_keys))
+        Ok(all_keys)
+    }
+
+    fn build_full_listing_sync(
+        &self,
+        bucket_name: &str,
+    ) -> StorageResult<Arc<Vec<ListCacheEntry>>> {
+        self.build_full_listing_entries_sync(bucket_name)
+            .map(Arc::new)
+    }
+
+    fn listing_records(entries: Vec<ListCacheEntry>) -> Vec<ListingRecord> {
+        entries
+            .into_iter()
+            .map(|(key, size, mtime, etag, version_id, owner)| {
+                ListingRecord::new(key, size, mtime, etag, version_id, owner)
+            })
+            .collect()
+    }
+
+    fn current_listing_record_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+    ) -> std::io::Result<Option<ListingRecord>> {
+        let path = self.object_live_path(bucket_name, key);
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => meta,
+            Ok(_) => return Ok(None),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs_f64())
+            .unwrap_or(0.0);
+        let (etag, version_id, owner) = if key.ends_with('/') {
+            (None, None, None)
+        } else {
+            let entry = self.read_index_entry_sync(bucket_name, key);
+            Self::listing_fields_from_meta(
+                entry
+                    .as_ref()
+                    .and_then(|entry| entry.get("metadata"))
+                    .and_then(Value::as_object),
+            )
+        };
+        Ok(Some(ListingRecord::new(
+            key.to_string(),
+            meta.len(),
+            mtime,
+            etag,
+            version_id,
+            owner,
+        )))
+    }
+
+    fn load_listing_index_locked_sync(
+        &self,
+        bucket_name: &str,
+    ) -> std::io::Result<Option<Arc<Mutex<BucketListingIndex>>>> {
+        let listing_dir = self.bucket_listing_dir(bucket_name);
+        if !listing_dir.join("snapshot.json").is_file() {
+            return Ok(None);
+        }
+        let mut index = BucketListingIndex::load(listing_dir, self.listing_index_compact_min_ops)?;
+        if index.should_compact() {
+            index.compact()?;
+        }
+        let index = Arc::new(Mutex::new(index));
+        self.listing_indexes
+            .insert(bucket_name.to_string(), index.clone());
+        Ok(Some(index))
+    }
+
+    fn discard_listing_index_locked_sync(&self, bucket_name: &str) {
+        if let Some(index) = self
+            .listing_indexes
+            .get(bucket_name)
+            .map(|entry| entry.value().clone())
+        {
+            index.lock().invalidate();
+        }
+        let removed = self.listing_indexes.remove(bucket_name);
+        drop(removed);
+        if let Err(err) = crate::listing_index::discard(&self.bucket_listing_dir(bucket_name)) {
+            tracing::warn!(
+                bucket = bucket_name,
+                error = %err,
+                "failed to discard listing index"
+            );
+        }
+    }
+
+    fn discard_listing_index_if_same_locked_sync(
+        &self,
+        bucket_name: &str,
+        expected: &Arc<Mutex<BucketListingIndex>>,
+    ) {
+        let current = self
+            .listing_indexes
+            .get(bucket_name)
+            .map(|entry| entry.value().clone());
+        if current
+            .as_ref()
+            .is_some_and(|index| Arc::ptr_eq(index, expected))
+        {
+            self.discard_listing_index_locked_sync(bucket_name);
+        }
+    }
+
+    fn mark_listing_index_dirty_sync(&self, bucket_name: &str, error: &dyn std::fmt::Display) {
+        if !self.listing_index_enabled {
+            return;
+        }
+        tracing::warn!(
+            bucket = bucket_name,
+            error = %error,
+            "listing index marked dirty"
+        );
+        let lock = self.get_list_rebuild_lock(bucket_name);
+        let _guard = lock.lock();
+        self.discard_listing_index_locked_sync(bucket_name);
+    }
+
+    fn update_listing_index_after_commit(&self, bucket_name: &str, key: &str) {
+        if !self.listing_index_enabled {
+            return;
+        }
+        let record = match self.current_listing_record_sync(bucket_name, key) {
+            Ok(record) => record,
+            Err(err) => {
+                self.mark_listing_index_dirty_sync(bucket_name, &err);
+                return;
+            }
+        };
+        let rebuild_lock = self.get_list_rebuild_lock(bucket_name);
+        let _rebuild_guard = rebuild_lock.lock();
+        let index = match self
+            .listing_indexes
+            .get(bucket_name)
+            .map(|entry| entry.value().clone())
+        {
+            Some(index) => index,
+            None => match self.load_listing_index_locked_sync(bucket_name) {
+                Ok(Some(index)) => index,
+                Ok(None) => {
+                    if self.bucket_listing_dir(bucket_name).exists() {
+                        self.discard_listing_index_locked_sync(bucket_name);
+                    }
+                    return;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        bucket = bucket_name,
+                        error = %err,
+                        "failed to load listing index for a committed mutation"
+                    );
+                    self.discard_listing_index_locked_sync(bucket_name);
+                    return;
+                }
+            },
+        };
+        let result = {
+            let mut index_guard = index.lock();
+            let result = if !index_guard.is_valid() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "listing index is invalid",
+                ))
+            } else {
+                match record {
+                    Some(record) => index_guard.apply_put(record),
+                    None => index_guard.apply_del(key),
+                }
+                .and_then(|()| {
+                    if index_guard.should_compact() {
+                        index_guard.compact()
+                    } else {
+                        Ok(())
+                    }
+                })
+            };
+            if result.is_err() {
+                index_guard.invalidate();
+            }
+            result
+        };
+        if let Err(err) = result {
+            tracing::warn!(
+                bucket = bucket_name,
+                key = key,
+                error = %err,
+                "failed to update listing index after commit"
+            );
+            self.discard_listing_index_if_same_locked_sync(bucket_name, &index);
+        }
+    }
+
+    fn get_listing_index_sync(
+        &self,
+        bucket_name: &str,
+    ) -> StorageResult<Arc<Mutex<BucketListingIndex>>> {
+        if let Some(index) = self
+            .listing_indexes
+            .get(bucket_name)
+            .map(|entry| entry.value().clone())
+        {
+            return Ok(index);
+        }
+
+        let rebuild_lock = self.get_list_rebuild_lock(bucket_name);
+        let _rebuild_guard = rebuild_lock.lock();
+        if let Some(index) = self
+            .listing_indexes
+            .get(bucket_name)
+            .map(|entry| entry.value().clone())
+        {
+            return Ok(index);
+        }
+
+        match self.load_listing_index_locked_sync(bucket_name) {
+            Ok(Some(index)) => return Ok(index),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(
+                    bucket = bucket_name,
+                    error = %err,
+                    "failed to load listing index; rebuilding from object sidecars"
+                );
+            }
+        }
+        self.discard_listing_index_locked_sync(bucket_name);
+
+        let entries = self.build_full_listing_entries_sync(bucket_name)?;
+        let records = Self::listing_records(entries);
+        let mut index = BucketListingIndex::from_records(
+            self.bucket_listing_dir(bucket_name),
+            records,
+            self.listing_index_compact_min_ops,
+        );
+        if let Err(err) = index.persist_rebuilt() {
+            tracing::warn!(
+                bucket = bucket_name,
+                error = %err,
+                "failed to persist rebuilt listing index; serving the in-memory rebuild"
+            );
+            let _ = crate::listing_index::discard(&self.bucket_listing_dir(bucket_name));
+            return Ok(Arc::new(Mutex::new(index)));
+        }
+        let index = Arc::new(Mutex::new(index));
+        self.listing_indexes
+            .insert(bucket_name.to_string(), index.clone());
+        Ok(index)
+    }
+
+    pub fn rebuild_listing_index_sync(&self, bucket: &str) -> StorageResult<usize> {
+        self.require_bucket(bucket)?;
+        let rebuild_lock = self.get_list_rebuild_lock(bucket);
+        let _rebuild_guard = rebuild_lock.lock();
+        let entries = self.build_full_listing_entries_sync(bucket)?;
+        let records = Self::listing_records(entries);
+        let mut index = BucketListingIndex::from_records(
+            self.bucket_listing_dir(bucket),
+            records,
+            self.listing_index_compact_min_ops,
+        );
+        let count = index.len();
+        self.discard_listing_index_locked_sync(bucket);
+        if let Err(err) = index.persist_rebuilt() {
+            let _ = crate::listing_index::discard(&self.bucket_listing_dir(bucket));
+            return Err(StorageError::Io(err));
+        }
+        self.listing_indexes
+            .insert(bucket.to_string(), Arc::new(Mutex::new(index)));
+        Ok(count)
     }
 
     fn get_full_listing_sync(&self, bucket_name: &str) -> StorageResult<Arc<Vec<ListCacheEntry>>> {
@@ -2758,11 +3096,7 @@ impl FsStorageBackend {
             }
         }
 
-        let lock = self
-            .list_rebuild_locks
-            .entry(bucket_name.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
+        let lock = self.get_list_rebuild_lock(bucket_name);
         let _guard = lock.lock();
 
         if let Some(entry) = self.list_cache.get(bucket_name) {
@@ -2778,7 +3112,7 @@ impl FsStorageBackend {
         Ok(listing)
     }
 
-    fn list_objects_sync(
+    fn list_objects_legacy_sync(
         &self,
         bucket_name: &str,
         params: &ListParams,
@@ -2845,6 +3179,79 @@ impl FsStorageBackend {
             is_truncated,
             next_continuation_token: next_token,
         })
+    }
+
+    fn list_objects_indexed_sync(
+        &self,
+        bucket_name: &str,
+        params: &ListParams,
+    ) -> StorageResult<ListObjectsResult> {
+        self.require_bucket(bucket_name)?;
+        let prefix = params
+            .prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_start_matches(['/', '\\']))
+            .unwrap_or_default();
+        if !prefix.is_empty() {
+            validate_list_prefix(prefix)?;
+        }
+        let marker = params
+            .continuation_token
+            .as_deref()
+            .or(params.start_after.as_deref());
+        let max_keys = if params.max_keys == 0 {
+            DEFAULT_MAX_KEYS
+        } else {
+            params.max_keys
+        };
+
+        loop {
+            let index = self.get_listing_index_sync(bucket_name)?;
+            let index_guard = index.lock();
+            if index_guard.is_valid() {
+                let (records, is_truncated, next_continuation_token) =
+                    index_guard.page(prefix, marker, max_keys);
+                drop(index_guard);
+                let objects = records
+                    .into_iter()
+                    .map(|record| {
+                        let lm = Utc
+                            .timestamp_opt(
+                                record.mtime as i64,
+                                ((record.mtime % 1.0) * 1_000_000_000.0) as u32,
+                            )
+                            .single()
+                            .unwrap_or_else(Utc::now);
+                        let mut object = ObjectMeta::new(record.key, record.size, lm);
+                        object.etag = record.etag;
+                        object.version_id = record.version_id;
+                        object.owner = record.owner;
+                        object
+                    })
+                    .collect();
+                return Ok(ListObjectsResult {
+                    objects,
+                    is_truncated,
+                    next_continuation_token,
+                });
+            }
+            drop(index_guard);
+            let rebuild_lock = self.get_list_rebuild_lock(bucket_name);
+            let _rebuild_guard = rebuild_lock.lock();
+            self.discard_listing_index_if_same_locked_sync(bucket_name, &index);
+        }
+    }
+
+    fn list_objects_sync(
+        &self,
+        bucket_name: &str,
+        params: &ListParams,
+    ) -> StorageResult<ListObjectsResult> {
+        if self.listing_index_enabled {
+            self.list_objects_indexed_sync(bucket_name, params)
+        } else {
+            self.list_objects_legacy_sync(bucket_name, params)
+        }
     }
 
     fn build_shallow_sync(
@@ -3145,6 +3552,19 @@ impl FsStorageBackend {
             0
         };
         let existing_meta = if is_overwrite {
+            if self
+                .read_index_entry_sync(bucket_name, key)
+                .as_ref()
+                .is_some_and(Self::entry_marks_unreadable_metadata)
+            {
+                return Err(StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "refusing to overwrite {}/{}: the existing metadata record is unreadable; repair or delete the object first",
+                        bucket_name, key
+                    ),
+                )));
+            }
             self.read_metadata_sync(bucket_name, key)
         } else {
             HashMap::new()
@@ -3257,21 +3677,7 @@ impl FsStorageBackend {
                 .map_err(StorageError::Io)?;
         }
 
-        std::fs::rename(tmp_path, &destination).map_err(|e| {
-            let _ = std::fs::remove_file(tmp_path);
-            StorageError::Io(e)
-        })?;
-        if let Some(parent) = destination.parent() {
-            Self::fsync_dir_best_effort(parent);
-        }
-
-        if let Some(seg_id) = release_old_segments {
-            self.release_segment_dir(bucket_name, &seg_id);
-        }
-
-        self.invalidate_bucket_caches(bucket_name);
-
-        let file_meta = std::fs::metadata(&destination).map_err(StorageError::Io)?;
+        let file_meta = std::fs::metadata(tmp_path).map_err(StorageError::Io)?;
         let mtime = file_meta
             .modified()
             .ok()
@@ -3304,9 +3710,24 @@ impl FsStorageBackend {
         self.write_metadata_sync(bucket_name, key, &internal_meta)
             .map_err(StorageError::Io)?;
 
+        std::fs::rename(tmp_path, &destination).map_err(|e| {
+            let _ = std::fs::remove_file(tmp_path);
+            StorageError::Io(e)
+        })?;
+        if let Some(parent) = destination.parent() {
+            Self::fsync_dir(parent).map_err(StorageError::Io)?;
+        }
+
+        if let Some(seg_id) = release_old_segments {
+            self.release_segment_dir(bucket_name, &seg_id);
+        }
+
+        self.invalidate_bucket_caches(bucket_name);
+
         if versioning_status.is_active() {
             self.clear_delete_marker_sync(bucket_name, key);
         }
+        self.update_listing_index_after_commit(bucket_name, key);
 
         let lm = Utc
             .timestamp_opt(mtime as i64, ((mtime % 1.0) * 1_000_000_000.0) as u32)
@@ -3411,6 +3832,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             ));
         }
 
+        let rebuild_lock = self.get_list_rebuild_lock(name);
+        let _rebuild_guard = rebuild_lock.lock();
+        self.discard_listing_index_locked_sync(name);
         Self::remove_tree(&bucket_path);
         Self::remove_tree(&self.system_bucket_root(name));
         Self::remove_tree(&self.multipart_bucket_root(name));
@@ -3879,6 +4303,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     .write_delete_marker_sync(bucket, key)
                     .map_err(StorageError::Io)?;
                 self.invalidate_bucket_caches(bucket);
+                self.update_listing_index_after_commit(bucket, key);
                 return Ok(DeleteOutcome {
                     version_id: Some(dm_version_id),
                     is_delete_marker: true,
@@ -3892,6 +4317,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     self.delete_metadata_sync(bucket, key)
                         .map_err(StorageError::Io)?;
                     self.invalidate_bucket_caches(bucket);
+                    self.update_listing_index_after_commit(bucket, key);
                     return Ok(DeleteOutcome {
                         version_id: None,
                         is_delete_marker: false,
@@ -3916,6 +4342,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
             Self::cleanup_empty_parents(&path, &bucket_path);
             self.invalidate_bucket_caches(bucket);
+            self.update_listing_index_after_commit(bucket, key);
             Ok(DeleteOutcome {
                 version_id: None,
                 is_delete_marker: false,
@@ -3962,6 +4389,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     self.promote_latest_archived_to_live_sync(bucket, key)
                         .map_err(StorageError::Io)?;
                     self.invalidate_bucket_caches(bucket);
+                    self.update_listing_index_after_commit(bucket, key);
                     return Ok(DeleteOutcome {
                         version_id: Some(version_id.to_string()),
                         is_delete_marker: false,
@@ -4029,6 +4457,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
 
             self.invalidate_bucket_caches(bucket);
+            self.update_listing_index_after_commit(bucket, key);
             Ok(DeleteOutcome {
                 version_id: Some(version_id.to_string()),
                 is_delete_marker,
@@ -4145,6 +4574,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.write_index_entry_sync(bucket, key, &entry)
                 .map_err(StorageError::Io)?;
             self.invalidate_bucket_caches(bucket);
+            self.update_listing_index_after_commit(bucket, key);
             Ok(())
         })
     }
@@ -4175,6 +4605,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 self.write_index_entry_sync(bucket, key, &entry)
                     .map_err(StorageError::Io)?;
                 self.invalidate_bucket_caches(bucket);
+                self.update_listing_index_after_commit(bucket, key);
                 return Ok(());
             }
 
@@ -4874,18 +5305,18 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn set_versioning(&self, bucket: &str, enabled: bool) -> StorageResult<()> {
-        self.require_bucket(bucket)?;
-        let mut config = self.read_bucket_config_sync(bucket);
-        let new_status = if enabled {
-            VersioningStatus::Enabled
-        } else if config.versioning_enabled || config.versioning_suspended {
-            VersioningStatus::Suspended
-        } else {
-            VersioningStatus::Disabled
-        };
-        config.set_versioning_status(new_status);
-        self.write_bucket_config_sync(bucket, &config)
-            .map_err(StorageError::Io)
+        self.mutate_bucket_config(bucket, |config| {
+            let new_status = if enabled {
+                VersioningStatus::Enabled
+            } else if config.versioning_enabled || config.versioning_suspended {
+                VersioningStatus::Suspended
+            } else {
+                VersioningStatus::Disabled
+            };
+            config.set_versioning_status(new_status);
+        })
+        .await
+        .map(|_| ())
     }
 
     async fn get_versioning_status(&self, bucket: &str) -> StorageResult<VersioningStatus> {
@@ -4897,11 +5328,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         status: VersioningStatus,
     ) -> StorageResult<()> {
-        self.require_bucket(bucket)?;
-        let mut config = self.read_bucket_config_sync(bucket);
-        config.set_versioning_status(status);
-        self.write_bucket_config_sync(bucket, &config)
-            .map_err(StorageError::Io)
+        self.mutate_bucket_config(bucket, |config| config.set_versioning_status(status))
+            .await
+            .map(|_| ())
     }
 
     async fn list_object_versions(
@@ -5090,6 +5519,123 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = FsStorageBackend::new(dir.path().to_path_buf());
         (dir, backend)
+    }
+
+    fn create_listing_backend(
+        root: PathBuf,
+        enabled: bool,
+        compact_min_ops: usize,
+    ) -> FsStorageBackend {
+        FsStorageBackend::new_with_config(
+            root,
+            FsStorageBackendConfig {
+                listing_index_enabled: enabled,
+                listing_index_compact_min_ops: compact_min_ops,
+                ..FsStorageBackendConfig::default()
+            },
+        )
+    }
+
+    async fn put_listing_object(backend: &FsStorageBackend, bucket: &str, key: &str, body: &[u8]) {
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body.to_vec()));
+        backend.put_object(bucket, key, stream, None).await.unwrap();
+    }
+
+    fn assert_list_results_equal(left: &ListObjectsResult, right: &ListObjectsResult) {
+        assert_eq!(
+            serde_json::to_value(&left.objects).unwrap(),
+            serde_json::to_value(&right.objects).unwrap()
+        );
+        assert_eq!(left.is_truncated, right.is_truncated);
+        assert_eq!(left.next_continuation_token, right.next_continuation_token);
+    }
+
+    fn logical_listing_view(
+        result: &ListObjectsResult,
+    ) -> Vec<(String, u64, Option<String>, Option<String>, Option<String>)> {
+        result
+            .objects
+            .iter()
+            .map(|object| {
+                (
+                    object.key.clone(),
+                    object.size,
+                    object.etag.clone(),
+                    object.version_id.clone(),
+                    object.owner.clone(),
+                )
+            })
+            .collect()
+    }
+
+    async fn assert_index_matches_legacy(
+        backend: &FsStorageBackend,
+        bucket: &str,
+        params: &ListParams,
+    ) -> ListObjectsResult {
+        let result = backend.list_objects(bucket, params).await.unwrap();
+        let legacy = backend.list_objects_legacy_sync(bucket, params).unwrap();
+        assert_list_results_equal(&result, &legacy);
+        result
+    }
+
+    async fn seed_listing_mutation_scenario(backend: &FsStorageBackend, bucket: &str) {
+        backend.create_bucket(bucket).await.unwrap();
+        for (key, body) in [
+            ("alpha.txt", b"alpha".as_slice()),
+            ("docs/a.txt", b"a".as_slice()),
+            ("docs/b.txt", b"b".as_slice()),
+            ("zeta.txt", b"zeta".as_slice()),
+        ] {
+            put_listing_object(backend, bucket, key, body).await;
+        }
+        backend
+            .list_objects(bucket, &ListParams::default())
+            .await
+            .unwrap();
+        put_listing_object(backend, bucket, "folder/", b"").await;
+        put_listing_object(backend, bucket, "docs/a.txt", b"overwritten").await;
+        let mut metadata = backend
+            .get_object_metadata(bucket, "zeta.txt")
+            .await
+            .unwrap();
+        metadata.insert(
+            "__acl__".to_string(),
+            serde_json::json!({"owner": "listing-owner"}).to_string(),
+        );
+        backend
+            .put_object_metadata(bucket, "zeta.txt", &metadata)
+            .await
+            .unwrap();
+        backend.delete_object(bucket, "alpha.txt").await.unwrap();
+        backend
+            .copy_object(bucket, "zeta.txt", bucket, "copied.txt")
+            .await
+            .unwrap();
+        let upload_id = backend
+            .initiate_multipart(bucket, "docs/multipart.bin", None)
+            .await
+            .unwrap();
+        let etag = backend
+            .upload_part(
+                bucket,
+                &upload_id,
+                1,
+                Box::pin(std::io::Cursor::new(b"multipart".to_vec())),
+            )
+            .await
+            .unwrap();
+        backend
+            .complete_multipart(
+                bucket,
+                &upload_id,
+                &[PartInfo {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -6206,6 +6752,386 @@ mod tests {
         let result2 = backend.list_objects("test-bucket", &params2).await.unwrap();
         assert_eq!(result2.objects.len(), 2);
         assert!(result2.is_truncated);
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_matches_legacy_after_all_primary_mutations() {
+        let indexed_dir = tempfile::tempdir().unwrap();
+        let legacy_dir = tempfile::tempdir().unwrap();
+        let indexed = create_listing_backend(indexed_dir.path().to_path_buf(), true, 4096);
+        let legacy = create_listing_backend(legacy_dir.path().to_path_buf(), false, 4096);
+        seed_listing_mutation_scenario(&indexed, "list-bkt").await;
+        seed_listing_mutation_scenario(&legacy, "list-bkt").await;
+
+        let first_params = ListParams {
+            max_keys: 2,
+            ..Default::default()
+        };
+        let indexed_first = assert_index_matches_legacy(&indexed, "list-bkt", &first_params).await;
+        let legacy_first = assert_index_matches_legacy(&legacy, "list-bkt", &first_params).await;
+        assert_eq!(
+            logical_listing_view(&indexed_first),
+            logical_listing_view(&legacy_first)
+        );
+        assert!(indexed_first.is_truncated);
+        assert_eq!(
+            indexed_first.next_continuation_token,
+            legacy_first.next_continuation_token
+        );
+
+        let second_params = ListParams {
+            max_keys: 2,
+            continuation_token: indexed_first.next_continuation_token.clone(),
+            ..Default::default()
+        };
+        let indexed_second =
+            assert_index_matches_legacy(&indexed, "list-bkt", &second_params).await;
+        let legacy_second = assert_index_matches_legacy(&legacy, "list-bkt", &second_params).await;
+        assert_eq!(
+            logical_listing_view(&indexed_second),
+            logical_listing_view(&legacy_second)
+        );
+
+        let prefix_params = ListParams {
+            max_keys: 2,
+            prefix: Some("docs/".to_string()),
+            ..Default::default()
+        };
+        let indexed_prefix =
+            assert_index_matches_legacy(&indexed, "list-bkt", &prefix_params).await;
+        let legacy_prefix = assert_index_matches_legacy(&legacy, "list-bkt", &prefix_params).await;
+        assert_eq!(
+            logical_listing_view(&indexed_prefix),
+            logical_listing_view(&legacy_prefix)
+        );
+
+        let start_after_params = ListParams {
+            max_keys: 100,
+            prefix: Some("docs/".to_string()),
+            start_after: Some("docs/a.txt".to_string()),
+            ..Default::default()
+        };
+        let indexed_start_after =
+            assert_index_matches_legacy(&indexed, "list-bkt", &start_after_params).await;
+        let legacy_start_after =
+            assert_index_matches_legacy(&legacy, "list-bkt", &start_after_params).await;
+        assert_eq!(
+            logical_listing_view(&indexed_start_after),
+            logical_listing_view(&legacy_start_after)
+        );
+        assert!(indexed_start_after
+            .objects
+            .iter()
+            .all(|object| object.key.starts_with("docs/") && object.key.as_str() > "docs/a.txt"));
+
+        let full = indexed
+            .list_objects("list-bkt", &ListParams::default())
+            .await
+            .unwrap();
+        let by_key = full
+            .objects
+            .iter()
+            .map(|object| (object.key.as_str(), object.size))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(by_key.get("docs/a.txt"), Some(&11));
+        assert_eq!(by_key.get("copied.txt"), Some(&4));
+        assert_eq!(by_key.get("docs/multipart.bin"), Some(&9));
+        assert!(!by_key.contains_key("alpha.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_tracks_version_delete_markers_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+        backend.create_bucket("ver-list").await.unwrap();
+        backend.set_versioning("ver-list", true).await.unwrap();
+        put_listing_object(&backend, "ver-list", "key.txt", b"first").await;
+        assert_index_matches_legacy(&backend, "ver-list", &ListParams::default()).await;
+
+        let marker = backend
+            .delete_object("ver-list", "key.txt")
+            .await
+            .unwrap()
+            .version_id
+            .unwrap();
+        let hidden =
+            assert_index_matches_legacy(&backend, "ver-list", &ListParams::default()).await;
+        assert!(hidden.objects.is_empty());
+
+        backend
+            .delete_object_version("ver-list", "key.txt", &marker)
+            .await
+            .unwrap();
+        let restored =
+            assert_index_matches_legacy(&backend, "ver-list", &ListParams::default()).await;
+        assert_eq!(restored.objects.len(), 1);
+        assert_eq!(restored.objects[0].key, "key.txt");
+
+        backend.delete_object("ver-list", "key.txt").await.unwrap();
+        let hidden_again =
+            assert_index_matches_legacy(&backend, "ver-list", &ListParams::default()).await;
+        assert!(hidden_again.objects.is_empty());
+        put_listing_object(&backend, "ver-list", "key.txt", b"second").await;
+        let reinstated =
+            assert_index_matches_legacy(&backend, "ver-list", &ListParams::default()).await;
+        assert_eq!(reinstated.objects.len(), 1);
+        assert_eq!(reinstated.objects[0].size, 6);
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_persists_and_loads_without_full_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+            backend.create_bucket("persist-list").await.unwrap();
+            put_listing_object(&backend, "persist-list", "a.txt", b"a").await;
+            put_listing_object(&backend, "persist-list", "b.txt", b"bb").await;
+            let result = backend
+                .list_objects("persist-list", &ListParams::default())
+                .await
+                .unwrap();
+            assert_eq!(result.objects.len(), 2);
+            assert_eq!(
+                backend
+                    .listing_full_builds
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            assert!(backend
+                .bucket_listing_dir("persist-list")
+                .join("snapshot.json")
+                .is_file());
+        }
+
+        let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let result = backend
+            .list_objects("persist-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .objects
+                .iter()
+                .map(|object| object.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_corrupt_snapshot_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+            backend.create_bucket("corrupt-list").await.unwrap();
+            put_listing_object(&backend, "corrupt-list", "a.txt", b"a").await;
+            backend
+                .list_objects("corrupt-list", &ListParams::default())
+                .await
+                .unwrap();
+        }
+        let snapshot = dir
+            .path()
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join("corrupt-list")
+            .join("listing")
+            .join("snapshot.json");
+        std::fs::write(&snapshot, b"{\"version\":1").unwrap();
+
+        let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+        let result = backend
+            .list_objects("corrupt-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(result.objects[0].key, "a.txt");
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_tolerates_garbage_journal_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal;
+        {
+            let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+            backend.create_bucket("tail-list").await.unwrap();
+            put_listing_object(&backend, "tail-list", "a.txt", b"a").await;
+            backend
+                .list_objects("tail-list", &ListParams::default())
+                .await
+                .unwrap();
+            put_listing_object(&backend, "tail-list", "b.txt", b"b").await;
+            journal = backend
+                .bucket_listing_dir("tail-list")
+                .join("journal.jsonl");
+        }
+        let mut bytes = std::fs::read(&journal).unwrap();
+        bytes.extend_from_slice(b"garbage tail\n");
+        std::fs::write(&journal, bytes).unwrap();
+
+        let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+        let result = backend
+            .list_objects("tail-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            result
+                .objects
+                .iter()
+                .map(|object| object.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(std::fs::metadata(journal).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_garbage_journal_middle_rebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal;
+        {
+            let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+            backend.create_bucket("middle-list").await.unwrap();
+            put_listing_object(&backend, "middle-list", "a.txt", b"a").await;
+            backend
+                .list_objects("middle-list", &ListParams::default())
+                .await
+                .unwrap();
+            put_listing_object(&backend, "middle-list", "b.txt", b"b").await;
+            put_listing_object(&backend, "middle-list", "c.txt", b"c").await;
+            journal = backend
+                .bucket_listing_dir("middle-list")
+                .join("journal.jsonl");
+        }
+        let bytes = std::fs::read(&journal).unwrap();
+        let split = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        let mut corrupt = Vec::new();
+        corrupt.extend_from_slice(&bytes[..split]);
+        corrupt.extend_from_slice(b"garbage middle\n");
+        corrupt.extend_from_slice(&bytes[split..]);
+        std::fs::write(&journal, corrupt).unwrap();
+
+        let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+        let result = backend
+            .list_objects("middle-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(result.objects.len(), 3);
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(std::fs::metadata(journal).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_compacts_at_configured_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal;
+        {
+            let backend = create_listing_backend(dir.path().to_path_buf(), true, 1);
+            backend.create_bucket("compact-list").await.unwrap();
+            put_listing_object(&backend, "compact-list", "a.txt", b"a").await;
+            backend
+                .list_objects("compact-list", &ListParams::default())
+                .await
+                .unwrap();
+            journal = backend
+                .bucket_listing_dir("compact-list")
+                .join("journal.jsonl");
+            put_listing_object(&backend, "compact-list", "b.txt", b"b").await;
+            assert!(std::fs::metadata(&journal).unwrap().len() > 0);
+            put_listing_object(&backend, "compact-list", "c.txt", b"c").await;
+            assert_eq!(std::fs::metadata(&journal).unwrap().len(), 0);
+        }
+
+        let backend = create_listing_backend(dir.path().to_path_buf(), true, 1);
+        let result = backend
+            .list_objects("compact-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(result.objects.len(), 3);
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_listing_index_disabled_uses_legacy_cache_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = create_listing_backend(dir.path().to_path_buf(), false, 1);
+        backend.create_bucket("legacy-list").await.unwrap();
+        put_listing_object(&backend, "legacy-list", "a.txt", b"a").await;
+        let first = backend
+            .list_objects("legacy-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(first.objects.len(), 1);
+        assert!(backend.list_cache.contains_key("legacy-list"));
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        backend
+            .list_objects("legacy-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .listing_full_builds
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(!backend.bucket_listing_dir("legacy-list").exists());
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_listing_index_sync_writes_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = create_listing_backend(dir.path().to_path_buf(), true, 4096);
+        backend.create_bucket("force-list").await.unwrap();
+        put_listing_object(&backend, "force-list", "a.txt", b"a").await;
+        put_listing_object(&backend, "force-list", "b.txt", b"b").await;
+        assert_eq!(backend.rebuild_listing_index_sync("force-list").unwrap(), 2);
+        assert!(backend
+            .bucket_listing_dir("force-list")
+            .join("snapshot.json")
+            .is_file());
+        let result = backend
+            .list_objects("force-list", &ListParams::default())
+            .await
+            .unwrap();
+        assert_eq!(result.objects.len(), 2);
     }
 
     #[tokio::test]

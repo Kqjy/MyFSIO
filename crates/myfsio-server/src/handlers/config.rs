@@ -32,6 +32,21 @@ fn storage_err(err: myfsio_storage::error::StorageError) -> Response {
     crate::s3_response::s3_error_response(S3Error::from(err))
 }
 
+async fn mutate_bucket_config<F>(
+    state: &AppState,
+    bucket: &str,
+    status: StatusCode,
+    f: F,
+) -> Response
+where
+    F: FnOnce(&mut myfsio_common::types::BucketConfig),
+{
+    match state.storage.mutate_bucket_config(bucket, f).await {
+        Ok(_) => status.into_response(),
+        Err(e) => storage_err(e),
+    }
+}
+
 fn xml_error_response(err: S3Error) -> Response {
     crate::s3_response::s3_error_response(err)
 }
@@ -188,29 +203,17 @@ pub async fn put_tagging(state: &AppState, bucket: &str, body: Body) -> Response
     let xml_str = String::from_utf8_lossy(&body_bytes);
     let tags = parse_tagging_xml(&xml_str);
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.tags = tags;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.tags = tags;
+    })
+    .await
 }
 
 pub async fn delete_tagging(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.tags.clear();
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.tags.clear();
+    })
+    .await
 }
 
 pub async fn get_cors(state: &AppState, bucket: &str) -> Response {
@@ -238,29 +241,17 @@ pub async fn put_cors(state: &AppState, bucket: &str, body: Body) -> Response {
     let body_str = String::from_utf8_lossy(&body_bytes);
     let value = serde_json::Value::String(body_str.to_string());
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.cors = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.cors = Some(value);
+    })
+    .await
 }
 
 pub async fn delete_cors(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.cors = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.cors = None;
+    })
+    .await
 }
 
 pub async fn get_location(state: &AppState, _bucket: &str) -> Response {
@@ -456,29 +447,17 @@ pub async fn put_encryption(state: &AppState, bucket: &str, body: Body) -> Respo
     }
     let value = serde_json::Value::Object(stored);
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.encryption = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.encryption = Some(value);
+    })
+    .await
 }
 
 pub async fn delete_encryption(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.encryption = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.encryption = None;
+    })
+    .await
 }
 
 pub async fn get_lifecycle(state: &AppState, bucket: &str) -> Response {
@@ -507,16 +486,10 @@ pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Respon
     }
     let value = serde_json::Value::String(raw);
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.lifecycle = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.lifecycle = Some(value);
+    })
+    .await
 }
 
 fn validate_lifecycle_days(raw: &str) -> Result<(), String> {
@@ -544,16 +517,10 @@ fn validate_lifecycle_days(raw: &str) -> Result<(), String> {
 }
 
 pub async fn delete_lifecycle(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.lifecycle = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.lifecycle = None;
+    })
+    .await
 }
 
 pub async fn get_quota(state: &AppState, bucket: &str) -> Response {
@@ -619,32 +586,20 @@ pub async fn put_quota(state: &AppState, bucket: &str, body: Body) -> Response {
         ));
     }
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.quota = Some(myfsio_common::types::QuotaConfig {
-                max_bytes: max_size,
-                max_objects,
-            });
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.quota = Some(myfsio_common::types::QuotaConfig {
+            max_bytes: max_size,
+            max_objects,
+        });
+    })
+    .await
 }
 
 pub async fn delete_quota(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.quota = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.quota = None;
+    })
+    .await
 }
 
 pub async fn get_policy(state: &AppState, bucket: &str) -> Response {
@@ -681,29 +636,17 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
         }
     };
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.policy = Some(policy);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, move |config| {
+        config.policy = Some(policy);
+    })
+    .await
 }
 
 pub async fn delete_policy(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.policy = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.policy = None;
+    })
+    .await
 }
 
 pub async fn get_policy_status(state: &AppState, bucket: &str) -> Response {
@@ -759,29 +702,17 @@ pub async fn put_replication(state: &AppState, bucket: &str, body: Body) -> Resp
     }
 
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.replication = Some(serde_json::Value::String(body_str));
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.replication = Some(serde_json::Value::String(body_str));
+    })
+    .await
 }
 
 pub async fn delete_replication(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.replication = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.replication = None;
+    })
+    .await
 }
 
 fn policy_is_public(policy: &serde_json::Value) -> bool {
@@ -854,16 +785,10 @@ pub async fn put_acl(state: &AppState, bucket: &str, body: Body) -> Response {
     };
     let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.acl = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.acl = Some(value);
+    })
+    .await
 }
 
 pub async fn get_website(state: &AppState, bucket: &str) -> Response {
@@ -889,29 +814,17 @@ pub async fn put_website(state: &AppState, bucket: &str, body: Body) -> Response
     };
     let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.website = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.website = Some(value);
+    })
+    .await
 }
 
 pub async fn delete_website(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.website = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.website = None;
+    })
+    .await
 }
 
 pub async fn get_ownership_controls(state: &AppState, bucket: &str) -> Response {
@@ -946,29 +859,17 @@ pub async fn put_ownership_controls(state: &AppState, bucket: &str, body: Body) 
         return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
     }
     let value = serde_json::Value::String(body_str);
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.ownership_controls = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.ownership_controls = Some(value);
+    })
+    .await
 }
 
 pub async fn delete_ownership_controls(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.ownership_controls = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.ownership_controls = None;
+    })
+    .await
 }
 
 pub async fn get_public_access_block(state: &AppState, bucket: &str) -> Response {
@@ -1002,29 +903,17 @@ pub async fn put_public_access_block(state: &AppState, bucket: &str, body: Body)
         return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
     }
     let value = serde_json::Value::String(body_str);
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.public_access_block = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.public_access_block = Some(value);
+    })
+    .await
 }
 
 pub async fn delete_public_access_block(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.public_access_block = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.public_access_block = None;
+    })
+    .await
 }
 
 pub async fn get_object_lock(state: &AppState, bucket: &str) -> Response {
@@ -1182,29 +1071,17 @@ pub async fn put_object_lock(state: &AppState, bucket: &str, body: Body) -> Resp
     };
     let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.object_lock = Some(value);
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.object_lock = Some(value);
+    })
+    .await
 }
 
 pub async fn delete_object_lock(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.object_lock = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.object_lock = None;
+    })
+    .await
 }
 
 pub async fn put_notification(state: &AppState, bucket: &str, body: Body) -> Response {
@@ -1235,29 +1112,17 @@ pub async fn put_notification(state: &AppState, bucket: &str, body: Body) -> Res
         }
     };
 
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.notification = notification;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::OK.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.notification = notification;
+    })
+    .await
 }
 
 pub async fn delete_notification(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(mut config) => {
-            config.notification = None;
-            match state.storage.set_bucket_config(bucket, &config).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(e) => storage_err(e),
-            }
-        }
-        Err(e) => storage_err(e),
-    }
+    mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
+        config.notification = None;
+    })
+    .await
 }
 
 pub async fn put_logging(state: &AppState, bucket: &str, body: Body) -> Response {

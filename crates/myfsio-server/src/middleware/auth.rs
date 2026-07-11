@@ -1709,7 +1709,16 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
         ));
     }
 
-    if let Ok(request_time) = NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ") {
+    let request_time = match NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ") {
+        Ok(t) => t,
+        Err(_) => {
+            return AuthResult::Denied(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Malformed X-Amz-Date",
+            ));
+        }
+    };
+    {
         let request_utc = request_time.and_utc();
         let now = Utc::now();
         let elapsed = (now - request_utc).num_seconds();
@@ -1830,7 +1839,15 @@ fn enforce_peer_freshness_and_nonce(
 }
 
 fn check_timestamp_freshness(amz_date: &str, tolerance_secs: u64) -> Option<S3Error> {
-    let request_time = NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ").ok()?;
+    let request_time = match NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ") {
+        Ok(t) => t,
+        Err(_) => {
+            return Some(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Malformed request timestamp",
+            ));
+        }
+    };
     let request_utc = request_time.and_utc();
     let now = Utc::now();
     let diff = (now - request_utc).num_seconds().unsigned_abs();

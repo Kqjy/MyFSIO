@@ -38,6 +38,8 @@ impl Drop for InflightHandle {
     }
 }
 
+const MAX_RELAY_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 fn json_error(code: &str, message: &str, status: StatusCode) -> Response {
     let body = serde_json::json!({"error": {"code": code, "message": message}}).to_string();
     (status, [("content-type", "application/json")], body).into_response()
@@ -207,13 +209,16 @@ pub async fn relay_inbound_layer(
         .unwrap_or_else(|| req.uri().path().to_string());
 
     let (parts_for_replay, request_body) = req.into_parts();
-    let body_bytes = match request_body.collect().await {
+    let body_bytes = match http_body_util::Limited::new(request_body, MAX_RELAY_BODY_BYTES)
+        .collect()
+        .await
+    {
         Ok(c) => c.to_bytes(),
         Err(e) => {
             return record_relay_failure(
-                "InternalError",
-                &format!("Body read failed: {}", e),
-                StatusCode::INTERNAL_SERVER_ERROR,
+                "InvalidRequest",
+                &format!("Body read failed or exceeds {} bytes: {}", MAX_RELAY_BODY_BYTES, e),
+                StatusCode::PAYLOAD_TOO_LARGE,
                 Some(origin_site.clone()),
                 Some(admin_user.clone()),
             );
@@ -320,13 +325,16 @@ pub async fn relay_inbound_layer(
     let response = next.run(req).await;
 
     let (parts, body) = response.into_parts();
-    let collected = match body.collect().await {
+    let collected = match http_body_util::Limited::new(body, MAX_RELAY_BODY_BYTES)
+        .collect()
+        .await
+    {
         Ok(c) => c.to_bytes(),
         Err(e) => {
-            tracing::error!("relay response read failed: {}", e);
+            tracing::error!("relay response read failed or too large: {}", e);
             return record_relay_failure(
                 "InternalError",
-                "Relay response read failed",
+                "Relay response read failed or exceeds size limit",
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Some(origin_site.clone()),
                 Some(admin_user.clone()),

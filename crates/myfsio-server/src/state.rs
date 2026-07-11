@@ -83,6 +83,8 @@ impl AppState {
                 metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
                     &config.metadata_layout,
                 ),
+                listing_index_enabled: config.listing_index_enabled,
+                ..FsStorageBackendConfig::default()
             },
         ));
         let iam = Arc::new(IamService::new_with_secret(
