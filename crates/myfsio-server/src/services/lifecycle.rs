@@ -205,16 +205,16 @@ impl LifecycleService {
             Ok(objects) => {
                 for object in &objects.objects {
                     if object.last_modified < cutoff
-                        && self.object_matches_tag_filter(bucket, &object.key, rule).await
+                        && self
+                            .object_matches_tag_filter(bucket, &object.key, rule)
+                            .await
                     {
                         let metadata = self
                             .storage
                             .get_object_metadata(bucket, &object.key)
                             .await
                             .unwrap_or_default();
-                        if let Err(message) =
-                            object_lock::can_delete_object(&metadata, false)
-                        {
+                        if let Err(message) = object_lock::can_delete_object(&metadata, false) {
                             tracing::info!(
                                 bucket = bucket,
                                 key = %object.key,
@@ -316,27 +316,20 @@ impl LifecycleService {
                     };
                     let version_tags: Vec<myfsio_common::types::Tag> =
                         serde_json::from_value(version_tags_value.clone()).unwrap_or_default();
-                    let matched = rule.tags.iter().all(|(k, v)| {
-                        version_tags
-                            .iter()
-                            .any(|t| t.key == *k && t.value == *v)
-                    });
+                    let matched = rule
+                        .tags
+                        .iter()
+                        .all(|(k, v)| version_tags.iter().any(|t| t.key == *k && t.value == *v));
                     if !matched {
                         continue;
                     }
                 }
-                if let Some(version_meta) =
-                    manifest.get("metadata").and_then(|m| m.as_object())
-                {
+                if let Some(version_meta) = manifest.get("metadata").and_then(|m| m.as_object()) {
                     let metadata_map: std::collections::HashMap<String, String> = version_meta
                         .iter()
-                        .filter_map(|(k, v)| {
-                            v.as_str().map(|s| (k.clone(), s.to_string()))
-                        })
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect();
-                    if let Err(message) =
-                        object_lock::can_delete_object(&metadata_map, false)
-                    {
+                    if let Err(message) = object_lock::can_delete_object(&metadata_map, false) {
                         tracing::info!(
                             bucket = bucket,
                             key = %key,
@@ -362,8 +355,7 @@ impl LifecycleService {
                             .push(format!("expire version {}: {}", version_id, err)),
                     }
                 } else {
-                    let data_path =
-                        entry.path().with_file_name(format!("{}.bin", version_id));
+                    let data_path = entry.path().with_file_name(format!("{}.bin", version_id));
                     let _ = std::fs::remove_file(&data_path);
                     let _ = std::fs::remove_file(entry.path());
                     result.versions_deleted += 1;
@@ -523,15 +515,15 @@ fn parse_lifecycle_rules_from_string(raw: &str) -> Vec<ParsedLifecycleRule> {
             status: child_text(&rule, "Status").unwrap_or_else(|| "Enabled".to_string()),
             prefix: child_text(&rule, "Prefix")
                 .or_else(|| {
-                    let filter = rule.children().find(|node| {
-                        node.is_element() && node.tag_name().name() == "Filter"
-                    })?;
+                    let filter = rule
+                        .children()
+                        .find(|node| node.is_element() && node.tag_name().name() == "Filter")?;
                     if let Some(prefix) = child_text(&filter, "Prefix") {
                         return Some(prefix);
                     }
-                    let and = filter.children().find(|node| {
-                        node.is_element() && node.tag_name().name() == "And"
-                    })?;
+                    let and = filter
+                        .children()
+                        .find(|node| node.is_element() && node.tag_name().name() == "And")?;
                     child_text(&and, "Prefix")
                 })
                 .unwrap_or_default(),
@@ -763,10 +755,7 @@ mod tests {
         let rules = parse_lifecycle_rules(&Value::String(xml.to_string()));
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].prefix, "");
-        assert_eq!(
-            rules[0].tags,
-            vec![("env".to_string(), "prod".to_string())]
-        );
+        assert_eq!(rules[0].tags, vec![("env".to_string(), "prod".to_string())]);
     }
 
     #[test]

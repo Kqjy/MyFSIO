@@ -26,10 +26,31 @@ pub async fn server_header(req: Request, next: Next) -> Response {
     resp
 }
 
+fn redact_sensitive_query(uri: &axum::http::Uri) -> String {
+    match uri.query() {
+        None => uri.path().to_string(),
+        Some(query) => {
+            let redacted: Vec<String> = query
+                .split('&')
+                .map(|pair| {
+                    let key = pair.split('=').next().unwrap_or("");
+                    let lower = key.to_ascii_lowercase();
+                    if lower == "x-amz-signature" || lower == "x-amz-security-token" {
+                        format!("{}=REDACTED", key)
+                    } else {
+                        pair.to_string()
+                    }
+                })
+                .collect();
+            format!("{}?{}", uri.path(), redacted.join("&"))
+        }
+    }
+}
+
 pub async fn request_log_layer(req: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = req.method().clone();
-    let uri = req.uri().clone();
+    let uri = redact_sensitive_query(req.uri());
     let version = req.version();
     let remote = req
         .extensions()
@@ -62,7 +83,11 @@ pub async fn request_log_layer(req: Request, next: Next) -> Response {
     response
 }
 
-pub async fn admin_audit_layer(State(state): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn admin_audit_layer(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
     let method = req.method().clone();
     let should_audit = matches!(
         method,
@@ -102,9 +127,7 @@ pub async fn admin_audit_layer(State(state): State<AppState>, req: Request, next
                 peer_ip: None,
                 idempotency_key: None,
                 error: None,
-                attribution: Some(
-                    crate::services::audit_log::ATTRIBUTION_VERIFIED.to_string(),
-                ),
+                attribution: Some(crate::services::audit_log::ATTRIBUTION_VERIFIED.to_string()),
             });
     }
     response
@@ -136,7 +159,6 @@ pub async fn ui_metrics_layer(State(state): State<AppState>, req: Request, next:
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
-    let error_code = if status >= 400 { Some("UIError") } else { None };
     metrics.record_request(
         method.as_str(),
         endpoint_type,
@@ -144,7 +166,11 @@ pub async fn ui_metrics_layer(State(state): State<AppState>, req: Request, next:
         latency_ms,
         bytes_in,
         bytes_out,
-        error_code,
+        None,
+        None,
+        None,
+        None,
+        "ui",
     );
 
     response

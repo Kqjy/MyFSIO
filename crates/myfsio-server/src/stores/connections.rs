@@ -88,7 +88,9 @@ impl ResolvedTuning {
                 .part_size_bytes
                 .clamp(S3_MIN_PART_BYTES, TUNING_MAX_PART_BYTES),
             multipart_concurrency: self.multipart_concurrency.clamp(1, TUNING_MAX_CONCURRENCY),
-            part_buffer_bytes: self.part_buffer_bytes.clamp(64 * 1024, TUNING_MAX_BUFFER_BYTES),
+            part_buffer_bytes: self
+                .part_buffer_bytes
+                .clamp(64 * 1024, TUNING_MAX_BUFFER_BYTES),
             mpu_in_place_retries: self.mpu_in_place_retries.min(TUNING_MAX_IN_PLACE_RETRIES),
         }
     }
@@ -422,7 +424,8 @@ mod tests {
 
     #[test]
     fn legacy_json_round_trips_with_no_tuning_field() {
-        let json = r#"{"id":"x","name":"n","endpoint_url":"http://a","access_key":"k","secret_key":"s"}"#;
+        let json =
+            r#"{"id":"x","name":"n","endpoint_url":"http://a","access_key":"k","secret_key":"s"}"#;
         let conn: RemoteConnection = serde_json::from_str(json).unwrap();
         assert!(conn.tuning.is_none());
         assert_eq!(conn.region, "us-east-1");

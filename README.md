@@ -7,10 +7,10 @@ MyFSIO is an S3-compatible object storage server with a Rust runtime and a files
 - S3-compatible REST API with Signature Version 4 authentication
 - Browser UI for buckets, objects, IAM users, policies, replication, metrics, and site administration
 - Filesystem-backed storage rooted at `data/`
-- Bucket versioning, multipart uploads, presigned URLs, CORS, object and bucket tagging
-- Server-side encryption and built-in KMS support
+- Bucket versioning, multipart uploads, presigned URLs, CORS, ACLs, object and bucket tagging
+- Object Lock retention and legal hold, S3 Select, bucket notifications via webhooks, SSE-C, server-side encryption, and built-in KMS support
 - Optional background services for lifecycle, garbage collection, integrity scanning, operation metrics, and system metrics history
-- Replication, site sync, and static website hosting support
+- Replication, site sync, cluster federation with peer relay and audit logging, and static website hosting support
 
 ## Runtime Model
 
@@ -89,11 +89,19 @@ Core settings:
 | `UI_ENABLED` | `true` | Disable to run API-only |
 | `STORAGE_ROOT` | `./data` | Root directory for buckets and system metadata |
 | `IAM_CONFIG` | `<STORAGE_ROOT>/.myfsio.sys/config/iam.json` | IAM config path |
-| `API_BASE_URL` | unset | Public API base used by the UI and presigned URL generation |
+| `API_BASE_URL` | derived as `http://<HOST>:<PORT>` | Public API base used by the UI and presigned URL generation |
 | `AWS_REGION` | `us-east-1` | Region used in SigV4 scope |
 | `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew (regular SigV4) |
 | `STRICT_STREAMING_SIGV4` | `false` | When `true`, reject streaming SigV4 (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD*`) requests because per-chunk signature validation is not yet implemented. When `false` (default) the server logs a warning and accepts the request without validating chunk signatures — leave it `false` only if you need AWS CLI/SDK compatibility for large uploads and trust the network |
 | `ALLOW_INTERNAL_ENDPOINTS` | `false` | Permit relay/replication targets to resolve to loopback / RFC1918 / link-local / CGNAT addresses. Required for local cluster testing; leave disabled in production unless you intentionally federate over private networks |
+| `MULTIPART_OBJECT_LAYOUT` | `segments` | Completed multipart layout. `segments` keeps uploaded parts as immutable segment files; `concat` is the legacy single-file assembly. Older binaries cannot read `segments` objects |
+| `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Delete orphaned multipart segment directories older than this |
+| `RATE_LIMIT_DEFAULT` | `50000/min` | Default S3 / KMS rate limit |
+| `RATE_LIMIT_LIST_BUCKETS` | inherits `RATE_LIMIT_DEFAULT` | Override for `GET /` |
+| `RATE_LIMIT_BUCKET_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for bucket-scoped operations |
+| `RATE_LIMIT_OBJECT_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for object-scoped operations |
+| `RATE_LIMIT_HEAD_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for HEAD requests |
+| `RATE_LIMIT_ADMIN` | `60/min` | Override for `/myfsio/admin/*` |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Rate-limit backend. Only `memory://` is supported today; any other value logs a warning and falls back to in-memory limits |
 | `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter skew enforced for peer-credential SigV4 requests |
 | `PEER_NONCE_CACHE_SIZE` | `10000` | Replay-detection LRU capacity for peer requests |
@@ -131,8 +139,10 @@ Metrics and replication tuning:
 | `OPERATION_METRICS_RETENTION_HOURS` | `24` |
 | `METRICS_HISTORY_INTERVAL_MINUTES` | `5` |
 | `METRICS_HISTORY_RETENTION_HOURS` | `24` |
+| `METRICS_STORAGE_REFRESH_MINUTES` | `30` (min `5`) |
 | `REPLICATION_CONNECT_TIMEOUT_SECONDS` | `5` |
 | `REPLICATION_READ_TIMEOUT_SECONDS` | `120` |
+| `REPLICATION_PART_STALL_TIMEOUT_SECONDS` | `300` |
 | `REPLICATION_MAX_RETRIES` | `2` |
 | `REPLICATION_STREAMING_THRESHOLD_BYTES` | `10485760` |
 | `REPLICATION_MAX_FAILURES_PER_BUCKET` | `50` |
@@ -168,7 +178,7 @@ If you federate two sites and also replicate between them, you typically need TW
 
 ```text
 data/
-  <bucket>/
+  <bucket>/                              # object paths; completed multipart objects may be sparse stubs
   .myfsio.sys/
     config/
       iam.json
@@ -179,6 +189,7 @@ data/
     buckets/<bucket>/
       meta/
       versions/
+      segments/
     multipart/
     keys/
 ```

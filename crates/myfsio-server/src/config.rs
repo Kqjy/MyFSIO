@@ -53,6 +53,7 @@ pub struct ServerConfig {
     pub metrics_retention_hours: u64,
     pub metrics_history_interval_minutes: u64,
     pub metrics_history_retention_hours: u64,
+    pub metrics_storage_refresh_minutes: u64,
     pub lifecycle_enabled: bool,
     pub lifecycle_max_history_per_bucket: usize,
     pub website_hosting_enabled: bool,
@@ -65,10 +66,15 @@ pub struct ServerConfig {
     pub replication_max_retries: u32,
     pub replication_streaming_threshold_bytes: u64,
     pub replication_max_failures_per_bucket: usize,
+    pub replication_concurrency: usize,
+    pub replication_queue_capacity: usize,
     pub replication_healer_enabled: bool,
     pub replication_healer_interval_secs: u64,
     pub replication_healer_max_attempts: u32,
     pub replication_part_stall_timeout_secs: u64,
+    pub hdd_read_concurrency: usize,
+    pub hdd_write_concurrency: usize,
+    pub disk_queue_timeout_secs: u64,
     pub site_sync_enabled: bool,
     pub site_sync_interval_secs: u64,
     pub site_sync_batch_size: usize,
@@ -106,6 +112,8 @@ pub struct ServerConfig {
     pub request_body_timeout_secs: u64,
     pub upload_stream_buffer_bytes: usize,
     pub multipart_object_layout: String,
+    pub metadata_layout: String,
+    pub listing_index_enabled: bool,
     pub ratelimit_default: RateLimitSetting,
     pub ratelimit_list_buckets: RateLimitSetting,
     pub ratelimit_bucket_ops: RateLimitSetting,
@@ -206,10 +214,15 @@ impl ServerConfig {
 
         let metrics_history_enabled = parse_bool_env("METRICS_HISTORY_ENABLED", false);
 
-        let metrics_interval_minutes = parse_u64_env("OPERATION_METRICS_INTERVAL_MINUTES", 5);
-        let metrics_retention_hours = parse_u64_env("OPERATION_METRICS_RETENTION_HOURS", 24);
-        let metrics_history_interval_minutes = parse_u64_env("METRICS_HISTORY_INTERVAL_MINUTES", 5);
-        let metrics_history_retention_hours = parse_u64_env("METRICS_HISTORY_RETENTION_HOURS", 24);
+        let metrics_interval_minutes =
+            parse_u64_env("OPERATION_METRICS_INTERVAL_MINUTES", 5).max(1);
+        let metrics_retention_hours = parse_u64_env("OPERATION_METRICS_RETENTION_HOURS", 24).max(1);
+        let metrics_history_interval_minutes =
+            parse_u64_env("METRICS_HISTORY_INTERVAL_MINUTES", 5).max(1);
+        let metrics_history_retention_hours =
+            parse_u64_env("METRICS_HISTORY_RETENTION_HOURS", 24).max(1);
+        let metrics_storage_refresh_minutes =
+            parse_u64_env("METRICS_STORAGE_REFRESH_MINUTES", 30).max(5);
 
         let lifecycle_enabled = parse_bool_env("LIFECYCLE_ENABLED", false);
         let lifecycle_max_history_per_bucket =
@@ -230,6 +243,12 @@ impl ServerConfig {
             parse_u64_env("REPLICATION_STREAMING_THRESHOLD_BYTES", 10_485_760);
         let replication_max_failures_per_bucket =
             parse_u64_env("REPLICATION_MAX_FAILURES_PER_BUCKET", 50) as usize;
+        let replication_concurrency = parse_usize_env("REPLICATION_CONCURRENCY", 4).max(1);
+        let replication_queue_capacity =
+            parse_usize_env("REPLICATION_QUEUE_CAPACITY", 10_000).max(1);
+        let hdd_read_concurrency = parse_usize_env("HDD_READ_CONCURRENCY", 0);
+        let hdd_write_concurrency = parse_usize_env("HDD_WRITE_CONCURRENCY", 0);
+        let disk_queue_timeout_secs = parse_u64_env("DISK_QUEUE_TIMEOUT_SECONDS", 15).max(1);
         let replication_healer_enabled = parse_bool_env("REPLICATION_HEALER_ENABLED", true);
         let replication_healer_interval_secs =
             parse_u64_env("REPLICATION_HEALER_INTERVAL_SECONDS", 60);
@@ -270,8 +289,7 @@ impl ServerConfig {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        let relay_idempotency_cache_size =
-            parse_usize_env("RELAY_IDEMPOTENCY_CACHE_SIZE", 10_000);
+        let relay_idempotency_cache_size = parse_usize_env("RELAY_IDEMPOTENCY_CACHE_SIZE", 10_000);
         let relay_idempotency_ttl_secs = parse_u64_env("RELAY_IDEMPOTENCY_TTL_SECONDS", 3_600);
         let audit_log_enabled = parse_bool_env("AUDIT_LOG_ENABLED", false);
         let cors_origins = parse_list_env("CORS_ORIGINS", "*");
@@ -286,10 +304,7 @@ impl ServerConfig {
             match raw.parse::<chrono_tz::Tz>() {
                 Ok(_) => raw,
                 Err(_) => {
-                    tracing::warn!(
-                        "Invalid DISPLAY_TIMEZONE '{}', falling back to UTC",
-                        raw
-                    );
+                    tracing::warn!("Invalid DISPLAY_TIMEZONE '{}', falling back to UTC", raw);
                     "UTC".to_string()
                 }
             }
@@ -299,8 +314,11 @@ impl ServerConfig {
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
         let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 300);
         let upload_stream_buffer_bytes = parse_usize_env("UPLOAD_STREAM_BUFFER_BYTES", 8_388_608);
-        let multipart_object_layout = std::env::var("MULTIPART_OBJECT_LAYOUT")
-            .unwrap_or_else(|_| "segments".to_string());
+        let multipart_object_layout =
+            std::env::var("MULTIPART_OBJECT_LAYOUT").unwrap_or_else(|_| "segments".to_string());
+        let metadata_layout =
+            std::env::var("METADATA_LAYOUT").unwrap_or_else(|_| "sidecar".to_string());
+        let listing_index_enabled = parse_bool_env("LISTING_INDEX_ENABLED", true);
         let ratelimit_default =
             parse_rate_limit_env("RATE_LIMIT_DEFAULT", RateLimitSetting::new(50_000, 60));
         let ratelimit_list_buckets =
@@ -357,6 +375,7 @@ impl ServerConfig {
             metrics_retention_hours,
             metrics_history_interval_minutes,
             metrics_history_retention_hours,
+            metrics_storage_refresh_minutes,
             lifecycle_enabled,
             lifecycle_max_history_per_bucket,
             website_hosting_enabled,
@@ -369,10 +388,15 @@ impl ServerConfig {
             replication_max_retries,
             replication_streaming_threshold_bytes,
             replication_max_failures_per_bucket,
+            replication_concurrency,
+            replication_queue_capacity,
             replication_healer_enabled,
             replication_healer_interval_secs,
             replication_healer_max_attempts,
             replication_part_stall_timeout_secs,
+            hdd_read_concurrency,
+            hdd_write_concurrency,
+            disk_queue_timeout_secs,
             site_sync_enabled,
             site_sync_interval_secs,
             site_sync_batch_size,
@@ -410,6 +434,8 @@ impl ServerConfig {
             request_body_timeout_secs,
             upload_stream_buffer_bytes,
             multipart_object_layout,
+            metadata_layout,
+            listing_index_enabled,
             ratelimit_default,
             ratelimit_list_buckets,
             ratelimit_bucket_ops,
@@ -462,6 +488,7 @@ impl Default for ServerConfig {
             metrics_retention_hours: 24,
             metrics_history_interval_minutes: 5,
             metrics_history_retention_hours: 24,
+            metrics_storage_refresh_minutes: 30,
             lifecycle_enabled: false,
             lifecycle_max_history_per_bucket: 50,
             website_hosting_enabled: false,
@@ -474,10 +501,15 @@ impl Default for ServerConfig {
             replication_max_retries: 2,
             replication_streaming_threshold_bytes: 10_485_760,
             replication_max_failures_per_bucket: 50,
+            replication_concurrency: 4,
+            replication_queue_capacity: 10_000,
             replication_healer_enabled: true,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
             replication_part_stall_timeout_secs: 300,
+            hdd_read_concurrency: 0,
+            hdd_write_concurrency: 0,
+            disk_queue_timeout_secs: 15,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
             site_sync_batch_size: 100,
@@ -522,6 +554,8 @@ impl Default for ServerConfig {
             request_body_timeout_secs: 300,
             upload_stream_buffer_bytes: 8_388_608,
             multipart_object_layout: "segments".to_string(),
+            metadata_layout: "sidecar".to_string(),
+            listing_index_enabled: true,
             ratelimit_default: RateLimitSetting::new(50_000, 60),
             ratelimit_list_buckets: RateLimitSetting::new(50_000, 60),
             ratelimit_bucket_ops: RateLimitSetting::new(50_000, 60),
@@ -732,5 +766,26 @@ mod tests {
         std::env::remove_var("RATE_LIMIT_ADMIN");
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
+    }
+
+    #[test]
+    fn metrics_intervals_and_retentions_are_floored() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("OPERATION_METRICS_INTERVAL_MINUTES", "0");
+        std::env::set_var("OPERATION_METRICS_RETENTION_HOURS", "0");
+        std::env::set_var("METRICS_HISTORY_INTERVAL_MINUTES", "0");
+        std::env::set_var("METRICS_HISTORY_RETENTION_HOURS", "0");
+
+        let config = ServerConfig::from_env();
+
+        assert_eq!(config.metrics_interval_minutes, 1);
+        assert_eq!(config.metrics_retention_hours, 1);
+        assert_eq!(config.metrics_history_interval_minutes, 1);
+        assert_eq!(config.metrics_history_retention_hours, 1);
+
+        std::env::remove_var("OPERATION_METRICS_INTERVAL_MINUTES");
+        std::env::remove_var("OPERATION_METRICS_RETENTION_HOURS");
+        std::env::remove_var("METRICS_HISTORY_INTERVAL_MINUTES");
+        std::env::remove_var("METRICS_HISTORY_RETENTION_HOURS");
     }
 }

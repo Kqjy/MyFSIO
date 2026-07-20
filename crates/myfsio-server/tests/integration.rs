@@ -6,6 +6,7 @@ use http_body_util::BodyExt;
 use myfsio_storage::traits::{AsyncReadStream, StorageEngine};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -977,8 +978,7 @@ async fn test_create_bidirectional_rule_requires_peer_inbound_access_key() {
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     let err = body["error"].as_str().unwrap_or_default();
     assert!(
-        err.to_lowercase().contains("inbound access key")
-            || err.to_lowercase().contains("loop"),
+        err.to_lowercase().contains("inbound access key") || err.to_lowercase().contains("loop"),
         "expected loop guard error, got: {}",
         err
     );
@@ -1037,7 +1037,10 @@ async fn test_create_bidirectional_rule_succeeds_when_peer_ak_set() {
     let body: Value =
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["mode"], "bidirectional");
-    let rule = state.replication.get_rule(bucket_name).expect("rule created");
+    let rule = state
+        .replication
+        .get_rule(bucket_name)
+        .expect("rule created");
     assert_eq!(
         rule.mode,
         myfsio_server::services::replication::MODE_BIDIRECTIONAL
@@ -1615,6 +1618,117 @@ async fn test_ui_metrics_history_endpoint_reads_system_history() {
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["enabled"], true);
     assert_eq!(body["history"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_ui_operation_metrics_error_endpoints() {
+    let (mut state, _tmp) = test_ui_state();
+    state.metrics = Some(Arc::new(
+        myfsio_server::services::metrics::MetricsService::new(
+            &state.config.storage_root,
+            myfsio_server::services::metrics::MetricsConfig {
+                interval_minutes: 5,
+                retention_hours: 24,
+            },
+        ),
+    ));
+    let metrics = state.metrics.as_ref().unwrap().clone();
+    metrics.record_request(
+        "GET",
+        "object",
+        403,
+        12.5,
+        0,
+        0,
+        Some("AccessDenied"),
+        Some("bucket-a"),
+        Some("key-a"),
+        Some("req-a"),
+        "api",
+    );
+
+    let (session_id, _csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state);
+
+    let summary_resp = app
+        .clone()
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/metrics/operations/error-summary?hours=1",
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(summary_resp.status(), StatusCode::OK);
+    let summary_body: Value =
+        serde_json::from_slice(&summary_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(summary_body["enabled"], true);
+    assert_eq!(summary_body["total_errors"], 1);
+    assert_eq!(summary_body["error_codes"]["AccessDenied"], 1);
+    assert_eq!(summary_body["error_buckets"]["bucket-a"]["AccessDenied"], 1);
+
+    let errors_resp = app
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/metrics/operations/errors?limit=10&code=AccessDenied&bucket=bucket-a",
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(errors_resp.status(), StatusCode::OK);
+    let errors_body: Value =
+        serde_json::from_slice(&errors_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(errors_body["enabled"], true);
+    assert_eq!(errors_body["total_buffered"], 1);
+    assert_eq!(errors_body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(errors_body["errors"][0]["code"], "AccessDenied");
+    assert_eq!(errors_body["errors"][0]["bucket"], "bucket-a");
+    assert_eq!(errors_body["errors"][0]["key"], "key-a");
+    assert_eq!(errors_body["errors"][0]["request_id"], "req-a");
+}
+
+#[tokio::test]
+async fn test_ui_operation_metrics_error_endpoints_require_auth() {
+    let (mut state, _tmp) = test_ui_state();
+    state.metrics = Some(Arc::new(
+        myfsio_server::services::metrics::MetricsService::new(
+            &state.config.storage_root,
+            myfsio_server::services::metrics::MetricsConfig {
+                interval_minutes: 5,
+                retention_hours: 24,
+            },
+        ),
+    ));
+    let app = myfsio_server::create_ui_router(state);
+
+    let summary_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ui/metrics/operations/error-summary?hours=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary_resp.status(), StatusCode::SEE_OTHER);
+
+    let errors_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ui/metrics/operations/errors")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(errors_resp.status(), StatusCode::SEE_OTHER);
 }
 
 #[tokio::test]
@@ -5227,7 +5341,11 @@ async fn test_kms_key_crud() {
 
     let resp = tower::ServiceExt::oneshot(
         app.clone(),
-        signed_request(Method::GET, &format!("/myfsio/kms/keys/{}", key_id), Body::empty()),
+        signed_request(
+            Method::GET,
+            &format!("/myfsio/kms/keys/{}", key_id),
+            Body::empty(),
+        ),
     )
     .await
     .unwrap();
@@ -5895,14 +6013,7 @@ async fn test_head_part_number_returns_part_size() {
 #[tokio::test]
 async fn test_part_number_out_of_range_rejected() {
     let (app, _tmp) = test_app();
-    complete_two_part_upload(
-        &app,
-        "mp-oob",
-        "obj.bin",
-        vec![b'A'; 8],
-        vec![b'B'; 8],
-    )
-    .await;
+    complete_two_part_upload(&app, "mp-oob", "obj.bin", vec![b'A'; 8], vec![b'B'; 8]).await;
 
     let resp = app
         .clone()
@@ -6143,11 +6254,7 @@ async fn test_bulk_delete_poisoned_unlocked_object_succeeds() {
     let (app, state, _tmp) = test_app_and_state();
 
     app.clone()
-        .oneshot(signed_request(
-            Method::PUT,
-            "/bulk-poison",
-            Body::empty(),
-        ))
+        .oneshot(signed_request(Method::PUT, "/bulk-poison", Body::empty()))
         .await
         .unwrap();
 
@@ -6205,11 +6312,7 @@ async fn test_bulk_delete_poisoned_locked_object_blocked_by_legal_hold() {
     let (app, state, _tmp) = test_app_and_state();
 
     app.clone()
-        .oneshot(signed_request(
-            Method::PUT,
-            "/bulk-locked",
-            Body::empty(),
-        ))
+        .oneshot(signed_request(Method::PUT, "/bulk-locked", Body::empty()))
         .await
         .unwrap();
 
@@ -6582,11 +6685,7 @@ async fn test_delete_pre_versioning_null_version_single_object() {
 
     let resp = app
         .clone()
-        .oneshot(signed_request(
-            Method::DELETE,
-            "/null-del-1",
-            Body::empty(),
-        ))
+        .oneshot(signed_request(Method::DELETE, "/null-del-1", Body::empty()))
         .await
         .unwrap();
     assert_eq!(
@@ -6601,7 +6700,11 @@ async fn test_delete_pre_versioning_null_version_batch() {
     let (app, _tmp) = test_app();
 
     app.clone()
-        .oneshot(signed_request(Method::PUT, "/null-del-batch", Body::empty()))
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-del-batch",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     for name in ["pre1", "pre2"] {
@@ -6947,8 +7050,7 @@ async fn test_delete_null_version_with_real_version_kept() {
         .split("<Version>")
         .skip(1)
         .find(|block| {
-            block.contains("<Key>k</Key>")
-                && !block.contains("<VersionId>null</VersionId>")
+            block.contains("<Key>k</Key>") && !block.contains("<VersionId>null</VersionId>")
         })
         .and_then(|block| {
             block
@@ -7137,7 +7239,11 @@ async fn test_suspended_put_refuses_to_purge_legal_held_archived_null() {
     let (app, tmp) = test_app();
 
     app.clone()
-        .oneshot(signed_request(Method::PUT, "/null-protected", Body::empty()))
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-protected",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     app.clone()
@@ -7488,8 +7594,7 @@ async fn test_form_post_respects_archived_null_legal_hold() {
     );
     let signing_key =
         myfsio_auth::sigv4::derive_signing_key(TEST_SECRET_KEY, date_stamp, region, service);
-    let signature =
-        myfsio_auth::sigv4::compute_post_policy_signature(&signing_key, &policy_b64);
+    let signature = myfsio_auth::sigv4::compute_post_policy_signature(&signing_key, &policy_b64);
 
     let boundary = "----TestFormBoundary";
     let body = format!(
@@ -7565,12 +7670,7 @@ form-bypass-attempt\r\n\
     assert_eq!(&bytes[..], b"legacy");
 }
 
-async fn ui_post_json(
-    uri: &str,
-    session_id: &str,
-    csrf: &str,
-    json_body: &str,
-) -> Request<Body> {
+async fn ui_post_json(uri: &str, session_id: &str, csrf: &str, json_body: &str) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
@@ -7835,10 +7935,7 @@ async fn test_ui_complete_multipart_respects_archived_null_legal_hold() {
         .oneshot(
             Request::builder()
                 .method(Method::PUT)
-                .uri(format!(
-                    "/null-ui-mp/k?uploadId={}&partNumber=1",
-                    upload_id
-                ))
+                .uri(format!("/null-ui-mp/k?uploadId={}&partNumber=1", upload_id))
                 .header("x-access-key", TEST_ACCESS_KEY)
                 .header("x-secret-key", TEST_SECRET_KEY)
                 .body(Body::from("part1"))
@@ -7859,17 +7956,11 @@ async fn test_ui_complete_multipart_respects_archived_null_legal_hold() {
     let (session_id, csrf) = authenticated_ui_session(&state);
     let ui_app = myfsio_server::create_ui_router(state.clone());
 
-    let payload = format!(
-        r#"{{"parts":[{{"part_number":1,"etag":"{}"}}]}}"#,
-        etag
-    );
+    let payload = format!(r#"{{"parts":[{{"part_number":1,"etag":"{}"}}]}}"#, etag);
     let resp = ui_app
         .oneshot(
             ui_post_json(
-                &format!(
-                    "/ui/buckets/null-ui-mp/multipart/{}/complete",
-                    upload_id
-                ),
+                &format!("/ui/buckets/null-ui-mp/multipart/{}/complete", upload_id),
                 &session_id,
                 &csrf,
                 &payload,
@@ -8009,7 +8100,11 @@ async fn test_copy_object_with_version_id_null_after_soft_delete() {
         .await
         .unwrap();
     app.clone()
-        .oneshot(signed_request(Method::PUT, "/null-cp-dm-dst", Body::empty()))
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-cp-dm-dst",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     app.clone()
@@ -8079,7 +8174,11 @@ async fn test_archived_null_lock_guard_fails_closed_on_unreadable_manifest() {
     let (app, tmp) = test_app();
 
     app.clone()
-        .oneshot(signed_request(Method::PUT, "/null-failclosed", Body::empty()))
+        .oneshot(signed_request(
+            Method::PUT,
+            "/null-failclosed",
+            Body::empty(),
+        ))
         .await
         .unwrap();
     app.clone()
@@ -8215,10 +8314,7 @@ async fn test_upload_part_copy_with_version_id_null() {
                 ))
                 .header("x-access-key", TEST_ACCESS_KEY)
                 .header("x-secret-key", TEST_SECRET_KEY)
-                .header(
-                    "x-amz-copy-source",
-                    "/null-mpcp-src/k?versionId=null",
-                )
+                .header("x-amz-copy-source", "/null-mpcp-src/k?versionId=null")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -8239,10 +8335,7 @@ async fn test_upload_part_copy_with_version_id_null() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(format!(
-                    "/null-mpcp-dst/recovered?uploadId={}",
-                    upload_id
-                ))
+                .uri(format!("/null-mpcp-dst/recovered?uploadId={}", upload_id))
                 .header("x-access-key", TEST_ACCESS_KEY)
                 .header("x-secret-key", TEST_SECRET_KEY)
                 .body(Body::from(complete_xml))
@@ -8735,7 +8828,11 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
 
     let resp = app
         .clone()
-        .oneshot(sigv4_get("/myfsio/admin/cluster/overview", PEER_AK, PEER_SK))
+        .oneshot(sigv4_get(
+            "/myfsio/admin/cluster/overview",
+            PEER_AK,
+            PEER_SK,
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -9101,7 +9198,11 @@ async fn test_sse_c_multipart_roundtrip_and_security() {
         )
         .await
         .unwrap();
-        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT, "partNumber {pn}");
+        assert_eq!(
+            resp.status(),
+            StatusCode::PARTIAL_CONTENT,
+            "partNumber {pn}"
+        );
         assert_eq!(
             resp.headers().get("x-amz-mp-parts-count").unwrap(),
             "2",
@@ -9539,7 +9640,10 @@ async fn drive_failed_small_sse_c_mpu(
         "completion with an undersized plaintext part must fail before publishing"
     );
     let body = String::from_utf8(body_bytes(resp).await).unwrap();
-    assert!(body.contains("EntityTooSmall"), "expected EntityTooSmall, got: {body}");
+    assert!(
+        body.contains("EntityTooSmall"),
+        "expected EntityTooSmall, got: {body}"
+    );
 }
 
 #[tokio::test]
@@ -9608,7 +9712,9 @@ async fn test_sse_c_multipart_failed_completion_preserves_versioned_object() {
         signed_request(
             Method::PUT,
             &format!("/{bucket}?versioning"),
-            Body::from("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>"),
+            Body::from(
+                "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+            ),
         ),
     )
     .await

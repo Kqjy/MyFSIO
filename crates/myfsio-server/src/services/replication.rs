@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError as SyncTrySendError};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -8,7 +9,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::task::JoinSet;
 
 use myfsio_common::types::ListParams;
@@ -129,15 +130,82 @@ pub struct ReplicationFailureStore {
     storage_root: PathBuf,
     max_failures_per_bucket: usize,
     cache: Mutex<HashMap<String, Vec<ReplicationFailure>>>,
+    pending_persistence: Arc<Mutex<HashMap<String, Option<Vec<ReplicationFailure>>>>>,
+    persistence_wakeup: SyncSender<()>,
 }
 
 impl ReplicationFailureStore {
     pub fn new(storage_root: PathBuf, max_failures_per_bucket: usize) -> Self {
+        let cache = Self::load_cache(&storage_root);
+        let pending_persistence: Arc<Mutex<HashMap<String, Option<Vec<ReplicationFailure>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (persistence_wakeup, receiver) = sync_channel(1);
+        let writer_root = storage_root.clone();
+        let writer_pending = pending_persistence.clone();
+        std::thread::Builder::new()
+            .name("replication-failure-writer".to_string())
+            .spawn(move || {
+                while receiver.recv().is_ok() {
+                    loop {
+                        let snapshots = {
+                            let mut pending = writer_pending.lock();
+                            if pending.is_empty() {
+                                break;
+                            }
+                            std::mem::take(&mut *pending)
+                        };
+                        for (bucket, failures) in snapshots {
+                            Self::persist_snapshot(
+                                &writer_root,
+                                max_failures_per_bucket,
+                                &bucket,
+                                failures.as_deref(),
+                            );
+                        }
+                    }
+                }
+            })
+            .expect("failed to start replication failure writer");
         Self {
             storage_root,
             max_failures_per_bucket,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(cache),
+            pending_persistence,
+            persistence_wakeup,
         }
+    }
+
+    fn load_cache(storage_root: &Path) -> HashMap<String, Vec<ReplicationFailure>> {
+        let mut cache = HashMap::new();
+        let buckets_root = storage_root.join(".myfsio.sys").join("buckets");
+        let Ok(entries) = std::fs::read_dir(buckets_root) else {
+            return cache;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let Some(bucket) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                continue;
+            };
+            let path = entry.path().join("replication_failures.json");
+            cache.insert(bucket, Self::load_path(&path));
+        }
+        cache
+    }
+
+    fn load_path(path: &Path) -> Vec<ReplicationFailure> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        };
+        parsed
+            .get("failures")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default()
     }
 
     fn path(&self, bucket: &str) -> PathBuf {
@@ -150,30 +218,28 @@ impl ReplicationFailureStore {
 
     fn load_from_disk(&self, bucket: &str) -> Vec<ReplicationFailure> {
         let path = self.path(bucket);
-        if !path.exists() {
-            return Vec::new();
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let parsed: serde_json::Value = match serde_json::from_str(&text) {
-                    Ok(v) => v,
-                    Err(_) => return Vec::new(),
-                };
-                parsed
-                    .get("failures")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default()
-            }
-            Err(_) => Vec::new(),
-        }
+        Self::load_path(&path)
     }
 
-    fn save_to_disk(&self, bucket: &str, failures: &[ReplicationFailure]) {
-        let path = self.path(bucket);
+    fn persist_snapshot(
+        storage_root: &Path,
+        max_failures_per_bucket: usize,
+        bucket: &str,
+        failures: Option<&[ReplicationFailure]>,
+    ) {
+        let path = storage_root
+            .join(".myfsio.sys")
+            .join("buckets")
+            .join(bucket)
+            .join("replication_failures.json");
+        let Some(failures) = failures else {
+            let _ = std::fs::remove_file(path);
+            return;
+        };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let trimmed = &failures[..failures.len().min(self.max_failures_per_bucket)];
+        let trimmed = &failures[..failures.len().min(max_failures_per_bucket)];
         let data = serde_json::json!({ "failures": trimmed });
         let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
         let mut tmp = path.clone();
@@ -185,36 +251,45 @@ impl ReplicationFailureStore {
         }
     }
 
+    fn schedule_persistence(&self, bucket: &str, failures: Option<Vec<ReplicationFailure>>) {
+        self.pending_persistence
+            .lock()
+            .insert(bucket.to_string(), failures);
+        match self.persistence_wakeup.try_send(()) {
+            Ok(()) | Err(SyncTrySendError::Full(())) => {}
+            Err(SyncTrySendError::Disconnected(())) => {
+                tracing::error!("Replication failure persistence worker stopped");
+            }
+        }
+    }
+
     fn mutate<R>(
         &self,
         bucket: &str,
         f: impl FnOnce(&mut Vec<ReplicationFailure>) -> (bool, R),
     ) -> R {
-        let mut cache = self.cache.lock();
-        if !cache.contains_key(bucket) {
-            let loaded = self.load_from_disk(bucket);
-            cache.insert(bucket.to_string(), loaded);
-        }
-        let failures = cache
-            .get_mut(bucket)
-            .expect("bucket entry was just inserted");
-        let (changed, result) = f(failures);
-        if changed {
-            if failures.len() > self.max_failures_per_bucket {
+        let (result, snapshot) = {
+            let mut cache = self.cache.lock();
+            let failures = cache.entry(bucket.to_string()).or_default();
+            let (changed, result) = f(failures);
+            if changed && failures.len() > self.max_failures_per_bucket {
                 failures.truncate(self.max_failures_per_bucket);
             }
-            self.save_to_disk(bucket, failures);
+            let snapshot = changed.then(|| failures.clone());
+            (result, snapshot)
+        };
+        if let Some(snapshot) = snapshot {
+            self.schedule_persistence(bucket, Some(snapshot));
         }
         result
     }
 
     pub fn load(&self, bucket: &str) -> Vec<ReplicationFailure> {
-        let mut cache = self.cache.lock();
-        if let Some(existing) = cache.get(bucket) {
+        if let Some(existing) = self.cache.lock().get(bucket).cloned() {
             return existing.clone();
         }
         let loaded = self.load_from_disk(bucket);
-        cache.insert(bucket.to_string(), loaded.clone());
+        self.cache.lock().insert(bucket.to_string(), loaded.clone());
         loaded
     }
 
@@ -223,8 +298,10 @@ impl ReplicationFailureStore {
             .into_iter()
             .take(self.max_failures_per_bucket)
             .collect();
-        self.save_to_disk(bucket, &trimmed);
-        self.cache.lock().insert(bucket.to_string(), trimmed);
+        self.cache
+            .lock()
+            .insert(bucket.to_string(), trimmed.clone());
+        self.schedule_persistence(bucket, Some(trimmed));
     }
 
     pub fn add(&self, bucket: &str, failure: ReplicationFailure) {
@@ -233,18 +310,61 @@ impl ReplicationFailureStore {
                 .iter_mut()
                 .find(|f| f.object_key == failure.object_key)
             {
+                let action_changed = existing.action != failure.action;
                 existing.failure_count += 1;
                 existing.timestamp = failure.timestamp;
                 existing.error_message = failure.error_message.clone();
                 existing.last_error_code = failure.last_error_code.clone();
+                existing.action = failure.action.clone();
                 if failure.pending_upload_id.is_some() {
                     existing.pending_upload_id = failure.pending_upload_id.clone();
                     existing.pending_source_size = failure.pending_source_size;
                     existing.pending_source_etag = failure.pending_source_etag.clone();
                     existing.pending_part_size = failure.pending_part_size;
+                } else if action_changed || failure.action == "delete" {
+                    existing.pending_upload_id = None;
+                    existing.pending_source_size = None;
+                    existing.pending_source_etag = None;
+                    existing.pending_part_size = None;
                 }
             } else {
                 failures.insert(0, failure);
+            }
+            (true, ())
+        });
+    }
+
+    pub fn record_queued_delete(&self, bucket: &str, object_key: &str) {
+        self.mutate(bucket, |failures| {
+            if let Some(existing) = failures
+                .iter_mut()
+                .find(|failure| failure.object_key == object_key)
+            {
+                existing.timestamp = now_secs();
+                existing.error_message = "replication delete queued".to_string();
+                existing.action = "delete".to_string();
+                existing.last_error_code = Some("ReplicationQueued".to_string());
+                existing.pending_upload_id = None;
+                existing.pending_source_size = None;
+                existing.pending_source_etag = None;
+                existing.pending_part_size = None;
+            } else {
+                failures.insert(
+                    0,
+                    ReplicationFailure {
+                        object_key: object_key.to_string(),
+                        error_message: "replication delete queued".to_string(),
+                        timestamp: now_secs(),
+                        failure_count: 0,
+                        bucket_name: bucket.to_string(),
+                        action: "delete".to_string(),
+                        last_error_code: Some("ReplicationQueued".to_string()),
+                        pending_upload_id: None,
+                        pending_source_size: None,
+                        pending_source_etag: None,
+                        pending_part_size: None,
+                    },
+                );
             }
             (true, ())
         });
@@ -281,9 +401,8 @@ impl ReplicationFailureStore {
     }
 
     pub fn clear(&self, bucket: &str) {
-        self.cache.lock().remove(bucket);
-        let path = self.path(bucket);
-        let _ = std::fs::remove_file(path);
+        self.cache.lock().insert(bucket.to_string(), Vec::new());
+        self.schedule_persistence(bucket, None);
     }
 
     pub fn get(&self, bucket: &str, object_key: &str) -> Option<ReplicationFailure> {
@@ -488,6 +607,15 @@ impl Drop for StatusLockHandle {
     }
 }
 
+struct ReplicationWork {
+    bucket: String,
+    key: String,
+    action: String,
+    rule: ReplicationRule,
+    connection: RemoteConnection,
+    run: Option<Arc<BatchRun>>,
+}
+
 pub struct ReplicationManager {
     storage: Arc<FsStorageBackend>,
     connections: Arc<ConnectionStore>,
@@ -498,7 +626,12 @@ pub struct ReplicationManager {
     streaming_threshold_bytes: u64,
     part_stall_timeout: Duration,
     pub failures: Arc<ReplicationFailureStore>,
-    semaphore: Arc<Semaphore>,
+    work_sender: mpsc::Sender<ReplicationWork>,
+    work_receiver: Mutex<Option<mpsc::Receiver<ReplicationWork>>>,
+    worker_count: usize,
+    workers_started: AtomicBool,
+    queue_depth: Arc<AtomicUsize>,
+    queue_overflow_total: Arc<AtomicU64>,
     allow_internal_endpoints: bool,
     http_client: aws_smithy_runtime_api::client::http::SharedHttpClient,
     status_locks_handle: StatusLocksMap,
@@ -526,6 +659,8 @@ impl ReplicationManager {
         max_failures_per_bucket: usize,
         allow_internal_endpoints: bool,
         part_stall_timeout: Duration,
+        replication_concurrency: usize,
+        replication_queue_capacity: usize,
     ) -> Self {
         let rules_path = storage_root
             .join(".myfsio.sys")
@@ -542,6 +677,8 @@ impl ReplicationManager {
             max_attempts: max_retries,
         };
         let http_client = crate::services::safe_http_client::build(allow_internal_endpoints);
+        let worker_count = replication_concurrency.max(1);
+        let (work_sender, work_receiver) = mpsc::channel(replication_queue_capacity.max(1));
         Self {
             storage,
             connections,
@@ -552,7 +689,12 @@ impl ReplicationManager {
             streaming_threshold_bytes,
             part_stall_timeout,
             failures,
-            semaphore: Arc::new(Semaphore::new(4)),
+            work_sender,
+            work_receiver: Mutex::new(Some(work_receiver)),
+            worker_count,
+            workers_started: AtomicBool::new(false),
+            queue_depth: Arc::new(AtomicUsize::new(0)),
+            queue_overflow_total: Arc::new(AtomicU64::new(0)),
             allow_internal_endpoints,
             http_client,
             status_locks_handle: Arc::new(Mutex::new(HashMap::new())),
@@ -565,6 +707,175 @@ impl ReplicationManager {
             healer_last_pass_at: Arc::new(Mutex::new(None)),
             healer_last_pass_healed: Arc::new(AtomicUsize::new(0)),
             healer_last_pass_skipped: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn start_workers(self: Arc<Self>) {
+        if self.workers_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let receiver = self
+            .work_receiver
+            .lock()
+            .take()
+            .expect("replication workers already started");
+        let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+        for _ in 0..self.worker_count {
+            let manager = self.clone();
+            let receiver = receiver.clone();
+            tokio::spawn(async move {
+                loop {
+                    let work = {
+                        let mut receiver = receiver.lock().await;
+                        receiver.recv().await
+                    };
+                    let Some(work) = work else {
+                        break;
+                    };
+                    manager.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                    manager.clone().execute_work(work).await;
+                }
+            });
+        }
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            self.reconcile_pending_objects().await;
+        });
+    }
+
+    async fn execute_work(self: Arc<Self>, work: ReplicationWork) {
+        let mut guard = InFlightGuard::enter(
+            work.run.clone(),
+            work.run.as_ref().map(|_| self.clone()),
+            self.live_in_flight.clone(),
+            self.live_replicated_total.clone(),
+            self.live_failed_total.clone(),
+        );
+        let outcome = self
+            .replicate_task(
+                &work.bucket,
+                &work.key,
+                &work.rule,
+                &work.connection,
+                &work.action,
+            )
+            .await;
+        if let Some(run) = work.run.as_ref() {
+            *run.last_object.lock() = Some(work.key);
+        }
+        guard.complete(outcome);
+    }
+
+    fn enqueue_work(&self, work: ReplicationWork) -> bool {
+        self.queue_depth.fetch_add(1, Ordering::Relaxed);
+        match self.work_sender.try_send(work) {
+            Ok(()) => true,
+            Err(TrySendError::Full(work)) | Err(TrySendError::Closed(work)) => {
+                self.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                self.queue_overflow_total.fetch_add(1, Ordering::Relaxed);
+                self.record_queue_overflow(work);
+                false
+            }
+        }
+    }
+
+    fn record_queue_overflow(&self, work: ReplicationWork) {
+        self.failures.add(
+            &work.bucket,
+            ReplicationFailure {
+                object_key: work.key.clone(),
+                error_message: "replication work queue is full".to_string(),
+                timestamp: now_secs(),
+                failure_count: 1,
+                bucket_name: work.bucket.clone(),
+                action: work.action,
+                last_error_code: Some("ReplicationQueueFull".to_string()),
+                pending_upload_id: None,
+                pending_source_size: None,
+                pending_source_etag: None,
+                pending_part_size: None,
+            },
+        );
+        if let Some(run) = work.run {
+            *run.last_object.lock() = Some(work.key);
+            run.failed.fetch_add(1, Ordering::Relaxed);
+            self.maybe_finalize_run(&run);
+        }
+    }
+
+    async fn reconcile_pending_objects(&self) {
+        for rule in self.list_rules().into_iter().filter(|rule| rule.enabled) {
+            let Some(connection) = self.connections.get(&rule.target_connection_id) else {
+                continue;
+            };
+            let mut continuation_token = None;
+            loop {
+                let page = match self
+                    .storage
+                    .list_objects(
+                        &rule.bucket_name,
+                        &ListParams {
+                            max_keys: 1000,
+                            continuation_token: continuation_token.clone(),
+                            prefix: rule.filter_prefix.clone(),
+                            start_after: None,
+                        },
+                    )
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Replication startup reconciliation failed to list {}: {}",
+                            rule.bucket_name,
+                            error
+                        );
+                        break;
+                    }
+                };
+                let is_truncated = page.is_truncated;
+                let next_token = page.next_continuation_token.clone();
+                for object in page.objects {
+                    let metadata = match self
+                        .storage
+                        .get_object_metadata(&rule.bucket_name, &object.key)
+                        .await
+                    {
+                        Ok(metadata) => metadata,
+                        Err(error) => {
+                            tracing::debug!(
+                                "Replication reconciliation skipped metadata for {}/{}: {}",
+                                rule.bucket_name,
+                                object.key,
+                                error
+                            );
+                            continue;
+                        }
+                    };
+                    let status = metadata.get(REPLICATION_STATUS_KEY);
+                    if status.is_some_and(|status| status != REPLICATION_STATUS_PENDING) {
+                        continue;
+                    }
+                    if !self.enqueue_work(ReplicationWork {
+                        bucket: rule.bucket_name.clone(),
+                        key: object.key,
+                        action: "write".to_string(),
+                        rule: rule.clone(),
+                        connection: connection.clone(),
+                        run: None,
+                    }) {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                if !is_truncated {
+                    break;
+                }
+                continuation_token = next_token;
+                if continuation_token.is_none() {
+                    break;
+                }
+            }
         }
     }
 
@@ -690,31 +1001,16 @@ impl ReplicationManager {
                 return;
             }
         };
-        let permit = match self.semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                let sem = self.semaphore.clone();
-                match sem.acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                }
-            }
-        };
-        let manager = self.clone();
-        let guard = InFlightGuard::enter(
-            None,
-            None,
-            self.live_in_flight.clone(),
-            self.live_replicated_total.clone(),
-            self.live_failed_total.clone(),
-        );
-        tokio::spawn(async move {
-            let _permit = permit;
-            let mut guard = guard;
-            let outcome = manager
-                .replicate_task(&bucket, &key, &rule, &connection, &action)
-                .await;
-            guard.complete(outcome);
+        if action == "delete" {
+            self.failures.record_queued_delete(&bucket, &key);
+        }
+        self.enqueue_work(ReplicationWork {
+            bucket,
+            key,
+            action,
+            rule,
+            connection,
+            run: None,
         });
     }
 
@@ -726,41 +1022,13 @@ impl ReplicationManager {
         rule: ReplicationRule,
         connection: RemoteConnection,
     ) {
-        let permit = match self.semaphore.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                let sem = self.semaphore.clone();
-                match sem.acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        run.failed.fetch_add(1, Ordering::Relaxed);
-                        self.maybe_finalize_run(&run);
-                        return;
-                    }
-                }
-            }
-        };
-        let manager = self.clone();
-        let run_for_task = run.clone();
-        let guard = InFlightGuard::enter(
-            Some(run.clone()),
-            Some(self.clone()),
-            self.live_in_flight.clone(),
-            self.live_replicated_total.clone(),
-            self.live_failed_total.clone(),
-        );
-        let bucket = run_for_task.bucket.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let mut guard = guard;
-            let outcome = manager
-                .replicate_task(&bucket, &key, &rule, &connection, &action)
-                .await;
-            {
-                let mut last = run_for_task.last_object.lock();
-                *last = Some(key.clone());
-            }
-            guard.complete(outcome);
+        self.enqueue_work(ReplicationWork {
+            bucket: run.bucket.clone(),
+            key,
+            action,
+            rule,
+            connection,
+            run: Some(run),
         });
     }
 
@@ -785,7 +1053,7 @@ impl ReplicationManager {
         }
     }
 
-    async fn replicate_existing_objects_with_run(
+    async fn sync_existing_objects_with_run(
         self: Arc<Self>,
         bucket: String,
         run: Arc<BatchRun>,
@@ -922,7 +1190,7 @@ impl ReplicationManager {
         let manager = self.clone();
         tokio::spawn(async move {
             let submitted = manager
-                .replicate_existing_objects_with_run(bucket.clone(), run)
+                .sync_existing_objects_with_run(bucket.clone(), run)
                 .await;
             if submitted > 0 {
                 tracing::info!(
@@ -950,8 +1218,7 @@ impl ReplicationManager {
 
         if rule_requires_inbound_ak(&rule.mode) {
             if let Some(registry) = self.site_registry.as_ref() {
-                if let Some(peer) =
-                    registry.find_peer_by_connection_id(&rule.target_connection_id)
+                if let Some(peer) = registry.find_peer_by_connection_id(&rule.target_connection_id)
                 {
                     let ak_set = peer
                         .peer_inbound_access_key
@@ -1090,8 +1357,7 @@ impl ReplicationManager {
             .get_object_metadata(bucket, object_key)
             .await
             .unwrap_or_default();
-        let segmented =
-            stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
+        let segmented = stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
         let (src_path, _materialized_guard) = if segmented {
             match self
                 .storage
@@ -1295,16 +1561,20 @@ impl ReplicationManager {
             Err(err) => {
                 let code = err.code.clone();
                 let clears_pending = err.clears_pending;
-                let (pending_upload_id, pending_source_size, pending_source_etag, pending_part_size) =
-                    match err.pending_mpu.clone() {
-                        Some(p) => (
-                            Some(p.upload_id),
-                            Some(p.source_size),
-                            Some(p.source_etag),
-                            Some(p.part_size),
-                        ),
-                        None => (None, None, None, None),
-                    };
+                let (
+                    pending_upload_id,
+                    pending_source_size,
+                    pending_source_etag,
+                    pending_part_size,
+                ) = match err.pending_mpu.clone() {
+                    Some(p) => (
+                        Some(p.upload_id),
+                        Some(p.source_size),
+                        Some(p.source_etag),
+                        Some(p.part_size),
+                    ),
+                    None => (None, None, None, None),
+                };
                 let msg = err.to_string();
                 tracing::error!("Replication failed {}/{}: {}", bucket, object_key, msg);
                 if clears_pending {
@@ -1507,6 +1777,14 @@ impl ReplicationManager {
         self.live_failed_total.load(Ordering::Relaxed)
     }
 
+    pub fn queue_depth(&self) -> usize {
+        self.queue_depth.load(Ordering::Relaxed)
+    }
+
+    pub fn queue_overflow_total(&self) -> u64 {
+        self.queue_overflow_total.load(Ordering::Relaxed)
+    }
+
     pub fn healer_status(&self) -> HealerStatus {
         HealerStatus {
             running: self.healer_running.load(Ordering::Relaxed),
@@ -1608,7 +1886,9 @@ impl ReplicationManager {
                 healed += 1;
             }
         }
-        self.healer_last_pass_healed.store(healed, Ordering::Relaxed);
+        self.reconcile_pending_objects().await;
+        self.healer_last_pass_healed
+            .store(healed, Ordering::Relaxed);
         self.healer_last_pass_skipped
             .store(skipped, Ordering::Relaxed);
         *self.healer_last_pass_at.lock() = Some(now_secs());
@@ -1758,8 +2038,16 @@ async fn upload_object(
         )
         .await
     } else {
-        upload_object_single(client, bucket, key, path, file_size, streaming_threshold, obj_meta)
-            .await
+        upload_object_single(
+            client,
+            bucket,
+            key,
+            path,
+            file_size,
+            streaming_threshold,
+            obj_meta,
+        )
+        .await
     }
 }
 
@@ -1788,13 +2076,15 @@ async fn upload_object_single(
                 clears_pending: false,
             })?
     } else {
-        let bytes = tokio::fs::read(path).await.map_err(|e| ReplicationUploadError {
-            code: None,
-            message: format!("failed to read {}: {}", path.display(), e),
-            is_no_such_bucket: false,
-            pending_mpu: None,
-            clears_pending: false,
-        })?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| ReplicationUploadError {
+                code: None,
+                message: format!("failed to read {}: {}", path.display(), e),
+                is_no_such_bucket: false,
+                pending_mpu: None,
+                clears_pending: false,
+            })?;
         ByteStream::from(bytes)
     };
 
@@ -2403,8 +2693,9 @@ async fn upload_one_part(
 
     let send_fut = async {
         if lower_sdk_retry {
-            let override_cfg = aws_sdk_s3::config::Builder::default()
-                .retry_config(aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(1));
+            let override_cfg = aws_sdk_s3::config::Builder::default().retry_config(
+                aws_smithy_types::retry::RetryConfig::standard().with_max_attempts(1),
+            );
             req.customize()
                 .config_override(override_cfg)
                 .send()
@@ -2464,10 +2755,10 @@ async fn build_progress_body(
     use futures::stream::TryStreamExt;
     let framed = stream.map_ok(http_body::Frame::data);
     let body = http_body_util::StreamBody::new(framed);
-    let mapped = http_body_util::BodyExt::map_err(
-        body,
-        |e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) },
-    );
+    let mapped =
+        http_body_util::BodyExt::map_err(body, |e| -> Box<dyn std::error::Error + Send + Sync> {
+            Box::new(e)
+        });
     let sdk_body = aws_smithy_types::body::SdkBody::from_body_1_x(mapped);
     Ok(ByteStream::new(sdk_body))
 }
@@ -2837,6 +3128,8 @@ mod tests {
             5000,
             true,
             Duration::from_secs(300),
+            4,
+            10_000,
         );
         std::mem::forget(tmp);
         manager
@@ -2870,7 +3163,10 @@ mod tests {
 
     #[test]
     fn is_transient_classifies_transport_errors_as_retryable() {
-        assert!(is_transient_upload_error(&upload_err(None, "connection reset")));
+        assert!(is_transient_upload_error(&upload_err(
+            None,
+            "connection reset"
+        )));
     }
 
     #[test]
@@ -2944,7 +3240,10 @@ mod tests {
     fn failure_store_preserves_pending_upload_id_when_new_failure_has_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
-        store.add("b", failure_with_pending("k", "upload-1", 2048, "etag-1", 256));
+        store.add(
+            "b",
+            failure_with_pending("k", "upload-1", 2048, "etag-1", 256),
+        );
         store.add("b", empty_failure("k"));
         let got = store.get("b", "k").expect("present");
         assert_eq!(got.pending_upload_id.as_deref(), Some("upload-1"));
@@ -2958,13 +3257,38 @@ mod tests {
     fn failure_store_overwrites_pending_upload_id_and_identity_when_new_failure_has_one() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
-        store.add("b", failure_with_pending("k", "upload-1", 2048, "etag-1", 256));
-        store.add("b", failure_with_pending("k", "upload-2", 4096, "etag-2", 512));
+        store.add(
+            "b",
+            failure_with_pending("k", "upload-1", 2048, "etag-1", 256),
+        );
+        store.add(
+            "b",
+            failure_with_pending("k", "upload-2", 4096, "etag-2", 512),
+        );
         let got = store.get("b", "k").expect("present");
         assert_eq!(got.pending_upload_id.as_deref(), Some("upload-2"));
         assert_eq!(got.pending_source_size, Some(4096));
         assert_eq!(got.pending_source_etag.as_deref(), Some("etag-2"));
         assert_eq!(got.pending_part_size, Some(512));
+    }
+
+    #[test]
+    fn failure_store_updates_action_and_clears_write_resume_for_delete() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
+        store.add(
+            "b",
+            failure_with_pending("k", "upload-1", 2048, "etag-1", 256),
+        );
+        let mut delete = empty_failure("k");
+        delete.action = "delete".to_string();
+        store.add("b", delete);
+        let got = store.get("b", "k").expect("present");
+        assert_eq!(got.action, "delete");
+        assert!(got.pending_upload_id.is_none());
+        assert!(got.pending_source_size.is_none());
+        assert!(got.pending_source_etag.is_none());
+        assert!(got.pending_part_size.is_none());
     }
 
     #[test]
@@ -3110,7 +3434,12 @@ mod tests {
         let huge: u64 = 200 * 1024 * 1024 * 1024;
         let part_size = compute_part_size(huge, &tuning);
         let parts = huge.div_ceil(part_size);
-        assert!(parts <= MULTIPART_MAX_PARTS, "{} > {}", parts, MULTIPART_MAX_PARTS);
+        assert!(
+            parts <= MULTIPART_MAX_PARTS,
+            "{} > {}",
+            parts,
+            MULTIPART_MAX_PARTS
+        );
         assert!(part_size > 5 * 1024 * 1024);
     }
 

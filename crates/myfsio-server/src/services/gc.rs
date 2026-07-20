@@ -81,11 +81,11 @@ impl GcService {
 
     pub async fn status(&self) -> Value {
         let running = self.running.load(Ordering::SeqCst);
-        let scan_elapsed_seconds = self
-            .started_at
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|started| started.elapsed().as_secs_f64()));
+        let scan_elapsed_seconds = self.started_at.lock().ok().and_then(|guard| {
+            guard
+                .as_ref()
+                .map(|started| started.elapsed().as_secs_f64())
+        });
         json!({
             "enabled": true,
             "running": running,

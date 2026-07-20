@@ -1,11 +1,12 @@
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use hkdf::Hkdf;
+use md5::{Digest, Md5};
 use rand::RngCore;
 use sha2::Sha256;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thiserror::Error;
 
 const DEFAULT_CHUNK_SIZE: usize = 65536;
@@ -27,7 +28,7 @@ pub enum CryptoError {
     HkdfFailed(String),
 }
 
-fn read_exact_chunk(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_exact_chunk<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         match reader.read(&mut buf[filled..]) {
@@ -101,11 +102,114 @@ pub fn encrypt_stream_chunked(
     Ok(chunk_index)
 }
 
-pub fn decrypt_stream_chunked(
-    input_path: &Path,
+pub struct ReaderEncryptOutcome {
+    pub plaintext_size: u64,
+    pub chunk_count: u32,
+    pub plaintext_md5_hex: String,
+}
+
+pub fn encrypt_reader_chunked(
+    reader: &mut dyn Read,
     output_path: &Path,
     key: &[u8],
     base_nonce: &[u8],
+    chunk_size: Option<usize>,
+) -> Result<ReaderEncryptOutcome, CryptoError> {
+    if key.len() != 32 {
+        return Err(CryptoError::InvalidKeySize(key.len()));
+    }
+    if base_nonce.len() != 12 {
+        return Err(CryptoError::InvalidNonceSize(base_nonce.len()));
+    }
+
+    let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
+    let key_arr: [u8; 32] = key.try_into().unwrap();
+    let nonce_arr: [u8; 12] = base_nonce.try_into().unwrap();
+    let cipher = Aes256Gcm::new(&key_arr.into());
+
+    let mut outfile = File::create(output_path)?;
+    outfile.write_all(&[0u8; 4])?;
+
+    let mut hasher = Md5::new();
+    let mut buf = vec![0u8; chunk_size];
+    let mut chunk_index: u32 = 0;
+    let mut plaintext_size: u64 = 0;
+
+    loop {
+        let n = read_exact_chunk(reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        plaintext_size += n as u64;
+
+        let nonce_bytes = derive_chunk_nonce(&nonce_arr, chunk_index)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let encrypted = cipher
+            .encrypt(nonce, &buf[..n])
+            .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
+
+        let size = encrypted.len() as u32;
+        outfile.write_all(&size.to_be_bytes())?;
+        outfile.write_all(&encrypted)?;
+        chunk_index += 1;
+    }
+
+    outfile.seek(SeekFrom::Start(0))?;
+    outfile.write_all(&chunk_index.to_be_bytes())?;
+    outfile.sync_all()?;
+
+    Ok(ReaderEncryptOutcome {
+        plaintext_size,
+        chunk_count: chunk_index,
+        plaintext_md5_hex: format!("{:x}", hasher.finalize()),
+    })
+}
+
+pub type DecryptSink<'a> = &'a mut dyn FnMut(&[u8]) -> std::io::Result<bool>;
+
+fn decrypt_chunked_full_core(
+    file: &mut File,
+    base_offset: u64,
+    key_arr: &[u8; 32],
+    nonce_arr: &[u8; 12],
+    sink: DecryptSink<'_>,
+) -> Result<u32, CryptoError> {
+    let cipher = Aes256Gcm::new(key_arr.into());
+    file.seek(SeekFrom::Start(base_offset))?;
+
+    let mut header = [0u8; HEADER_SIZE];
+    file.read_exact(&mut header)?;
+    let chunk_count = u32::from_be_bytes(header);
+
+    let mut size_buf = [0u8; HEADER_SIZE];
+    for chunk_index in 0..chunk_count {
+        file.read_exact(&mut size_buf)?;
+        let chunk_size = u32::from_be_bytes(size_buf) as usize;
+
+        let mut encrypted = vec![0u8; chunk_size];
+        file.read_exact(&mut encrypted)?;
+
+        let nonce_bytes = derive_chunk_nonce(nonce_arr, chunk_index)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let decrypted = cipher
+            .decrypt(nonce, encrypted.as_ref())
+            .map_err(|_| CryptoError::DecryptionFailed(chunk_index))?;
+
+        if !sink(&decrypted)? {
+            return Ok(chunk_index + 1);
+        }
+    }
+
+    Ok(chunk_count)
+}
+
+pub fn decrypt_stream_chunked_each(
+    input_path: &Path,
+    key: &[u8],
+    base_nonce: &[u8],
+    sink: DecryptSink<'_>,
 ) -> Result<u32, CryptoError> {
     if key.len() != 32 {
         return Err(CryptoError::InvalidKeySize(key.len()));
@@ -113,64 +217,46 @@ pub fn decrypt_stream_chunked(
     if base_nonce.len() != 12 {
         return Err(CryptoError::InvalidNonceSize(base_nonce.len()));
     }
-
     let key_arr: [u8; 32] = key.try_into().unwrap();
     let nonce_arr: [u8; 12] = base_nonce.try_into().unwrap();
-    let cipher = Aes256Gcm::new(&key_arr.into());
-
     let mut infile = File::open(input_path)?;
-    let mut outfile = File::create(output_path)?;
-
-    let mut header = [0u8; HEADER_SIZE];
-    infile.read_exact(&mut header)?;
-    let chunk_count = u32::from_be_bytes(header);
-
-    let mut size_buf = [0u8; HEADER_SIZE];
-    for chunk_index in 0..chunk_count {
-        infile.read_exact(&mut size_buf)?;
-        let chunk_size = u32::from_be_bytes(size_buf) as usize;
-
-        let mut encrypted = vec![0u8; chunk_size];
-        infile.read_exact(&mut encrypted)?;
-
-        let nonce_bytes = derive_chunk_nonce(&nonce_arr, chunk_index)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let decrypted = cipher
-            .decrypt(nonce, encrypted.as_ref())
-            .map_err(|_| CryptoError::DecryptionFailed(chunk_index))?;
-
-        outfile.write_all(&decrypted)?;
-    }
-
-    Ok(chunk_count)
+    decrypt_chunked_full_core(&mut infile, 0, &key_arr, &nonce_arr, sink)
 }
 
-const GCM_TAG_LEN: usize = 16;
-
-pub fn decrypt_stream_chunked_range(
+pub fn decrypt_stream_chunked(
     input_path: &Path,
     output_path: &Path,
     key: &[u8],
     base_nonce: &[u8],
+) -> Result<u32, CryptoError> {
+    let mut outfile = File::create(output_path)?;
+    let mut sink = |data: &[u8]| -> std::io::Result<bool> {
+        outfile.write_all(data)?;
+        Ok(true)
+    };
+    decrypt_stream_chunked_each(input_path, key, base_nonce, &mut sink)
+}
+
+const GCM_TAG_LEN: usize = 16;
+
+#[allow(clippy::too_many_arguments)]
+fn decrypt_chunked_range_core(
+    file: &mut File,
+    base_offset: u64,
+    key_arr: &[u8; 32],
+    nonce_arr: &[u8; 12],
     chunk_plain_size: usize,
     plaintext_size: u64,
     plain_start: u64,
     plain_end_inclusive: u64,
+    sink: DecryptSink<'_>,
 ) -> Result<u64, CryptoError> {
-    if key.len() != 32 {
-        return Err(CryptoError::InvalidKeySize(key.len()));
-    }
-    if base_nonce.len() != 12 {
-        return Err(CryptoError::InvalidNonceSize(base_nonce.len()));
-    }
     if chunk_plain_size == 0 {
         return Err(CryptoError::EncryptionFailed(
             "chunk_plain_size must be > 0".into(),
         ));
     }
     if plaintext_size == 0 {
-        let _ = File::create(output_path)?;
         return Ok(0);
     }
     if plain_start > plain_end_inclusive || plain_end_inclusive >= plaintext_size {
@@ -180,9 +266,7 @@ pub fn decrypt_stream_chunked_range(
         )));
     }
 
-    let key_arr: [u8; 32] = key.try_into().unwrap();
-    let nonce_arr: [u8; 12] = base_nonce.try_into().unwrap();
-    let cipher = Aes256Gcm::new(&key_arr.into());
+    let cipher = Aes256Gcm::new(key_arr.into());
 
     let n = chunk_plain_size as u64;
     let first_chunk = (plain_start / n) as u32;
@@ -190,10 +274,9 @@ pub fn decrypt_stream_chunked_range(
     let total_chunks = plaintext_size.div_ceil(n) as u32;
     let final_chunk_plain = plaintext_size - (total_chunks as u64 - 1) * n;
 
-    let mut infile = File::open(input_path)?;
-
+    file.seek(SeekFrom::Start(base_offset))?;
     let mut header = [0u8; HEADER_SIZE];
-    infile.read_exact(&mut header)?;
+    file.read_exact(&mut header)?;
     let stored_chunk_count = u32::from_be_bytes(header);
     if stored_chunk_count != total_chunks {
         return Err(CryptoError::EncryptionFailed(format!(
@@ -202,17 +285,15 @@ pub fn decrypt_stream_chunked_range(
         )));
     }
 
-    let mut outfile = File::create(output_path)?;
-
     let stride = n + GCM_TAG_LEN as u64 + HEADER_SIZE as u64;
-    let first_offset = HEADER_SIZE as u64 + first_chunk as u64 * stride;
-    infile.seek(SeekFrom::Start(first_offset))?;
+    let first_offset = base_offset + HEADER_SIZE as u64 + first_chunk as u64 * stride;
+    file.seek(SeekFrom::Start(first_offset))?;
 
     let mut size_buf = [0u8; HEADER_SIZE];
     let mut bytes_written: u64 = 0;
 
     for chunk_index in first_chunk..=last_chunk {
-        infile.read_exact(&mut size_buf)?;
+        file.read_exact(&mut size_buf)?;
         let ct_len = u32::from_be_bytes(size_buf) as usize;
 
         let expected_plain = if chunk_index + 1 == total_chunks {
@@ -229,9 +310,9 @@ pub fn decrypt_stream_chunked_range(
         }
 
         let mut encrypted = vec![0u8; ct_len];
-        infile.read_exact(&mut encrypted)?;
+        file.read_exact(&mut encrypted)?;
 
-        let nonce_bytes = derive_chunk_nonce(&nonce_arr, chunk_index)?;
+        let nonce_bytes = derive_chunk_nonce(nonce_arr, chunk_index)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let decrypted = cipher
             .decrypt(nonce, encrypted.as_ref())
@@ -245,12 +326,78 @@ pub fn decrypt_stream_chunked_range(
         let slice_end_local = (slice_end - chunk_plain_start) as usize;
 
         if slice_end_local > slice_start {
-            outfile.write_all(&decrypted[slice_start..slice_end_local])?;
             bytes_written += (slice_end_local - slice_start) as u64;
+            if !sink(&decrypted[slice_start..slice_end_local])? {
+                return Ok(bytes_written);
+            }
         }
     }
 
     Ok(bytes_written)
+}
+
+fn validated_keys(key: &[u8], base_nonce: &[u8]) -> Result<([u8; 32], [u8; 12]), CryptoError> {
+    if key.len() != 32 {
+        return Err(CryptoError::InvalidKeySize(key.len()));
+    }
+    if base_nonce.len() != 12 {
+        return Err(CryptoError::InvalidNonceSize(base_nonce.len()));
+    }
+    Ok((key.try_into().unwrap(), base_nonce.try_into().unwrap()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decrypt_stream_chunked_range_each(
+    input_path: &Path,
+    key: &[u8],
+    base_nonce: &[u8],
+    chunk_plain_size: usize,
+    plaintext_size: u64,
+    plain_start: u64,
+    plain_end_inclusive: u64,
+    sink: DecryptSink<'_>,
+) -> Result<u64, CryptoError> {
+    let (key_arr, nonce_arr) = validated_keys(key, base_nonce)?;
+    let mut infile = File::open(input_path)?;
+    decrypt_chunked_range_core(
+        &mut infile,
+        0,
+        &key_arr,
+        &nonce_arr,
+        chunk_plain_size,
+        plaintext_size,
+        plain_start,
+        plain_end_inclusive,
+        sink,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decrypt_stream_chunked_range(
+    input_path: &Path,
+    output_path: &Path,
+    key: &[u8],
+    base_nonce: &[u8],
+    chunk_plain_size: usize,
+    plaintext_size: u64,
+    plain_start: u64,
+    plain_end_inclusive: u64,
+) -> Result<u64, CryptoError> {
+    let mut outfile = File::create(output_path)?;
+    let mut sink = |data: &[u8]| -> std::io::Result<bool> {
+        outfile.write_all(data)?;
+        Ok(true)
+    };
+    decrypt_stream_chunked_range_each(
+        input_path,
+        key,
+        base_nonce,
+        chunk_plain_size,
+        plaintext_size,
+        plain_start,
+        plain_end_inclusive,
+        &mut sink,
+    )
 }
 
 pub const PART_BLOCK_PLAIN_SIZE_LEN: usize = 8;
@@ -341,24 +488,15 @@ pub fn read_part_block_salt(
     block_offset: u64,
 ) -> Result<[u8; PART_BLOCK_SALT_LEN], CryptoError> {
     let mut f = File::open(object_path)?;
-    f.seek(SeekFrom::Start(block_offset + PART_BLOCK_PLAIN_SIZE_LEN as u64))?;
+    f.seek(SeekFrom::Start(
+        block_offset + PART_BLOCK_PLAIN_SIZE_LEN as u64,
+    ))?;
     let mut salt = [0u8; PART_BLOCK_SALT_LEN];
     f.read_exact(&mut salt)?;
     Ok(salt)
 }
 
-fn envelope_tmp_path(output_path: &Path) -> PathBuf {
-    let mut name = output_path.as_os_str().to_owned();
-    name.push(".env");
-    PathBuf::from(name)
-}
-
-fn extract_part_envelope(
-    object_path: &Path,
-    block_offset: u64,
-    block_len: u64,
-    env_tmp: &Path,
-) -> Result<(), CryptoError> {
+fn part_block_min_len_check(block_len: u64) -> Result<(), CryptoError> {
     let min_len = (PART_BLOCK_PREFIX_LEN + HEADER_SIZE) as u64;
     if block_len < min_len {
         return Err(CryptoError::EncryptionFailed(format!(
@@ -366,14 +504,28 @@ fn extract_part_envelope(
             block_len, min_len
         )));
     }
-    let mut f = File::open(object_path)?;
-    f.seek(SeekFrom::Start(block_offset + PART_BLOCK_PREFIX_LEN as u64))?;
-    let env_len = block_len - PART_BLOCK_PREFIX_LEN as u64;
-    let mut limited = f.take(env_len);
-    let mut out = File::create(env_tmp)?;
-    std::io::copy(&mut limited, &mut out)?;
-    out.flush()?;
     Ok(())
+}
+
+pub fn decrypt_part_block_each(
+    object_path: &Path,
+    block_offset: u64,
+    block_len: u64,
+    odk: &[u8; 32],
+    part_number: u32,
+    sink: DecryptSink<'_>,
+) -> Result<u32, CryptoError> {
+    part_block_min_len_check(block_len)?;
+    let salt = read_part_block_salt(object_path, block_offset)?;
+    let base_nonce = derive_part_base_nonce(odk, part_number, &salt)?;
+    let mut file = File::open(object_path)?;
+    decrypt_chunked_full_core(
+        &mut file,
+        block_offset + PART_BLOCK_PREFIX_LEN as u64,
+        odk,
+        &base_nonce,
+        sink,
+    )
 }
 
 pub fn decrypt_part_block(
@@ -384,14 +536,52 @@ pub fn decrypt_part_block(
     odk: &[u8; 32],
     part_number: u32,
 ) -> Result<u64, CryptoError> {
+    let mut outfile = File::create(output_path)?;
+    let mut written: u64 = 0;
+    let mut sink = |data: &[u8]| -> std::io::Result<bool> {
+        outfile.write_all(data)?;
+        written += data.len() as u64;
+        Ok(true)
+    };
+    decrypt_part_block_each(
+        object_path,
+        block_offset,
+        block_len,
+        odk,
+        part_number,
+        &mut sink,
+    )?;
+    Ok(written)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn decrypt_part_block_range_each(
+    object_path: &Path,
+    block_offset: u64,
+    block_len: u64,
+    odk: &[u8; 32],
+    part_number: u32,
+    chunk_plain_size: usize,
+    part_plaintext_size: u64,
+    plain_start: u64,
+    plain_end_inclusive: u64,
+    sink: DecryptSink<'_>,
+) -> Result<u64, CryptoError> {
+    part_block_min_len_check(block_len)?;
     let salt = read_part_block_salt(object_path, block_offset)?;
     let base_nonce = derive_part_base_nonce(odk, part_number, &salt)?;
-    let env_tmp = envelope_tmp_path(output_path);
-    extract_part_envelope(object_path, block_offset, block_len, &env_tmp)?;
-    let res = decrypt_stream_chunked(&env_tmp, output_path, odk, &base_nonce);
-    let _ = std::fs::remove_file(&env_tmp);
-    res?;
-    Ok(std::fs::metadata(output_path)?.len())
+    let mut file = File::open(object_path)?;
+    decrypt_chunked_range_core(
+        &mut file,
+        block_offset + PART_BLOCK_PREFIX_LEN as u64,
+        odk,
+        &base_nonce,
+        chunk_plain_size,
+        part_plaintext_size,
+        plain_start,
+        plain_end_inclusive,
+        sink,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -407,22 +597,23 @@ pub fn decrypt_part_block_range(
     plain_start: u64,
     plain_end_inclusive: u64,
 ) -> Result<u64, CryptoError> {
-    let salt = read_part_block_salt(object_path, block_offset)?;
-    let base_nonce = derive_part_base_nonce(odk, part_number, &salt)?;
-    let env_tmp = envelope_tmp_path(output_path);
-    extract_part_envelope(object_path, block_offset, block_len, &env_tmp)?;
-    let res = decrypt_stream_chunked_range(
-        &env_tmp,
-        output_path,
+    let mut outfile = File::create(output_path)?;
+    let mut sink = |data: &[u8]| -> std::io::Result<bool> {
+        outfile.write_all(data)?;
+        Ok(true)
+    };
+    decrypt_part_block_range_each(
+        object_path,
+        block_offset,
+        block_len,
         odk,
-        &base_nonce,
+        part_number,
         chunk_plain_size,
         part_plaintext_size,
         plain_start,
         plain_end_inclusive,
-    );
-    let _ = std::fs::remove_file(&env_tmp);
-    res
+        &mut sink,
+    )
 }
 
 pub async fn encrypt_stream_chunked_async(

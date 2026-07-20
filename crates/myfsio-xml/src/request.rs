@@ -78,14 +78,11 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
                             });
                         }
                         (Some(pn), None) => {
-                            return Err(format!(
-                                "Part {} is missing required ETag element",
-                                pn
-                            ));
+                            return Err(format!("Part {} is missing required ETag element", pn));
                         }
                         (None, _) => {
                             return Err(
-                                "Part element is missing required PartNumber element".to_string(),
+                                "Part element is missing required PartNumber element".to_string()
                             );
                         }
                     }
@@ -129,10 +126,7 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
                 if !first_element_seen {
                     first_element_seen = true;
                     if name != "Delete" {
-                        return Err(format!(
-                            "Expected <Delete> root element, found <{}>",
-                            name
-                        ));
+                        return Err(format!("Expected <Delete> root element, found <{}>", name));
                     }
                     saw_delete_root = true;
                 } else if name == "Object" {
@@ -146,10 +140,7 @@ pub fn parse_delete_objects(xml: &str) -> Result<DeleteObjectsRequest, String> {
                 if !first_element_seen {
                     first_element_seen = true;
                     if name != "Delete" {
-                        return Err(format!(
-                            "Expected <Delete> root element, found <{}>",
-                            name
-                        ));
+                        return Err(format!("Expected <Delete> root element, found <{}>", name));
                     }
                     saw_delete_root = true;
                 }
@@ -246,8 +237,8 @@ mod tests {
     #[test]
     fn test_parse_complete_multipart_rejects_part_without_etag() {
         let xml = r#"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ChecksumSHA256>aGVsbG8=</ChecksumSHA256></Part></CompleteMultipartUpload>"#;
-        let err = parse_complete_multipart_upload(xml)
-            .expect_err("Part without ETag must be rejected");
+        let err =
+            parse_complete_multipart_upload(xml).expect_err("Part without ETag must be rejected");
         assert!(
             err.contains("missing required ETag"),
             "expected ETag-missing error, got: {}",
@@ -257,7 +248,8 @@ mod tests {
 
     #[test]
     fn test_parse_complete_multipart_rejects_part_without_part_number() {
-        let xml = r#"<CompleteMultipartUpload><Part><ETag>"abc"</ETag></Part></CompleteMultipartUpload>"#;
+        let xml =
+            r#"<CompleteMultipartUpload><Part><ETag>"abc"</ETag></Part></CompleteMultipartUpload>"#;
         let err = parse_complete_multipart_upload(xml)
             .expect_err("Part without PartNumber must be rejected");
         assert!(

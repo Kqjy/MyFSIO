@@ -22,6 +22,19 @@ struct Cli {
                 lose any S3 policies; reissue separate creds for site_sync if needed."
     )]
     migrate_peer_creds: bool,
+    #[arg(
+        long,
+        help = "Convert aggregate _index.json metadata to per-object sidecar files (one-shot). \
+                Run with the server stopped. After migration, older myfsio-server binaries \
+                cannot read the migrated metadata."
+    )]
+    migrate_meta: bool,
+    #[arg(
+        long,
+        help = "Rebuild the persistent per-bucket listing index from object metadata (one-shot). \
+                Run with the server stopped. Safe to run anytime; the index is derived data."
+    )]
+    rebuild_listing: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -49,6 +62,14 @@ async fn main() {
         migrate_peer_credentials(&config);
         return;
     }
+    if cli.migrate_meta {
+        migrate_metadata_to_sidecars(&config);
+        return;
+    }
+    if cli.rebuild_listing {
+        rebuild_listing_indexes(&config);
+        return;
+    }
     if cli.check_config || cli.show_config {
         print_config_summary(&config);
         if cli.check_config {
@@ -71,6 +92,8 @@ async fn main() {
         Command::Serve => {}
     }
 
+    myfsio_server::handlers::ui_api::init_server_start_time();
+
     ensure_iam_bootstrap(&config);
     let bind_addr = config.bind_addr;
     let ui_bind_addr = config.ui_bind_addr;
@@ -81,6 +104,21 @@ async fn main() {
     }
     tracing::info!("Storage root: {}", config.storage_root.display());
     tracing::info!("Region: {}", config.region);
+    if myfsio_storage::fs_backend::MetadataLayout::from_env_str(&config.metadata_layout)
+        == myfsio_storage::fs_backend::MetadataLayout::Sidecar
+    {
+        tracing::info!(
+            "Metadata layout: sidecar (per-object). New and updated objects write \
+             .__myfsio_meta__*.json sidecar files that older myfsio-server binaries cannot \
+             read; do not downgrade after objects have been written. Set METADATA_LAYOUT=index \
+             to keep writing the legacy aggregate _index.json layout."
+        );
+    } else {
+        tracing::info!(
+            "Metadata layout: index (legacy aggregate _index.json). Existing sidecar files \
+             still take precedence when present."
+        );
+    }
     tracing::info!(
         "Encryption: {}, KMS: {}, GC: {}, Lifecycle: {}, Integrity: {}, Metrics History: {}, Operation Metrics: {}, UI: {}",
         config.encryption_enabled,
@@ -263,6 +301,9 @@ async fn main() {
         .expect("Failed to listen for Ctrl+C");
     tracing::info!("Shutdown signal received");
     shutdown.notify_waiters();
+    if let Some(metrics) = &state.metrics {
+        metrics.flush();
+    }
 
     if let Err(err) = api_task.await.unwrap_or(Ok(())) {
         tracing::error!("API server exited with error: {}", err);
@@ -271,6 +312,9 @@ async fn main() {
         if let Err(err) = task.await.unwrap_or(Ok(())) {
             tracing::error!("UI server exited with error: {}", err);
         }
+    }
+    if let Some(metrics) = &state.metrics {
+        metrics.flush();
     }
 
     for handle in bg_handles {
@@ -553,13 +597,12 @@ fn migrate_peer_credentials(config: &ServerConfig) {
         .collect();
 
     if candidates.is_empty() {
-        println!(
-            "No peer_inbound_access_key entries found in site registry; nothing to migrate."
-        );
+        println!("No peer_inbound_access_key entries found in site registry; nothing to migrate.");
         return;
     }
 
-    let iam = IamService::new_with_secret(config.iam_config_path.clone(), config.secret_key.clone());
+    let iam =
+        IamService::new_with_secret(config.iam_config_path.clone(), config.secret_key.clone());
 
     let mut migrated: Vec<String> = Vec::new();
     let mut already: Vec<String> = Vec::new();
@@ -614,6 +657,121 @@ fn migrate_peer_credentials(config: &ServerConfig) {
     }
     println!("============================================================");
     if !errors.is_empty() {
+        std::process::exit(1);
+    }
+}
+
+fn migrate_metadata_to_sidecars(config: &ServerConfig) {
+    use myfsio_storage::fs_backend::{FsStorageBackend, FsStorageBackendConfig, MetadataLayout};
+
+    println!("============================================================");
+    println!("METADATA MIGRATION: _index.json -> per-object sidecars");
+    println!("============================================================");
+    println!("Storage root: {}", config.storage_root.display());
+    println!("NOTE: run this with the server stopped; the migration does not");
+    println!("coordinate with a running myfsio-server process.");
+    println!();
+
+    let backend = FsStorageBackend::new_with_config(
+        config.storage_root.clone(),
+        FsStorageBackendConfig {
+            metadata_layout: MetadataLayout::Sidecar,
+            ..FsStorageBackendConfig::default()
+        },
+    );
+    let report = backend.migrate_meta_indexes_to_sidecars();
+
+    println!("Index files migrated : {}", report.index_files_migrated);
+    println!("Index files failed   : {}", report.index_files_failed);
+    println!("Entries written      : {}", report.entries_written);
+    println!(
+        "Entries skipped      : {} (sidecar already present)",
+        report.entries_skipped
+    );
+    if !report.failures.is_empty() {
+        println!();
+        println!("Failures ({}):", report.failures.len());
+        for failure in &report.failures {
+            println!("  - {}", failure);
+        }
+    }
+    println!();
+    println!("============================================================");
+    println!("WARNING");
+    println!("============================================================");
+    println!("- Object metadata now lives in per-object sidecar files");
+    println!("  (.__myfsio_meta__*.json) under .myfsio.sys/buckets/<bucket>/meta/.");
+    println!("- Older myfsio-server binaries CANNOT read sidecar metadata.");
+    println!("  Do not downgrade this deployment after migrating; there is no");
+    println!("  rollback tool.");
+    println!("- Cleanly migrated _index.json files were removed. Corrupt or");
+    println!("  partially migrated indexes were left in place (see failures");
+    println!("  above) and keep serving reads until fixed.");
+    println!("- Re-running this command is safe; already-migrated entries are");
+    println!("  skipped.");
+    println!("============================================================");
+    if !report.failures.is_empty() {
+        std::process::exit(1);
+    }
+}
+
+fn rebuild_listing_indexes(config: &ServerConfig) {
+    use myfsio_storage::fs_backend::{FsStorageBackend, FsStorageBackendConfig};
+
+    println!("============================================================");
+    println!("LISTING INDEX REBUILD");
+    println!("============================================================");
+    println!("Storage root: {}", config.storage_root.display());
+    println!("NOTE: run this with the server stopped; the rebuild does not");
+    println!("coordinate with a running myfsio-server process.");
+    println!();
+
+    let backend = FsStorageBackend::new_with_config(
+        config.storage_root.clone(),
+        FsStorageBackendConfig::default(),
+    );
+
+    let mut buckets: Vec<String> = Vec::new();
+    match std::fs::read_dir(&config.storage_root) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == ".myfsio.sys" {
+                    continue;
+                }
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    buckets.push(name);
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "Failed to read storage root {}: {}",
+                config.storage_root.display(),
+                err
+            );
+            std::process::exit(1);
+        }
+    }
+    buckets.sort();
+
+    let mut failures = 0usize;
+    for bucket in &buckets {
+        match backend.rebuild_listing_index_sync(bucket) {
+            Ok(count) => println!("  {bucket}: {count} entries"),
+            Err(err) => {
+                failures += 1;
+                eprintln!("  {bucket}: FAILED ({err})");
+            }
+        }
+    }
+    println!();
+    println!(
+        "Rebuilt {} of {} bucket listing indexes.",
+        buckets.len() - failures,
+        buckets.len()
+    );
+    if failures > 0 {
         std::process::exit(1);
     }
 }

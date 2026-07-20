@@ -166,14 +166,14 @@ fn render_metrics() {
         "app",
         &json!({
             "buckets": 0, "objects": 0, "storage_used": "0 B",
-            "uptime_days": 0, "versions": 0
+            "uptime_days": 0, "uptime_seconds": 0, "uptime_display": "0h 0m", "versions": 0
         }),
     );
     ctx.insert("has_issues", &false);
     ctx.insert(
         "summary",
         &json!({
-            "app": {"buckets": 0, "objects": 0, "storage_used": "0 B", "uptime_days": 0, "versions": 0},
+            "app": {"buckets": 0, "objects": 0, "storage_used": "0 B", "uptime_days": 0, "uptime_seconds": 0, "uptime_display": "0h 0m", "versions": 0},
             "cpu_percent": 0,
             "disk": {"free": 0, "percent": 0, "total": 0},
             "memory": {"percent": 0, "total": 0, "used": 0},

@@ -135,6 +135,7 @@ pub fn validate_object_key(
         if *part == ".__myfsio_dirobj__"
             || *part == ".__myfsio_keydata__"
             || *part == ".__myfsio_empty__"
+            || part.starts_with(".__myfsio_meta__")
             || part.starts_with("_index.json")
         {
             return Some("Object key segment uses a reserved internal name".to_string());
@@ -172,9 +173,7 @@ pub fn validate_bucket_name(bucket_name: &str) -> Option<String> {
     }
 
     if bucket_name.contains(".-") || bucket_name.contains("-.") {
-        return Some(
-            "Bucket name must not contain a period adjacent to a hyphen".to_string(),
-        );
+        return Some("Bucket name must not contain a period adjacent to a hyphen".to_string());
     }
 
     if IP_REGEX.is_match(bucket_name) {

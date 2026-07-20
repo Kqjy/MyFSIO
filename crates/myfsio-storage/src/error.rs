@@ -1,5 +1,23 @@
-use myfsio_common::error::{S3Error, S3ErrorCode};
+use myfsio_common::error::{IncompleteBodyError, S3Error, S3ErrorCode};
 use thiserror::Error;
+
+fn find_incomplete_body(err: &std::io::Error) -> Option<&IncompleteBodyError> {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = err.get_ref().map(|e| e as _);
+    while let Some(err) = source {
+        if let Some(incomplete) = err.downcast_ref::<IncompleteBodyError>() {
+            return Some(incomplete);
+        }
+        source = err.source();
+    }
+    None
+}
+
+fn s3_error_from_io(err: &std::io::Error) -> S3Error {
+    if let Some(incomplete) = find_incomplete_body(err) {
+        return S3Error::new(S3ErrorCode::IncompleteBody, incomplete.to_string());
+    }
+    S3Error::new(S3ErrorCode::InternalError, err.to_string())
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -39,6 +57,10 @@ pub enum StorageError {
     UploadNotFound(String),
     #[error("Quota exceeded: {0}")]
     QuotaExceeded(String),
+    #[error("Precondition failed: {0}")]
+    PreconditionFailed(String),
+    #[error("Object locked: {0}")]
+    ObjectLocked(String),
     #[error("Invalid range")]
     InvalidRange,
     #[error("IO error: {0}")]
@@ -97,8 +119,12 @@ impl From<StorageError> for S3Error {
                 format!("Upload {} not found", id),
             ),
             StorageError::QuotaExceeded(msg) => S3Error::new(S3ErrorCode::QuotaExceeded, msg),
+            StorageError::PreconditionFailed(msg) => {
+                S3Error::new(S3ErrorCode::PreconditionFailed, msg)
+            }
+            StorageError::ObjectLocked(msg) => S3Error::new(S3ErrorCode::AccessDenied, msg),
             StorageError::InvalidRange => S3Error::from_code(S3ErrorCode::InvalidRange),
-            StorageError::Io(e) => S3Error::new(S3ErrorCode::InternalError, e.to_string()),
+            StorageError::Io(e) => s3_error_from_io(&e),
             StorageError::Json(e) => S3Error::new(S3ErrorCode::InternalError, e.to_string()),
             StorageError::Internal(msg) => S3Error::new(S3ErrorCode::InternalError, msg),
         }

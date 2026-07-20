@@ -9,6 +9,7 @@ pub enum S3ErrorCode {
     BucketNotEmpty,
     EntityTooLarge,
     EntityTooSmall,
+    IncompleteBody,
     InternalError,
     InvalidAccessKeyId,
     InvalidArgument,
@@ -59,6 +60,7 @@ impl S3ErrorCode {
             Self::BucketNotEmpty => 409,
             Self::EntityTooLarge => 413,
             Self::EntityTooSmall => 400,
+            Self::IncompleteBody => 400,
             Self::InternalError => 500,
             Self::InvalidAccessKeyId => 403,
             Self::InvalidArgument => 400,
@@ -109,6 +111,7 @@ impl S3ErrorCode {
             Self::BucketNotEmpty => "BucketNotEmpty",
             Self::EntityTooLarge => "EntityTooLarge",
             Self::EntityTooSmall => "EntityTooSmall",
+            Self::IncompleteBody => "IncompleteBody",
             Self::InternalError => "InternalError",
             Self::InvalidAccessKeyId => "InvalidAccessKeyId",
             Self::InvalidArgument => "InvalidArgument",
@@ -141,9 +144,7 @@ impl S3ErrorCode {
             Self::PreconditionFailed => "PreconditionFailed",
             Self::NotModified => "NotModified",
             Self::QuotaExceeded => "QuotaExceeded",
-            Self::ReplicationConfigurationNotFoundError => {
-                "ReplicationConfigurationNotFoundError"
-            }
+            Self::ReplicationConfigurationNotFoundError => "ReplicationConfigurationNotFoundError",
             Self::RequestTimeout => "RequestTimeout",
             Self::RequestTimeTooSkewed => "RequestTimeTooSkewed",
             Self::ServerSideEncryptionConfigurationNotFoundError => {
@@ -163,6 +164,7 @@ impl S3ErrorCode {
             Self::BucketNotEmpty => "The bucket you tried to delete is not empty",
             Self::EntityTooLarge => "Your proposed upload exceeds the maximum allowed size",
             Self::EntityTooSmall => "Your proposed upload is smaller than the minimum allowed object size",
+            Self::IncompleteBody => "You did not provide the number of bytes specified by the Content-Length HTTP header",
             Self::InternalError => "We encountered an internal error. Please try again.",
             Self::InvalidAccessKeyId => "The access key ID you provided does not exist",
             Self::InvalidArgument => "Invalid argument",
@@ -210,6 +212,24 @@ impl fmt::Display for S3ErrorCode {
         f.write_str(self.as_str())
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncompleteBodyError {
+    pub expected: u64,
+    pub received: u64,
+}
+
+impl fmt::Display for IncompleteBodyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "You did not provide the number of bytes specified by the Content-Length HTTP header (expected {}, received {})",
+            self.expected, self.received
+        )
+    }
+}
+
+impl std::error::Error for IncompleteBodyError {}
 
 #[derive(Debug, Clone)]
 pub struct S3Error {

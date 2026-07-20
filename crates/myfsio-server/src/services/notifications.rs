@@ -250,7 +250,8 @@ fn emit_notifications(
             }),
         };
         let payload = json!({ "Records": [record] });
-        let resolver = crate::services::safe_resolver::shared(state.config.allow_internal_endpoints);
+        let resolver =
+            crate::services::safe_resolver::shared(state.config.allow_internal_endpoints);
         let client = match reqwest::Client::builder()
             .dns_resolver(resolver)
             .timeout(std::time::Duration::from_secs(15))

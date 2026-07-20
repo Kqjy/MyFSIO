@@ -347,10 +347,13 @@ impl IamService {
         }
 
         if let Some(ref expires_at) = user.expires_at {
-            if let Ok(exp) = expires_at.parse::<DateTime<Utc>>() {
-                if Utc::now() > exp {
-                    return None;
+            match expires_at.parse::<DateTime<Utc>>() {
+                Ok(exp) => {
+                    if Utc::now() > exp {
+                        return None;
+                    }
                 }
+                Err(_) => return None,
             }
         }
 
@@ -373,10 +376,13 @@ impl IamService {
         }
 
         if let Some(ref expires_at) = user.expires_at {
-            if let Ok(exp) = expires_at.parse::<DateTime<Utc>>() {
-                if Utc::now() > exp {
-                    return None;
+            match expires_at.parse::<DateTime<Utc>>() {
+                Ok(exp) => {
+                    if Utc::now() > exp {
+                        return None;
+                    }
                 }
+                Err(_) => return None,
             }
         }
 
@@ -555,10 +561,13 @@ impl IamService {
         }
 
         if let Some(ref expires_at) = user.expires_at {
-            if let Ok(exp) = expires_at.parse::<DateTime<Utc>>() {
-                if Utc::now() > exp {
-                    return false;
+            match expires_at.parse::<DateTime<Utc>>() {
+                Ok(exp) => {
+                    if Utc::now() > exp {
+                        return false;
+                    }
                 }
+                Err(_) => return false,
             }
         }
 

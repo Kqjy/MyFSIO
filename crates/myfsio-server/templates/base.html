@@ -7,12 +7,7 @@
     <title>{% block title %}MyFSIO Console{% endblock %}</title>
     <link rel="icon" type="image/png" href="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" />
     <link rel="icon" type="image/x-icon" href="{{ url_for(endpoint="static", filename="images/MyFSIO.ico") }}" />
-    <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
-      rel="stylesheet"
-      integrity="sha384-T3c6CoIi6uLrA9TneNEoa7RxnatzjcDSCmG1MXxSR1GAsXEV/Dwwykc2MPK8M2HN"
-      crossorigin="anonymous"
-    />
+    <link rel="stylesheet" href="{{ url_for(endpoint="static", filename="css/vendor/bootstrap.min.css") }}" />
     <script>
       (function () {
         try {
@@ -305,11 +300,7 @@
         </div>
       </div>
     </div>
-    <script
-      src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"
-      integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL"
-      crossorigin="anonymous"
-    ></script>
+    <script src="{{ url_for(endpoint="static", filename="js/vendor/bootstrap.bundle.min.js") }}"></script>
     <script>
       window.myfsioCsrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
       window.getCsrfToken = () => window.myfsioCsrfToken;
@@ -429,8 +420,9 @@
         toastEl.classList.remove('text-bg-primary', 'text-bg-success', 'text-bg-danger', 'text-bg-warning');
         
         if (type === 'success') toastEl.classList.add('text-bg-success');
-        if (type === 'error') toastEl.classList.add('text-bg-danger');
+        if (type === 'error' || type === 'danger') toastEl.classList.add('text-bg-danger');
         if (type === 'warning') toastEl.classList.add('text-bg-warning');
+        if (type === 'info') toastEl.classList.add('text-bg-primary');
         
         const toast = new bootstrap.Toast(toastEl);
         toast.show();

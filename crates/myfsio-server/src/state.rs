@@ -48,6 +48,7 @@ pub struct AppState {
     pub templates: Option<Arc<TemplateEngine>>,
     pub sessions: Arc<SessionStore>,
     pub access_logging: Arc<AccessLoggingService>,
+    pub disk_limiter: Arc<crate::services::disk_limiter::DiskLimiter>,
     pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
@@ -79,6 +80,11 @@ impl AppState {
                 multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
                     &config.multipart_object_layout,
                 ),
+                metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
+                    &config.metadata_layout,
+                ),
+                listing_index_enabled: config.listing_index_enabled,
+                ..FsStorageBackendConfig::default()
             },
         ));
         let iam = Arc::new(IamService::new_with_secret(
@@ -122,6 +128,7 @@ impl AppState {
                 crate::services::system_metrics::SystemMetricsConfig {
                     interval_minutes: config.metrics_history_interval_minutes,
                     retention_hours: config.metrics_history_retention_hours,
+                    storage_refresh_minutes: config.metrics_storage_refresh_minutes,
                 },
             )))
         } else {
@@ -223,7 +230,10 @@ impl AppState {
             config.replication_max_failures_per_bucket,
             config.allow_internal_endpoints,
             Duration::from_secs(config.replication_part_stall_timeout_secs),
+            config.replication_concurrency,
+            config.replication_queue_capacity,
         ));
+        replication.clone().start_workers();
         if config.replication_healer_enabled {
             replication.clone().start_healer(
                 Duration::from_secs(config.replication_healer_interval_secs.max(1)),
@@ -294,7 +304,15 @@ impl AppState {
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
         let idemp_cap = NonZeroUsize::new(config.relay_idempotency_cache_size.max(1))
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
-        let audit_log = Arc::new(AuditLog::new(&config.storage_root, config.audit_log_enabled));
+        let audit_log = Arc::new(AuditLog::new(
+            &config.storage_root,
+            config.audit_log_enabled,
+        ));
+        let disk_limiter = Arc::new(crate::services::disk_limiter::DiskLimiter::new(
+            config.hdd_read_concurrency,
+            config.hdd_write_concurrency,
+            Duration::from_secs(config.disk_queue_timeout_secs),
+        ));
         Self {
             config,
             storage,
@@ -314,13 +332,12 @@ impl AppState {
             templates,
             sessions: Arc::new(SessionStore::new(session_ttl)),
             access_logging,
+            disk_limiter,
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
             relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),
-            relay_idempotency_inflight: Arc::new(Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            relay_idempotency_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
             audit_log,
         }
     }

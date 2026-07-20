@@ -18,7 +18,10 @@ pub fn derive_local_endpoint(bind: &SocketAddr) -> String {
 pub fn endpoint_port(endpoint: &str) -> Option<u16> {
     let trimmed = endpoint.trim_end_matches('/');
     let after_scheme = trimmed.split_once("://").map(|(_, r)| r).unwrap_or(trimmed);
-    let host_port = after_scheme.split_once('/').map(|(h, _)| h).unwrap_or(after_scheme);
+    let host_port = after_scheme
+        .split_once('/')
+        .map(|(h, _)| h)
+        .unwrap_or(after_scheme);
     if let Some(rest) = host_port.strip_prefix('[') {
         let (_v6, tail) = rest.split_once(']')?;
         tail.strip_prefix(':')?.parse().ok()

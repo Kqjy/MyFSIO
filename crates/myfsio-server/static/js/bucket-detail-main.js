@@ -1023,6 +1023,28 @@
 
   if (scrollContainer) {
     scrollContainer.addEventListener('scroll', handleVirtualScroll, { passive: true });
+
+    scrollContainer.addEventListener('show.bs.dropdown', (event) => {
+      const toggle = event.target;
+      const wrapper = toggle.closest ? toggle.closest('.dropdown') : null;
+      const menu = wrapper ? wrapper.querySelector('.dropdown-menu') : null;
+      if (!menu) return;
+      toggle._floatingMenu = menu;
+      toggle._floatingMenuHome = wrapper;
+      document.body.appendChild(menu);
+    });
+
+    const restoreFloatingMenu = (event) => {
+      const toggle = event.target;
+      const menu = toggle._floatingMenu;
+      const home = toggle._floatingMenuHome;
+      if (menu && home) {
+        home.appendChild(menu);
+        toggle._floatingMenu = null;
+        toggle._floatingMenuHome = null;
+      }
+    };
+    scrollContainer.addEventListener('hidden.bs.dropdown', restoreFloatingMenu);
   }
 
   const isSentinelVisible = () => {
@@ -3254,12 +3276,14 @@
 
       const successCount = uploadSuccessFiles.length;
       const errorCount = uploadErrorFiles.length;
+      const objectWord = (n) => (n === 1 ? 'object' : 'objects');
+      const fileWord = (n) => (n === 1 ? 'file' : 'files');
       if (successCount > 0 && errorCount > 0) {
         showMessage({ title: 'Upload complete', body: `${successCount} uploaded, ${errorCount} failed.`, variant: 'warning' });
       } else if (successCount > 0) {
-        showMessage({ title: 'Upload complete', body: `${successCount} object(s) uploaded successfully.`, variant: 'success' });
+        showMessage({ title: 'Upload complete', body: `${successCount} ${objectWord(successCount)} uploaded successfully.`, variant: 'success' });
       } else if (errorCount > 0) {
-        showMessage({ title: 'Upload failed', body: `${errorCount} file(s) failed to upload.`, variant: 'danger' });
+        showMessage({ title: 'Upload failed', body: `${errorCount} ${fileWord(errorCount)} failed to upload.`, variant: 'danger' });
       }
       if (successCount > 0) refreshBucketUsage();
     };
@@ -4159,9 +4183,19 @@
 
   window.editingLifecycleIdx = null;
 
-  window.deleteLifecycleRule = async (idx) => {
-    lifecycleRules.splice(idx, 1);
-    await saveLifecycleRules();
+  window.deleteLifecycleRule = (idx) => {
+    const rule = lifecycleRules[idx];
+    const ruleName = rule && rule.ID ? `"${rule.ID}"` : 'this rule';
+    showMessage({
+      title: 'Delete lifecycle rule',
+      body: `Delete lifecycle rule ${ruleName}? This cannot be undone.`,
+      variant: 'danger',
+      actionText: 'Delete rule',
+      onAction: async () => {
+        lifecycleRules.splice(idx, 1);
+        await saveLifecycleRules();
+      },
+    });
   };
 
   const saveLifecycleRules = async () => {
@@ -4278,9 +4312,17 @@
 
   window.editingCorsIdx = null;
 
-  window.deleteCorsRule = async (idx) => {
-    corsRules.splice(idx, 1);
-    await saveCorsRules();
+  window.deleteCorsRule = (idx) => {
+    showMessage({
+      title: 'Delete CORS rule',
+      body: `Delete CORS rule #${idx + 1}? This cannot be undone.`,
+      variant: 'danger',
+      actionText: 'Delete rule',
+      onAction: async () => {
+        corsRules.splice(idx, 1);
+        await saveCorsRules();
+      },
+    });
   };
 
   const saveCorsRules = async () => {

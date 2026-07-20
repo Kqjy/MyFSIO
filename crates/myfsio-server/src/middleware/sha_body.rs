@@ -26,7 +26,7 @@ impl fmt::Display for Sha256MismatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "XAmzContentSHA256Mismatch: expected {}, computed {}",
+            "BadDigest: expected {}, computed {}",
             self.expected, self.computed
         )
     }

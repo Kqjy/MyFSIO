@@ -80,8 +80,12 @@ cargo run -p myfsio-server -- --check-config
 cargo run -p myfsio-server -- --reset-cred
 
 # One-shot: tag existing peer_inbound_access_key entries as peer credentials
-# (restricts them to /myfsio/admin/cluster/overview and clears their IAM policies)
+# (restricts them to cluster overview and peer relay paths, and clears their IAM policies)
 cargo run -p myfsio-server -- --migrate-peer-creds
+
+# One-shot: convert aggregate _index.json metadata to per-object sidecar files.
+# Run with the server stopped. Older binaries cannot read migrated metadata.
+cargo run -p myfsio-server -- --migrate-meta
 ```
 
 If you are running a release build instead of `cargo run`, replace the `cargo run ... --` prefix with the binary path.
@@ -109,7 +113,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `PORT` | `5000` | S3 API port |
 | `UI_PORT` | `5100` | Web UI port |
 | `UI_ENABLED` | `true` | Disable to run API-only |
-| `API_BASE_URL` | unset | Public-facing API base used by the UI and presigned URL generation |
+| `API_BASE_URL` | derived as `http://<HOST>:<PORT>` | Public-facing API base used by the UI and presigned URL generation |
 | `TEMPLATES_DIR` | built-in templates dir | Optional override for UI templates |
 | `STATIC_DIR` | built-in static dir | Optional override for static assets |
 
@@ -135,11 +139,15 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `ADMIN_ACCESS_KEY` | unset | Optional deterministic first-run/reset access key |
 | `ADMIN_SECRET_KEY` | unset | Optional deterministic first-run/reset secret key |
 | `SESSION_LIFETIME_DAYS` | `1` | UI session lifetime in days |
+| `SESSION_COOKIE_SECURE` | `false` | Mark the UI session cookie as Secure |
 | `LOG_LEVEL` | `INFO` | Log verbosity (also honored as `RUST_LOG`) |
+| `DISPLAY_TIMEZONE` | `UTC` | Timezone used by UI date formatting |
 | `REQUEST_BODY_TIMEOUT_SECONDS` | `300` | Idle timeout between request-body reads; stalled uploads receive `400 RequestTimeout` |
 | `UPLOAD_STREAM_BUFFER_BYTES` | `8388608` | In-memory buffer between client stream and disk writer for uploads (8 MiB); `0` disables |
 | `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum part size enforced where applicable (5 MiB) |
 | `MULTIPART_OBJECT_LAYOUT` | `segments` | How completed multipart objects are stored: `segments` keeps part files and completes in O(metadata) (recommended, especially on HDD/ext4); `concat` assembles one file like older releases. Affects new completes only; both layouts stay readable. Note: binaries older than this feature cannot read `segments` objects |
+| `METADATA_LAYOUT` | `sidecar` | How object metadata is written: `sidecar` writes one `.__myfsio_meta__<name>.json` file per object (O(1) metadata updates, no shared rewrite); `index` keeps appending to the legacy per-directory `_index.json` (every update rewrites the whole directory index). Affects writes only; both layouts stay readable forever, and sidecars always take precedence over index entries. Note: binaries older than this feature cannot read sidecar metadata |
+| `LISTING_INDEX_ENABLED` | `true` | Persistent per-bucket listing index. Flat (no-delimiter) ListObjectsV2 is served from an ordered index persisted as `snapshot.json` + `journal.jsonl` under `.myfsio.sys/buckets/<bucket>/listing/`, built once per bucket and updated incrementally on every write — no full-bucket walk per LIST and no cold walk after restart. The index is derived data: object sidecars remain the source of truth, and corruption or version mismatch triggers an automatic rebuild. Set `false` to restore the legacy walk-per-LIST behavior. Force a rebuild anytime with `myfsio-server --rebuild-listing` (server stopped) |
 | `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Age before an orphaned (unreferenced) multipart segment directory is garbage-collected |
 | `BULK_DELETE_MAX_KEYS` | `1000` | Maximum keys per UI bulk-delete request |
 | `STREAM_CHUNK_SIZE` | `1048576` | Default streaming chunk size for opt-in routes |
@@ -152,13 +160,23 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `RATE_LIMIT_DEFAULT` | `5000 per minute` | Default S3 / KMS rate limit. Accepts `N per <s/m/h/d>` or `N/<seconds>` |
+| `RATE_LIMIT_DEFAULT` | `50000 per minute` | Default S3 / KMS rate limit. Accepts `N per <s/m/h/d>` or `N/<seconds>` |
 | `RATE_LIMIT_LIST_BUCKETS` | inherits `RATE_LIMIT_DEFAULT` | Override for `GET /` |
 | `RATE_LIMIT_BUCKET_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for `/{bucket}` |
 | `RATE_LIMIT_OBJECT_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for `/{bucket}/{key}` |
 | `RATE_LIMIT_HEAD_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for HEAD requests |
 | `RATE_LIMIT_ADMIN` | `60 per minute` | Override for `/myfsio/admin/*` |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Backend for rate-limit state. Only `memory://` is supported today |
+
+### Disk admission control
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HDD_READ_CONCURRENCY` | `0` (disabled) | Maximum concurrent S3 object data reads; `2` is recommended for HDD storage |
+| `HDD_WRITE_CONCURRENCY` | `0` (disabled) | Maximum concurrent S3 object data writes; `2` is recommended for HDD storage |
+| `DISK_QUEUE_TIMEOUT_SECONDS` | `15` | Maximum wait for a disk permit before returning `503 SlowDown` |
+
+These limits gate S3 object data reads and writes only. Admin and UI requests, HEAD requests, and metadata operations are unaffected.
 
 ### CORS and proxying
 
@@ -170,7 +188,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `CORS_EXPOSE_HEADERS` | `*` | Headers exposed to the browser |
 | `NUM_TRUSTED_PROXIES` | `0` | Trusted reverse-proxy count. Forwarded-IP headers are ignored when `0` |
 | `ALLOWED_REDIRECT_HOSTS` | empty | Comma-separated whitelist of safe UI login redirect hosts |
-| `ALLOW_INTERNAL_ENDPOINTS` | `false` | Gate for internal diagnostic routes |
+| `ALLOW_INTERNAL_ENDPOINTS` | `false` | Permit outbound relay, replication, and webhook targets to resolve to loopback / RFC1918 / link-local / CGNAT addresses. Required for local cluster testing; leave disabled in production unless you intentionally federate over private networks |
 
 ### Feature toggles
 
@@ -184,7 +202,8 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `INTEGRITY_DRY_RUN` | `false` | Report what the periodic scan would heal without touching anything |
 | `INTEGRITY_INTERVAL_HOURS` | `24` | Period between background integrity scans |
 | `INTEGRITY_BATCH_SIZE` | `10000` | Max objects scanned per cycle |
-| `INTEGRITY_HEAL_CONCURRENCY` | `4` | Max concurrent heal tasks per cycle |
+| `INTEGRITY_HEAL_CONCURRENCY` | `1` | Max concurrent heal tasks per cycle |
+| `INTEGRITY_SCAN_PACING_MS` | `0` | Optional delay between scanned objects |
 | `INTEGRITY_QUARANTINE_RETENTION_DAYS` | `7` | How long to retain quarantined files (cleaned up by GC) |
 | `LIFECYCLE_ENABLED` | `false` | Start the lifecycle worker |
 | `METRICS_HISTORY_ENABLED` | `false` | Persist system metrics snapshots |
@@ -200,6 +219,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `OPERATION_METRICS_RETENTION_HOURS` | `24` | Retention window for operation metrics |
 | `METRICS_HISTORY_INTERVAL_MINUTES` | `5` | Snapshot interval for system metrics |
 | `METRICS_HISTORY_RETENTION_HOURS` | `24` | Retention window for system metrics |
+| `METRICS_STORAGE_REFRESH_MINUTES` | `30` | Interval for refreshing total stored bytes in system metrics; minimum 5 |
 
 ### Replication and site sync
 
@@ -207,9 +227,12 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | --- | --- | --- |
 | `REPLICATION_CONNECT_TIMEOUT_SECONDS` | `5` | Replication connect timeout |
 | `REPLICATION_READ_TIMEOUT_SECONDS` | `120` | Replication per-part / per-attempt read timeout |
+| `REPLICATION_PART_STALL_TIMEOUT_SECONDS` | `300` | Per-part zero-progress stall threshold before a replication upload is treated as stalled |
 | `REPLICATION_MAX_RETRIES` | `2` | Replication retry count |
 | `REPLICATION_STREAMING_THRESHOLD_BYTES` | `10485760` | Switch to streaming for large copies |
 | `REPLICATION_MAX_FAILURES_PER_BUCKET` | `50` | Failure budget before a bucket is skipped |
+| `REPLICATION_CONCURRENCY` | `4` | Fixed number of replication worker tasks |
+| `REPLICATION_QUEUE_CAPACITY` | `10000` | Maximum queued replication events before overflow is persisted for healer retry |
 | `REPLICATION_HEALER_ENABLED` | `true` | Background worker that auto-retries persisted replication failures (set `false` to disable) |
 | `REPLICATION_HEALER_INTERVAL_SECONDS` | `60` | Healer pass interval; each pass re-runs eligible failures |
 | `REPLICATION_HEALER_MAX_ATTEMPTS` | `12` | Per-object retry cap; failures with `failure_count` at or above this are skipped (manual retry still works) |
@@ -258,7 +281,7 @@ The Cluster dashboard on each site fetches `/myfsio/admin/cluster/overview` from
 1. The signing principal is a full admin on the receiving site (policy `{"bucket":"*","actions":["*"]}`), **or**
 2. The signing principal is a **peer credential** issued on the receiving site (an IAM record with the internal `peer_site_id` flag set; access keys conventionally start with `PEERAK…`).
 
-Peer credentials are deliberately scoped: they can **only** call `/myfsio/admin/cluster/overview` and they refuse `x-access-key`/`x-secret-key` (legacy) header authentication. They appear in `/myfsio/admin/cluster/overview` request signing and nowhere else — list/get user-management endpoints filter them out.
+Peer credentials are deliberately scoped: they can call `/myfsio/admin/cluster/overview` and the `/myfsio/admin/peer/*` relay surface, and they refuse `x-access-key`/`x-secret-key` (legacy) header authentication. They are not general S3 credentials — list/get user-management endpoints filter them out.
 
 Issue a peer credential on the receiving site:
 
@@ -296,7 +319,7 @@ once on each site to retag those access keys. The migration:
 
 - Refuses to migrate any access key that shares an IAM user with other access keys (it would clear that user's policies and convert all of its keys into peer credentials). Move the AK onto a dedicated user before retrying.
 - Errors (with exit code 1) when the registry references an AK that is not present in IAM, instead of silently treating it as already-migrated.
-- Clears the migrated user's policies. **If you used the same AK as a site-sync credential, you must reissue separate IAM users for site-sync** before relying on the data plane again — the migrated AK is now restricted to `/myfsio/admin/cluster/overview`.
+- Clears the migrated user's policies. **If you used the same AK as a site-sync credential, you must reissue separate IAM users for site-sync** before relying on the data plane again — the migrated AK is now restricted to `/myfsio/admin/cluster/overview` and `/myfsio/admin/peer/*`.
 
 The in-app **Documentation → Site Registry** page has a worked example with side-by-side cards.
 
@@ -305,7 +328,7 @@ The in-app **Documentation → Site Registry** page has a worked example with si
 Once peer credentials are issued and `MYFSIO_CLUSTER_PSK` is set on every node, an admin can apply most write actions on a peer site through their local node. The local node signs a SigV4 request with the peer credential it holds for the target site and attaches three HMACs over the cluster PSK:
 
 - `x-myfsio-cluster-attest` = `HMAC-SHA256(PSK, amz_date || origin_site_id || idempotency_key)` — proves the call comes from a cluster member
-- `x-myfsio-admin-attest` = `HMAC-SHA256(PSK, amz_date || admin_user_id)` — proves a real admin authorised it
+- `x-myfsio-admin-attest` = `HMAC-SHA256(PSK, amz_date || admin_user_id || method || canonical_path || body_sha256_hex || idempotency_key)` — proves a real admin authorised this exact relay request; inbound relay also requires a non-empty `x-myfsio-admin-user` header
 - `x-myfsio-origin-site` must equal the peer principal's site_id on the target node
 
 Plus a unique `x-myfsio-idempotency-key` (UUIDv4) for safe retry, a `x-myfsio-correlation-id` so origin and target audit entries can be joined, and `x-myfsio-nonce` to prevent same-second signature collisions.
@@ -362,7 +385,7 @@ With the default `STORAGE_ROOT=./data`, the Rust server writes:
 
 ```text
 data/
-  <bucket>/                              # raw object data
+  <bucket>/                              # object paths; completed multipart objects may be sparse stubs
   .myfsio.sys/
     config/
       .secret                            # persisted SECRET_KEY (if generated)
@@ -378,8 +401,10 @@ data/
       operation_metrics.json             # API operation metrics (if enabled)
     buckets/<bucket>/
       .bucket.json                       # bucket config (versioning, cors, lifecycle, etc.)
-      meta/                              # per-object metadata
+      meta/                              # per-object metadata sidecars (.__myfsio_meta__*.json)
+                                         # plus legacy per-directory _index.json files
       versions/                          # archived versions (if versioning enabled)
+      segments/                          # completed multipart segment files by upload id
       lifecycle_history.json             # lifecycle action log (if any rule has fired)
       replication_failures.json          # bounded failure log
       site_sync_state.json               # bidi sync watermark
@@ -391,10 +416,27 @@ data/
 
 Notable files:
 
+- With the default `MULTIPART_OBJECT_LAYOUT=segments`, completed multipart key paths are sparse stubs; the bytes live in the matching `segments/<upload_id>/seg-NNNNN` directory.
+- With the default `METADATA_LAYOUT=sidecar`, each object's metadata lives in its own `meta/<dirs>/.__myfsio_meta__<name>.json` file (over-long names fall back to a SHA-256-derived filename; the real entry name is embedded in the JSON as `__entry_name__`). Deployments upgraded from older releases keep their `_index.json` files readable forever; a sidecar always wins over an index entry for the same object.
+- With the default `LISTING_INDEX_ENABLED=true`, each bucket keeps a derived listing index under `.myfsio.sys/buckets/<bucket>/listing/` (`snapshot.json` + `journal.jsonl`). It is a disposable cache over the sidecars: deleting the directory is always safe and simply triggers a rebuild on the next listing (or via `--rebuild-listing`).
 - `iam.json` is Fernet-encrypted at rest when `SECRET_KEY` is set.
 - `bucket_policies.json` is read only as a fallback for policies that pre-date per-bucket `.bucket.json`.
 - `kms_master.key` is plaintext on disk — protect `keys/` with filesystem permissions.
 - `*_history.json` files only appear when their owning service has been enabled at least once.
+
+### Metadata layout migration
+
+Existing deployments need no migration: the server reads sidecars first, then `_index.json`, then the pre-index legacy `.meta/<key>.meta.json` form. Objects migrate themselves to sidecars whenever their metadata is next written. To convert everything at once:
+
+```bash
+myfsio-server --migrate-meta
+```
+
+Run it with the server stopped. It walks every bucket's `meta/` tree, writes one sidecar per index entry (skipping entries that already have a valid sidecar), and deletes each `_index.json` only after all of its entries were written successfully. Corrupt indexes and unreadable sidecars are reported and left in place. Re-running is safe.
+
+**Warning:** once metadata exists in sidecar form — via `--migrate-meta` or simply by writing objects with a `METADATA_LAYOUT=sidecar` (default) server — older `myfsio-server` binaries cannot read that metadata. There is no rollback tool; do not downgrade past this feature after migrating. Setting `METADATA_LAYOUT=index` restores legacy-format *writes* for new objects but does not convert existing sidecars back.
+
+A corrupt `_index.json` or sidecar now **fails closed**: affected objects return `422 ObjectCorrupted` instead of silently losing metadata, and the server refuses to rewrite a corrupt index (previously a corrupt index was treated as empty and the next write destroyed metadata for every sibling object in that directory).
 
 ## 8. Background Services
 
@@ -430,9 +472,10 @@ Defaults (override with the env vars in section 6):
 - `GC_TEMP_FILE_MAX_AGE_HOURS=24`
 - `GC_MULTIPART_MAX_AGE_DAYS=7`
 - `GC_LOCK_FILE_MAX_AGE_HOURS=1`
+- `GC_SEGMENT_MAX_AGE_HOURS=24`
 - `GC_DRY_RUN=false`
 
-Each GC cycle also sweeps `data/.myfsio.sys/quarantine/<bucket>/<ts>/` directories whose `<ts>` mtime is older than `INTEGRITY_QUARANTINE_RETENTION_DAYS`, freeing the bytes recorded in `quarantine_bytes_freed` / `quarantine_entries_deleted` in the result JSON.
+Each GC cycle also sweeps `data/.myfsio.sys/quarantine/<bucket>/<ts>/` directories whose `<ts>` mtime is older than `INTEGRITY_QUARANTINE_RETENTION_DAYS`, freeing the bytes recorded in `quarantine_bytes_freed` / `quarantine_entries_deleted` in the result JSON. It also deletes unreferenced `data/.myfsio.sys/buckets/<bucket>/segments/<upload_id>/` directories older than `GC_SEGMENT_MAX_AGE_HOURS`, reported as `segment_dirs_deleted` / `segment_bytes_freed`.
 
 History is persisted at `data/.myfsio.sys/config/gc_history.json` and can be triggered manually via `POST /myfsio/admin/gc/run` (use `{"dry_run": true}` to preview).
 
@@ -451,7 +494,7 @@ INTEGRITY_INTERVAL_HOURS=24
 INTEGRITY_BATCH_SIZE=10000
 INTEGRITY_AUTO_HEAL=false
 INTEGRITY_DRY_RUN=false
-INTEGRITY_HEAL_CONCURRENCY=4
+INTEGRITY_HEAL_CONCURRENCY=1
 INTEGRITY_QUARANTINE_RETENTION_DAYS=7
 ```
 
@@ -479,9 +522,10 @@ Tune it with:
 ```bash
 METRICS_HISTORY_INTERVAL_MINUTES=10
 METRICS_HISTORY_RETENTION_HOURS=72
+METRICS_STORAGE_REFRESH_MINUTES=30
 ```
 
-Snapshots are stored in `data/.myfsio.sys/config/metrics_history.json`.
+Snapshots are stored in `data/.myfsio.sys/config/metrics_history.json` with atomic temp-file replacement. CPU sampling and storage-size walks run on blocking worker threads; total stored bytes are refreshed on the `METRICS_STORAGE_REFRESH_MINUTES` cadence and reused between refreshes.
 
 ### Operation metrics
 
@@ -500,6 +544,8 @@ OPERATION_METRICS_RETENTION_HOURS=24
 
 Snapshots are stored in `data/.myfsio.sys/config/operation_metrics.json`.
 
+Empty operation windows are not persisted. The Metrics UI zero-fills gaps in charts, and `/ui/metrics/operations/error-summary?hours=1|6|24` merges the live window with persisted snapshots so S3 API error codes remain visible after snapshot rollover. Recent in-memory error details are exposed at `/ui/metrics/operations/errors?limit=N&code=X&bucket=Y`.
+
 ## 9. Encryption and KMS
 
 Object encryption and built-in KMS are both optional.
@@ -512,6 +558,16 @@ Notes:
 
 - If `ENCRYPTION_ENABLED=true` and `SECRET_KEY` is not configured, the server still starts, but `--check-config` warns that secure-at-rest config encryption is unavailable.
 - KMS and the object encryption master key live under `data/.myfsio.sys/keys/`.
+- Encrypted PUTs stream the client body straight through the encryptor into a temp file and commit the ciphertext atomically; plaintext is never installed at the live key path. Encrypted GETs (full, ranged, and SSE-C multipart) decrypt chunk-by-chunk while streaming the response instead of materializing a decrypted temp file. Objects written by older builds without `x-amz-encryption-plaintext-size` metadata fall back to temp-file decryption.
+- One remaining non-atomic window: SSE-S3/SSE-KMS multipart uploads encrypt after CompleteMultipartUpload commits the assembled object; a crash inside that window can leave the assembled plaintext live. Per-part SSE-C multipart uploads are not affected.
+
+### Write integrity and conditional writes
+
+- `Content-MD5`, `x-amz-checksum-sha256`, and `x-amz-checksum-crc32` are verified while the body streams to disk (no in-memory buffering); a mismatch returns `BadDigest` and nothing is committed.
+- `If-Match` / `If-None-Match` / `If-Unmodified-Since` / `If-Modified-Since` on PutObject and CompleteMultipartUpload are re-evaluated inside the storage commit lock, so concurrent conditional writes cannot both succeed (`412 PreconditionFailed` on conflict).
+- Object lock (retention and legal hold) is enforced at the storage commit for destructive operations: unversioned overwrite/delete, suspended-versioning null-version replacement, and version deletion. This covers internal writers (replication, site sync, lifecycle) in addition to the S3 API.
+- Bucket quotas are checked under a per-bucket commit lock, so concurrent uploads to different keys cannot race past the limit.
+- Object data and multipart part files are fsynced before the commit rename, and parent directories are fsynced after rename (crash durability).
 
 ## 10. Docker
 
@@ -615,6 +671,8 @@ The Rust server exposes:
 - UI routes under `/ui/...`
 - admin routes under `/myfsio/admin/...`
 - KMS routes under `/myfsio/kms/...`
+
+`CompleteMultipartUpload` includes `x-amz-version-id` on the response when the completed object has a version id.
 
 For a route-level view, inspect:
 

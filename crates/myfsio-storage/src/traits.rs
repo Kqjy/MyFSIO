@@ -8,11 +8,58 @@ use tokio::io::AsyncRead;
 pub type StorageResult<T> = Result<T, StorageError>;
 pub type AsyncReadStream = Pin<Box<dyn AsyncRead + Send>>;
 
+#[derive(Debug, Clone, Default)]
+pub struct PutConditions {
+    pub if_match: Option<String>,
+    pub if_none_match: Option<String>,
+    pub if_unmodified_since: Option<chrono::DateTime<chrono::Utc>>,
+    pub if_modified_since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl PutConditions {
+    pub fn is_empty(&self) -> bool {
+        self.if_match.is_none()
+            && self.if_none_match.is_none()
+            && self.if_unmodified_since.is_none()
+            && self.if_modified_since.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PutCommitOptions {
+    pub etag_override: Option<String>,
+    pub conditions: PutConditions,
+    pub bypass_governance: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RangeHint {
+    pub start: Option<u64>,
+    pub end: Option<u64>,
+}
+
+impl RangeHint {
+    pub fn resolve(&self, total: u64) -> Option<(u64, u64)> {
+        match (self.start, self.end) {
+            (Some(start), Some(end)) if start <= end && start < total => {
+                Some((start, end.min(total - 1) - start + 1))
+            }
+            (Some(start), None) if start < total => Some((start, total - start)),
+            (None, Some(suffix)) if suffix > 0 && total > 0 => {
+                let take = suffix.min(total);
+                Some((total - take, take))
+            }
+            _ => None,
+        }
+    }
+}
+
 pub enum SnapshotSource {
     LinkedFile(PathBuf),
     Segments {
         files: Vec<(std::fs::File, u64)>,
         total: u64,
+        base_offset: u64,
     },
 }
 
@@ -34,15 +81,32 @@ impl SnapshotSource {
                     None => Box::pin(file),
                 })
             }
-            SnapshotSource::Segments { files, total } => {
+            SnapshotSource::Segments {
+                files,
+                total,
+                base_offset,
+            } => {
+                let effective_len = len.unwrap_or_else(|| total.saturating_sub(start));
+                let rel_start = start.checked_sub(base_offset).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "requested range precedes the opened segment window",
+                    )
+                })?;
+                let covered: u64 = files.iter().map(|(_, size)| *size).sum();
+                if rel_start.saturating_add(effective_len) > covered {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "opened segment window does not cover the requested range",
+                    ));
+                }
                 let tokio_files: Vec<(tokio::fs::File, u64)> = files
                     .into_iter()
                     .map(|(f, size)| (tokio::fs::File::from_std(f), size))
                     .collect();
-                let effective_len = len.unwrap_or_else(|| total.saturating_sub(start));
                 let reader = crate::segments::SegmentRangeReader::from_files(
                     tokio_files,
-                    start,
+                    rel_start,
                     effective_len,
                 )
                 .await?;
@@ -102,6 +166,17 @@ pub trait StorageEngine: Send + Sync {
         bucket: &str,
         key: &str,
         link_path: &std::path::Path,
+    ) -> StorageResult<(ObjectMeta, SnapshotSource)> {
+        self.snapshot_object_to_link_windowed(bucket, key, link_path, None)
+            .await
+    }
+
+    async fn snapshot_object_to_link_windowed(
+        &self,
+        bucket: &str,
+        key: &str,
+        link_path: &std::path::Path,
+        window: Option<RangeHint>,
     ) -> StorageResult<(ObjectMeta, SnapshotSource)>;
 
     async fn snapshot_object_version_to_link(
@@ -110,10 +185,21 @@ pub trait StorageEngine: Send + Sync {
         key: &str,
         version_id: &str,
         link_path: &std::path::Path,
+    ) -> StorageResult<(ObjectMeta, SnapshotSource)> {
+        self.snapshot_object_version_to_link_windowed(bucket, key, version_id, link_path, None)
+            .await
+    }
+
+    async fn snapshot_object_version_to_link_windowed(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        link_path: &std::path::Path,
+        window: Option<RangeHint>,
     ) -> StorageResult<(ObjectMeta, SnapshotSource)>;
 
-    async fn materialize_object_to_tmp(&self, bucket: &str, key: &str)
-        -> StorageResult<PathBuf>;
+    async fn materialize_object_to_tmp(&self, bucket: &str, key: &str) -> StorageResult<PathBuf>;
 
     async fn head_object(&self, bucket: &str, key: &str) -> StorageResult<ObjectMeta>;
 
@@ -160,13 +246,33 @@ pub trait StorageEngine: Send + Sync {
         key: &str,
     ) -> StorageResult<Option<HashMap<String, String>>>;
 
-    async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<DeleteOutcome>;
+    async fn delete_object(&self, bucket: &str, key: &str) -> StorageResult<DeleteOutcome> {
+        self.delete_object_checked(bucket, key, false).await
+    }
+
+    async fn delete_object_checked(
+        &self,
+        bucket: &str,
+        key: &str,
+        bypass_governance: bool,
+    ) -> StorageResult<DeleteOutcome>;
 
     async fn delete_object_version(
         &self,
         bucket: &str,
         key: &str,
         version_id: &str,
+    ) -> StorageResult<DeleteOutcome> {
+        self.delete_object_version_checked(bucket, key, version_id, false)
+            .await
+    }
+
+    async fn delete_object_version_checked(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: &str,
+        bypass_governance: bool,
     ) -> StorageResult<DeleteOutcome>;
 
     async fn copy_object(
@@ -241,6 +347,17 @@ pub trait StorageEngine: Send + Sync {
         bucket: &str,
         upload_id: &str,
         parts: &[PartInfo],
+    ) -> StorageResult<ObjectMeta> {
+        self.complete_multipart_checked(bucket, upload_id, parts, PutCommitOptions::default())
+            .await
+    }
+
+    async fn complete_multipart_checked(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        parts: &[PartInfo],
+        options: PutCommitOptions,
     ) -> StorageResult<ObjectMeta>;
 
     async fn abort_multipart(&self, bucket: &str, upload_id: &str) -> StorageResult<()>;

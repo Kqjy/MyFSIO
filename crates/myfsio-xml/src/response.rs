@@ -208,7 +208,11 @@ pub fn list_objects_v2_xml_full(
     writer.write_event(Event::Start(start)).unwrap();
 
     write_text_element(&mut writer, "Name", bucket_name);
-    write_text_element(&mut writer, "Prefix", &maybe_url_encode(prefix, encoding_type));
+    write_text_element(
+        &mut writer,
+        "Prefix",
+        &maybe_url_encode(prefix, encoding_type),
+    );
     if !delimiter.is_empty() {
         write_text_element(
             &mut writer,
@@ -233,7 +237,11 @@ pub fn list_objects_v2_xml_full(
     }
     if let Some(sa) = start_after {
         if !sa.is_empty() {
-            write_text_element(&mut writer, "StartAfter", &maybe_url_encode(sa, encoding_type));
+            write_text_element(
+                &mut writer,
+                "StartAfter",
+                &maybe_url_encode(sa, encoding_type),
+            );
         }
     }
 
@@ -244,7 +252,11 @@ pub fn list_objects_v2_xml_full(
         writer
             .write_event(Event::Start(BytesStart::new("Contents")))
             .unwrap();
-        write_text_element(&mut writer, "Key", &maybe_url_encode(&obj.key, encoding_type));
+        write_text_element(
+            &mut writer,
+            "Key",
+            &maybe_url_encode(&obj.key, encoding_type),
+        );
         write_text_element(
             &mut writer,
             "LastModified",
@@ -289,7 +301,11 @@ pub fn list_objects_v2_xml_full(
         writer
             .write_event(Event::Start(BytesStart::new("CommonPrefixes")))
             .unwrap();
-        write_text_element(&mut writer, "Prefix", &maybe_url_encode(prefix, encoding_type));
+        write_text_element(
+            &mut writer,
+            "Prefix",
+            &maybe_url_encode(prefix, encoding_type),
+        );
         writer
             .write_event(Event::End(BytesEnd::new("CommonPrefixes")))
             .unwrap();
@@ -414,8 +430,16 @@ pub fn list_objects_v1_xml_full(
     writer.write_event(Event::Start(start)).unwrap();
 
     write_text_element(&mut writer, "Name", bucket_name);
-    write_text_element(&mut writer, "Prefix", &maybe_url_encode(prefix, encoding_type));
-    write_text_element(&mut writer, "Marker", &maybe_url_encode(marker, encoding_type));
+    write_text_element(
+        &mut writer,
+        "Prefix",
+        &maybe_url_encode(prefix, encoding_type),
+    );
+    write_text_element(
+        &mut writer,
+        "Marker",
+        &maybe_url_encode(marker, encoding_type),
+    );
     write_text_element(&mut writer, "MaxKeys", &max_keys.to_string());
     write_text_element(&mut writer, "IsTruncated", &is_truncated.to_string());
 
@@ -460,7 +484,11 @@ pub fn list_objects_v1_xml_full(
         writer
             .write_event(Event::Start(BytesStart::new("Contents")))
             .unwrap();
-        write_text_element(&mut writer, "Key", &maybe_url_encode(&obj.key, encoding_type));
+        write_text_element(
+            &mut writer,
+            "Key",
+            &maybe_url_encode(&obj.key, encoding_type),
+        );
         write_text_element(
             &mut writer,
             "LastModified",

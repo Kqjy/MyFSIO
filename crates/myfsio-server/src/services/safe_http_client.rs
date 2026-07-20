@@ -17,10 +17,10 @@ use aws_smithy_runtime_api::client::orchestrator::{HttpRequest, HttpResponse};
 use aws_smithy_runtime_api::client::result::ConnectorError;
 use aws_smithy_types::body::SdkBody;
 use http_body_util::BodyExt;
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
-use hyper_rustls::HttpsConnector;
 
 use crate::services::safe_resolver::SafeResolver;
 
@@ -45,9 +45,9 @@ impl SmithyHttpConnector for SafeConnector {
                 .map_err(|e| ConnectorError::io(Box::new(e)))?;
 
             let (parts, body) = hyper_response.into_parts();
-            let sdk_body = SdkBody::from_body_1_x(body.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                Box::new(e)
-            }));
+            let sdk_body = SdkBody::from_body_1_x(
+                body.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) }),
+            );
             let response = http::Response::from_parts(parts, sdk_body);
             HttpResponse::try_from(response).map_err(|e| ConnectorError::other(Box::new(e), None))
         })
@@ -70,9 +70,7 @@ impl SafeHttpClient {
 
         let https_connector = hyper_rustls::HttpsConnectorBuilder::new()
             .with_native_roots()
-            .unwrap_or_else(|_| {
-                hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots()
-            })
+            .unwrap_or_else(|_| hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots())
             .https_or_http()
             .enable_http1()
             .enable_http2()
