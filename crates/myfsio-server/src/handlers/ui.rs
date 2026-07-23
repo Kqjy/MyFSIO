@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 
-use axum::extract::{Extension, Form, State};
+use axum::extract::{Extension, Form, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use tera::Context;
@@ -10,15 +10,28 @@ use crate::middleware::session::SessionHandle;
 use crate::session::FlashMessage;
 use crate::state::AppState;
 
+#[derive(serde::Deserialize, Default)]
+pub struct LoginPageQuery {
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
 pub async fn login_page(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
+    Query(query): Query<LoginPageQuery>,
 ) -> Response {
     if session.read(|s| s.is_authenticated()) {
         return Redirect::to("/ui/buckets").into_response();
     }
 
     let mut ctx = base_context(&session, None);
+    let next = query
+        .next
+        .as_deref()
+        .filter(|target| is_allowed_redirect(target, &state.config.allowed_redirect_hosts))
+        .unwrap_or("");
+    ctx.insert("login_next", next);
     let flashed = session.write(|s| s.take_flash());
     inject_flash(&mut ctx, flashed);
 

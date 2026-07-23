@@ -70,18 +70,6 @@ window.BucketDetailUtils = (function() {
     });
   }
 
-  function formatBytes(bytes) {
-    if (!Number.isFinite(bytes)) return `${bytes} bytes`;
-    const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
-    let i = 0;
-    let size = bytes;
-    while (size >= 1024 && i < units.length - 1) {
-      size /= 1024;
-      i++;
-    }
-    return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-  }
-
   function escapeHtml(value) {
     if (value === null || value === undefined) return '';
     return String(value)
@@ -113,7 +101,7 @@ window.BucketDetailUtils = (function() {
 
   return {
     setupJsonAutoIndent: setupJsonAutoIndent,
-    formatBytes: formatBytes,
+    formatBytes: window.MyFSIO.formatBytes,
     escapeHtml: escapeHtml,
     fallbackCopy: fallbackCopy
   };

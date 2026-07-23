@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Metrics - MyFSIO Console{% endblock %}
+{% block title %}Metrics{% endblock %}
 
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
@@ -161,6 +161,8 @@
                 <small class="text-muted">Objects</small>
               </div>
             </div>
+            <small class="text-muted mt-2">Storage inventory refreshes every {{ metrics_storage_refresh_minutes }} min</small>
+            <small class="text-muted{% if not storage_refreshed_at_display %} d-none{% endif %}" id="storageInventoryAsOf"{% if storage_refreshed_at %} data-timestamp="{{ storage_refreshed_at }}"{% endif %}>{% if storage_refreshed_at_display %}As of {{ storage_refreshed_at_display }}{% endif %}</small>
           </div>
           <div class="mt-3 rounded px-2 py-1" style="height: 48px; background: rgba(16,185,129,0.04);">
             <div class="d-flex align-items-center justify-content-around h-100 small">
@@ -513,13 +515,6 @@
         <option value="24" selected>Last 24 hours</option>
         <option value="168">Last 7 days</option>
       </select>
-      <select class="form-select form-select-sm" id="maxDataPoints" style="width: auto;" title="Maximum data points">
-        <option value="100">100 pts</option>
-        <option value="250">250 pts</option>
-        <option value="500" selected>500 pts</option>
-        <option value="1000">1000 pts</option>
-        <option value="0">All</option>
-      </select>
     </div>
     <span class="small text-muted" id="historyStatus">Loading...</span>
   </div>
@@ -567,6 +562,12 @@ function formatUptime(seconds) {
   return days + 'd ' + remHours + 'h';
 }
 
+function parseMetricsResponse(response) {
+  if (!response.ok) throw new Error('Request failed with status ' + response.status);
+  return response.json();
+}
+
+try {
 (function() {
   var POLL_INTERVAL = 5000;
   var paused = false;
@@ -701,7 +702,7 @@ function formatUptime(seconds) {
 
   function updateMetrics() {
     fetch('/ui/metrics/api')
-      .then(function(resp) { return resp.json(); })
+      .then(parseMetricsResponse)
       .then(function(data) {
         if (window.renderDiskPressure) window.renderDiskPressure(data.disk_pressure, data.replication_queue);
         updateGauge(cpuGauge, data.cpu_percent);
@@ -736,6 +737,12 @@ function formatUptime(seconds) {
         if (el) el.textContent = data.disk.total;
         el = document.querySelector('[data-metric="storage_used"]');
         if (el) el.textContent = data.app.storage_used;
+        el = document.getElementById('storageInventoryAsOf');
+        if (el && data.app.storage_refreshed_at_display) {
+          el.textContent = 'As of ' + data.app.storage_refreshed_at_display;
+          el.dataset.timestamp = data.app.storage_refreshed_at || '';
+          el.classList.remove('d-none');
+        }
         el = document.querySelector('[data-metric="buckets_count"]');
         if (el) el.textContent = data.app.buckets;
         el = document.querySelector('[data-metric="objects_count"]');
@@ -856,7 +863,7 @@ function formatUptime(seconds) {
   if (exportSystem) {
     exportSystem.addEventListener('click', function(e) {
       e.preventDefault();
-      fetch('/ui/metrics/api').then(function(r) { return r.json(); }).then(function(d) {
+      fetch('/ui/metrics/api').then(parseMetricsResponse).then(function(d) {
         downloadJson(d, 'system-metrics-' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json');
       });
     });
@@ -867,7 +874,7 @@ function formatUptime(seconds) {
   if (exportOps) {
     exportOps.addEventListener('click', function(e) {
       e.preventDefault();
-      fetch('/ui/metrics/operations').then(function(r) { return r.json(); }).then(function(d) {
+      fetch('/ui/metrics/operations').then(parseMetricsResponse).then(function(d) {
         downloadJson(d, 'operation-metrics-' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json');
       });
     });
@@ -880,15 +887,20 @@ function formatUptime(seconds) {
     exportHistory.addEventListener('click', function(e) {
       e.preventDefault();
       var hours = document.getElementById('historyTimeRange') ? document.getElementById('historyTimeRange').value : 24;
-      fetch('/ui/metrics/history?hours=' + hours).then(function(r) { return r.json(); }).then(function(d) {
+      fetch('/ui/metrics/history?hours=' + hours).then(parseMetricsResponse).then(function(d) {
         downloadJson(d, 'metrics-history-' + new Date().toISOString().slice(0,19).replace(/:/g, '-') + '.json');
       });
     });
   }
   {% endif %}
 })();
+} catch (error) {
+  var metricsBanner = document.getElementById('metrics-error-banner');
+  if (metricsBanner) metricsBanner.classList.remove('d-none');
+}
 
 {% if operation_metrics_enabled %}
+function bootstrapOperationsSection() {
 (function() {
   var chartsAvailable = typeof Chart !== 'undefined';
   var methodChart = null;
@@ -912,6 +924,8 @@ function formatUptime(seconds) {
   var trendTimer = null;
   var recentErrorsTimer = null;
   var selectedErrorCode = null;
+  var operationsLoadInFlight = false;
+  var operationsLoadSucceeded = false;
   var esc = window.UICore && window.UICore.escapeHtml ? window.UICore.escapeHtml : function(value) {
     if (value === null || value === undefined) return '';
     return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
@@ -932,14 +946,7 @@ function formatUptime(seconds) {
   };
   var errorSeriesColors = ['#ef4444', '#f59e0b', '#3b82f6', '#10b981', '#8b5cf6', '#6b7280'];
 
-  function formatBytes(bytes) {
-    var value = Number(bytes);
-    if (!Number.isFinite(value) || value <= 0) return '0 B';
-    var k = 1024;
-    var sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    var i = Math.min(sizes.length - 1, Math.max(0, Math.floor(Math.log(value) / Math.log(k))));
-    return parseFloat((value / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  }
+  var formatBytes = window.MyFSIO.formatBytes;
 
   function trendChartOpts(color, yCallback) {
     return {
@@ -1054,11 +1061,28 @@ function formatUptime(seconds) {
     if (el) el.textContent = value;
   }
 
-  function updateOpMetrics() {
-    if (document.hidden) return;
-    fetch('/ui/metrics/operations')
-      .then(function(r) { return r.json(); })
+  function renderRetryStatus(element, message, loader) {
+    if (!element) return;
+    element.textContent = message + ' ';
+    var retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', loader);
+    element.appendChild(retry);
+  }
+
+  function renderOperationsLoadError() {
+    renderRetryStatus(opStatus, 'Unable to load operations.', function() { loadOperationsSection(true); });
+  }
+
+  function updateOpMetrics(force) {
+    if ((!force && document.hidden) || operationsLoadInFlight) return;
+    operationsLoadInFlight = true;
+    return fetch('/ui/metrics/operations')
+      .then(parseMetricsResponse)
       .then(function(data) {
+        operationsLoadSucceeded = true;
         if (!data.enabled || !data.stats) {
           if (opStatus) opStatus.textContent = 'Not available';
           return;
@@ -1119,7 +1143,10 @@ function formatUptime(seconds) {
         }
       })
       .catch(function() {
-        if (opStatus) opStatus.textContent = 'Failed to load';
+        renderOperationsLoadError();
+      })
+      .finally(function() {
+        operationsLoadInFlight = false;
       });
   }
 
@@ -1186,12 +1213,22 @@ function formatUptime(seconds) {
     if (document.hidden || window.__metricsPaused) return;
     var hours = errorSummaryRange ? errorSummaryRange.value : 1;
     fetch('/ui/metrics/operations/error-summary?hours=' + encodeURIComponent(hours))
-      .then(function(r) { return r.json(); })
+      .then(parseMetricsResponse)
       .then(function(data) {
         if (!data.enabled) return;
         renderErrorSummary(data);
       })
       .catch(function() {
+        var errorBody = document.getElementById('errorCodesBody');
+        if (errorBody) {
+          errorBody.innerHTML = '';
+          var retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'btn btn-link btn-sm';
+          retry.textContent = 'Unable to load error summary · Retry';
+          retry.addEventListener('click', loadErrorSummary);
+          errorBody.appendChild(retry);
+        }
       });
   }
 
@@ -1238,7 +1275,7 @@ function formatUptime(seconds) {
     var url = '/ui/metrics/operations/errors?limit=50';
     if (selectedErrorCode) url += '&code=' + encodeURIComponent(selectedErrorCode);
     fetch(url)
-      .then(function(r) { return r.json(); })
+      .then(parseMetricsResponse)
       .then(function(data) {
         if (!data.enabled) {
           if (recentErrorsStatus) recentErrorsStatus.textContent = 'Not available';
@@ -1247,7 +1284,7 @@ function formatUptime(seconds) {
         renderRecentErrors(data);
       })
       .catch(function() {
-        if (recentErrorsStatus) recentErrorsStatus.textContent = 'Failed to load';
+        renderRetryStatus(recentErrorsStatus, 'Unable to load recent errors.', function() { loadRecentErrors(true); });
       });
   }
 
@@ -1313,7 +1350,7 @@ function formatUptime(seconds) {
     if (document.hidden) return;
     var hours = opHistoryRange ? opHistoryRange.value : 24;
     fetch('/ui/metrics/operations/history?hours=' + hours)
-      .then(function(r) { return r.json(); })
+      .then(parseMetricsResponse)
       .then(function(data) {
         if (!data.enabled || !data.history || data.history.length === 0) {
           if (opTrendStatus) opTrendStatus.textContent = 'No operation history data yet. Snapshots are taken every ' + (data.interval_minutes || 5) + ' minutes.';
@@ -1341,7 +1378,7 @@ function formatUptime(seconds) {
         if (opTrendStatus) opTrendStatus.textContent = data.history.length + ' snapshots';
       })
       .catch(function() {
-        if (opTrendStatus) opTrendStatus.textContent = 'Failed to load operation history';
+        renderRetryStatus(opTrendStatus, 'Unable to load operation history.', loadOpTrends);
       });
   }
 
@@ -1361,6 +1398,13 @@ function formatUptime(seconds) {
     trendTimer = setInterval(function() {
       if (!document.hidden && !window.__metricsPaused) loadOpTrends();
     }, 60000);
+  }
+
+  function loadOperationsSection(force) {
+    updateOpMetrics(force);
+    loadErrorSummary();
+    loadRecentErrors(Boolean(force));
+    loadOpTrends();
   }
 
   if (opHistoryRange) opHistoryRange.addEventListener('change', loadOpTrends);
@@ -1392,16 +1436,43 @@ function formatUptime(seconds) {
     }
   });
 
+  var operationsTabButton = document.getElementById('opsTabBtn');
+  operationsTabButton?.addEventListener('shown.bs.tab', function() {
+    [methodChart, statusChart, endpointChart, latencyEndpointChart, trendReqRate, trendThroughput, trendLatency, trendErrorRate, trendErrorCodes].forEach(function(chart) {
+      if (chart) chart.resize();
+    });
+    if (!operationsLoadSucceeded) loadOperationsSection(true);
+  });
+
   initOpCharts();
-  updateOpMetrics();
-  loadErrorSummary();
-  loadRecentErrors(false);
-  loadOpTrends();
+  loadOperationsSection(false);
   startOpPolling();
 })();
+}
+function renderOperationsBootstrapError() {
+  var operationsStatus = document.getElementById('opStatus');
+  if (operationsStatus) {
+    operationsStatus.textContent = 'Unable to initialize operations. ';
+    var operationsRetry = document.createElement('button');
+    operationsRetry.type = 'button';
+    operationsRetry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    operationsRetry.textContent = 'Retry';
+    operationsRetry.addEventListener('click', tryBootstrapOperationsSection);
+    operationsStatus.appendChild(operationsRetry);
+  }
+}
+function tryBootstrapOperationsSection() {
+  try {
+    bootstrapOperationsSection();
+  } catch (error) {
+    renderOperationsBootstrapError();
+  }
+}
+tryBootstrapOperationsSection();
 {% endif %}
 
 {% if metrics_history_enabled %}
+function bootstrapHistorySection() {
 (function() {
   if (typeof Chart === 'undefined') {
     var historyStatusEl = document.getElementById('historyStatus');
@@ -1413,10 +1484,24 @@ function formatUptime(seconds) {
   var diskChart = null;
   var historyStatus = document.getElementById('historyStatus');
   var timeRangeSelect = document.getElementById('historyTimeRange');
-  var maxDataPointsSelect = document.getElementById('maxDataPoints');
   var historyTimer = null;
+  var historyLoadInFlight = false;
+  var historyLoadSucceeded = false;
+  var renderedHistory = [];
+  var renderedHistoryAggregated = false;
+  var renderedBucketSeconds = null;
 
-  function createChart(ctx, label, color) {
+  function formatBucketSpan(seconds) {
+    var value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return 'unknown interval';
+    if (value < 60) return Math.round(value) + ' sec';
+    var minutes = value / 60;
+    if (minutes < 60) return (Number.isInteger(minutes) ? minutes : minutes.toFixed(1)) + ' min';
+    var hours = minutes / 60;
+    return (Number.isInteger(hours) ? hours : hours.toFixed(1)) + ' hr';
+  }
+
+  function createChart(ctx, label, color, metricKey) {
     return new Chart(ctx, {
       type: 'line',
       data: {
@@ -1442,7 +1527,18 @@ function formatUptime(seconds) {
           legend: { display: false },
           tooltip: {
             callbacks: {
-              label: function(ctx) { return ctx.parsed.y.toFixed(2) + '%'; }
+              label: function(ctx) {
+                if (!renderedHistoryAggregated) return ctx.parsed.y.toFixed(2) + '%';
+                var point = renderedHistory[ctx.dataIndex] || {};
+                var minimum = Number(point[metricKey + '_min']);
+                var maximum = Number(point[metricKey + '_max']);
+                return [
+                  label + ' avg: ' + ctx.parsed.y.toFixed(2) + '%',
+                  'Min: ' + minimum.toFixed(2) + '%',
+                  'Max: ' + maximum.toFixed(2) + '%',
+                  'Bucket span: ' + formatBucketSpan(renderedBucketSeconds)
+                ];
+              }
             }
           }
         },
@@ -1458,23 +1554,38 @@ function formatUptime(seconds) {
     var cpuCtx = document.getElementById('cpuHistoryChart');
     var memCtx = document.getElementById('memoryHistoryChart');
     var diskCtx = document.getElementById('diskHistoryChart');
-    if (cpuCtx) cpuChart = createChart(cpuCtx, 'CPU %', '#3b82f6');
-    if (memCtx) memoryChart = createChart(memCtx, 'Memory %', '#06b6d4');
-    if (diskCtx) diskChart = createChart(diskCtx, 'Disk %', '#f59e0b');
+    if (cpuCtx) cpuChart = createChart(cpuCtx, 'CPU %', '#3b82f6', 'cpu_percent');
+    if (memCtx) memoryChart = createChart(memCtx, 'Memory %', '#06b6d4', 'memory_percent');
+    if (diskCtx) diskChart = createChart(diskCtx, 'Disk %', '#f59e0b', 'disk_percent');
   }
 
-  function loadHistory() {
-    if (document.hidden || window.__metricsPaused) return;
+  function renderHistoryLoadError() {
+    if (!historyStatus) return;
+    historyStatus.textContent = 'Unable to load history. ';
+    var retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', function() { loadHistory(true); });
+    historyStatus.appendChild(retry);
+  }
+
+  function loadHistory(force) {
+    if ((!force && (document.hidden || window.__metricsPaused)) || historyLoadInFlight) return;
+    historyLoadInFlight = true;
     var hours = timeRangeSelect ? timeRangeSelect.value : 24;
-    fetch('/ui/metrics/history?hours=' + hours)
-      .then(function(r) { return r.json(); })
+    return fetch('/ui/metrics/history?hours=' + encodeURIComponent(hours) + '&points=240')
+      .then(parseMetricsResponse)
       .then(function(data) {
+        historyLoadSucceeded = true;
         if (!data.enabled || !data.history || data.history.length === 0) {
           if (historyStatus) historyStatus.textContent = 'No history data yet. Recorded every ' + (data.interval_minutes || 5) + ' min.';
           return;
         }
-        var maxPoints = maxDataPointsSelect ? parseInt(maxDataPointsSelect.value, 10) : 500;
-        var history = maxPoints > 0 ? data.history.slice(-maxPoints) : data.history;
+        var history = data.history;
+        renderedHistory = history;
+        renderedHistoryAggregated = Boolean(data.aggregated);
+        renderedBucketSeconds = data.bucket_seconds;
         var labels = history.map(function(h) { return formatTime(h.timestamp); });
 
         function updateChart(chart, data) {
@@ -1487,10 +1598,19 @@ function formatUptime(seconds) {
         updateChart(memoryChart, history.map(function(h) { return h.memory_percent; }));
         updateChart(diskChart, history.map(function(h) { return h.disk_percent; }));
 
-        if (historyStatus) historyStatus.textContent = history.length + ' data points';
+        if (historyStatus) {
+          var sampleCount = Number(data.sample_count);
+          if (!Number.isFinite(sampleCount)) sampleCount = history.length;
+          historyStatus.textContent = data.aggregated
+            ? sampleCount.toLocaleString() + ' samples \u2192 ' + history.length.toLocaleString() + ' buckets (avg over ' + formatBucketSpan(data.bucket_seconds) + ')'
+            : sampleCount.toLocaleString() + ' samples';
+        }
       })
       .catch(function() {
-        if (historyStatus) historyStatus.textContent = 'Failed to load history';
+        renderHistoryLoadError();
+      })
+      .finally(function() {
+        historyLoadInFlight = false;
       });
   }
 
@@ -1500,7 +1620,6 @@ function formatUptime(seconds) {
   }
 
   if (timeRangeSelect) timeRangeSelect.addEventListener('change', loadHistory);
-  if (maxDataPointsSelect) maxDataPointsSelect.addEventListener('change', loadHistory);
 
   document.addEventListener('visibilitychange', function() {
     if (document.hidden) {
@@ -1512,10 +1631,39 @@ function formatUptime(seconds) {
     }
   });
 
+  var historyTabButton = document.getElementById('historyTabBtn');
+  historyTabButton?.addEventListener('shown.bs.tab', function() {
+    [cpuChart, memoryChart, diskChart].forEach(function(chart) {
+      if (chart) chart.resize();
+    });
+    if (!historyLoadSucceeded) loadHistory(true);
+  });
+
   initCharts();
   loadHistory();
   startHistoryPolling();
 })();
+}
+function renderHistoryBootstrapError() {
+  var historyInitStatus = document.getElementById('historyStatus');
+  if (historyInitStatus) {
+    historyInitStatus.textContent = 'Unable to initialize history. ';
+    var historyInitRetry = document.createElement('button');
+    historyInitRetry.type = 'button';
+    historyInitRetry.className = 'btn btn-link btn-sm p-0 align-baseline';
+    historyInitRetry.textContent = 'Retry';
+    historyInitRetry.addEventListener('click', tryBootstrapHistorySection);
+    historyInitStatus.appendChild(historyInitRetry);
+  }
+}
+function tryBootstrapHistorySection() {
+  try {
+    bootstrapHistorySection();
+  } catch (error) {
+    renderHistoryBootstrapError();
+  }
+}
+tryBootstrapHistorySection();
 {% endif %}
 </script>
 {% endblock %}

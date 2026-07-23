@@ -7,6 +7,8 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use tera::{Context, Error as TeraError, Tera};
 
+use crate::ui_format::human_size;
+
 pub type EndpointResolver =
     Arc<dyn Fn(&str, &HashMap<String, Value>) -> Option<String> + Send + Sync>;
 
@@ -292,24 +294,11 @@ fn slice_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Va
 
 fn filesizeformat_filter(value: &Value, _args: &HashMap<String, Value>) -> tera::Result<Value> {
     let bytes = match value {
-        Value::Number(n) => n.as_f64().unwrap_or(0.0),
-        Value::String(s) => s.parse::<f64>().unwrap_or(0.0),
-        _ => 0.0,
+        Value::Number(n) => n.as_u64().unwrap_or(0),
+        Value::String(s) => s.parse::<u64>().unwrap_or(0),
+        _ => 0,
     };
-
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let mut size = bytes;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    let formatted = if unit == 0 {
-        format!("{} {}", size as u64, UNITS[unit])
-    } else {
-        format!("{:.1} {}", size, UNITS[unit])
-    };
-    Ok(Value::String(formatted))
+    Ok(Value::String(human_size(bytes)))
 }
 
 #[cfg(test)]
@@ -373,9 +362,9 @@ mod tests {
     #[test]
     fn filesizeformat_basic() {
         let v = filesizeformat_filter(&Value::Number(1024.into()), &HashMap::new()).unwrap();
-        assert_eq!(v, Value::String("1.0 KB".into()));
+        assert_eq!(v, Value::String("1.0 KiB".into()));
         let v = filesizeformat_filter(&Value::Number(1_048_576.into()), &HashMap::new()).unwrap();
-        assert_eq!(v, Value::String("1.0 MB".into()));
+        assert_eq!(v, Value::String("1.0 MiB".into()));
         let v = filesizeformat_filter(&Value::Number(500.into()), &HashMap::new()).unwrap();
         assert_eq!(v, Value::String("500 B".into()));
     }

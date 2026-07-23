@@ -232,6 +232,13 @@ impl AppState {
             Duration::from_secs(config.replication_part_stall_timeout_secs),
             config.replication_concurrency,
             config.replication_queue_capacity,
+            (config.replication_full_reconcile_interval_hours > 0).then(|| {
+                Duration::from_secs(
+                    config
+                        .replication_full_reconcile_interval_hours
+                        .saturating_mul(3600),
+                )
+            }),
         ));
         replication.clone().start_workers();
         if config.replication_healer_enabled {

@@ -16,14 +16,29 @@ use crate::middleware::sha_body::{is_hex_sha256, Sha256VerifyBody};
 use crate::services::acl::acl_from_bucket_config;
 use crate::state::AppState;
 
-fn wrap_body_for_sha256_verification(req: &mut Request) -> Option<Response> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamingPayloadVariant {
+    SignedPayload,
+    SignedPayloadTrailer,
+}
+
+#[derive(Clone, Debug)]
+pub struct StreamingSigV4Context {
+    pub signing_key: Vec<u8>,
+    pub timestamp: String,
+    pub credential_scope: String,
+    pub seed_signature: String,
+    pub payload_variant: StreamingPayloadVariant,
+}
+
+fn wrap_body_for_sha256_verification(req: &mut Request, strict_streaming_sigv4: bool) {
     let declared = match req
         .headers()
         .get("x-amz-content-sha256")
         .and_then(|v| v.to_str().ok())
     {
         Some(v) => v.to_string(),
-        None => return None,
+        None => return,
     };
 
     let upper = declared.to_ascii_uppercase();
@@ -33,42 +48,24 @@ fn wrap_body_for_sha256_verification(req: &mut Request) -> Option<Response> {
     let is_streaming = is_streaming_signed || is_streaming_unsigned;
 
     if is_streaming {
-        if std::env::var("STRICT_STREAMING_SIGV4")
-            .ok()
-            .as_deref()
-            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-            .unwrap_or(false)
-        {
-            tracing::warn!(
-                payload_type = %upper,
-                "Rejecting streaming SigV4 request because STRICT_STREAMING_SIGV4 is enabled"
-            );
-            let err = S3Error::new(
-                S3ErrorCode::SignatureDoesNotMatch,
-                "Streaming SigV4 chunk-signature validation is not yet implemented; \
-                 resend with x-amz-content-sha256: UNSIGNED-PAYLOAD or disable STRICT_STREAMING_SIGV4",
-            );
-            return Some(crate::s3_response::s3_error_response(err));
+        if is_streaming_signed && !strict_streaming_sigv4 {
+            static STREAMING_SIGV4_WARN: std::sync::Once = std::sync::Once::new();
+            STREAMING_SIGV4_WARN.call_once(|| {
+                tracing::warn!(
+                    payload_type = %upper,
+                    "Accepting streaming SigV4 requests without per-chunk signature validation because STRICT_STREAMING_SIGV4=false"
+                );
+            });
         }
-        static STREAMING_SIGV4_WARN: std::sync::Once = std::sync::Once::new();
-        STREAMING_SIGV4_WARN.call_once(|| {
-            tracing::warn!(
-                payload_type = %upper,
-                "Accepting streaming SigV4 requests without per-chunk signature validation. \
-                 Set STRICT_STREAMING_SIGV4=true to reject these requests until full validation lands. \
-                 (This warning is emitted once per process; subsequent streaming uploads are accepted silently.)"
-            );
-        });
-        return None;
+        return;
     }
 
     if !is_hex_sha256(&declared) {
-        return None;
+        return;
     }
     let body = std::mem::replace(req.body_mut(), axum::body::Body::empty());
     let wrapped = Sha256VerifyBody::new(body, declared);
     *req.body_mut() = axum::body::Body::new(wrapped);
-    None
 }
 
 #[derive(Clone, Debug)]
@@ -553,7 +550,7 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
                 Ok(()) => next.run(req).await,
                 Err(err) => error_response(err, &auth_path),
             },
-            AuthResult::Ok(principal) => {
+            AuthResult::Ok(principal, streaming_context) => {
                 if let Err(err) = authorize_request(
                     &state,
                     Some(&principal),
@@ -573,11 +570,14 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
                         }
                     }
                     req.extensions_mut().insert(principal);
-                    if let Some(rejection) = wrap_body_for_sha256_verification(&mut req) {
-                        rejection
-                    } else {
-                        next.run(req).await
+                    if let Some(context) = streaming_context {
+                        req.extensions_mut().insert(context);
                     }
+                    wrap_body_for_sha256_verification(
+                        &mut req,
+                        state.config.strict_streaming_sigv4,
+                    );
+                    next.run(req).await
                 }
             }
             AuthResult::Denied(err) => error_response(err, &auth_path),
@@ -726,7 +726,7 @@ fn bucket_key_from_path(path: &str) -> (Option<String>, Option<String>) {
 }
 
 enum AuthResult {
-    Ok(Principal),
+    Ok(Principal, Option<StreamingSigV4Context>),
     Denied(S3Error),
     NoAuth,
 }
@@ -1470,7 +1470,7 @@ fn try_auth(state: &AppState, req: &Request) -> AuthResult {
                             "Peer credentials must use SigV4 authentication",
                         ));
                     }
-                    AuthResult::Ok(principal)
+                    AuthResult::Ok(principal, None)
                 }
                 None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::SignatureDoesNotMatch)),
             };
@@ -1621,7 +1621,23 @@ fn verify_sigv4_header(state: &AppState, req: &Request, auth_str: &str) -> AuthR
             {
                 return AuthResult::Denied(err);
             }
-            AuthResult::Ok(p)
+            let payload_variant = match payload_hash.to_ascii_uppercase().as_str() {
+                "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" => {
+                    Some(StreamingPayloadVariant::SignedPayload)
+                }
+                "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER" => {
+                    Some(StreamingPayloadVariant::SignedPayloadTrailer)
+                }
+                _ => None,
+            };
+            let streaming_context = payload_variant.map(|payload_variant| StreamingSigV4Context {
+                signing_key: sigv4::derive_signing_key(&secret_key, date_stamp, region, service),
+                timestamp: amz_date.to_string(),
+                credential_scope: format!("{}/{}/{}/aws4_request", date_stamp, region, service),
+                seed_signature: provided_signature.to_ascii_lowercase(),
+                payload_variant,
+            });
+            AuthResult::Ok(p, streaming_context)
         }
         None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }
@@ -1803,7 +1819,7 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
             {
                 return AuthResult::Denied(err);
             }
-            AuthResult::Ok(p)
+            AuthResult::Ok(p, None)
         }
         None => AuthResult::Denied(S3Error::from_code(S3ErrorCode::InvalidAccessKeyId)),
     }

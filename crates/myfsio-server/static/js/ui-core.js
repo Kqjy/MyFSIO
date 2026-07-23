@@ -7,10 +7,11 @@ window.UICore = (function() {
   }
 
   function formatBytes(bytes) {
-    if (!Number.isFinite(bytes)) return bytes + ' bytes';
-    const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+    const numeric = Number(bytes);
+    if (!Number.isFinite(numeric) || numeric <= 0) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
     let i = 0;
-    let size = bytes;
+    let size = numeric;
     while (size >= 1024 && i < units.length - 1) {
       size /= 1024;
       i++;
@@ -212,6 +213,8 @@ window.UICore = (function() {
 })();
 
 window.pollingManager = window.UICore.pollingManager;
+window.MyFSIO = window.MyFSIO || {};
+window.MyFSIO.formatBytes = window.UICore.formatBytes;
 
 window.UICore.copyToClipboard = async function(text, button, originalText) {
   try {

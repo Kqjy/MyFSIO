@@ -95,6 +95,14 @@ async fn main() {
     myfsio_server::handlers::ui_api::init_server_start_time();
 
     ensure_iam_bootstrap(&config);
+    let (unclean_shutdown_marker, previous_shutdown_unclean) =
+        match initialize_unclean_shutdown_marker(&config.storage_root) {
+            Ok(marker) => marker,
+            Err(err) => {
+                tracing::error!("Failed to initialize unclean-shutdown marker: {}", err);
+                std::process::exit(1);
+            }
+        };
     let bind_addr = config.bind_addr;
     let ui_bind_addr = config.ui_bind_addr;
 
@@ -136,6 +144,21 @@ async fn main() {
     } else {
         AppState::new(config.clone())
     };
+    if previous_shutdown_unclean {
+        match state.storage.invalidate_all_listing_indexes_sync() {
+            Ok(count) => tracing::warn!(
+                "Previous shutdown was unclean; discarded listing indexes for {} buckets",
+                count
+            ),
+            Err(err) => {
+                tracing::error!(
+                    "Failed to invalidate listing indexes after unclean shutdown: {}",
+                    err
+                );
+                std::process::exit(1);
+            }
+        }
+    }
 
     if !config.peer_require_https {
         if let Some(registry) = state.site_registry.as_ref() {
@@ -296,14 +319,9 @@ async fn main() {
         None
     };
 
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to listen for Ctrl+C");
+    wait_for_shutdown_signal().await;
     tracing::info!("Shutdown signal received");
     shutdown.notify_waiters();
-    if let Some(metrics) = &state.metrics {
-        metrics.flush();
-    }
 
     if let Err(err) = api_task.await.unwrap_or(Ok(())) {
         tracing::error!("API server exited with error: {}", err);
@@ -317,8 +335,18 @@ async fn main() {
         metrics.flush();
     }
 
-    for handle in bg_handles {
+    if let Some(site_sync) = &state.site_sync {
+        site_sync.shutdown();
+    }
+    for handle in &bg_handles {
         handle.abort();
+    }
+    for handle in bg_handles {
+        let _ = handle.await;
+    }
+    state.storage.shutdown_listing_compactor();
+    if let Err(err) = finish_clean_shutdown(&unclean_shutdown_marker) {
+        tracing::error!("Failed to remove unclean-shutdown marker: {}", err);
     }
 }
 
@@ -470,6 +498,70 @@ fn init_tracing() {
 
 fn shutdown_signal_shared() -> std::sync::Arc<tokio::sync::Notify> {
     std::sync::Arc::new(tokio::sync::Notify::new())
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to listen for SIGTERM");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.expect("Failed to listen for Ctrl+C");
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for Ctrl+C");
+    }
+}
+
+fn initialize_unclean_shutdown_marker(
+    storage_root: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, bool)> {
+    let parent = storage_root.join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&parent)?;
+    let marker = parent.join("unclean-shutdown");
+    let existed = marker.exists();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&marker)?;
+    file.sync_all()?;
+    sync_directory(&parent)?;
+    Ok((marker, existed))
+}
+
+fn finish_clean_shutdown(marker: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(marker) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    sync_directory(marker.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unclean-shutdown marker has no parent",
+        )
+    })?)
+}
+
+fn sync_directory(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 fn load_env_files() {
@@ -845,5 +937,89 @@ fn prune_iam_backups(iam_path: &std::path::Path, keep: usize) {
         } else {
             println!("Pruned old IAM backup {}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use myfsio_storage::fs_backend::{FsStorageBackend, FsStorageBackendConfig};
+    use myfsio_storage::traits::{AsyncReadStream, StorageEngine};
+
+    #[tokio::test]
+    async fn marker_boot_discards_stale_valid_listing_index_and_rebuilds_lazily() {
+        let dir = tempfile::tempdir().unwrap();
+        let listing_dir = dir
+            .path()
+            .join(".myfsio.sys")
+            .join("buckets")
+            .join("stale-list")
+            .join("listing");
+        let snapshot_path = listing_dir.join("snapshot.json");
+        let journal_path = listing_dir.join("journal.1.jsonl");
+
+        let backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig::default(),
+        );
+        backend.create_bucket("stale-list").await.unwrap();
+        backend
+            .set_versioning_status(
+                "stale-list",
+                myfsio_common::types::VersioningStatus::Enabled,
+            )
+            .await
+            .unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"stale".to_vec()));
+        backend
+            .put_object("stale-list", "stale.txt", stream, None)
+            .await
+            .unwrap();
+        backend
+            .list_objects("stale-list", &Default::default())
+            .await
+            .unwrap();
+        let stale_snapshot = std::fs::read(&snapshot_path).unwrap();
+        backend
+            .delete_object("stale-list", "stale.txt")
+            .await
+            .unwrap();
+        drop(backend);
+        std::fs::write(&snapshot_path, stale_snapshot).unwrap();
+        std::fs::write(&journal_path, b"").unwrap();
+
+        let (marker, existed) = initialize_unclean_shutdown_marker(dir.path()).unwrap();
+        assert!(!existed);
+        let (_, existed) = initialize_unclean_shutdown_marker(dir.path()).unwrap();
+        assert!(existed);
+
+        let backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig::default(),
+        );
+        assert_eq!(backend.invalidate_all_listing_indexes_sync().unwrap(), 1);
+        assert!(!listing_dir.exists());
+        let result = backend
+            .list_objects("stale-list", &Default::default())
+            .await
+            .unwrap();
+        assert!(result.objects.is_empty());
+        assert!(snapshot_path.is_file());
+        let stats = backend.bucket_stats("stale-list").await.unwrap();
+        assert_eq!(stats.objects, 0);
+        assert_eq!(stats.bytes, 0);
+        assert_eq!(stats.version_count, 1);
+        assert_eq!(stats.version_bytes, 5);
+        finish_clean_shutdown(&marker).unwrap();
+    }
+
+    #[test]
+    fn clean_shutdown_removes_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (marker, existed) = initialize_unclean_shutdown_marker(dir.path()).unwrap();
+        assert!(!existed);
+        assert!(marker.is_file());
+        finish_clean_shutdown(&marker).unwrap();
+        assert!(!marker.exists());
     }
 }

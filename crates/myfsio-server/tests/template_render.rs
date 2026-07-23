@@ -42,6 +42,7 @@ fn base_ctx() -> Context {
     ctx.insert("flashed_messages", &Vec::<Value>::new());
     ctx.insert("null", &Value::Null);
     ctx.insert("none", &Value::Null);
+    ctx.insert("login_next", &"");
     ctx
 }
 
@@ -79,7 +80,7 @@ fn render_buckets() {
         "buckets",
         &json!([{
             "meta": {"name": "b1", "creation_date": "2024-01-01T00:00:00Z"},
-            "summary": {"human_size": "0 B", "objects": 0},
+            "summary": {"human_size": "0 B", "objects": 0, "version_count": 0},
             "detail_url": "/ui/buckets/b1",
             "access_badge": "bg-secondary",
             "access_label": "Private",
@@ -151,6 +152,9 @@ fn render_metrics() {
     ctx.insert("metrics_enabled", &false);
     ctx.insert("metrics_history_enabled", &false);
     ctx.insert("operation_metrics_enabled", &false);
+    ctx.insert("metrics_storage_refresh_minutes", &30u64);
+    ctx.insert("storage_refreshed_at", &Value::Null);
+    ctx.insert("storage_refreshed_at_display", &Value::Null);
     ctx.insert("history", &Vec::<Value>::new());
     ctx.insert("operation_metrics", &Vec::<Value>::new());
     ctx.insert("cpu_percent", &0);
@@ -358,6 +362,8 @@ fn render_bucket_detail() {
     ctx.insert("version_bytes", &0);
     ctx.insert("max_objects", &Value::Null);
     ctx.insert("max_bytes", &Value::Null);
+    ctx.insert("has_max_objects", &false);
+    ctx.insert("has_max_bytes", &false);
     ctx.insert("obj_pct", &0);
     ctx.insert("bytes_pct", &0);
     ctx.insert("has_quota", &false);
@@ -393,6 +399,8 @@ fn render_bucket_detail() {
     ctx.insert("is_replication_admin", &true);
     ctx.insert("lifecycle_enabled", &false);
     ctx.insert("site_sync_enabled", &false);
+    ctx.insert("presigned_url_min_expiry", &1u64);
+    ctx.insert("presigned_url_max_expiry", &604800u64);
     ctx.insert("website_hosting_enabled", &false);
     ctx.insert("website_domains", &Vec::<Value>::new());
     ctx.insert("kms_keys", &Vec::<Value>::new());
@@ -414,7 +422,9 @@ fn render_bucket_detail() {
     ctx.insert("lifecycle_url", &"");
     ctx.insert("objects_api_url", &"");
     ctx.insert("objects_stream_url", &"");
-    render_or_panic("bucket_detail.html", &ctx);
+    let rendered = render_to_string_or_panic("bucket_detail.html", &ctx);
+    assert!(rendered.contains("min=\"1\" max=\"604800\""));
+    assert!(rendered.contains("Total stored (incl. versions)"));
 }
 
 #[test]
@@ -475,6 +485,8 @@ fn render_bucket_detail_without_error_document() {
     ctx.insert("is_replication_admin", &true);
     ctx.insert("lifecycle_enabled", &false);
     ctx.insert("site_sync_enabled", &false);
+    ctx.insert("presigned_url_min_expiry", &1u64);
+    ctx.insert("presigned_url_max_expiry", &604800u64);
     ctx.insert("website_hosting_enabled", &true);
     ctx.insert("website_domains", &Vec::<Value>::new());
     ctx.insert("kms_keys", &Vec::<Value>::new());

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block title %}Documentation{% endblock %}
 {% block content %}
 <section class="docs-hero p-4 p-md-5 rounded-4 mb-4">
   <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
@@ -190,7 +191,7 @@ cargo build --release -p myfsio-server
               <tr>
                 <td><code>LISTING_INDEX_ENABLED</code></td>
                 <td><code>true</code></td>
-                <td>Persistent per-bucket listing index. Flat ListObjectsV2 is served from an ordered index (<code>snapshot.json</code> + <code>journal.jsonl</code> under <code>.myfsio.sys/buckets/&lt;bucket&gt;/listing/</code>) that is built once, survives restarts, and is updated incrementally on writes — no full-bucket walk per LIST. Derived data: object sidecars remain the source of truth and any corruption triggers an automatic rebuild. Set <code>false</code> for the legacy walk-per-LIST behavior; force a rebuild with <code>myfsio-server --rebuild-listing</code> (server stopped).</td>
+                <td>Persistent per-bucket listing index and aggregate counters. Flat ListObjectsV2, bucket statistics, and quota projections are served from an ordered index (<code>snapshot.json</code> + generation-numbered <code>journal.&lt;gen&gt;.jsonl</code> files under <code>.myfsio.sys/buckets/&lt;bucket&gt;/listing/</code>) that is built once, survives restarts, and is updated incrementally on writes. Threshold compaction rotates journals briefly, then runs in a backend-owned background worker. Snapshot format 3 records the covered journal generation and live-object, live-byte, version, version-byte, and delete-marker counters; corruption or an incompatible format triggers an automatic rebuild from sidecars and version records. Set <code>false</code> for the legacy recursive-walk behavior; force a rebuild with <code>myfsio-server --rebuild-listing</code> (server stopped).</td>
               </tr>
               <tr>
                 <td><code>BULK_DELETE_MAX_KEYS</code></td>
@@ -430,6 +431,11 @@ cargo build --release -p myfsio-server
                 <td><code>12</code></td>
                 <td>Per-object retry cap; failures whose <code>failure_count</code> reaches this value are skipped by the healer (manual <strong>Retry</strong> from the UI still works).</td>
               </tr>
+              <tr>
+                <td><code>REPLICATION_FULL_RECONCILE_INTERVAL_HOURS</code></td>
+                <td><code>0</code></td>
+                <td>Optional full object-listing and sidecar consistency pass interval in hours. The default <code>0</code> disables it.</td>
+              </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Security & Auth Settings</td>
               </tr>
@@ -439,14 +445,19 @@ cargo build --release -p myfsio-server
                 <td>Max time skew for SigV4 requests (15 minutes).</td>
               </tr>
               <tr>
+                <td><code>STRICT_STREAMING_SIGV4</code></td>
+                <td><code>true</code></td>
+                <td>Validate streaming SigV4 chunk chains, final zero-length chunks, and signed trailers. Set to <code>false</code> only as a compatibility escape hatch; checksum trailers remain verified.</td>
+              </tr>
+              <tr>
                 <td><code>PRESIGNED_URL_MIN_EXPIRY_SECONDS</code></td>
                 <td><code>1</code></td>
-                <td>Minimum presigned URL expiry time.</td>
+                <td>Minimum presigned URL expiry time. The UI validates custom whole-second values against this bound.</td>
               </tr>
               <tr>
                 <td><code>PRESIGNED_URL_MAX_EXPIRY_SECONDS</code></td>
                 <td><code>604800</code></td>
-                <td>Maximum presigned URL expiry time (7 days).</td>
+                <td>Maximum presigned URL expiry time (7 days). The UI reports when a preset is clamped to this bound.</td>
               </tr>
               <tr class="table-secondary">
                 <td colspan="3" class="fw-semibold">Proxy &amp; Network Settings</td>
@@ -476,8 +487,8 @@ cargo build --release -p myfsio-server
               </tr>
               <tr>
                 <td><code>OBJECT_CACHE_MAX_SIZE</code></td>
-                <td><code>100</code></td>
-                <td>Maximum number of objects in cache.</td>
+                <td><code>1024</code></td>
+                <td>Object metadata LRU cache capacity.</td>
               </tr>
               <tr>
                 <td><code>BUCKET_CONFIG_CACHE_TTL_SECONDS</code></td>
@@ -590,7 +601,8 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <li>Bucket policies layer on top of IAM. Apply Private/Public presets or paste custom JSON; changes reload instantly.</li>
           </ol>
         </div>
-        <p class="mb-0 text-muted">S3 API calls use SigV4 by default. The legacy <code>X-Access-Key</code> and <code>X-Secret-Key</code> header pair works only when <code>ALLOW_LEGACY_HEADER_AUTH=true</code>, and peer credentials are always SigV4-only. The UI stores credentials in the server-managed session after you log in.</p>
+        <p class="mb-2 text-muted">S3 API calls use SigV4 by default. The legacy <code>X-Access-Key</code> and <code>X-Secret-Key</code> header pair works only when <code>ALLOW_LEGACY_HEADER_AUTH=true</code>, and peer credentials are always SigV4-only. The UI stores credentials in the server-managed session after you log in.</p>
+        <p class="mb-0 text-muted">PutObject, UploadPart, POST policy uploads, and SSE-C variants stream-verify <code>Content-MD5</code> plus SHA-256, SHA-1, CRC32, CRC32C, and CRC64NVME checksums. Aws-chunked checksum trailers and signed SigV4 chunk/trailer chains are verified before commit. GET and HEAD expose stored checksum headers only with <code>x-amz-checksum-mode: ENABLED</code>.</p>
       </div>
     </article>
     <article id="console" class="card shadow-sm docs-section">
@@ -628,6 +640,8 @@ sudo journalctl -u myfsio -f   # View logs</code></pre>
             <h3 class="h6 text-uppercase text-muted">Object details</h3>
             <ul>
               <li>Selecting an object opens the preview card with metadata, inline viewers, presign generator, and version history.</li>
+              <li>Storage sizes use 1024-byte binary units labeled KiB, MiB, GiB, TiB, and PiB.</li>
+              <li>Custom presigned-link expiry values must be whole seconds; invalid values are rejected and server clamping is shown in the dialog.</li>
               <li>Trigger downloads, deletes, restores, or metadata refreshes without leaving the panel.</li>
             </ul>
           </div>
@@ -924,6 +938,7 @@ s3.complete_multipart_upload(
           <h2 class="h4 mb-0">Site Replication &amp; Sync</h2>
         </div>
         <p class="text-muted">Replicate objects to another MyFSIO instance or S3-compatible service. Supports one-way replication for backup and bi-directional sync for geo-distributed deployments.</p>
+        <p class="small text-muted">Pending puts, deletes, and delete markers are fsynced to <code>data/.myfsio.sys/buckets/&lt;bucket&gt;/replication/pending.journal.jsonl</code> before enqueue and compacted into <code>pending.snapshot.json</code>. Startup replays this ledger without listing objects or reading metadata sidecars. Pre-ledger buckets migrate once; unreadable or oversized ledger state triggers a recovery scan. Normal healer passes use only the ledger and persisted failure records unless <code>REPLICATION_FULL_RECONCILE_INTERVAL_HOURS</code> enables a low-frequency consistency scan.</p>
         
         <h3 class="h6 text-uppercase text-muted mt-4">Setup Guide</h3>
         <ol class="docs-steps mb-3">
@@ -1448,6 +1463,7 @@ curl "{{ api_base }}/&lt;bucket&gt;/&lt;key&gt;?versionId=&lt;version-id&gt;" \
           <h2 class="h4 mb-0">Bucket Quotas</h2>
         </div>
         <p class="text-muted">Limit how much data a bucket can hold using storage quotas. Quotas are enforced on uploads and multipart completions.</p>
+        <p class="small text-muted">When the persistent listing index and its counters are live, quota checks and bucket statistics are O(1). If the index is disabled, unavailable, dirty, or rebuilding, MyFSIO uses the recursive statistics walk with its 60-second cache.</p>
         
         <h3 class="h6 text-uppercase text-muted mt-4">Quota Types</h3>
         <div class="table-responsive mb-3">
@@ -1501,7 +1517,7 @@ curl -X DELETE "{{ api_base }}/&lt;bucket&gt;?quota" \
               <path d="m8.93 6.588-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
             </svg>
             <div>
-              <strong>Version Counting:</strong> When versioning is enabled, archived versions count toward the quota. The quota is checked against total storage, not just current objects.
+              <strong>Version Counting:</strong> When versioning is enabled, archived versions count toward the quota, so an overwrite adds the new stored copy while retaining the prior version. With suspended versioning, replaced or archived null versions that are purged are removed from the projection, while a non-null live version remains counted when archived. Creating a delete marker frees no quota; purging the stored object version frees its bytes and object count.
             </div>
           </div>
         </div>

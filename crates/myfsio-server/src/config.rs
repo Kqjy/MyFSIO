@@ -24,6 +24,7 @@ pub struct ServerConfig {
     pub region: String,
     pub iam_config_path: PathBuf,
     pub sigv4_timestamp_tolerance_secs: u64,
+    pub strict_streaming_sigv4: bool,
     pub presigned_url_min_expiry: u64,
     pub presigned_url_max_expiry: u64,
     pub secret_key: Option<String>,
@@ -71,6 +72,7 @@ pub struct ServerConfig {
     pub replication_healer_enabled: bool,
     pub replication_healer_interval_secs: u64,
     pub replication_healer_max_attempts: u32,
+    pub replication_full_reconcile_interval_hours: u64,
     pub replication_part_stall_timeout_secs: u64,
     pub hdd_read_concurrency: usize,
     pub hdd_write_concurrency: usize,
@@ -157,6 +159,7 @@ impl ServerConfig {
                 .unwrap_or_else(|_| "900".to_string())
                 .parse()
                 .unwrap_or(900);
+        let strict_streaming_sigv4 = parse_bool_env("STRICT_STREAMING_SIGV4", true);
 
         let presigned_url_min_expiry: u64 = std::env::var("PRESIGNED_URL_MIN_EXPIRY_SECONDS")
             .unwrap_or_else(|_| "1".to_string())
@@ -231,7 +234,7 @@ impl ServerConfig {
         let website_hosting_enabled = parse_bool_env("WEBSITE_HOSTING_ENABLED", false);
         let object_key_max_length_bytes = parse_usize_env("OBJECT_KEY_MAX_LENGTH_BYTES", 1024);
         let object_tag_limit = parse_usize_env("OBJECT_TAG_LIMIT", 50);
-        let object_cache_max_size = parse_usize_env("OBJECT_CACHE_MAX_SIZE", 100);
+        let object_cache_max_size = parse_usize_env("OBJECT_CACHE_MAX_SIZE", 1024);
         let bucket_config_cache_ttl_seconds =
             parse_f64_env("BUCKET_CONFIG_CACHE_TTL_SECONDS", 30.0);
 
@@ -254,6 +257,8 @@ impl ServerConfig {
             parse_u64_env("REPLICATION_HEALER_INTERVAL_SECONDS", 60);
         let replication_healer_max_attempts =
             parse_u64_env("REPLICATION_HEALER_MAX_ATTEMPTS", 12) as u32;
+        let replication_full_reconcile_interval_hours =
+            parse_u64_env("REPLICATION_FULL_RECONCILE_INTERVAL_HOURS", 0);
         let replication_part_stall_timeout_secs =
             parse_u64_env("REPLICATION_PART_STALL_TIMEOUT_SECONDS", 300);
 
@@ -346,6 +351,7 @@ impl ServerConfig {
             region,
             iam_config_path,
             sigv4_timestamp_tolerance_secs,
+            strict_streaming_sigv4,
             presigned_url_min_expiry,
             presigned_url_max_expiry,
             secret_key,
@@ -393,6 +399,7 @@ impl ServerConfig {
             replication_healer_enabled,
             replication_healer_interval_secs,
             replication_healer_max_attempts,
+            replication_full_reconcile_interval_hours,
             replication_part_stall_timeout_secs,
             hdd_read_concurrency,
             hdd_write_concurrency,
@@ -459,6 +466,7 @@ impl Default for ServerConfig {
             region: "us-east-1".to_string(),
             iam_config_path: PathBuf::from("./data/.myfsio.sys/config/iam.json"),
             sigv4_timestamp_tolerance_secs: 900,
+            strict_streaming_sigv4: true,
             presigned_url_min_expiry: 1,
             presigned_url_max_expiry: 604_800,
             secret_key: None,
@@ -494,7 +502,7 @@ impl Default for ServerConfig {
             website_hosting_enabled: false,
             object_key_max_length_bytes: 1024,
             object_tag_limit: 50,
-            object_cache_max_size: 100,
+            object_cache_max_size: 1024,
             bucket_config_cache_ttl_seconds: 30.0,
             replication_connect_timeout_secs: 5,
             replication_read_timeout_secs: 120,
@@ -506,6 +514,7 @@ impl Default for ServerConfig {
             replication_healer_enabled: true,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
+            replication_full_reconcile_interval_hours: 0,
             replication_part_stall_timeout_secs: 300,
             hdd_read_concurrency: 0,
             hdd_write_concurrency: 0,
@@ -733,12 +742,14 @@ mod tests {
         std::env::remove_var("OBJECT_KEY_MAX_LENGTH_BYTES");
         std::env::set_var("OBJECT_TAG_LIMIT", "not-a-number");
         std::env::set_var("RATE_LIMIT_DEFAULT", "invalid");
+        std::env::remove_var("STRICT_STREAMING_SIGV4");
 
         let config = ServerConfig::from_env();
 
         assert_eq!(config.object_key_max_length_bytes, 1024);
         assert_eq!(config.object_tag_limit, 50);
         assert_eq!(config.ratelimit_default, RateLimitSetting::new(50_000, 60));
+        assert!(config.strict_streaming_sigv4);
 
         std::env::remove_var("OBJECT_TAG_LIMIT");
         std::env::remove_var("RATE_LIMIT_DEFAULT");
@@ -752,6 +763,7 @@ mod tests {
         std::env::set_var("RATE_LIMIT_ADMIN", "7 per second");
         std::env::set_var("HOST", "127.0.0.1");
         std::env::set_var("PORT", "5501");
+        std::env::set_var("STRICT_STREAMING_SIGV4", "false");
         std::env::remove_var("API_BASE_URL");
 
         let config = ServerConfig::from_env();
@@ -760,12 +772,14 @@ mod tests {
         assert!(config.gc_dry_run);
         assert_eq!(config.ratelimit_admin, RateLimitSetting::new(7, 1));
         assert_eq!(config.api_base_url, "http://127.0.0.1:5501");
+        assert!(!config.strict_streaming_sigv4);
 
         std::env::remove_var("OBJECT_KEY_MAX_LENGTH_BYTES");
         std::env::remove_var("GC_DRY_RUN");
         std::env::remove_var("RATE_LIMIT_ADMIN");
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
+        std::env::remove_var("STRICT_STREAMING_SIGV4");
     }
 
     #[test]

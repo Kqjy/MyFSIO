@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block title %}Buckets{% endblock %}
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
   <div>
@@ -78,7 +79,7 @@
             <div class="bucket-stat-label">Storage</div>
           </div>
           <div class="bucket-stat">
-            <div class="bucket-stat-value">{{ bucket.summary.objects }}</div>
+            <div class="bucket-stat-value">{{ bucket.summary.objects }}{% if bucket.summary.version_count > 0 %} <span class="bucket-stat-suffix">+{{ bucket.summary.version_count }} versions</span>{% endif %}</div>
             <div class="bucket-stat-label">Objects</div>
           </div>
         </div>
@@ -134,6 +135,10 @@
           <input class="form-control" id="createBucketName" type="text" name="bucket_name" pattern="[a-z0-9.\-]{3,63}" placeholder="my-bucket-name" required autofocus aria-describedby="createBucketHelp" />
           <div class="invalid-feedback">Use 3-63 characters: lowercase letters, numbers, dots, or hyphens only.</div>
           <div class="form-text" id="createBucketHelp">Use 3-63 characters: lowercase letters, numbers, dots, or hyphens.</div>
+          <div class="form-check mt-3">
+            <input class="form-check-input" type="checkbox" id="createBucketVersioning" />
+            <label class="form-check-label" for="createBucketVersioning">Enable versioning</label>
+          </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -264,32 +269,73 @@
 
     var createForm = document.getElementById('createBucketForm');
     if (createForm) {
+      var createModalEl = document.getElementById('createBucketModal');
       var createNameInput = document.getElementById('createBucketName');
+      var createNameHelp = document.getElementById('createBucketHelp');
+      var createVersioning = document.getElementById('createBucketVersioning');
+      if (createModalEl && createNameInput) {
+        createModalEl.addEventListener('shown.bs.modal', function() {
+          createNameInput.focus();
+        });
+      }
+      var syncCreateNameHelp = function() {
+        if (createNameHelp) createNameHelp.classList.toggle('d-none', createNameInput.classList.contains('is-invalid'));
+      };
       if (createNameInput) {
         createNameInput.addEventListener('input', function() {
           createNameInput.classList.remove('is-invalid');
+          syncCreateNameHelp();
         });
       }
       createForm.addEventListener('submit', function(e) {
         e.preventDefault();
         if (createNameInput && !createNameInput.checkValidity()) {
           createNameInput.classList.add('is-invalid');
+          syncCreateNameHelp();
           createNameInput.focus();
           return;
         }
         if (createNameInput) {
           createNameInput.classList.remove('is-invalid');
+          syncCreateNameHelp();
         }
         window.UICore.submitFormAjax(createForm, {
           successMessage: 'Bucket created',
           onSuccess: function(data) {
-            var modal = bootstrap.Modal.getInstance(document.getElementById('createBucketModal'));
-            if (modal) modal.hide();
-            if (data.bucket_name) {
-              window.location.href = '{{ url_for(endpoint="ui.bucket_detail", bucket_name="__BUCKET__") }}'.replace('__BUCKET__', data.bucket_name);
-            } else {
-              location.reload();
-            }
+            (async function() {
+              var modal = bootstrap.Modal.getInstance(createModalEl);
+              var bucketName = data.bucket_name || '';
+              if (bucketName && createVersioning && createVersioning.checked) {
+                var versioningUrl = '{{ url_for(endpoint="ui.update_bucket_versioning", bucket_name="__BUCKET__") }}'.replace('__BUCKET__', bucketName);
+                try {
+                  var versioningResponse = await fetch(versioningUrl, {
+                    method: 'POST',
+                    headers: {
+                      'Accept': 'application/json',
+                      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                      'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: new URLSearchParams({ state: 'enable' })
+                  });
+                  var versioningData = await versioningResponse.json();
+                  if (!versioningResponse.ok) {
+                    throw new Error(versioningData.error || 'Unable to enable versioning');
+                  }
+                } catch (error) {
+                  sessionStorage.setItem('flashMessage', JSON.stringify({
+                    title: 'Error',
+                    body: 'Bucket created, but versioning could not be enabled: ' + ((error && error.message) || 'Unknown error'),
+                    variant: 'danger'
+                  }));
+                }
+              }
+              if (modal) modal.hide();
+              if (bucketName) {
+                window.location.href = '{{ url_for(endpoint="ui.bucket_detail", bucket_name="__BUCKET__") }}'.replace('__BUCKET__', bucketName);
+              } else {
+                location.reload();
+              }
+            })();
           }
         });
       });

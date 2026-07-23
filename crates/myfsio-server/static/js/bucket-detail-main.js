@@ -1,18 +1,8 @@
 (function () {
   'use strict';
 
-  const { formatBytes, escapeHtml, fallbackCopy, setupJsonAutoIndent } = window.BucketDetailUtils || {
-    formatBytes: (bytes) => {
-      if (!Number.isFinite(bytes)) return `${bytes} bytes`;
-      const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
-      let i = 0;
-      let size = bytes;
-      while (size >= 1024 && i < units.length - 1) {
-        size /= 1024;
-        i++;
-      }
-      return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-    },
+  const formatBytes = window.MyFSIO.formatBytes;
+  const { escapeHtml, fallbackCopy, setupJsonAutoIndent } = window.BucketDetailUtils || {
     escapeHtml: (value) => {
       if (value === null || value === undefined) return '';
       return String(value)
@@ -111,7 +101,11 @@
   const presignModalEl = document.getElementById('presignModal');
   const presignModal = presignModalEl ? new bootstrap.Modal(presignModalEl) : null;
   const presignMethod = document.getElementById('presignMethod');
+  const presignExpiryPreset = document.getElementById('presignExpiryPreset');
+  const presignCustomExpiry = document.getElementById('presignCustomExpiry');
   const presignTtl = document.getElementById('presignTtl');
+  const presignTtlFeedback = document.getElementById('presignTtlFeedback');
+  const presignClampNote = document.getElementById('presignClampNote');
   const presignLink = document.getElementById('presignLink');
   const copyPresignLink = document.getElementById('copyPresignLink');
   const copyPresignDefaultLabel = copyPresignLink?.textContent?.trim() || 'Copy';
@@ -126,6 +120,7 @@
   const uploadFileInput = uploadForm?.querySelector('input[name="object"]');
   const uploadDropZone = uploadForm?.querySelector('[data-dropzone]');
   const uploadDropZoneLabel = uploadDropZone?.querySelector('[data-dropzone-label]');
+  const uploadDestination = document.getElementById('uploadDestination');
   const messageModalEl = document.getElementById('messageModal');
   const messageModal = messageModalEl ? new bootstrap.Modal(messageModalEl) : null;
   const messageModalTitle = document.getElementById('messageModalTitle');
@@ -145,6 +140,9 @@
   let archivedCountBadge = archivedCard?.querySelector('[data-archived-count]');
   let archivedRefreshButton = archivedCard?.querySelector('[data-archived-refresh]');
   let archivedEndpoint = archivedCard?.dataset.archivedEndpoint;
+  let archivedObjectsChip = document.getElementById('archived-objects-chip');
+  let archivedItemsCache = null;
+  let archivedLoadPromise = null;
   let versioningEnabled = objectsContainer?.dataset.versioning === 'true';
   const versionsCache = new Map();
   let activeRow = null;
@@ -220,7 +218,7 @@
     tr.dataset.key = obj.key;
     tr.dataset.size = obj.size;
     tr.dataset.lastModified = obj.lastModified ?? obj.last_modified ?? '';
-    tr.dataset.lastModifiedDisplay = obj.lastModifiedDisplay ?? obj.last_modified_display ?? new Date(obj.lastModified || obj.last_modified).toLocaleString();
+    tr.dataset.lastModifiedDisplay = obj.lastModifiedDisplay ?? obj.last_modified_display ?? obj.lastModified ?? obj.last_modified ?? '';
     tr.dataset.lastModifiedIso = obj.lastModifiedIso ?? obj.last_modified_iso ?? obj.lastModified ?? obj.last_modified ?? '';
     tr.dataset.etag = obj.etag ?? '';
     tr.dataset.previewUrl = obj.previewUrl ?? obj.preview_url ?? '';
@@ -235,7 +233,7 @@
     tr.dataset.moveUrl = obj.moveUrl ?? obj.move_url ?? '';
 
     const keyToShow = displayKey || obj.key;
-    const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || new Date(obj.lastModified || obj.last_modified).toLocaleDateString();
+    const lastModDisplay = obj.lastModifiedDisplay || obj.last_modified_display || obj.lastModified || obj.last_modified || '';
 
     tr.innerHTML = `
       <td class="text-center align-middle">
@@ -350,7 +348,7 @@
   const updateObjectCountBadge = () => {
     if (!objectCountBadge) return;
     if (useDelimiterMode) {
-      const total = bucketTotalObjects || totalObjectCount;
+      const total = Number.isFinite(bucketTotalObjects) ? bucketTotalObjects : totalObjectCount;
       objectCountBadge.textContent = `${total.toLocaleString()} object${total !== 1 ? 's' : ''}`;
     } else {
       objectCountBadge.textContent = `${totalObjectCount.toLocaleString()} object${totalObjectCount !== 1 ? 's' : ''}`;
@@ -364,9 +362,9 @@
       return '<div class="progress mt-2" style="height: 4px;">' +
         '<div class="progress-bar ' + cls + '" style="width: ' + pct + '%"></div>' +
         '</div>' +
-        '<div class="small text-muted mt-1">' + pct + '% of ' + maxObjects.toLocaleString() + ' limit</div>';
+        '<div class="small text-muted mt-1">' + pct + '% of ' + maxObjects.toLocaleString() + ' stored-copy limit</div>';
     }
-    return '<div class="small text-muted mt-2">No limit</div>';
+    return '<div class="small text-muted mt-2">No stored-copy limit</div>';
   };
 
   const renderBytesLimit = (totalBytes, maxBytes) => {
@@ -412,7 +410,12 @@
       const objectsCard = document.querySelector('[data-usage-objects]');
       const objectsValue = document.querySelector('[data-usage-objects-value]');
       if (objectsCard) objectsCard.dataset.totalObjects = String(data.total_objects);
-      if (objectsValue) objectsValue.textContent = data.total_objects.toLocaleString();
+      if (objectsValue) objectsValue.textContent = data.objects.toLocaleString();
+      const versionsValue = document.querySelector('[data-usage-versions-value]');
+      if (versionsValue) versionsValue.textContent = data.version_count.toLocaleString();
+      bucketTotalObjects = data.objects;
+      if (objectsContainer) objectsContainer.dataset.bucketTotalObjects = String(data.objects);
+      updateObjectCountBadge();
 
       const bytesCard = document.querySelector('[data-usage-bytes]');
       const bytesValue = document.querySelector('[data-usage-bytes-value]');
@@ -1010,7 +1013,14 @@
       });
 
       row.addEventListener('click', (e) => {
-        if (e.target.closest('[data-folder-select]') || e.target.closest('button')) return;
+        if (e.target.closest('[data-folder-select]') || e.target.closest('button') || e.target.closest('[data-folder-link]')) return;
+        navigateToFolder(folderPath);
+      });
+
+      const folderLink = row.querySelector('[data-folder-link]');
+      folderLink?.addEventListener('click', (e) => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        e.preventDefault();
         navigateToFolder(folderPath);
       });
     });
@@ -1245,7 +1255,7 @@
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="text-warning flex-shrink-0" viewBox="0 0 16 16">
             <path d="M9.828 3h3.982a2 2 0 0 1 1.992 2.181l-.637 7A2 2 0 0 1 13.174 14H2.825a2 2 0 0 1-1.991-1.819l-.637-7a1.99 1.99 0 0 1 .342-1.31L.5 3a2 2 0 0 1 2-2h3.672a2 2 0 0 1 1.414.586l.828.828A2 2 0 0 0 9.828 3zm-8.322.12C1.72 3.042 1.95 3 2.19 3h5.396l-.707-.707A1 1 0 0 0 6.172 2H2.5a1 1 0 0 0-1 .981l.006.139z"/>
           </svg>
-          <span>${escapeHtml(folderName)}/</span>
+          <a href="${escapeHtml(folderUrl(folderPath))}" class="text-decoration-none text-body" data-folder-link>${escapeHtml(folderName)}/</a>
         </div>
         ${countLine}
       </td>
@@ -1689,11 +1699,35 @@
     if (!generatePresignButton) return;
     if (isGeneratingPresign) {
       generatePresignButton.disabled = true;
-      generatePresignButton.textContent = 'Generating…';
+      generatePresignButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Generating…';
       return;
     }
     generatePresignButton.textContent = 'Generate link';
     generatePresignButton.disabled = !activeRow;
+  };
+
+  const syncPresignExpiryPreset = () => {
+    const custom = presignExpiryPreset?.value === 'custom';
+    presignCustomExpiry?.classList.toggle('d-none', !custom);
+    presignTtl?.classList.remove('is-invalid');
+    presignClampNote?.classList.add('d-none');
+  };
+
+  const selectedPresignExpiry = () => {
+    if (presignExpiryPreset?.value !== 'custom') {
+      return Number(presignExpiryPreset?.value || 900);
+    }
+    const raw = presignTtl?.value.trim() || '';
+    const value = Number(raw);
+    const valid = raw !== ''
+      && Number.isSafeInteger(value)
+      && presignTtl?.checkValidity();
+    presignTtl?.classList.toggle('is-invalid', !valid);
+    if (!valid) {
+      presignTtl?.focus();
+      return null;
+    }
+    return value;
   };
 
   const requestPresignedUrl = async () => {
@@ -1709,13 +1743,18 @@
     if (isGeneratingPresign) {
       return;
     }
+    const expiresIn = selectedPresignExpiry();
+    if (expiresIn === null) {
+      return;
+    }
     isGeneratingPresign = true;
     updateGeneratePresignState();
     presignLink.value = '';
+    presignClampNote?.classList.add('d-none');
     try {
       const payload = {
         method: presignMethod?.value || 'GET',
-        expires_in: Number(presignTtl?.value) || 900,
+        expires_in: expiresIn,
       };
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -1724,15 +1763,34 @@
       });
       const data = await response.json();
       if (!response.ok) {
+        if (response.status === 400 && data.error && data.error.toLowerCase().includes('expiry')) {
+          if (presignTtlFeedback) presignTtlFeedback.textContent = data.error;
+          presignTtl?.classList.add('is-invalid');
+          presignCustomExpiry?.classList.remove('d-none');
+          return;
+        }
         throw new Error(data.error || 'Unable to generate presigned URL');
       }
       presignLink.value = data.url;
+      if (data.clamped && presignClampNote) {
+        const effective = Number(data.effective_expires_in ?? data.expires_in);
+        const maximum = Number(presignTtl?.max || 0);
+        const bound = effective === maximum ? 'maximum' : 'minimum';
+        presignClampNote.textContent = `Expiry clamped to ${effective} seconds (server ${bound})`;
+        presignClampNote.classList.remove('d-none');
+      }
     } catch (error) {
       presignModal?.hide();
       showMessage({ title: 'Presign failed', body: (error && error.message) || 'Unable to generate presigned URL', variant: 'danger' });
     } finally {
       isGeneratingPresign = false;
-      updateGeneratePresignState();
+      if (presignLink?.value && generatePresignButton) {
+        generatePresignButton.disabled = false;
+        generatePresignButton.textContent = 'Link ready';
+        window.setTimeout(updateGeneratePresignState, 1200);
+      } else {
+        updateGeneratePresignState();
+      }
     }
   };
 
@@ -1789,7 +1847,7 @@
     if (!entry) return '';
     if (entry.archived_at_display) return entry.archived_at_display;
     const raw = entry.archived_at || entry.last_modified;
-    return raw ? new Date(raw).toLocaleString() : entry.version_id;
+    return raw || entry.version_id;
   };
 
   const confirmVersionRestore = (row, version, label = null, onConfirm) => {
@@ -1835,9 +1893,43 @@
   };
 
   const updateArchivedCount = (count) => {
-    if (!archivedCountBadge) return;
     const label = count === 1 ? 'item' : 'items';
-    archivedCountBadge.textContent = `${count} ${label}`;
+    if (archivedCountBadge) {
+      archivedCountBadge.textContent = `${count} ${label}`;
+      archivedCountBadge.classList.remove('d-none');
+    }
+    if (archivedObjectsChip) {
+      archivedObjectsChip.textContent = `${count.toLocaleString()} archived`;
+      archivedObjectsChip.dataset.state = 'loaded';
+      archivedObjectsChip.classList.remove('d-none');
+    }
+  };
+
+  const renderArchivedLoadError = (message) => {
+    if (archivedBody) {
+      archivedBody.innerHTML = '';
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 4;
+      cell.className = 'text-center text-danger py-3';
+      const text = document.createElement('div');
+      text.textContent = message;
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'btn btn-outline-danger btn-sm mt-2';
+      retry.textContent = 'Retry';
+      retry.addEventListener('click', () => loadArchivedObjects(true));
+      cell.appendChild(text);
+      cell.appendChild(retry);
+      row.appendChild(cell);
+      archivedBody.appendChild(row);
+    }
+    if (archivedCountBadge) archivedCountBadge.classList.add('d-none');
+    if (archivedObjectsChip) {
+      archivedObjectsChip.textContent = 'Archived count unavailable · Retry';
+      archivedObjectsChip.dataset.state = 'error';
+      archivedObjectsChip.classList.remove('d-none');
+    }
   };
 
   function renderArchivedRows(items) {
@@ -1922,8 +2014,9 @@
         throw new Error(data.error || 'Unable to restore archived object');
       }
       showMessage({ title: 'Restore scheduled', body: data.message || 'Object restored from archive.', variant: 'success' });
-      await loadArchivedObjects();
+      await loadArchivedObjects(true);
       loadObjects(false);
+      refreshBucketUsage();
     } catch (error) {
       showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore archived object', variant: 'danger' });
     }
@@ -1946,7 +2039,8 @@
         throw new Error(data.error || 'Unable to delete archived versions');
       }
       showMessage({ title: 'Archived versions removed', body: data.message || 'All archived data for this key has been deleted.', variant: 'success' });
-      await loadArchivedObjects();
+      await loadArchivedObjects(true);
+      refreshBucketUsage();
     } catch (error) {
       showMessage({ title: 'Delete failed', body: (error && error.message) || 'Unable to delete archived versions', variant: 'danger' });
     }
@@ -1965,33 +2059,41 @@
     });
   }
 
-  async function loadArchivedObjects() {
-    if (!archivedEndpoint || !archivedBody) return;
+  async function loadArchivedObjects(force = false) {
+    if (!archivedEndpoint) return;
+    if (archivedLoadPromise) return archivedLoadPromise;
+    if (!force && archivedItemsCache) {
+      renderArchivedRows(archivedItemsCache);
+      return;
+    }
     archivedBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Loading…</td></tr>';
-    try {
-      const response = await fetch(archivedEndpoint);
-      let data = {};
+    archivedLoadPromise = (async () => {
       try {
-        data = await response.json();
-      } catch {
-        data = {};
+        const response = await fetch(archivedEndpoint);
+        let data = {};
+        try {
+          data = await response.json();
+        } catch {
+          data = {};
+        }
+        if (!response.ok) {
+          throw new Error(data.error || 'Unable to load archived objects');
+        }
+        archivedItemsCache = Array.isArray(data.objects) ? data.objects : [];
+        renderArchivedRows(archivedItemsCache);
+      } catch (error) {
+        renderArchivedLoadError((error && error.message) || 'Unable to load archived objects');
       }
-      if (!response.ok) {
-        throw new Error(data.error || 'Unable to load archived objects');
-      }
-      const items = Array.isArray(data.objects) ? data.objects : [];
-      renderArchivedRows(items);
-    } catch (error) {
-      archivedBody.innerHTML = `<tr><td colspan="4" class="text-center text-danger py-3">${(error && error.message) || 'Unable to load archived objects'}</td></tr>`;
-      updateArchivedCount(0);
+    })();
+    try {
+      await archivedLoadPromise;
+    } finally {
+      archivedLoadPromise = null;
     }
   }
 
   if (archivedRefreshButton) {
-    archivedRefreshButton.addEventListener('click', () => loadArchivedObjects());
-  }
-  if (archivedCard && archivedEndpoint) {
-    loadArchivedObjects();
+    archivedRefreshButton.addEventListener('click', () => loadArchivedObjects(true));
   }
 
   const propertiesTab = document.getElementById('properties-tab');
@@ -2000,7 +2102,35 @@
       if (archivedCard && archivedEndpoint) {
         loadArchivedObjects();
       }
+      if (propertiesTab.dataset.scrollToArchived === 'true') {
+        propertiesTab.dataset.scrollToArchived = 'false';
+        archivedCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     });
+  }
+
+  archivedObjectsChip?.addEventListener('click', () => {
+    if (archivedObjectsChip.dataset.state === 'error') {
+      loadArchivedObjects(true);
+      return;
+    }
+    if (!propertiesTab) return;
+    propertiesTab.dataset.scrollToArchived = 'true';
+    bootstrap.Tab.getOrCreateInstance(propertiesTab).show();
+    if (propertiesTab.classList.contains('active')) {
+      propertiesTab.dataset.scrollToArchived = 'false';
+      archivedCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
+
+  const archivedLoadTrigger = document.getElementById('pagination-controls');
+  if (versioningEnabled && archivedLoadTrigger && archivedEndpoint) {
+    const archivedObserver = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      archivedObserver.disconnect();
+      loadArchivedObjects();
+    });
+    archivedObserver.observe(archivedLoadTrigger);
   }
 
   async function restoreVersion(row, version) {
@@ -2026,6 +2156,7 @@
       await loadObjectVersions(row, { force: true });
       showMessage({ title: 'Version restored', body: data.message || 'The selected version has been restored.', variant: 'success' });
       loadObjects(false);
+      refreshBucketUsage();
     } catch (error) {
       showMessage({ title: 'Restore failed', body: (error && error.message) || 'Unable to restore version', variant: 'danger' });
     }
@@ -2191,6 +2322,13 @@
     previewPlaceholder.classList.remove('d-none');
   };
 
+  const renderPreviewUnavailable = () => {
+    if (!previewPlaceholder) return;
+    previewIframe?.classList.add('d-none');
+    previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="fw-semibold mb-1">Preview unavailable</div><div class="small text-muted">Download to view</div></div>';
+    previewPlaceholder.classList.remove('d-none');
+  };
+
   let previewFailed = false;
 
   const handlePreviewError = () => {
@@ -2324,15 +2462,32 @@
       const currentRow = row;
       previewIframe.onerror = () => {
         if (activeRow !== currentRow) return;
-        previewIframe.classList.add('d-none');
-        previewPlaceholder.classList.remove('d-none');
-        previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
-        handlePreviewError();
+        renderPreviewUnavailable();
       };
-      previewIframe.src = previewUrl;
-      previewIframe.style.minHeight = '500px';
-      previewIframe.classList.remove('d-none');
-      previewPlaceholder.classList.add('d-none');
+      previewPlaceholder.innerHTML = '<div class="spinner-border spinner-border-sm text-secondary" role="status"></div><div class="small mt-2">Loading preview\u2026</div>';
+      fetch(previewUrl, { headers: { 'Range': 'bytes=0-4', 'Accept': 'application/pdf' } })
+        .then(async response => {
+          if (activeRow !== currentRow) return false;
+          if (!response.ok) {
+            if (response.status === 415) {
+              renderPreviewUnavailable();
+              return false;
+            }
+            throw new Error('Unable to validate PDF preview');
+          }
+          if (response.body) await response.body.cancel();
+          return true;
+        })
+        .then(valid => {
+          if (!valid || activeRow !== currentRow) return;
+          previewIframe.src = previewUrl;
+          previewIframe.classList.remove('d-none');
+          previewPlaceholder.classList.add('d-none');
+        })
+        .catch(() => {
+          if (activeRow !== currentRow) return;
+          renderPreviewUnavailable();
+        });
     } else if (previewUrl && previewText && lower.match(/\.(txt|log|json|md|csv|xml|html|htm|js|ts|py|java|c|cpp|h|css|scss|yaml|yml|toml|ini|cfg|conf|sh|bat|rs|go|rb|php|sql|r|swift|kt|scala|pl|lua|zig|ex|exs|hs|erl|ps1|psm1|psd1|fish|zsh|env|properties|gradle|makefile|dockerfile|vagrantfile|gitignore|gitattributes|editorconfig|eslintrc|prettierrc)$/)) {
       previewText.textContent = 'Loading\u2026';
       previewText.classList.remove('d-none');
@@ -2630,6 +2785,13 @@
     loadObjectVersions(activeRow, { force: true });
   });
 
+  presignExpiryPreset?.addEventListener('change', syncPresignExpiryPreset);
+  presignTtl?.addEventListener('input', () => {
+    presignTtl.classList.remove('is-invalid');
+    presignClampNote?.classList.add('d-none');
+  });
+  syncPresignExpiryPreset();
+
   presignButton?.addEventListener('click', () => {
     if (!activeRow) {
       showMessage({ title: 'Select an object', body: 'Choose an object before generating a presigned URL.', variant: 'warning' });
@@ -2709,6 +2871,17 @@
     const bulkUploadErrorCount = document.getElementById('bulkUploadErrorCount');
     const bulkUploadErrorList = document.getElementById('bulkUploadErrorList');
     const uploadKeyPrefix = document.getElementById('uploadKeyPrefix');
+    const normalizeUploadPrefix = (raw) => {
+      let prefix = (raw || '').trim().replace(/^\/+/, '');
+      if (prefix && !prefix.endsWith('/')) prefix += '/';
+      return prefix;
+    };
+    const updateUploadDestination = () => {
+      if (!uploadDestination) return;
+      const bucketName = objectsContainer?.dataset.bucket || '';
+      const prefix = normalizeUploadPrefix(uploadKeyPrefix?.value);
+      uploadDestination.textContent = prefix ? `${bucketName}/${prefix}` : bucketName;
+    };
     const singleFileOptions = document.getElementById('singleFileOptions');
     const floatingProgress = document.getElementById('floatingUploadProgress');
     const floatingProgressBar = document.getElementById('floatingUploadProgressBar');
@@ -3291,7 +3464,7 @@
     const performBulkUpload = async (files) => {
       if (!files || files.length === 0) return;
 
-      const keyPrefix = (uploadKeyPrefix?.value || '').trim();
+      const keyPrefix = normalizeUploadPrefix(uploadKeyPrefix?.value);
       const metadataRaw = uploadForm.querySelector('textarea[name="metadata"]')?.value?.trim();
       let metadata = null;
       if (metadataRaw) {
@@ -3357,8 +3530,6 @@
       const files = uploadFileInput.files;
       if (!files || files.length === 0) return;
 
-      const keyPrefix = (uploadKeyPrefix?.value || '').trim();
-
       if (uploadSubmitBtn) {
         uploadSubmitBtn.disabled = true;
         if (uploadBtnText) uploadBtnText.textContent = 'Uploading...';
@@ -3371,8 +3542,8 @@
       if (hasFolders() && currentPrefix) {
         uploadKeyPrefix.value = currentPrefix;
 
-        const advancedToggle = document.querySelector('[data-bs-target="#advancedUploadOptions"]');
-        const advancedCollapse = document.getElementById('advancedUploadOptions');
+        const advancedToggle = document.querySelector('[data-bs-target="#uploadAdvancedOptions"]');
+        const advancedCollapse = document.getElementById('uploadAdvancedOptions');
         if (advancedToggle && advancedCollapse && !advancedCollapse.classList.contains('show')) {
           new bootstrap.Collapse(advancedCollapse, { show: true });
         }
@@ -3380,7 +3551,10 @@
 
         uploadKeyPrefix.value = '';
       }
+      updateUploadDestination();
     });
+
+    uploadKeyPrefix?.addEventListener('input', updateUploadDestination);
 
     uploadModalEl?.addEventListener('hide.bs.modal', (event) => {
       if (isUploading) {
@@ -4665,8 +4839,12 @@
         previewEmpty.classList.remove('d-none');
         previewPanel.classList.add('d-none');
         activeRow = null;
+      }
+      const currentBucket = objectsContainer?.dataset.bucket;
+      if (copyMoveAction === 'move' || destBucket === currentBucket) {
         loadObjects(false);
       }
+      refreshBucketUsage();
     } catch (err) {
       showMessage({ title: `${copyMoveAction === 'move' ? 'Move' : 'Copy'} failed`, body: err.message, variant: 'danger' });
     }
@@ -4860,7 +5038,7 @@
           '<path d="M0 2a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1v7.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 1 12.5V5a1 1 0 0 1-1-1V2zm2 3v7.5A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5V5H2zm13-3H1v2h14V2zM5 7.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5z"/>' +
           '</svg><span class="fw-semibold">Archived Objects</span></div>' +
           '<div class="d-flex align-items-center gap-2">' +
-          '<span class="badge text-bg-secondary" data-archived-count>0 items</span>' +
+          '<span class="badge text-bg-secondary d-none" data-archived-count></span>' +
           '<button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>' +
           '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
           '<path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>' +
@@ -4888,7 +5066,28 @@
         archivedCountBadge = archivedCard.querySelector('[data-archived-count]');
         archivedRefreshButton = archivedCard.querySelector('[data-archived-refresh]');
         archivedEndpoint = endpoint;
-        archivedRefreshButton.addEventListener('click', function() { loadArchivedObjects(); });
+        archivedItemsCache = null;
+        archivedRefreshButton.addEventListener('click', function() { loadArchivedObjects(true); });
+        if (!archivedObjectsChip) {
+          archivedObjectsChip = document.createElement('button');
+          archivedObjectsChip.type = 'button';
+          archivedObjectsChip.id = 'archived-objects-chip';
+          archivedObjectsChip.className = 'btn btn-link btn-sm py-0 px-1 text-decoration-none d-none';
+          document.getElementById('pagination-controls')?.appendChild(archivedObjectsChip);
+          archivedObjectsChip.addEventListener('click', function() {
+            if (archivedObjectsChip.dataset.state === 'error') {
+              loadArchivedObjects(true);
+              return;
+            }
+            if (!propertiesTab) return;
+            propertiesTab.dataset.scrollToArchived = 'true';
+            bootstrap.Tab.getOrCreateInstance(propertiesTab).show();
+            if (propertiesTab.classList.contains('active')) {
+              propertiesTab.dataset.scrollToArchived = 'false';
+              archivedCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          });
+        }
         loadArchivedObjects();
       }
     }
