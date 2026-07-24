@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Cluster - S3 Compatible Storage{% endblock %}
+{% block title %}Cluster{% endblock %}
 
 {% block content %}
 <div class="page-header d-flex justify-content-between align-items-center mb-4">
@@ -309,14 +309,7 @@
 
 <script>
 (function () {
-    function fmtBytes(n) {
-        if (!n || n < 0) return "0 B";
-        var u = ["B", "KB", "MB", "GB", "TB", "PB"];
-        var i = 0;
-        var v = n;
-        while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-        return v.toFixed(i === 0 ? 0 : (v >= 100 ? 0 : 1)) + " " + u[i];
-    }
+    var fmtBytes = window.MyFSIO.formatBytes;
     function fmtRel(ts) {
         var diff = Math.max(0, Math.floor(Date.now() / 1000 - ts));
         if (diff < 60) return diff + "s ago";

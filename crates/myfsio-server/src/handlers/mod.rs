@@ -109,8 +109,14 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
         if let Some(message) = crate::middleware::sha_body::sha256_mismatch_message(io_err) {
             return bad_digest_response(message);
         }
-        if let Some(message) = checksum_stream::upload_checksum_mismatch_message(io_err) {
-            return bad_digest_response(message);
+        if let Some(mismatch) = checksum_stream::upload_checksum_mismatch(io_err) {
+            if mismatch.is_content_md5() {
+                return bad_digest_response(mismatch.message());
+            }
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                mismatch.message(),
+            ));
         }
         if let Some(violation) = checksum_stream::post_content_length_violation(io_err) {
             let code = if violation.too_large {
@@ -119,6 +125,9 @@ fn storage_err_response(err: myfsio_storage::error::StorageError) -> Response {
                 S3ErrorCode::EntityTooSmall
             };
             return s3_error_response(S3Error::new(code, violation.to_string()));
+        }
+        if let Some(chunked_error) = chunked::aws_chunked_error(io_err) {
+            return aws_chunked_error_response(chunked_error);
         }
         if let Some(response) = io_error_to_s3_response(io_err) {
             return response;
@@ -199,13 +208,20 @@ fn io_error_to_s3_response(err: &std::io::Error) -> Option<Response> {
     Some(s3_error_response(S3Error::new(code, detail)))
 }
 
-fn trigger_replication(state: &AppState, bucket: &str, key: &str, action: &str) {
+fn trigger_replication(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    action: &str,
+    generation: Option<&str>,
+) {
     let manager = state.replication.clone();
     let bucket = bucket.to_string();
     let key = key.to_string();
     let action = action.to_string();
+    let generation = generation.map(ToOwned::to_owned);
     tokio::spawn(async move {
-        manager.trigger(bucket, key, action).await;
+        manager.trigger(bucket, key, action, generation).await;
     });
 }
 
@@ -215,11 +231,12 @@ fn trigger_replication_for_request(
     bucket: &str,
     key: &str,
     action: &str,
+    generation: Option<&str>,
 ) {
     if peer_marker.is_some() {
         return;
     }
-    trigger_replication(state, bucket, key, action);
+    trigger_replication(state, bucket, key, action, generation);
 }
 
 #[derive(Debug, Clone)]
@@ -345,7 +362,15 @@ pub async fn list_buckets(
     request: axum::extract::Request,
 ) -> Response {
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
-        return get_bucket(State(state), Path(host_bucket), Query(query), headers).await;
+        let raw_query = axum::extract::RawQuery(request.uri().query().map(str::to_string));
+        return get_bucket(
+            State(state),
+            Path(host_bucket),
+            Query(query),
+            raw_query,
+            headers,
+        )
+        .await;
     }
 
     let (owner_id, owner_display) = caller_owner(&state, &request);
@@ -394,6 +419,7 @@ pub async fn create_bucket(
     raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
+    streaming_sigv4: Option<axum::extract::Extension<crate::middleware::StreamingSigV4Context>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -405,6 +431,7 @@ pub async fn create_bucket(
                 Query(ObjectQuery::default()),
                 peer,
                 principal,
+                streaming_sigv4,
                 headers,
                 body,
             )
@@ -663,6 +690,7 @@ pub async fn get_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    raw_query: axum::extract::RawQuery,
     headers: HeaderMap,
 ) -> Response {
     let (owner_id, owner_display) = canonical_default_owner(&state);
@@ -678,6 +706,16 @@ pub async fn get_bucket(
             )
             .await;
         }
+    }
+
+    if let Some(unsupported) = unsupported_bucket_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The bucket subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
     }
 
     if !matches!(state.storage.bucket_exists(&bucket).await, Ok(true)) {
@@ -1195,6 +1233,7 @@ pub async fn delete_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
@@ -1209,6 +1248,16 @@ pub async fn delete_bucket(
             )
             .await;
         }
+    }
+
+    if let Some(unsupported) = unsupported_bucket_subresource(raw_query.0.as_deref()) {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::NotImplemented,
+            format!(
+                "The bucket subresource '?{}' is not implemented by this server",
+                unsupported
+            ),
+        ));
     }
 
     if query.quota.is_some() {
@@ -1808,6 +1857,20 @@ fn base64_header_bytes(headers: &HeaderMap, name: &str) -> Result<Option<Vec<u8>
         .map_err(|_| invalid_digest_response(format!("Invalid base64 value for {}", name)))
 }
 
+fn validate_checksum_length(
+    value: Option<Vec<u8>>,
+    name: &str,
+    length: usize,
+) -> Result<Option<Vec<u8>>, Response> {
+    match value {
+        Some(value) if value.len() != length => Err(invalid_digest_response(format!(
+            "The {} you specified is not a valid {}-byte value",
+            name, length
+        ))),
+        value => Ok(value),
+    }
+}
+
 fn expected_upload_checksums(
     headers: &HeaderMap,
 ) -> Result<checksum_stream::ExpectedUploadChecksums, Response> {
@@ -1820,7 +1883,16 @@ fn expected_upload_checksums(
         }
         expected.md5 = Some(md5);
     }
-    expected.sha256 = base64_header_bytes(headers, "x-amz-checksum-sha256")?;
+    expected.sha256 = validate_checksum_length(
+        base64_header_bytes(headers, "x-amz-checksum-sha256")?,
+        "x-amz-checksum-sha256",
+        32,
+    )?;
+    expected.sha1 = validate_checksum_length(
+        base64_header_bytes(headers, "x-amz-checksum-sha1")?,
+        "x-amz-checksum-sha1",
+        20,
+    )?;
     if let Some(crc) = base64_header_bytes(headers, "x-amz-checksum-crc32")? {
         let crc: [u8; 4] = crc.as_slice().try_into().map_err(|_| {
             invalid_digest_response(
@@ -1828,6 +1900,22 @@ fn expected_upload_checksums(
             )
         })?;
         expected.crc32 = Some(crc);
+    }
+    if let Some(crc) = base64_header_bytes(headers, "x-amz-checksum-crc32c")? {
+        let crc: [u8; 4] = crc.as_slice().try_into().map_err(|_| {
+            invalid_digest_response(
+                "The x-amz-checksum-crc32c you specified is not a valid 4-byte CRC32C value",
+            )
+        })?;
+        expected.crc32c = Some(crc);
+    }
+    if let Some(crc) = base64_header_bytes(headers, "x-amz-checksum-crc64nvme")? {
+        let crc: [u8; 8] = crc.as_slice().try_into().map_err(|_| {
+            invalid_digest_response(
+                "The x-amz-checksum-crc64nvme you specified is not a valid 8-byte CRC64NVME value",
+            )
+        })?;
+        expected.crc64nvme = Some(crc);
     }
     Ok(expected)
 }
@@ -1881,6 +1969,33 @@ fn apply_stored_checksum_headers(resp_headers: &mut HeaderMap, metadata: &HashMa
             }
         }
     }
+}
+
+fn checksum_mode_enabled(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-amz-checksum-mode")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("ENABLED"))
+}
+
+fn aws_chunked_error_response(error: &chunked::AwsChunkedError) -> Response {
+    let code = match error.kind() {
+        chunked::AwsChunkedErrorKind::IncompleteBody => S3ErrorCode::IncompleteBody,
+        chunked::AwsChunkedErrorKind::InvalidRequest => S3ErrorCode::InvalidRequest,
+        chunked::AwsChunkedErrorKind::SignatureDoesNotMatch => S3ErrorCode::SignatureDoesNotMatch,
+    };
+    s3_error_response(S3Error::new(code, error.message()))
+}
+
+fn decode_aws_chunked_body(
+    body: Body,
+    headers: &HeaderMap,
+    signing_context: Option<crate::middleware::StreamingSigV4Context>,
+    strict_signatures: bool,
+) -> Result<myfsio_storage::traits::AsyncReadStream, Response> {
+    chunked::decode_body(body, headers, signing_context, strict_signatures)
+        .map(|stream| Box::pin(stream) as myfsio_storage::traits::AsyncReadStream)
+        .map_err(|error| aws_chunked_error_response(&error))
 }
 
 fn parse_tagging_header(value: &str) -> Result<Vec<myfsio_common::types::Tag>, Response> {
@@ -1992,6 +2107,7 @@ pub async fn put_object(
     Query(query): Query<ObjectQuery>,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
+    streaming_sigv4: Option<axum::extract::Extension<crate::middleware::StreamingSigV4Context>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
@@ -2010,14 +2126,14 @@ pub async fn put_object(
         }
         let resp = config::put_object_tagging(&state, &bucket, &key, body).await;
         if resp.status().is_success() {
-            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         }
         return resp;
     }
     if query.acl.is_some() {
         let resp = config::put_object_acl(&state, &bucket, &key, &headers, body).await;
         if resp.status().is_success() {
-            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         }
         return resp;
     }
@@ -2032,7 +2148,7 @@ pub async fn put_object(
         )
         .await;
         if resp.status().is_success() {
-            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         }
         return resp;
     }
@@ -2041,7 +2157,7 @@ pub async fn put_object(
             config::put_object_legal_hold(&state, &bucket, &key, query.version_id.as_deref(), body)
                 .await;
         if resp.status().is_success() {
-            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         }
         return resp;
     }
@@ -2080,6 +2196,7 @@ pub async fn put_object(
                 &headers,
                 body,
                 is_aws_chunked(&headers),
+                streaming_sigv4.as_ref().map(|context| context.0.clone()),
             )
             .await;
         }
@@ -2160,7 +2277,15 @@ pub async fn put_object(
     let aws_chunked = is_aws_chunked(&headers);
     let declared_len = declared_body_length(&headers, aws_chunked);
     let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
-        Box::pin(chunked::decode_body(body))
+        match decode_aws_chunked_body(
+            body,
+            &headers,
+            streaming_sigv4.map(|context| context.0),
+            state.config.strict_streaming_sigv4,
+        ) {
+            Ok(stream) => stream,
+            Err(response) => return response,
+        }
     } else {
         Box::pin(tokio_util::io::StreamReader::new(
             body.into_data_stream().map_err(std::io::Error::other),
@@ -2284,7 +2409,7 @@ pub async fn put_object(
             "",
             "Put",
         );
-        trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+        trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         return (StatusCode::OK, resp_headers).into_response();
     }
 
@@ -2328,7 +2453,7 @@ pub async fn put_object(
                 "",
                 "Put",
             );
-            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
             (StatusCode::OK, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -2605,7 +2730,9 @@ pub async fn get_object(
         resp_headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
     }
     apply_stored_response_headers(&mut resp_headers, &meta.internal_metadata);
-    apply_stored_checksum_headers(&mut resp_headers, &meta.internal_metadata);
+    if checksum_mode_enabled(&headers) {
+        apply_stored_checksum_headers(&mut resp_headers, &meta.internal_metadata);
+    }
     if let Some(ref requested_version) = query.version_id {
         if let Ok(value) = requested_version.parse() {
             resp_headers.insert("x-amz-version-id", value);
@@ -2673,7 +2800,7 @@ pub async fn delete_object(
         }
         let resp = config::delete_object_tagging(&state, &bucket, &key).await;
         if resp.status().is_success() {
-            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write");
+            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "write", None);
         }
         return resp;
     }
@@ -2713,7 +2840,19 @@ pub async fn delete_object(
                     resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
                 }
                 notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
-                trigger_replication_for_request(&state, peer_marker, &bucket, &key, "delete");
+                let action = if outcome.is_delete_marker {
+                    "delete-marker"
+                } else {
+                    "delete"
+                };
+                trigger_replication_for_request(
+                    &state,
+                    peer_marker,
+                    &bucket,
+                    &key,
+                    action,
+                    outcome.version_id.as_deref().or(Some(version_id)),
+                );
                 (StatusCode::NO_CONTENT, resp_headers).into_response()
             }
             Err(e) => storage_err_response(e),
@@ -2742,7 +2881,19 @@ pub async fn delete_object(
                 resp_headers.insert("x-amz-delete-marker", "true".parse().unwrap());
             }
             notifications::emit_object_removed(&state, &bucket, &key, "", "", "", "Delete");
-            trigger_replication_for_request(&state, peer_marker, &bucket, &key, "delete");
+            let action = if outcome.is_delete_marker {
+                "delete-marker"
+            } else {
+                "delete"
+            };
+            trigger_replication_for_request(
+                &state,
+                peer_marker,
+                &bucket,
+                &key,
+                action,
+                outcome.version_id.as_deref(),
+            );
             (StatusCode::NO_CONTENT, resp_headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -2756,6 +2907,7 @@ pub async fn head_object(
     headers: HeaderMap,
 ) -> Response {
     let key = normalize_object_key(key);
+    let checksum_requested = checksum_mode_enabled(&headers);
     let version_id = query.version_id.as_deref();
     let result = match version_id {
         Some(version_id) => {
@@ -2830,7 +2982,9 @@ pub async fn head_object(
                 }
             }
             apply_stored_response_headers(&mut headers, &meta.internal_metadata);
-            apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
+            if checksum_requested {
+                apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
+            }
             if let Some(ref requested_version) = query.version_id {
                 if let Ok(value) = requested_version.parse() {
                     headers.insert("x-amz-version-id", value);
@@ -2928,7 +3082,7 @@ fn head_mpu_sse_c(
     h.insert("accept-ranges", "bytes".parse().unwrap());
     apply_sse_c_response_headers(&mut h, &meta.internal_metadata);
     apply_stored_response_headers(&mut h, &meta.internal_metadata);
-    if query.part_number.is_none() {
+    if query.part_number.is_none() && checksum_mode_enabled(headers) {
         apply_stored_checksum_headers(&mut h, &meta.internal_metadata);
     }
     if let Some(ref requested_version) = query.version_id {
@@ -3288,6 +3442,7 @@ async fn upload_part_handler_with_chunking(
     headers: &HeaderMap,
     body: Body,
     aws_chunked: bool,
+    streaming_sigv4: Option<crate::middleware::StreamingSigV4Context>,
 ) -> Response {
     let pending = match state
         .storage
@@ -3308,6 +3463,7 @@ async fn upload_part_handler_with_chunking(
             body,
             aws_chunked,
             &pending,
+            streaming_sigv4,
         )
         .await;
     }
@@ -3317,7 +3473,15 @@ async fn upload_part_handler_with_chunking(
         Err(response) => return response,
     };
     let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
-        Box::pin(chunked::decode_body(body))
+        match decode_aws_chunked_body(
+            body,
+            headers,
+            streaming_sigv4,
+            state.config.strict_streaming_sigv4,
+        ) {
+            Ok(stream) => stream,
+            Err(response) => return response,
+        }
     } else {
         let stream = tokio_util::io::StreamReader::new(
             body.into_data_stream().map_err(std::io::Error::other),
@@ -3362,6 +3526,7 @@ async fn upload_part_sse_c(
     body: Body,
     aws_chunked: bool,
     pending: &HashMap<String, String>,
+    streaming_sigv4: Option<crate::middleware::StreamingSigV4Context>,
 ) -> Response {
     let Some(enc_svc) = state.encryption.as_ref() else {
         return s3_error_response(S3Error::new(
@@ -3428,7 +3593,15 @@ async fn upload_part_sse_c(
         Err(response) => return response,
     };
     let raw: myfsio_storage::traits::AsyncReadStream = if aws_chunked {
-        Box::pin(chunked::decode_body(body))
+        match decode_aws_chunked_body(
+            body,
+            headers,
+            streaming_sigv4,
+            state.config.strict_streaming_sigv4,
+        ) {
+            Ok(stream) => stream,
+            Err(response) => return response,
+        }
     } else {
         Box::pin(tokio_util::io::StreamReader::new(
             body.into_data_stream().map_err(std::io::Error::other),
@@ -4052,7 +4225,7 @@ async fn complete_multipart_handler(
                 "",
                 "CompleteMultipartUpload",
             );
-            trigger_replication_for_request(state, peer_marker, bucket, key, "write");
+            trigger_replication_for_request(state, peer_marker, bucket, key, "write", None);
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("content-type", "application/xml".parse().unwrap());
             if let Some(ref vid) = meta.version_id {
@@ -4792,7 +4965,7 @@ async fn copy_object_handler(
     };
     let last_modified = myfsio_xml::response::format_s3_datetime(&meta.last_modified);
     let xml = myfsio_xml::response::copy_object_result_xml(etag, &last_modified);
-    trigger_replication_for_request(state, peer_marker, dst_bucket, dst_key, "write");
+    trigger_replication_for_request(state, peer_marker, dst_bucket, dst_key, "write", None);
 
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert("content-type", "application/xml".parse().unwrap());
@@ -4945,7 +5118,19 @@ async fn delete_objects_handler(
         match result {
             Ok(outcome) => {
                 notifications::emit_object_removed(state, bucket, &key, "", "", "", "Delete");
-                trigger_replication_for_request(state, peer_marker, bucket, &key, "delete");
+                let action = if outcome.is_delete_marker {
+                    "delete-marker"
+                } else {
+                    "delete"
+                };
+                trigger_replication_for_request(
+                    state,
+                    peer_marker,
+                    bucket,
+                    &key,
+                    action,
+                    outcome.version_id.as_deref().or(requested_vid.as_deref()),
+                );
                 let delete_marker_version_id = if outcome.is_delete_marker {
                     outcome.version_id.clone()
                 } else {
@@ -5166,6 +5351,7 @@ async fn serve_range_from_snapshot(
                         &meta,
                         key,
                         query,
+                        headers,
                         Some(enc_info.algorithm.as_str()),
                         parts_count,
                     );
@@ -5227,6 +5413,7 @@ async fn serve_range_from_snapshot(
         &meta,
         key,
         query,
+        headers,
         enc_header,
         false,
         parts_count,
@@ -5245,6 +5432,7 @@ async fn stream_partial_content(
     meta: &myfsio_common::types::ObjectMeta,
     key: &str,
     query: &ObjectQuery,
+    request_headers: &HeaderMap,
     enc_header: Option<&str>,
     already_trimmed: bool,
     parts_count: Option<u32>,
@@ -5279,6 +5467,7 @@ async fn stream_partial_content(
         meta,
         key,
         query,
+        request_headers,
         enc_header,
         parts_count,
     );
@@ -5293,6 +5482,7 @@ fn partial_content_headers(
     meta: &myfsio_common::types::ObjectMeta,
     key: &str,
     query: &ObjectQuery,
+    request_headers: &HeaderMap,
     enc_header: Option<&str>,
     parts_count: Option<u32>,
 ) -> HeaderMap {
@@ -5322,7 +5512,7 @@ fn partial_content_headers(
         headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
     }
     apply_stored_response_headers(&mut headers, &meta.internal_metadata);
-    if start == 0 && end + 1 == plaintext_size {
+    if start == 0 && end + 1 == plaintext_size && checksum_mode_enabled(request_headers) {
         apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
     }
     if let Some(ref requested_version) = query.version_id {
@@ -5390,8 +5580,17 @@ async fn serve_range_from_segments(
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
     let body = Body::from_stream(ReaderStream::with_capacity(reader, stream_cap));
 
-    let resp_headers =
-        partial_content_headers(start, end, total, &meta, key, query, None, parts_count);
+    let resp_headers = partial_content_headers(
+        start,
+        end,
+        total,
+        &meta,
+        key,
+        query,
+        headers,
+        None,
+        parts_count,
+    );
     (StatusCode::PARTIAL_CONTENT, resp_headers, body).into_response()
 }
 
@@ -5622,7 +5821,7 @@ async fn serve_mpu_sse_c(
     h.insert("accept-ranges", "bytes".parse().unwrap());
     apply_sse_c_response_headers(&mut h, &meta.internal_metadata);
     apply_stored_response_headers(&mut h, &meta.internal_metadata);
-    if is_full {
+    if is_full && checksum_mode_enabled(headers) {
         apply_stored_checksum_headers(&mut h, &meta.internal_metadata);
     }
     if let Some(ref requested_version) = query.version_id {
@@ -6600,6 +6799,31 @@ async fn post_object_form_handler(
         "__content_type__".to_string(),
         guessed_content_type(&object_key, content_type_value.as_deref()),
     );
+    let mut checksum_headers = HeaderMap::new();
+    for name in [
+        "content-md5",
+        "x-amz-checksum-sha256",
+        "x-amz-checksum-sha1",
+        "x-amz-checksum-crc32",
+        "x-amz-checksum-crc32c",
+        "x-amz-checksum-crc64nvme",
+        "x-amz-sdk-checksum-algorithm",
+    ] {
+        if let Some(value) = fields
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+        {
+            let Ok(value) = value.parse() else {
+                return invalid_digest_response(format!("Invalid value for {}", name));
+            };
+            checksum_headers.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value,
+            );
+        }
+    }
+    persist_additional_checksums(&checksum_headers, &mut metadata);
 
     if let Err(response) =
         ensure_archived_null_lock_allows_overwrite(state, bucket, &object_key, Some(headers)).await
@@ -6617,6 +6841,10 @@ async fn post_object_form_handler(
     let raw: myfsio_storage::traits::AsyncReadStream = match length_range {
         Some((min, max)) => Box::pin(checksum_stream::LengthRangeReader::new(raw, min, max)),
         None => raw,
+    };
+    let raw = match apply_upload_checksum_verification(raw, &checksum_headers) {
+        Ok(stream) => stream,
+        Err(response) => return response,
     };
     let boxed = spool_upload_stream(
         raw,
@@ -6642,7 +6870,7 @@ async fn post_object_form_handler(
         );
         return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
     };
-    trigger_replication_for_request(state, peer_marker, bucket, &object_key, "write");
+    trigger_replication_for_request(state, peer_marker, bucket, &object_key, "write", None);
     let success_status = fields
         .get("success_action_status")
         .cloned()
@@ -6765,6 +6993,12 @@ mod tests {
     const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
     fn test_state() -> (AppState, tempfile::TempDir) {
+        test_state_with_strict_streaming(true)
+    }
+
+    fn test_state_with_strict_streaming(
+        strict_streaming_sigv4: bool,
+    ) -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join(".myfsio.sys").join("config");
         std::fs::create_dir_all(&config_dir).unwrap();
@@ -6823,6 +7057,7 @@ mod tests {
             replication_healer_enabled: false,
             replication_healer_interval_secs: 60,
             replication_healer_max_attempts: 12,
+            replication_full_reconcile_interval_hours: 0,
             replication_part_stall_timeout_secs: 300,
             site_sync_enabled: false,
             site_sync_interval_secs: 60,
@@ -6835,6 +7070,7 @@ mod tests {
             templates_dir: manifest_dir.join("templates"),
             static_dir: manifest_dir.join("static"),
             allow_legacy_header_auth: true,
+            strict_streaming_sigv4,
             ..ServerConfig::default()
         };
         (AppState::new(config), tmp)
@@ -6851,6 +7087,57 @@ mod tests {
             .header("x-access-key", TEST_ACCESS_KEY)
             .header("x-secret-key", TEST_SECRET_KEY)
             .body(body)
+            .unwrap()
+    }
+
+    fn presigned_streaming_request(uri: &str) -> axum::http::Request<Body> {
+        let now = chrono::Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+        let date_stamp = now.format("%Y%m%d").to_string();
+        let scope = format!("{}/us-east-1/s3/aws4_request", date_stamp);
+        let credential = format!("{}/{}", TEST_ACCESS_KEY, scope);
+        let mut params = [
+            (
+                "X-Amz-Algorithm".to_string(),
+                "AWS4-HMAC-SHA256".to_string(),
+            ),
+            ("X-Amz-Credential".to_string(), credential),
+            ("X-Amz-Date".to_string(), amz_date.clone()),
+            ("X-Amz-Expires".to_string(), "300".to_string()),
+            ("X-Amz-SignedHeaders".to_string(), "host".to_string()),
+        ];
+        params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let canonical_query = params
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{}={}",
+                    myfsio_auth::sigv4::aws_uri_encode(key),
+                    myfsio_auth::sigv4::aws_uri_encode(value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let canonical_request = format!(
+            "PUT\n{}\n{}\nhost:localhost\n\nhost\nUNSIGNED-PAYLOAD",
+            uri, canonical_query
+        );
+        let string_to_sign =
+            myfsio_auth::sigv4::build_string_to_sign(&amz_date, &scope, &canonical_request);
+        let signing_key =
+            myfsio_auth::sigv4::derive_signing_key(TEST_SECRET_KEY, &date_stamp, "us-east-1", "s3");
+        let signature = myfsio_auth::sigv4::compute_signature(&signing_key, &string_to_sign);
+        axum::http::Request::builder()
+            .method(axum::http::Method::PUT)
+            .uri(format!(
+                "{}?{}&X-Amz-Signature={}",
+                uri, canonical_query, signature
+            ))
+            .header("host", "localhost")
+            .header("content-encoding", "aws-chunked")
+            .header("x-amz-content-sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+            .header("x-amz-decoded-content-length", "5")
+            .body(Body::from("5\r\nhello\r\n0\r\n\r\n"))
             .unwrap()
     }
 
@@ -6888,6 +7175,43 @@ mod tests {
         assert_eq!(declared_body_length(&h, true), Some(7));
         assert_eq!(declared_body_length(&HeaderMap::new(), false), None);
         assert_eq!(declared_body_length(&HeaderMap::new(), true), None);
+    }
+
+    #[tokio::test]
+    async fn presigned_streaming_marker_without_context_respects_strict_mode() {
+        let (strict_state, _strict_tmp) = test_state_with_strict_streaming(true);
+        strict_state
+            .storage
+            .create_bucket("strict-stream")
+            .await
+            .unwrap();
+        let response = crate::create_router(strict_state)
+            .oneshot(presigned_streaming_request("/strict-stream/object.txt"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let (compat_state, _compat_tmp) = test_state_with_strict_streaming(false);
+        compat_state
+            .storage
+            .create_bucket("compat-stream")
+            .await
+            .unwrap();
+        let response = crate::create_router(compat_state.clone())
+            .oneshot(presigned_streaming_request("/compat-stream/object.txt"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, mut body) = compat_state
+            .storage
+            .get_object("compat-stream", "object.txt")
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut body, &mut bytes)
+            .await
+            .unwrap();
+        assert_eq!(bytes, b"hello");
     }
 
     fn io_error_is_incomplete_body(err: &std::io::Error) -> bool {

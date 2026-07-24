@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}System - MyFSIO Console{% endblock %}
+{% block title %}System{% endblock %}
 
 {% block content %}
 <div class="page-header d-flex justify-content-between align-items-center mb-4">
@@ -20,7 +20,7 @@
 </div>
 
 <div class="row g-4 mb-4">
-  <div class="col-lg-6">
+  <div class="col-12">
     <div class="card shadow-sm border-0" style="border-radius: 1rem;">
       <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
         <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
@@ -32,21 +32,17 @@
         <p class="text-muted small mb-0">Runtime environment and configuration</p>
       </div>
       <div class="card-body px-4 pb-4">
-        <table class="table table-sm mb-0">
-          <tbody>
-            <tr><td class="text-muted" style="width:40%">Version</td><td class="fw-medium">{{ app_version }}</td></tr>
-            <tr><td class="text-muted">Storage Root</td><td><code>{{ storage_root }}</code></td></tr>
-            <tr><td class="text-muted">Platform</td><td>{{ platform }}</td></tr>
-            <tr><td class="text-muted">Engine</td><td>
-              <span class="badge bg-success bg-opacity-10 text-success">Rust (native)</span>
-            </td></tr>
-          </tbody>
-        </table>
+        <div class="row g-3">
+          <div class="col-md-6 col-xl-3"><div class="small text-muted">Version</div><div class="fw-medium">{{ app_version }}</div></div>
+          <div class="col-md-6 col-xl-3"><div class="small text-muted">Storage Root</div><code class="text-break">{{ storage_root }}</code></div>
+          <div class="col-md-6 col-xl-3"><div class="small text-muted">Platform</div><div>{{ platform }}</div></div>
+          <div class="col-md-6 col-xl-3"><div class="small text-muted">Engine</div><span class="badge bg-success bg-opacity-10 text-success">Rust (native)</span></div>
+        </div>
       </div>
     </div>
   </div>
 
-  <div class="col-lg-6">
+  <div class="col-12">
     <div class="card shadow-sm border-0" style="border-radius: 1rem;">
       <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
         <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
@@ -372,15 +368,7 @@
 <script>
 (function () {
   var csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-
-  function formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0 B';
-    var units = ['B', 'KB', 'MB', 'GB'];
-    var i = 0;
-    var b = bytes;
-    while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
-    return (i === 0 ? b : b.toFixed(1)) + ' ' + units[i];
-  }
+  var formatBytes = window.MyFSIO.formatBytes;
 
   var _displayTimezone = {{ display_timezone | json_island | safe }};
 

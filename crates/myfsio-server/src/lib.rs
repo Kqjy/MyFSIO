@@ -8,6 +8,7 @@ pub mod session;
 pub mod state;
 pub mod stores;
 pub mod templates;
+pub mod ui_format;
 
 use axum::Router;
 

@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::extract::{Extension, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
+use futures::StreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tera::Context;
@@ -12,6 +13,7 @@ use crate::handlers::ui::{base_context, inject_flash, render};
 use crate::middleware::session::SessionHandle;
 use crate::state::AppState;
 use crate::templates::TemplateEngine;
+use crate::ui_format::human_size;
 use myfsio_storage::traits::StorageEngine;
 
 pub fn register_ui_endpoints(engine: &TemplateEngine) {
@@ -189,21 +191,6 @@ fn page_context(state: &AppState, session: &SessionHandle, endpoint: &str) -> Co
     let flashed = session.write(|s| s.take_flash());
     inject_flash(&mut ctx, flashed);
     ctx
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let mut size = bytes as f64;
-    let mut idx = 0usize;
-    while size >= 1024.0 && idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        idx += 1;
-    }
-    if idx == 0 {
-        format!("{} {}", bytes, UNITS[idx])
-    } else {
-        format!("{:.1} {}", size, UNITS[idx])
-    }
 }
 
 fn wants_json(headers: &HeaderMap) -> bool {
@@ -403,44 +390,64 @@ pub async fn buckets_overview(
         }
     };
 
-    let mut items: Vec<Value> = Vec::with_capacity(buckets.len());
-    for b in &buckets {
-        if !is_admin {
-            let allowed = match principal.as_ref() {
-                Some(p) => crate::middleware::ui_can_see_bucket(&state, p, &b.name).await,
-                None => false,
-            };
-            if !allowed {
-                continue;
+    let mut items = futures::stream::iter(buckets.into_iter().enumerate())
+        .map(|(index, bucket)| {
+            let state = &state;
+            let principal = principal.as_ref();
+            async move {
+                if !is_admin {
+                    let allowed = match principal {
+                        Some(principal) => {
+                            crate::middleware::ui_can_see_bucket(state, principal, &bucket.name)
+                                .await
+                        }
+                        None => false,
+                    };
+                    if !allowed {
+                        return None;
+                    }
+                }
+
+                let stats = state.storage.bucket_stats(&bucket.name).await.ok();
+                let total_bytes = stats.as_ref().map(|stats| stats.total_bytes()).unwrap_or(0);
+                let objects = stats.as_ref().map(|stats| stats.objects).unwrap_or(0);
+                let version_count = stats.as_ref().map(|stats| stats.version_count).unwrap_or(0);
+                let policy = state
+                    .storage
+                    .get_bucket_config(&bucket.name)
+                    .await
+                    .ok()
+                    .and_then(|config| config.policy);
+                let access = bucket_access_descriptor(policy.as_ref(), &bucket.name);
+                Some((
+                    index,
+                    json!({
+                        "meta": {
+                            "name": bucket.name,
+                            "creation_date": bucket.creation_date.to_rfc3339(),
+                        },
+                        "summary": {
+                            "human_size": human_size(total_bytes),
+                            "objects": objects,
+                            "version_count": version_count,
+                        },
+                        "detail_url": format!("/ui/buckets/{}", bucket.name),
+                        "access_badge": access.badge(),
+                        "access_label": access.label(),
+                        "access_kind": access.kind(),
+                    }),
+                ))
             }
-        }
-
-        let stats = state.storage.bucket_stats(&b.name).await.ok();
-        let total_bytes = stats.as_ref().map(|s| s.total_bytes()).unwrap_or(0);
-        let total_objects = stats.as_ref().map(|s| s.total_objects()).unwrap_or(0);
-        let policy = state
-            .storage
-            .get_bucket_config(&b.name)
-            .await
-            .ok()
-            .and_then(|cfg| cfg.policy);
-        let access = bucket_access_descriptor(policy.as_ref(), &b.name);
-
-        items.push(json!({
-            "meta": {
-                "name": b.name,
-                "creation_date": b.creation_date.to_rfc3339(),
-            },
-            "summary": {
-                "human_size": human_size(total_bytes),
-                "objects": total_objects,
-            },
-            "detail_url": format!("/ui/buckets/{}", b.name),
-            "access_badge": access.badge(),
-            "access_label": access.label(),
-            "access_kind": access.kind(),
-        }));
-    }
+        })
+        .buffer_unordered(4)
+        .filter_map(|item| async move { item })
+        .collect::<Vec<_>>()
+        .await;
+    items.sort_by_key(|(index, _)| *index);
+    let items = items
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect::<Vec<Value>>();
 
     ctx.insert("buckets", &items);
     render(&state, "buckets.html", &ctx)
@@ -654,6 +661,14 @@ pub async fn bucket_detail(
     ctx.insert("is_replication_admin", &viewer_is_admin);
     ctx.insert("lifecycle_enabled", &state.config.lifecycle_enabled);
     ctx.insert("site_sync_enabled", &state.config.site_sync_enabled);
+    ctx.insert(
+        "presigned_url_min_expiry",
+        &state.config.presigned_url_min_expiry,
+    );
+    ctx.insert(
+        "presigned_url_max_expiry",
+        &state.config.presigned_url_max_expiry,
+    );
     ctx.insert(
         "website_hosting_enabled",
         &state.config.website_hosting_enabled,
@@ -2124,6 +2139,10 @@ pub async fn metrics_dashboard(
         &state.config.metrics_history_enabled,
     );
     ctx.insert("operation_metrics_enabled", &state.config.metrics_enabled);
+    ctx.insert(
+        "metrics_storage_refresh_minutes",
+        &state.config.metrics_storage_refresh_minutes,
+    );
     ctx.insert("history", &Vec::<Value>::new());
     ctx.insert("operation_metrics", &Vec::<Value>::new());
 
@@ -2146,6 +2165,14 @@ pub async fn metrics_dashboard(
             "uptime_days": 0, "uptime_seconds": 0, "uptime_display": "0h 0m", "versions": 0,
         })
     });
+    let storage_refreshed_at = app
+        .get("storage_refreshed_at")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let storage_refreshed_at_display = app
+        .get("storage_refreshed_at_display")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let mem_pct = memory
         .get("percent")
         .and_then(|v| v.as_f64())
@@ -2157,6 +2184,11 @@ pub async fn metrics_dashboard(
     ctx.insert("memory", &memory);
     ctx.insert("disk", &disk);
     ctx.insert("app", &app);
+    ctx.insert("storage_refreshed_at", &storage_refreshed_at);
+    ctx.insert(
+        "storage_refreshed_at_display",
+        &storage_refreshed_at_display,
+    );
     ctx.insert("has_issues", &has_issues);
     ctx.insert(
         "summary",
@@ -2183,21 +2215,6 @@ fn format_history_timestamp(timestamp: Option<f64>, tz: chrono_tz::Tz) -> String
                 .to_string()
         })
         .unwrap_or_else(|| "-".to_string())
-}
-
-fn format_byte_count(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", bytes, UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
@@ -2237,7 +2254,7 @@ fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
                 );
                 obj.insert(
                     "bytes_freed_display".to_string(),
-                    Value::String(format_byte_count(bytes_freed)),
+                    Value::String(human_size(bytes_freed)),
                 );
             }
             execution

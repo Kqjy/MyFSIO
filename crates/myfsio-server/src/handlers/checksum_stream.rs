@@ -1,4 +1,5 @@
 use md5::{Digest as Md5Digest, Md5};
+use sha1::Sha1;
 use sha2::Sha256;
 use std::error::Error;
 use std::fmt;
@@ -9,11 +10,16 @@ use tokio::io::{AsyncRead, ReadBuf};
 #[derive(Debug)]
 pub struct UploadChecksumMismatchError {
     message: String,
+    content_md5: bool,
 }
 
 impl UploadChecksumMismatchError {
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn is_content_md5(&self) -> bool {
+        self.content_md5
     }
 }
 
@@ -25,29 +31,39 @@ impl fmt::Display for UploadChecksumMismatchError {
 
 impl Error for UploadChecksumMismatchError {}
 
-pub fn upload_checksum_mismatch_message(err: &(dyn Error + 'static)) -> Option<String> {
+pub fn upload_checksum_mismatch<'a>(
+    err: &'a (dyn Error + 'static),
+) -> Option<&'a UploadChecksumMismatchError> {
     if let Some(mismatch) = err.downcast_ref::<UploadChecksumMismatchError>() {
-        return Some(mismatch.message().to_string());
+        return Some(mismatch);
     }
     if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
         if let Some(inner) = io_err.get_ref() {
-            return upload_checksum_mismatch_message(inner);
+            return upload_checksum_mismatch(inner);
         }
         return None;
     }
-    err.source().and_then(upload_checksum_mismatch_message)
+    err.source().and_then(upload_checksum_mismatch)
 }
 
 #[derive(Default)]
 pub struct ExpectedUploadChecksums {
     pub md5: Option<Vec<u8>>,
     pub sha256: Option<Vec<u8>>,
+    pub sha1: Option<Vec<u8>>,
     pub crc32: Option<[u8; 4]>,
+    pub crc32c: Option<[u8; 4]>,
+    pub crc64nvme: Option<[u8; 8]>,
 }
 
 impl ExpectedUploadChecksums {
     pub fn is_empty(&self) -> bool {
-        self.md5.is_none() && self.sha256.is_none() && self.crc32.is_none()
+        self.md5.is_none()
+            && self.sha256.is_none()
+            && self.sha1.is_none()
+            && self.crc32.is_none()
+            && self.crc32c.is_none()
+            && self.crc64nvme.is_none()
     }
 }
 
@@ -55,7 +71,10 @@ pub struct ChecksumVerifyReader {
     inner: myfsio_storage::traits::AsyncReadStream,
     md5: Option<(Md5, Vec<u8>)>,
     sha256: Option<(Sha256, Vec<u8>)>,
+    sha1: Option<(Sha1, Vec<u8>)>,
     crc32: Option<(crc32fast::Hasher, [u8; 4])>,
+    crc32c: Option<(crc_fast::Digest, [u8; 4])>,
+    crc64nvme: Option<(crc_fast::Digest, [u8; 8])>,
     verified: bool,
 }
 
@@ -68,7 +87,14 @@ impl ChecksumVerifyReader {
             inner,
             md5: expected.md5.map(|e| (Md5::new(), e)),
             sha256: expected.sha256.map(|e| (Sha256::new(), e)),
+            sha1: expected.sha1.map(|e| (Sha1::new(), e)),
             crc32: expected.crc32.map(|e| (crc32fast::Hasher::new(), e)),
+            crc32c: expected
+                .crc32c
+                .map(|e| (crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi), e)),
+            crc64nvme: expected
+                .crc64nvme
+                .map(|e| (crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64Nvme), e)),
             verified: false,
         }
     }
@@ -78,11 +104,12 @@ impl ChecksumVerifyReader {
             return Ok(());
         }
         self.verified = true;
-        let mismatch = |message: &str| {
+        let mismatch = |message: &str, content_md5| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 UploadChecksumMismatchError {
                     message: message.to_string(),
+                    content_md5,
                 },
             )
         };
@@ -90,6 +117,7 @@ impl ChecksumVerifyReader {
             if hasher.finalize().as_slice() != expected.as_slice() {
                 return Err(mismatch(
                     "The Content-MD5 you specified did not match what we received",
+                    true,
                 ));
             }
         }
@@ -97,6 +125,15 @@ impl ChecksumVerifyReader {
             if hasher.finalize().as_slice() != expected.as_slice() {
                 return Err(mismatch(
                     "The x-amz-checksum-sha256 you specified did not match what we received",
+                    false,
+                ));
+            }
+        }
+        if let Some((hasher, expected)) = self.sha1.take() {
+            if hasher.finalize().as_slice() != expected.as_slice() {
+                return Err(mismatch(
+                    "The x-amz-checksum-sha1 you specified did not match what we received",
+                    false,
                 ));
             }
         }
@@ -104,6 +141,23 @@ impl ChecksumVerifyReader {
             if hasher.finalize().to_be_bytes() != expected {
                 return Err(mismatch(
                     "The x-amz-checksum-crc32 you specified did not match what we received",
+                    false,
+                ));
+            }
+        }
+        if let Some((hasher, expected)) = self.crc32c.take() {
+            if (hasher.finalize() as u32).to_be_bytes() != expected {
+                return Err(mismatch(
+                    "The x-amz-checksum-crc32c you specified did not match what we received",
+                    false,
+                ));
+            }
+        }
+        if let Some((hasher, expected)) = self.crc64nvme.take() {
+            if hasher.finalize().to_be_bytes() != expected {
+                return Err(mismatch(
+                    "The x-amz-checksum-crc64nvme you specified did not match what we received",
+                    false,
                 ));
             }
         }
@@ -132,7 +186,16 @@ impl AsyncRead for ChecksumVerifyReader {
                     if let Some((hasher, _)) = self.sha256.as_mut() {
                         hasher.update(filled);
                     }
+                    if let Some((hasher, _)) = self.sha1.as_mut() {
+                        hasher.update(filled);
+                    }
                     if let Some((hasher, _)) = self.crc32.as_mut() {
+                        hasher.update(filled);
+                    }
+                    if let Some((hasher, _)) = self.crc32c.as_mut() {
+                        hasher.update(filled);
+                    }
+                    if let Some((hasher, _)) = self.crc64nvme.as_mut() {
                         hasher.update(filled);
                     }
                     Poll::Ready(Ok(()))
@@ -258,7 +321,14 @@ mod tests {
         let expected = ExpectedUploadChecksums {
             md5: Some(Md5::digest(data).to_vec()),
             sha256: Some(Sha256::digest(data).to_vec()),
+            sha1: Some(Sha1::digest(data).to_vec()),
             crc32: Some(crc32fast::hash(data).to_be_bytes()),
+            crc32c: Some(
+                (crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, data) as u32).to_be_bytes(),
+            ),
+            crc64nvme: Some(
+                crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, data).to_be_bytes(),
+            ),
         };
         let mut reader = ChecksumVerifyReader::new(stream_of(data), expected);
         let mut out = Vec::new();
@@ -276,8 +346,9 @@ mod tests {
         let mut reader = ChecksumVerifyReader::new(stream_of(data), expected);
         let mut out = Vec::new();
         let err = reader.read_to_end(&mut out).await.unwrap_err();
-        let msg = upload_checksum_mismatch_message(&err).expect("typed mismatch");
-        assert!(msg.contains("Content-MD5"));
+        let mismatch = upload_checksum_mismatch(&err).expect("typed mismatch");
+        assert!(mismatch.message().contains("Content-MD5"));
+        assert!(mismatch.is_content_md5());
     }
 
     #[tokio::test]
@@ -290,7 +361,49 @@ mod tests {
         let mut reader = ChecksumVerifyReader::new(stream_of(data), expected);
         let mut out = Vec::new();
         let err = reader.read_to_end(&mut out).await.unwrap_err();
-        assert!(upload_checksum_mismatch_message(&err).is_some());
+        assert!(upload_checksum_mismatch(&err).is_some());
+    }
+
+    #[tokio::test]
+    async fn checksum_reader_rejects_bad_crc32c_sha1_and_crc64nvme() {
+        let data = b"hello world";
+        for expected in [
+            ExpectedUploadChecksums {
+                crc32c: Some(
+                    (crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, b"other") as u32)
+                        .to_be_bytes(),
+                ),
+                ..Default::default()
+            },
+            ExpectedUploadChecksums {
+                sha1: Some(Sha1::digest(b"other").to_vec()),
+                ..Default::default()
+            },
+            ExpectedUploadChecksums {
+                crc64nvme: Some(
+                    crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, b"other").to_be_bytes(),
+                ),
+                ..Default::default()
+            },
+        ] {
+            let mut reader = ChecksumVerifyReader::new(stream_of(data), expected);
+            let mut out = Vec::new();
+            let err = reader.read_to_end(&mut out).await.unwrap_err();
+            let mismatch = upload_checksum_mismatch(&err).expect("typed mismatch");
+            assert!(!mismatch.is_content_md5());
+        }
+    }
+
+    #[test]
+    fn crc64nvme_matches_aws_empty_and_catalog_vectors() {
+        assert_eq!(
+            crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, b""),
+            0
+        );
+        assert_eq!(
+            crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, b"123456789"),
+            0xae8b_1486_0a79_9888
+        );
     }
 
     #[tokio::test]

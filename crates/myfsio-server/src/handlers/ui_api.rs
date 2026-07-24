@@ -9,7 +9,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Datelike, Timelike, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use http_body_util::BodyStream;
 use myfsio_auth::sigv4;
 use myfsio_common::constants::{BUCKET_VERSIONS_DIR, SYSTEM_BUCKETS_DIR, SYSTEM_ROOT};
@@ -30,6 +30,7 @@ use crate::middleware::session::SessionHandle;
 use crate::services::object_lock;
 use crate::state::AppState;
 use crate::stores::connections::RemoteConnection;
+use crate::ui_format::human_size;
 
 const UI_KEY_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -82,21 +83,6 @@ fn build_ui_object_url(bucket: &str, key: &str, action: &str) -> String {
         encode_object_key(key),
         action
     )
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let mut size = bytes as f64;
-    let mut idx = 0;
-    while size >= 1024.0 && idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        idx += 1;
-    }
-    if idx == 0 {
-        format!("{} {}", bytes, UNITS[idx])
-    } else {
-        format!("{:.1} {}", size, UNITS[idx])
-    }
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -1088,6 +1074,35 @@ fn dangerous_preview_content_type(content_type: Option<&str>, key: &str) -> Opti
         | "image/svg+xml" => Some("text/plain; charset=utf-8".to_string()),
         _ => None,
     }
+}
+
+fn is_pdf_preview(content_type: Option<&str>, key: &str) -> bool {
+    content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(|value| value.eq_ignore_ascii_case("application/pdf"))
+        .unwrap_or(false)
+        || key.to_ascii_lowercase().ends_with(".pdf")
+}
+
+async fn has_pdf_magic(state: &AppState, bucket: &str, key: &str) -> Result<bool, StorageError> {
+    let (_, mut stream) = state
+        .storage
+        .get_object_range(bucket, key, 0, Some(5))
+        .await?;
+    let mut magic = [0u8; 5];
+    let mut read = 0;
+    while read < magic.len() {
+        let count = stream
+            .read(&mut magic[read..])
+            .await
+            .map_err(StorageError::Io)?;
+        if count == 0 {
+            break;
+        }
+        read += count;
+    }
+    Ok(read == magic.len() && magic == *b"%PDF-")
 }
 
 async fn parse_json_body<T: DeserializeOwned>(body: Body) -> Result<T, Response> {
@@ -2674,6 +2689,7 @@ pub async fn upload_object(
         Query(ObjectQuery::default()),
         None,
         None,
+        None,
         upload_headers,
         upload_body,
     )
@@ -2831,7 +2847,7 @@ pub async fn complete_multipart_upload(
         .await
     {
         Ok(meta) => {
-            super::trigger_replication(&state, &bucket_name, &meta.key, "write");
+            super::trigger_replication(&state, &bucket_name, &meta.key, "write", None);
             json_ok(json!({
                 "key": meta.key,
                 "size": meta.size,
@@ -3050,6 +3066,23 @@ async fn serve_object_download_or_preview(
         .ok()
         .and_then(|meta| meta.content_type);
 
+    if !is_download && is_pdf_preview(content_type.as_deref(), &key) {
+        match has_pdf_magic(&state, &bucket, &key).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    Json(json!({
+                        "error": "Preview unavailable — Download to view",
+                        "preview_unavailable": true,
+                    })),
+                )
+                    .into_response()
+            }
+            Err(err) => return storage_json_error(err),
+        }
+    }
+
     let mut query = ObjectQuery::default();
     if is_download {
         query.response_content_disposition = Some(format!(
@@ -3159,11 +3192,27 @@ struct PresignPayload {
     #[serde(default = "default_presign_method")]
     method: String,
     #[serde(default)]
-    expires_in: Option<u64>,
+    expires_in: Option<Value>,
 }
 
 fn default_presign_method() -> String {
     "GET".to_string()
+}
+
+fn effective_presign_expiry(
+    value: Option<&Value>,
+    min_expiry: u64,
+    max_expiry: u64,
+) -> Result<(u64, bool), &'static str> {
+    let requested = match value {
+        None => 900,
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .ok_or("Expiry must be a whole number of seconds")?,
+        Some(_) => return Err("Expiry must be a whole number of seconds"),
+    };
+    let effective = requested.clamp(min_expiry, max_expiry);
+    Ok((effective, effective != requested))
 }
 
 async fn object_presign_json(
@@ -3202,10 +3251,11 @@ async fn object_presign_json(
 
     let min_expiry = state.config.presigned_url_min_expiry;
     let max_expiry = state.config.presigned_url_max_expiry;
-    let expires = payload
-        .expires_in
-        .unwrap_or(900)
-        .clamp(min_expiry, max_expiry);
+    let (expires, clamped) =
+        match effective_presign_expiry(payload.expires_in.as_ref(), min_expiry, max_expiry) {
+            Ok(result) => result,
+            Err(message) => return json_error(StatusCode::BAD_REQUEST, message),
+        };
 
     let api_base = parse_api_base(state);
     let parsed = match reqwest::Url::parse(&api_base) {
@@ -3273,6 +3323,8 @@ async fn object_presign_json(
         "url": final_url,
         "method": method,
         "expires_in": expires,
+        "effective_expires_in": expires,
+        "clamped": clamped,
     }))
     .into_response()
 }
@@ -3386,7 +3438,7 @@ async fn copy_object_json(
         .await
     {
         Ok(_) => {
-            super::trigger_replication(state, dest_bucket, dest_key, "write");
+            super::trigger_replication(state, dest_bucket, dest_key, "write", None);
             Json(json!({
                 "status": "ok",
                 "message": format!("Copied to {}/{}", dest_bucket, dest_key),
@@ -3456,8 +3508,8 @@ async fn move_object_json(
     match state.storage.copy_object(bucket, key, dest_bucket, dest_key).await {
         Ok(_) => match state.storage.delete_object(bucket, key).await {
             Ok(_) => {
-                super::trigger_replication(state, dest_bucket, dest_key, "write");
-                super::trigger_replication(state, bucket, key, "delete");
+                super::trigger_replication(state, dest_bucket, dest_key, "write", None);
+                super::trigger_replication(state, bucket, key, "delete", None);
                 Json(json!({
                     "status": "ok",
                     "message": format!("Moved to {}/{}", dest_bucket, dest_key),
@@ -3530,7 +3582,7 @@ async fn delete_object_json(
         if let Err(err) = state.storage.delete_object(bucket, key).await {
             return storage_json_error(err);
         }
-        super::trigger_replication(state, bucket, key, "delete");
+        super::trigger_replication(state, bucket, key, "delete", None);
         if let Err(err) = purge_object_versions_for_key(state, bucket, key).await {
             return json_error(StatusCode::BAD_REQUEST, err);
         }
@@ -3543,7 +3595,7 @@ async fn delete_object_json(
 
     match state.storage.delete_object(bucket, key).await {
         Ok(_) => {
-            super::trigger_replication(state, bucket, key, "delete");
+            super::trigger_replication(state, bucket, key, "delete", None);
             Json(json!({
                 "status": "ok",
                 "message": format!("Deleted '{}'", key),
@@ -3659,7 +3711,7 @@ async fn restore_object_version_json(
     {
         return storage_json_error(err);
     }
-    super::trigger_replication(state, bucket, key, "write");
+    super::trigger_replication(state, bucket, key, "write", None);
 
     let mut message = format!("Restored '{}'", key);
     if live_exists && versioning_enabled {
@@ -3960,7 +4012,7 @@ pub async fn bulk_delete_objects(
         }
         match state.storage.delete_object(&bucket_name, &key).await {
             Ok(_) => {
-                super::trigger_replication(&state, &bucket_name, &key, "delete");
+                super::trigger_replication(&state, &bucket_name, &key, "delete", None);
                 if payload.purge_versions {
                     if let Err(err) =
                         purge_object_versions_for_key(&state, &bucket_name, &key).await
@@ -4209,7 +4261,7 @@ pub async fn archived_post_dispatch(
         match purge_object_versions_for_key(&state, &bucket_name, key).await {
             Ok(()) => {
                 let _ = state.storage.delete_object(&bucket_name, key).await;
-                super::trigger_replication(&state, &bucket_name, key, "delete");
+                super::trigger_replication(&state, &bucket_name, key, "delete", None);
                 Json(json!({
                     "status": "ok",
                     "message": format!("Removed archived versions for '{}'", key),
@@ -4708,15 +4760,18 @@ pub async fn collect_metrics(state: &AppState) -> Value {
     let buckets_list = state.storage.list_buckets().await.unwrap_or_default();
     let bucket_count = buckets_list.len() as u64;
 
+    let stats = futures::stream::iter(buckets_list)
+        .map(|bucket| async move { state.storage.bucket_stats(&bucket.name).await })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
     let mut total_objects: u64 = 0;
     let mut total_bytes: u64 = 0;
     let mut total_versions: u64 = 0;
-    for bucket in &buckets_list {
-        if let Ok(stats) = state.storage.bucket_stats(&bucket.name).await {
-            total_objects += stats.objects;
-            total_bytes += stats.bytes;
-            total_versions += stats.version_count;
-        }
+    for stats in stats.into_iter().flatten() {
+        total_objects += stats.objects;
+        total_bytes += stats.bytes;
+        total_versions += stats.version_count;
     }
 
     let (cpu_percent, mem_used, mem_total) = sample_system().await;
@@ -4734,6 +4789,13 @@ pub async fn collect_metrics(state: &AppState) -> Value {
         0.0
     };
     let disk_pressure = state.disk_limiter.snapshot();
+    let storage_refreshed_at = match &state.system_metrics {
+        Some(metrics) => metrics.storage_last_refresh().await,
+        None => None,
+    };
+    let storage_refreshed_at_display = storage_refreshed_at
+        .as_ref()
+        .map(|timestamp| format_display_timestamp(timestamp, display_tz(state)));
 
     json!({
         "cpu_percent": cpu_percent,
@@ -4749,6 +4811,8 @@ pub async fn collect_metrics(state: &AppState) -> Value {
         },
         "app": {
             "storage_used": human_size(total_bytes),
+            "storage_refreshed_at": storage_refreshed_at,
+            "storage_refreshed_at_display": storage_refreshed_at_display,
             "buckets": bucket_count,
             "objects": total_objects,
             "versions": total_versions,
@@ -4786,6 +4850,14 @@ pub struct HoursQuery {
 }
 
 #[derive(Deserialize, Default)]
+pub struct MetricsHistoryQuery {
+    #[serde(default)]
+    pub hours: Option<u64>,
+    #[serde(default)]
+    pub points: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
 pub struct OperationErrorsQuery {
     #[serde(default)]
     pub limit: Option<usize>,
@@ -4797,24 +4869,36 @@ pub struct OperationErrorsQuery {
 
 pub async fn metrics_history(
     State(state): State<AppState>,
-    Query(q): Query<HoursQuery>,
+    Query(q): Query<MetricsHistoryQuery>,
 ) -> Response {
     let settings = metrics_settings_snapshot(&state);
+    let hours_requested = q.hours.unwrap_or(settings.retention_hours);
     match &state.system_metrics {
-        Some(metrics) => Json(json!({
-            "enabled": settings.enabled,
-            "history": metrics.get_history(q.hours).await,
-            "interval_minutes": settings.interval_minutes,
-            "retention_hours": settings.retention_hours,
-            "hours_requested": q.hours.unwrap_or(settings.retention_hours),
-        }))
-        .into_response(),
+        Some(metrics) => {
+            let result = metrics
+                .get_history_aggregated(hours_requested, q.points)
+                .await;
+            Json(json!({
+                "enabled": settings.enabled,
+                "history": result.history,
+                "interval_minutes": settings.interval_minutes,
+                "retention_hours": settings.retention_hours,
+                "hours_requested": hours_requested,
+                "aggregated": result.aggregated,
+                "bucket_seconds": result.bucket_seconds,
+                "sample_count": result.sample_count,
+            }))
+            .into_response()
+        }
         None => Json(json!({
             "enabled": settings.enabled,
             "history": [],
             "interval_minutes": settings.interval_minutes,
             "retention_hours": settings.retention_hours,
-            "hours_requested": q.hours.unwrap_or(settings.retention_hours),
+            "hours_requested": hours_requested,
+            "aggregated": false,
+            "bucket_seconds": null,
+            "sample_count": 0,
         }))
         .into_response(),
     }

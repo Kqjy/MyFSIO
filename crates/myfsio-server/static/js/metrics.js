@@ -4,17 +4,7 @@
     if (element) element.textContent = value;
   }
 
-  function formatBytes(bytes) {
-    var value = Math.max(0, Number(bytes) || 0);
-    if (value < 1024) return value + ' B';
-    var units = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
-    var unit = -1;
-    do {
-      value /= 1024;
-      unit++;
-    } while (value >= 1024 && unit < units.length - 1);
-    return value.toLocaleString(undefined, { maximumFractionDigits: value < 10 ? 1 : 0 }) + ' ' + units[unit];
-  }
+  var formatBytes = window.MyFSIO.formatBytes;
 
   function formatPermits(inUse, limit) {
     var used = Math.max(0, Number(inUse) || 0).toLocaleString();

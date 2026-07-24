@@ -34,6 +34,40 @@ pub struct SystemMetricsSnapshot {
     pub storage_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemMetricsHistoryPoint {
+    pub timestamp: DateTime<Utc>,
+    pub cpu_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_percent_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_percent_max: Option<f64>,
+    pub memory_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_percent_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_percent_max: Option<f64>,
+    pub disk_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_percent_min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_percent_max: Option<f64>,
+    pub storage_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_bytes_min: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_bytes_max: Option<u64>,
+}
+
+pub struct SystemMetricsHistory {
+    pub history: Vec<SystemMetricsHistoryPoint>,
+    pub aggregated: bool,
+    pub bucket_seconds: Option<f64>,
+    pub sample_count: usize,
+}
+
+pub const DEFAULT_HISTORY_POINTS: usize = 240;
+
 pub struct SystemMetricsService {
     storage_root: PathBuf,
     storage: Arc<FsStorageBackend>,
@@ -77,6 +111,22 @@ impl SystemMetricsService {
         let mut history = self.history.read().await.clone();
         prune_history(&mut history, hours.unwrap_or(self.config.retention_hours));
         history
+    }
+
+    pub async fn get_history_aggregated(
+        &self,
+        hours: u64,
+        points: Option<usize>,
+    ) -> SystemMetricsHistory {
+        let end = Utc::now();
+        let start = end - chrono::Duration::hours(hours as i64);
+        let mut history = self.history.read().await.clone();
+        history.retain(|item| item.timestamp > start && item.timestamp <= end);
+        aggregate_history(history, start, end, clamp_history_points(points))
+    }
+
+    pub async fn storage_last_refresh(&self) -> Option<DateTime<Utc>> {
+        self.storage_bytes_cache.read().await.last_refresh
     }
 
     async fn take_snapshot(&self) {
@@ -129,6 +179,150 @@ impl SystemMetricsService {
 fn prune_history(history: &mut Vec<SystemMetricsSnapshot>, retention_hours: u64) {
     let cutoff = Utc::now() - chrono::Duration::hours(retention_hours as i64);
     history.retain(|item| item.timestamp > cutoff);
+}
+
+fn clamp_history_points(points: Option<usize>) -> usize {
+    points.unwrap_or(DEFAULT_HISTORY_POINTS).clamp(50, 1000)
+}
+
+impl From<SystemMetricsSnapshot> for SystemMetricsHistoryPoint {
+    fn from(snapshot: SystemMetricsSnapshot) -> Self {
+        Self {
+            timestamp: snapshot.timestamp,
+            cpu_percent: snapshot.cpu_percent,
+            cpu_percent_min: None,
+            cpu_percent_max: None,
+            memory_percent: snapshot.memory_percent,
+            memory_percent_min: None,
+            memory_percent_max: None,
+            disk_percent: snapshot.disk_percent,
+            disk_percent_min: None,
+            disk_percent_max: None,
+            storage_bytes: snapshot.storage_bytes,
+            storage_bytes_min: None,
+            storage_bytes_max: None,
+        }
+    }
+}
+
+struct HistoryBucket {
+    count: u64,
+    cpu_sum: f64,
+    cpu_min: f64,
+    cpu_max: f64,
+    memory_sum: f64,
+    memory_min: f64,
+    memory_max: f64,
+    disk_sum: f64,
+    disk_min: f64,
+    disk_max: f64,
+    storage_sum: u128,
+    storage_min: u64,
+    storage_max: u64,
+}
+
+impl HistoryBucket {
+    fn new(snapshot: &SystemMetricsSnapshot) -> Self {
+        Self {
+            count: 1,
+            cpu_sum: snapshot.cpu_percent,
+            cpu_min: snapshot.cpu_percent,
+            cpu_max: snapshot.cpu_percent,
+            memory_sum: snapshot.memory_percent,
+            memory_min: snapshot.memory_percent,
+            memory_max: snapshot.memory_percent,
+            disk_sum: snapshot.disk_percent,
+            disk_min: snapshot.disk_percent,
+            disk_max: snapshot.disk_percent,
+            storage_sum: snapshot.storage_bytes as u128,
+            storage_min: snapshot.storage_bytes,
+            storage_max: snapshot.storage_bytes,
+        }
+    }
+
+    fn add(&mut self, snapshot: &SystemMetricsSnapshot) {
+        self.count += 1;
+        self.cpu_sum += snapshot.cpu_percent;
+        self.cpu_min = self.cpu_min.min(snapshot.cpu_percent);
+        self.cpu_max = self.cpu_max.max(snapshot.cpu_percent);
+        self.memory_sum += snapshot.memory_percent;
+        self.memory_min = self.memory_min.min(snapshot.memory_percent);
+        self.memory_max = self.memory_max.max(snapshot.memory_percent);
+        self.disk_sum += snapshot.disk_percent;
+        self.disk_min = self.disk_min.min(snapshot.disk_percent);
+        self.disk_max = self.disk_max.max(snapshot.disk_percent);
+        self.storage_sum += snapshot.storage_bytes as u128;
+        self.storage_min = self.storage_min.min(snapshot.storage_bytes);
+        self.storage_max = self.storage_max.max(snapshot.storage_bytes);
+    }
+
+    fn into_point(self, timestamp: DateTime<Utc>) -> SystemMetricsHistoryPoint {
+        SystemMetricsHistoryPoint {
+            timestamp,
+            cpu_percent: round2(self.cpu_sum / self.count as f64),
+            cpu_percent_min: Some(self.cpu_min),
+            cpu_percent_max: Some(self.cpu_max),
+            memory_percent: round2(self.memory_sum / self.count as f64),
+            memory_percent_min: Some(self.memory_min),
+            memory_percent_max: Some(self.memory_max),
+            disk_percent: round2(self.disk_sum / self.count as f64),
+            disk_percent_min: Some(self.disk_min),
+            disk_percent_max: Some(self.disk_max),
+            storage_bytes: (self.storage_sum / self.count as u128) as u64,
+            storage_bytes_min: Some(self.storage_min),
+            storage_bytes_max: Some(self.storage_max),
+        }
+    }
+}
+
+fn aggregate_history(
+    mut history: Vec<SystemMetricsSnapshot>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    target: usize,
+) -> SystemMetricsHistory {
+    history.sort_by_key(|item| item.timestamp);
+    let sample_count = history.len();
+    if sample_count <= target {
+        return SystemMetricsHistory {
+            history: history.into_iter().map(Into::into).collect(),
+            aggregated: false,
+            bucket_seconds: None,
+            sample_count,
+        };
+    }
+
+    let range_millis = (end - start).num_milliseconds().max(1);
+    let mut buckets: Vec<Option<HistoryBucket>> = (0..target).map(|_| None).collect();
+    for snapshot in &history {
+        let elapsed = (snapshot.timestamp - start)
+            .num_milliseconds()
+            .clamp(0, range_millis);
+        let index = ((elapsed as i128 * target as i128) / range_millis as i128)
+            .min(target.saturating_sub(1) as i128) as usize;
+        match &mut buckets[index] {
+            Some(bucket) => bucket.add(snapshot),
+            None => buckets[index] = Some(HistoryBucket::new(snapshot)),
+        }
+    }
+
+    let points = buckets
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, bucket)| {
+            bucket.map(|bucket| {
+                let offset = (range_millis as i128 * (index + 1) as i128 / target as i128) as i64;
+                bucket.into_point(start + chrono::Duration::milliseconds(offset))
+            })
+        })
+        .collect();
+
+    SystemMetricsHistory {
+        history: points,
+        aggregated: true,
+        bucket_seconds: Some(range_millis as f64 / 1000.0 / target as f64),
+        sample_count,
+    }
 }
 
 fn sample_system_now() -> (f64, f64) {
@@ -299,6 +493,7 @@ fn round2(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use tempfile::tempdir;
 
     fn service(root: &Path) -> SystemMetricsService {
@@ -311,6 +506,112 @@ mod tests {
                 storage_refresh_minutes: 30,
             },
         )
+    }
+
+    fn history_snapshot(
+        start: DateTime<Utc>,
+        seconds: i64,
+        cpu_percent: f64,
+        memory_percent: f64,
+        disk_percent: f64,
+        storage_bytes: u64,
+    ) -> SystemMetricsSnapshot {
+        SystemMetricsSnapshot {
+            timestamp: start + chrono::Duration::seconds(seconds),
+            cpu_percent,
+            memory_percent,
+            disk_percent,
+            storage_bytes,
+        }
+    }
+
+    #[test]
+    fn metrics_history_points_are_clamped() {
+        assert_eq!(clamp_history_points(None), 240);
+        assert_eq!(clamp_history_points(Some(1)), 50);
+        assert_eq!(clamp_history_points(Some(500)), 500);
+        assert_eq!(clamp_history_points(Some(2000)), 1000);
+    }
+
+    #[test]
+    fn metrics_history_raw_samples_pass_through() {
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let history = vec![
+            history_snapshot(start, 10, 10.0, 20.0, 30.0, 100),
+            history_snapshot(start, 20, 40.0, 50.0, 60.0, 200),
+        ];
+
+        let result = aggregate_history(history, start, start + chrono::Duration::hours(1), 50);
+
+        assert!(!result.aggregated);
+        assert_eq!(result.bucket_seconds, None);
+        assert_eq!(result.sample_count, 2);
+        assert_eq!(result.history.len(), 2);
+        assert_eq!(
+            result.history[0].timestamp,
+            start + chrono::Duration::seconds(10)
+        );
+        assert_eq!(result.history[0].cpu_percent, 10.0);
+        assert_eq!(result.history[0].cpu_percent_min, None);
+        assert_eq!(result.history[0].storage_bytes_max, None);
+    }
+
+    #[test]
+    fn metrics_history_aggregates_average_min_and_max() {
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let history = vec![
+            history_snapshot(start, 10, 10.0, 20.0, 30.0, 100),
+            history_snapshot(start, 20, 30.0, 50.0, 70.0, 300),
+            history_snapshot(start, 70, 40.0, 60.0, 80.0, 400),
+            history_snapshot(start, 80, 80.0, 90.0, 100.0, 800),
+        ];
+
+        let result = aggregate_history(history, start, start + chrono::Duration::seconds(120), 2);
+
+        assert!(result.aggregated);
+        assert_eq!(result.bucket_seconds, Some(60.0));
+        assert_eq!(result.sample_count, 4);
+        assert_eq!(result.history.len(), 2);
+        let first = &result.history[0];
+        assert_eq!(first.timestamp, start + chrono::Duration::seconds(60));
+        assert_eq!(first.cpu_percent, 20.0);
+        assert_eq!(first.cpu_percent_min, Some(10.0));
+        assert_eq!(first.cpu_percent_max, Some(30.0));
+        assert_eq!(first.memory_percent, 35.0);
+        assert_eq!(first.memory_percent_min, Some(20.0));
+        assert_eq!(first.memory_percent_max, Some(50.0));
+        assert_eq!(first.disk_percent, 50.0);
+        assert_eq!(first.disk_percent_min, Some(30.0));
+        assert_eq!(first.disk_percent_max, Some(70.0));
+        assert_eq!(first.storage_bytes, 200);
+        assert_eq!(first.storage_bytes_min, Some(100));
+        assert_eq!(first.storage_bytes_max, Some(300));
+    }
+
+    #[test]
+    fn metrics_history_skips_empty_buckets() {
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let history = vec![
+            history_snapshot(start, 10, 10.0, 20.0, 30.0, 100),
+            history_snapshot(start, 20, 20.0, 30.0, 40.0, 200),
+            history_snapshot(start, 30, 30.0, 40.0, 50.0, 300),
+            history_snapshot(start, 310, 40.0, 50.0, 60.0, 400),
+            history_snapshot(start, 320, 50.0, 60.0, 70.0, 500),
+        ];
+
+        let result = aggregate_history(history, start, start + chrono::Duration::seconds(400), 4);
+
+        assert!(result.aggregated);
+        assert_eq!(result.sample_count, 5);
+        assert_eq!(result.history.len(), 2);
+        assert_eq!(
+            result.history[0].timestamp,
+            start + chrono::Duration::seconds(100)
+        );
+        assert_eq!(
+            result.history[1].timestamp,
+            start + chrono::Duration::seconds(400)
+        );
     }
 
     #[tokio::test]

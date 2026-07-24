@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-auth"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "aes",
  "base64",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-common"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "base64",
  "chrono",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-crypto"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-server"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -2739,6 +2739,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "cookie",
+ "crc-fast",
  "crc32fast",
  "dotenvy",
  "duckdb",
@@ -2772,6 +2773,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "subtle",
  "sysinfo",
@@ -2790,11 +2792,12 @@ dependencies = [
 
 [[package]]
 name = "myfsio-storage"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "chrono",
  "dashmap",
  "hex",
+ "lru 0.14.0",
  "md-5 0.10.6",
  "myfsio-common",
  "myfsio-crypto",
@@ -2815,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "myfsio-xml"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "base64",
  "chrono",

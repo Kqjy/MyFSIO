@@ -3,6 +3,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
+use futures::StreamExt;
 use myfsio_common::types::Principal;
 use myfsio_storage::traits::StorageEngine;
 use std::collections::HashMap;
@@ -1566,13 +1567,16 @@ async fn build_cluster_overview(state: &AppState) -> serde_json::Value {
 
     let buckets = state.storage.list_buckets().await.unwrap_or_default();
     let bucket_count = buckets.len() as u64;
+    let stats = futures::stream::iter(buckets)
+        .map(|bucket| async move { state.storage.bucket_stats(&bucket.name).await })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
     let mut total_objects: u64 = 0;
     let mut size_bytes: u64 = 0;
-    for b in &buckets {
-        if let Ok(stats) = state.storage.bucket_stats(&b.name).await {
-            total_objects += stats.total_objects();
-            size_bytes += stats.total_bytes();
-        }
+    for stats in stats.into_iter().flatten() {
+        total_objects += stats.total_objects();
+        size_bytes += stats.total_bytes();
     }
 
     let (disk_total, disk_free) =

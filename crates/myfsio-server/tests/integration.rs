@@ -49,6 +49,7 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -131,6 +132,7 @@ fn test_app_and_state() -> (
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -350,6 +352,7 @@ fn test_ui_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -442,6 +445,10 @@ fn ui_json_request(
         .unwrap()
 }
 
+async fn response_json(response: axum::response::Response) -> Value {
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
 fn signed_request(method: Method, uri: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -450,6 +457,130 @@ fn signed_request(method: Method, uri: &str, body: Body) -> Request<Body> {
         .header("x-secret-key", TEST_SECRET_KEY)
         .body(body)
         .unwrap()
+}
+
+fn streaming_chunk_signature(
+    signing_key: &[u8],
+    timestamp: &str,
+    scope: &str,
+    previous: &str,
+    data: &[u8],
+) -> String {
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256-PAYLOAD\n{}\n{}\n{}\n{}\n{}",
+        timestamp,
+        scope,
+        previous,
+        myfsio_auth::sigv4::sha256_hex(b""),
+        myfsio_auth::sigv4::sha256_hex(data)
+    );
+    myfsio_auth::sigv4::compute_signature(signing_key, &string_to_sign)
+}
+
+fn streaming_sigv4_request(
+    uri: &str,
+    signed_data: &[u8],
+    transmitted_data: &[u8],
+    trailer: Option<(&str, &str, bool)>,
+) -> Request<Body> {
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let scope = format!("{}/us-east-1/s3/aws4_request", date_stamp);
+    let payload_type = if trailer.is_some() {
+        "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
+    } else {
+        "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
+    };
+    let mut signed_headers = vec![
+        ("host", "localhost".to_string()),
+        ("x-amz-content-sha256", payload_type.to_string()),
+        ("x-amz-date", timestamp.clone()),
+        (
+            "x-amz-decoded-content-length",
+            signed_data.len().to_string(),
+        ),
+    ];
+    if let Some((name, _, _)) = trailer {
+        signed_headers.push(("x-amz-trailer", name.to_string()));
+    }
+    let signed_header_names = signed_headers
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(";");
+    let canonical_headers = signed_headers
+        .iter()
+        .map(|(name, value)| format!("{}:{}\n", name, value))
+        .collect::<String>();
+    let canonical_request = format!(
+        "PUT\n{}\n\n{}\n{}\n{}",
+        uri, canonical_headers, signed_header_names, payload_type
+    );
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(TEST_SECRET_KEY, &date_stamp, "us-east-1", "s3");
+    let request_string_to_sign =
+        myfsio_auth::sigv4::build_string_to_sign(&timestamp, &scope, &canonical_request);
+    let seed_signature =
+        myfsio_auth::sigv4::compute_signature(&signing_key, &request_string_to_sign);
+    let data_signature = streaming_chunk_signature(
+        &signing_key,
+        &timestamp,
+        &scope,
+        &seed_signature,
+        signed_data,
+    );
+    let final_signature =
+        streaming_chunk_signature(&signing_key, &timestamp, &scope, &data_signature, b"");
+    let mut encoded = format!(
+        "{:x};chunk-signature={}\r\n",
+        transmitted_data.len(),
+        data_signature
+    )
+    .into_bytes();
+    encoded.extend_from_slice(transmitted_data);
+    encoded.extend_from_slice(format!("\r\n0;chunk-signature={}\r\n", final_signature).as_bytes());
+    if let Some((name, value, valid_signature)) = trailer {
+        let canonical = format!("{}:{}\n", name, value);
+        let trailer_string_to_sign = format!(
+            "AWS4-HMAC-SHA256-TRAILER\n{}\n{}\n{}\n{}",
+            timestamp,
+            scope,
+            final_signature,
+            myfsio_auth::sigv4::sha256_hex(canonical.as_bytes())
+        );
+        let trailer_signature = if valid_signature {
+            myfsio_auth::sigv4::compute_signature(&signing_key, &trailer_string_to_sign)
+        } else {
+            "0".repeat(64)
+        };
+        encoded.extend_from_slice(
+            format!(
+                "{}:{}\r\nx-amz-trailer-signature:{}\r\n",
+                name, value, trailer_signature
+            )
+            .as_bytes(),
+        );
+    }
+    encoded.extend_from_slice(b"\r\n");
+
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+        TEST_ACCESS_KEY, scope, signed_header_names, seed_signature
+    );
+    let mut builder = Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header("host", "localhost")
+        .header("authorization", authorization)
+        .header("x-amz-date", timestamp)
+        .header("x-amz-content-sha256", payload_type)
+        .header("x-amz-decoded-content-length", signed_data.len())
+        .header("content-encoding", "aws-chunked");
+    if let Some((name, _, _)) = trailer {
+        builder = builder.header("x-amz-trailer", name);
+    }
+    builder.body(Body::from(encoded)).unwrap()
 }
 
 fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
@@ -511,6 +642,7 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -1266,6 +1398,119 @@ async fn test_ui_iam_user_actions_use_real_user_ids() {
 }
 
 #[tokio::test]
+async fn test_ui_presign_reports_clamping_and_rejects_invalid_expiry() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "presign-ui";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    put_website_object(&state, bucket_name, "file.txt", "hello", "text/plain").await;
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state);
+    let endpoint = format!("/ui/buckets/{}/objects/file.txt/presign", bucket_name);
+
+    let clamped_response = app
+        .clone()
+        .oneshot(ui_json_request(
+            Method::POST,
+            &endpoint,
+            &session_id,
+            &csrf,
+            r#"{"method":"GET","expires_in":9999999}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(clamped_response.status(), StatusCode::OK);
+    let clamped = response_json(clamped_response).await;
+    assert_eq!(clamped["expires_in"], 604800);
+    assert_eq!(clamped["effective_expires_in"], 604800);
+    assert_eq!(clamped["clamped"], true);
+    assert!(clamped["url"]
+        .as_str()
+        .unwrap()
+        .contains("X-Amz-Expires=604800"));
+
+    for invalid in [r#""""#, r#""not-a-number""#] {
+        let response = app
+            .clone()
+            .oneshot(ui_json_request(
+                Method::POST,
+                &endpoint,
+                &session_id,
+                &csrf,
+                &format!(r#"{{"method":"GET","expires_in":{invalid}}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"], "Expiry must be a whole number of seconds");
+    }
+}
+
+#[tokio::test]
+async fn test_ui_pdf_preview_rejects_mismatched_magic() {
+    let (state, _tmp) = test_ui_state();
+    let bucket_name = "preview-ui";
+    state.storage.create_bucket(bucket_name).await.unwrap();
+    put_website_object(
+        &state,
+        bucket_name,
+        "broken.pdf",
+        "this is not a PDF",
+        "application/pdf",
+    )
+    .await;
+    let (session_id, _csrf) = authenticated_ui_session(&state);
+    let app = myfsio_server::create_ui_router(state);
+
+    let response = app
+        .oneshot(ui_request(
+            Method::GET,
+            &format!("/ui/buckets/{}/objects/broken.pdf/preview", bucket_name),
+            &session_id,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert!(response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("application/json"));
+    let body = response_json(response).await;
+    assert_eq!(body["preview_unavailable"], true);
+    assert_eq!(body["error"], "Preview unavailable — Download to view");
+}
+
+#[tokio::test]
+async fn test_ui_expired_session_401_shape_is_unchanged() {
+    let (state, _tmp) = test_ui_state();
+    let (session_id, mut session) = state.sessions.create();
+    session.user_id = Some("missing-access-key".to_string());
+    let csrf = session.csrf_token.clone();
+    state.sessions.save(&session_id, session);
+    let app = myfsio_server::create_ui_router(state);
+
+    let response = app
+        .oneshot(ui_request(
+            Method::GET,
+            "/ui/buckets/any-bucket/stats",
+            &session_id,
+            Some(&csrf),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = response_json(response).await;
+    assert_eq!(
+        body,
+        serde_json::json!({"error": "Your session is no longer valid."})
+    );
+}
+
+#[tokio::test]
 async fn test_ui_bucket_panels_and_history_endpoints_round_trip() {
     let (state, _tmp) = test_ui_state();
     let bucket_name = "ui-bucket";
@@ -1587,6 +1832,7 @@ async fn test_ui_metrics_history_endpoint_reads_system_history() {
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -2153,6 +2399,104 @@ async fn test_list_objects_v2() {
 }
 
 #[tokio::test]
+async fn test_get_bucket_unknown_subresources_return_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    for subresource in ["accelerate", "inventory", "analytics"] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/subresource-guard?{subresource}"),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = String::from_utf8(body_bytes(resp).await).unwrap();
+        assert!(body.contains("<Code>NotImplemented</Code>"));
+    }
+}
+
+#[tokio::test]
+async fn test_get_bucket_listing_subresources_remain_supported() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/listing-subresources",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    for (query, expected) in [
+        ("prefix=", "ListBucketResult"),
+        ("list-type=2", "ListBucketResult"),
+        ("versions", "ListVersionsResult"),
+        ("uploads", "ListMultipartUploadsResult"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/listing-subresources?{query}"),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "query {query}");
+        let body = String::from_utf8(body_bytes(resp).await).unwrap();
+        assert!(body.contains(expected), "query {query}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn test_delete_bucket_unknown_subresource_returns_not_implemented() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/delete-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            "/delete-subresource-guard?accelerate",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::HEAD,
+            "/delete-subresource-guard",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_get_nonexistent_object_returns_404() {
     let (app, _tmp) = test_app();
 
@@ -2393,7 +2737,7 @@ async fn test_range_get_omits_whole_object_checksum() {
         .await
         .unwrap();
 
-    let full = app
+    let full_without_mode = app
         .clone()
         .oneshot(
             Request::builder()
@@ -2405,9 +2749,66 @@ async fn test_range_get_omits_whole_object_checksum() {
         )
         .await
         .unwrap();
-    assert_eq!(full.status(), StatusCode::OK);
+    assert_eq!(full_without_mode.status(), StatusCode::OK);
+    assert!(full_without_mode
+        .headers()
+        .get("x-amz-checksum-sha256")
+        .is_none());
+
+    let full = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/csum-bucket/obj.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-checksum-mode", "enabled")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         full.headers().get("x-amz-checksum-sha256").unwrap(),
+        sha.as_str()
+    );
+
+    let head_without_mode = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/csum-bucket/obj.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(head_without_mode
+        .headers()
+        .get("x-amz-checksum-sha256")
+        .is_none());
+    let head_with_mode = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/csum-bucket/obj.bin")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-checksum-mode", "ENABLED")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        head_with_mode
+            .headers()
+            .get("x-amz-checksum-sha256")
+            .unwrap(),
         sha.as_str()
     );
 
@@ -2445,6 +2846,7 @@ async fn test_range_get_omits_whole_object_checksum() {
                 .header("x-access-key", TEST_ACCESS_KEY)
                 .header("x-secret-key", TEST_SECRET_KEY)
                 .header("range", &full_range)
+                .header("x-amz-checksum-mode", "ENABLED")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3624,6 +4026,365 @@ async fn test_put_object_validates_content_md5() {
         .await
         .unwrap();
     assert_eq!(good_resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_put_object_validates_crc32c_sha1_and_crc64nvme() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use sha1::{Digest, Sha1};
+
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/algorithm-checksums",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let data = b"checksum payload";
+    let checksums = [
+        (
+            "crc32c",
+            B64.encode(
+                (crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, data) as u32).to_be_bytes(),
+            ),
+        ),
+        ("sha1", B64.encode(Sha1::digest(data))),
+        (
+            "crc64nvme",
+            B64.encode(crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, data).to_be_bytes()),
+        ),
+    ];
+
+    for (algorithm, checksum) in checksums {
+        let bad_checksum = match algorithm {
+            "sha1" => B64.encode([0u8; 20]),
+            "crc64nvme" => B64.encode([0u8; 8]),
+            _ => B64.encode([0u8; 4]),
+        };
+        let bad = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/algorithm-checksums/bad-{}", algorithm))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header(format!("x-amz-checksum-{}", algorithm), bad_checksum)
+                    .body(Body::from(&data[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(bad.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        assert!(body.contains("<Code>InvalidRequest</Code>"));
+        assert!(body.contains(algorithm));
+
+        let good = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/algorithm-checksums/good-{}", algorithm))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header(format!("x-amz-checksum-{}", algorithm), checksum)
+                    .body(Body::from(&data[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(good.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn test_upload_part_validates_crc32c_sha1_and_crc64nvme() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use sha1::{Digest, Sha1};
+
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/part-algorithm-checksums",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let initiated = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/part-algorithm-checksums/object?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        initiated
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    let data = b"part checksum payload";
+    let checksums = [
+        (
+            "crc32c",
+            B64.encode(
+                (crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, data) as u32).to_be_bytes(),
+            ),
+        ),
+        ("sha1", B64.encode(Sha1::digest(data))),
+        (
+            "crc64nvme",
+            B64.encode(crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, data).to_be_bytes()),
+        ),
+    ];
+
+    for (index, (algorithm, checksum)) in checksums.into_iter().enumerate() {
+        let part_number = index + 1;
+        let bad_checksum = match algorithm {
+            "sha1" => B64.encode([0u8; 20]),
+            "crc64nvme" => B64.encode([0u8; 8]),
+            _ => B64.encode([0u8; 4]),
+        };
+        let uri = format!(
+            "/part-algorithm-checksums/object?uploadId={}&partNumber={}",
+            upload_id, part_number
+        );
+        let bad = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(&uri)
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header(format!("x-amz-checksum-{}", algorithm), bad_checksum)
+                    .body(Body::from(&data[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let body = String::from_utf8(bad.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        assert!(body.contains("<Code>InvalidRequest</Code>"));
+        assert!(body.contains(algorithm));
+
+        let good = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(&uri)
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header(format!("x-amz-checksum-{}", algorithm), checksum)
+                    .body(Body::from(&data[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(good.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_sigv4_chunk_chain_accepts_valid_and_rejects_tampered_body() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/streaming-signatures",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let valid = app
+        .clone()
+        .oneshot(streaming_sigv4_request(
+            "/streaming-signatures/valid",
+            b"hello",
+            b"hello",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(valid.status(), StatusCode::OK);
+
+    let tampered = app
+        .oneshot(streaming_sigv4_request(
+            "/streaming-signatures/tampered",
+            b"hello",
+            b"jello",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tampered.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(
+        tampered
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<Code>SignatureDoesNotMatch</Code>"));
+}
+
+#[tokio::test]
+async fn test_streaming_sigv4_signed_trailer_accepts_valid_and_rejects_invalid_signature() {
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/streaming-trailer-signatures",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let checksum = B64.encode(
+        (crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, b"hello") as u32).to_be_bytes(),
+    );
+
+    let valid = app
+        .clone()
+        .oneshot(streaming_sigv4_request(
+            "/streaming-trailer-signatures/valid",
+            b"hello",
+            b"hello",
+            Some(("x-amz-checksum-crc32c", &checksum, true)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(valid.status(), StatusCode::OK);
+
+    let invalid = app
+        .oneshot(streaming_sigv4_request(
+            "/streaming-trailer-signatures/invalid",
+            b"hello",
+            b"hello",
+            Some(("x-amz-checksum-crc32c", &checksum, false)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(
+        invalid
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<Code>SignatureDoesNotMatch</Code>"));
+}
+
+#[tokio::test]
+async fn test_aws_chunked_unsigned_checksum_trailer_valid_tampered_and_truncated() {
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/unsigned-checksum-trailers",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let checksum = B64.encode(
+        (crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, b"hello") as u32).to_be_bytes(),
+    );
+    let request = |key: &str, encoded: Vec<u8>| {
+        Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/unsigned-checksum-trailers/{}", key))
+            .header("x-access-key", TEST_ACCESS_KEY)
+            .header("x-secret-key", TEST_SECRET_KEY)
+            .header("x-amz-content-sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+            .header("x-amz-decoded-content-length", "5")
+            .header("content-encoding", "aws-chunked")
+            .header("x-amz-trailer", "x-amz-checksum-crc32c")
+            .body(Body::from(encoded))
+            .unwrap()
+    };
+
+    let valid_body = format!(
+        "5\r\nhello\r\n0\r\nx-amz-checksum-crc32c:{}\r\n\r\n",
+        checksum
+    )
+    .into_bytes();
+    let valid = app
+        .clone()
+        .oneshot(request("valid", valid_body))
+        .await
+        .unwrap();
+    assert_eq!(valid.status(), StatusCode::OK);
+
+    let tampered_body = b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32c:AAAAAA==\r\n\r\n".to_vec();
+    let tampered = app
+        .clone()
+        .oneshot(request("tampered", tampered_body))
+        .await
+        .unwrap();
+    assert_eq!(tampered.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(
+        tampered
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<Code>InvalidRequest</Code>"));
+
+    let truncated_body = b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32c:".to_vec();
+    let truncated = app
+        .oneshot(request("truncated", truncated_body))
+        .await
+        .unwrap();
+    assert_eq!(truncated.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(
+        truncated
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<Code>IncompleteBody</Code>"));
 }
 
 #[tokio::test]
@@ -5152,6 +5913,7 @@ async fn test_non_admin_authorization_enforced() {
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -5238,6 +6000,7 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -8713,6 +9476,7 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,
@@ -8916,6 +9680,7 @@ async fn test_app_sse_c_with_min(min_part_size: u64) -> (axum::Router, tempfile:
         replication_healer_enabled: false,
         replication_healer_interval_secs: 60,
         replication_healer_max_attempts: 12,
+        replication_full_reconcile_interval_hours: 0,
         site_sync_enabled: false,
         site_sync_interval_secs: 60,
         site_sync_batch_size: 100,

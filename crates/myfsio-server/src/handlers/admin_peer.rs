@@ -217,7 +217,10 @@ pub async fn relay_inbound_layer(
         Err(e) => {
             return record_relay_failure(
                 "InvalidRequest",
-                &format!("Body read failed or exceeds {} bytes: {}", MAX_RELAY_BODY_BYTES, e),
+                &format!(
+                    "Body read failed or exceeds {} bytes: {}",
+                    MAX_RELAY_BODY_BYTES, e
+                ),
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Some(origin_site.clone()),
                 Some(admin_user.clone()),

@@ -9,6 +9,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::task::JoinSet;
 
@@ -16,6 +17,9 @@ use myfsio_common::types::ListParams;
 use myfsio_storage::fs_backend::{metadata_is_corrupted, FsStorageBackend};
 use myfsio_storage::traits::StorageEngine;
 
+use crate::services::replication_ledger::{
+    LedgerEntry, LedgerKey, LoadResult, ReplicationLedger, ReplicationOpKind,
+};
 use crate::services::s3_client::{
     build_client, build_health_client, check_endpoint_health, check_target_bucket_reachable,
     ClientOptions,
@@ -614,6 +618,7 @@ struct ReplicationWork {
     rule: ReplicationRule,
     connection: RemoteConnection,
     run: Option<Arc<BatchRun>>,
+    ledger_identity: LedgerKey,
 }
 
 pub struct ReplicationManager {
@@ -640,6 +645,12 @@ pub struct ReplicationManager {
     live_in_flight: Arc<AtomicUsize>,
     live_replicated_total: Arc<AtomicU64>,
     live_failed_total: Arc<AtomicU64>,
+    ledger: Arc<ReplicationLedger>,
+    recovery_scan_ops: AtomicU64,
+    #[cfg(test)]
+    skip_next_ledger_ack: AtomicBool,
+    full_reconcile_interval: Option<Duration>,
+    last_full_reconcile: Mutex<Option<SystemTime>>,
     healer_running: Arc<AtomicBool>,
     healer_last_pass_at: Arc<Mutex<Option<f64>>>,
     healer_last_pass_healed: Arc<AtomicUsize>,
@@ -661,6 +672,7 @@ impl ReplicationManager {
         part_stall_timeout: Duration,
         replication_concurrency: usize,
         replication_queue_capacity: usize,
+        full_reconcile_interval: Option<Duration>,
     ) -> Self {
         let rules_path = storage_root
             .join(".myfsio.sys")
@@ -703,6 +715,12 @@ impl ReplicationManager {
             live_in_flight: Arc::new(AtomicUsize::new(0)),
             live_replicated_total: Arc::new(AtomicU64::new(0)),
             live_failed_total: Arc::new(AtomicU64::new(0)),
+            ledger: Arc::new(ReplicationLedger::new(storage_root.to_path_buf())),
+            recovery_scan_ops: AtomicU64::new(0),
+            #[cfg(test)]
+            skip_next_ledger_ack: AtomicBool::new(false),
+            full_reconcile_interval,
+            last_full_reconcile: Mutex::new(full_reconcile_interval.map(|_| SystemTime::now())),
             healer_running: Arc::new(AtomicBool::new(false)),
             healer_last_pass_at: Arc::new(Mutex::new(None)),
             healer_last_pass_healed: Arc::new(AtomicUsize::new(0)),
@@ -739,7 +757,7 @@ impl ReplicationManager {
         }
         tokio::spawn(async move {
             tokio::task::yield_now().await;
-            self.reconcile_pending_objects().await;
+            self.initialize_pending_ledgers().await;
         });
     }
 
@@ -758,6 +776,7 @@ impl ReplicationManager {
                 &work.rule,
                 &work.connection,
                 &work.action,
+                &work.ledger_identity,
             )
             .await;
         if let Some(run) = work.run.as_ref() {
@@ -803,79 +822,241 @@ impl ReplicationManager {
         }
     }
 
-    async fn reconcile_pending_objects(&self) {
-        for rule in self.list_rules().into_iter().filter(|rule| rule.enabled) {
-            let Some(connection) = self.connections.get(&rule.target_connection_id) else {
+    async fn initialize_pending_ledgers(&self) {
+        let active_rules: HashMap<String, ReplicationRule> = self
+            .list_rules()
+            .into_iter()
+            .filter(|rule| rule.enabled)
+            .map(|rule| (rule.bucket_name.clone(), rule))
+            .collect();
+        for bucket in self.ledger.buckets_with_state() {
+            if active_rules.contains_key(&bucket) {
                 continue;
+            }
+            if let Err(error) = self.ledger.load(&bucket, None) {
+                tracing::warn!(
+                    "Failed to prune replication ledger for removed rule {}: {}",
+                    bucket,
+                    error
+                );
+                if let Err(reset_error) = self.ledger.reset(&bucket) {
+                    tracing::error!(
+                        "Failed to reset replication ledger for removed rule {}: {}",
+                        bucket,
+                        reset_error
+                    );
+                }
+            }
+        }
+        for rule in active_rules.into_values() {
+            self.load_or_recover_and_enqueue(&rule).await;
+        }
+    }
+
+    async fn load_or_recover_and_enqueue(&self, rule: &ReplicationRule) {
+        let rule_id = replication_rule_id(rule);
+        let entries = match self.ledger.load(&rule.bucket_name, Some(&rule_id)) {
+            Ok(LoadResult::Loaded(entries)) => entries,
+            Ok(LoadResult::Missing) => {
+                tracing::info!(
+                    "Migrating pre-ledger replication state for {}",
+                    rule.bucket_name
+                );
+                self.rebuild_ledger_from_sidecars(rule).await
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Replication ledger for {} is unreadable; rebuilding from sidecars: {}",
+                    rule.bucket_name,
+                    error
+                );
+                self.rebuild_ledger_from_sidecars(rule).await
+            }
+        };
+        self.enqueue_ledger_entries(rule, entries).await;
+    }
+
+    async fn rebuild_ledger_from_sidecars(&self, rule: &ReplicationRule) -> Vec<LedgerEntry> {
+        let lock_key = format!("replication-ledger:{}", rule.bucket_name);
+        let handle = self.status_lock_for(&lock_key);
+        let _guard = handle.lock.lock().await;
+        self.rebuild_ledger_from_sidecars_locked(rule).await
+    }
+
+    async fn rebuild_ledger_from_sidecars_locked(
+        &self,
+        rule: &ReplicationRule,
+    ) -> Vec<LedgerEntry> {
+        let identities = self.scan_pending_puts(rule).await;
+        match self.ledger.replace(&rule.bucket_name, identities) {
+            Ok(entries) => {
+                for entry in &entries {
+                    if entry.identity.kind == ReplicationOpKind::Put {
+                        self.set_replication_status(
+                            &rule.bucket_name,
+                            &entry.identity.key,
+                            REPLICATION_STATUS_PENDING,
+                        )
+                        .await;
+                    }
+                }
+                entries
+            }
+            Err(error) => {
+                tracing::error!(
+                    "Failed to rebuild replication ledger for {}: {}",
+                    rule.bucket_name,
+                    error
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    async fn scan_pending_puts(&self, rule: &ReplicationRule) -> Vec<LedgerKey> {
+        let rule_id = replication_rule_id(rule);
+        let mut identities = Vec::new();
+        let mut continuation_token = None;
+        loop {
+            self.recovery_scan_ops.fetch_add(1, Ordering::Relaxed);
+            let page = match self
+                .storage
+                .list_objects(
+                    &rule.bucket_name,
+                    &ListParams {
+                        max_keys: 1000,
+                        continuation_token: continuation_token.clone(),
+                        prefix: rule.filter_prefix.clone(),
+                        start_after: None,
+                    },
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        "Replication recovery scan failed to list {}: {}",
+                        rule.bucket_name,
+                        error
+                    );
+                    break;
+                }
             };
-            let mut continuation_token = None;
-            loop {
-                let page = match self
+            let is_truncated = page.is_truncated;
+            let next_token = page.next_continuation_token.clone();
+            for object in page.objects {
+                self.recovery_scan_ops.fetch_add(1, Ordering::Relaxed);
+                let metadata = match self
                     .storage
-                    .list_objects(
-                        &rule.bucket_name,
-                        &ListParams {
-                            max_keys: 1000,
-                            continuation_token: continuation_token.clone(),
-                            prefix: rule.filter_prefix.clone(),
-                            start_after: None,
-                        },
-                    )
+                    .get_object_metadata(&rule.bucket_name, &object.key)
                     .await
                 {
-                    Ok(page) => page,
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        tracing::debug!(
+                            "Replication recovery scan skipped metadata for {}/{}: {}",
+                            rule.bucket_name,
+                            object.key,
+                            error
+                        );
+                        continue;
+                    }
+                };
+                let status = metadata.get(REPLICATION_STATUS_KEY);
+                if status.is_some_and(|status| status != REPLICATION_STATUS_PENDING) {
+                    continue;
+                }
+                identities.push(LedgerKey {
+                    rule_id: rule_id.clone(),
+                    key: object.key,
+                    generation: replication_generation(&metadata),
+                    kind: ReplicationOpKind::Put,
+                });
+            }
+            if !is_truncated {
+                break;
+            }
+            continuation_token = next_token;
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+        identities
+    }
+
+    async fn enqueue_ledger_entries(&self, rule: &ReplicationRule, entries: Vec<LedgerEntry>) {
+        let Some(connection) = self.connections.get(&rule.target_connection_id) else {
+            return;
+        };
+        for entry in entries {
+            self.enqueue_work(ReplicationWork {
+                bucket: rule.bucket_name.clone(),
+                key: entry.identity.key.clone(),
+                action: entry.identity.kind.action().to_string(),
+                rule: rule.clone(),
+                connection: connection.clone(),
+                run: None,
+                ledger_identity: entry.identity,
+            });
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn process_pending_ledger(&self) {
+        for rule in self.list_rules().into_iter().filter(|rule| rule.enabled) {
+            let rule_id = replication_rule_id(&rule);
+            let mut entries = match self.ledger.load(&rule.bucket_name, Some(&rule_id)) {
+                Ok(LoadResult::Loaded(entries)) => entries,
+                Ok(LoadResult::Missing) | Err(_) => self.rebuild_ledger_from_sidecars(&rule).await,
+            };
+            let failures = self.failures.load(&rule.bucket_name);
+            entries.retain(|entry| {
+                !failures
+                    .iter()
+                    .any(|failure| failure.object_key == entry.identity.key)
+            });
+            self.enqueue_ledger_entries(&rule, entries).await;
+        }
+    }
+
+    async fn run_full_reconcile_if_due(&self) {
+        let Some(interval) = self.full_reconcile_interval else {
+            return;
+        };
+        let now = SystemTime::now();
+        let due = self
+            .last_full_reconcile
+            .lock()
+            .is_none_or(|last| now.duration_since(last).unwrap_or_default() >= interval);
+        if !due {
+            return;
+        }
+        *self.last_full_reconcile.lock() = Some(now);
+        for rule in self.list_rules().into_iter().filter(|rule| rule.enabled) {
+            let identities = self.scan_pending_puts(&rule).await;
+            let mut entries = Vec::new();
+            for identity in identities {
+                match self.ledger.append(&rule.bucket_name, identity) {
+                    Ok(entry) => {
+                        self.set_replication_status(
+                            &rule.bucket_name,
+                            &entry.identity.key,
+                            REPLICATION_STATUS_PENDING,
+                        )
+                        .await;
+                        entries.push(entry);
+                    }
                     Err(error) => {
                         tracing::warn!(
-                            "Replication startup reconciliation failed to list {}: {}",
+                            "Replication consistency pass could not append ledger entry for {}: {}",
                             rule.bucket_name,
                             error
                         );
                         break;
                     }
-                };
-                let is_truncated = page.is_truncated;
-                let next_token = page.next_continuation_token.clone();
-                for object in page.objects {
-                    let metadata = match self
-                        .storage
-                        .get_object_metadata(&rule.bucket_name, &object.key)
-                        .await
-                    {
-                        Ok(metadata) => metadata,
-                        Err(error) => {
-                            tracing::debug!(
-                                "Replication reconciliation skipped metadata for {}/{}: {}",
-                                rule.bucket_name,
-                                object.key,
-                                error
-                            );
-                            continue;
-                        }
-                    };
-                    let status = metadata.get(REPLICATION_STATUS_KEY);
-                    if status.is_some_and(|status| status != REPLICATION_STATUS_PENDING) {
-                        continue;
-                    }
-                    if !self.enqueue_work(ReplicationWork {
-                        bucket: rule.bucket_name.clone(),
-                        key: object.key,
-                        action: "write".to_string(),
-                        rule: rule.clone(),
-                        connection: connection.clone(),
-                        run: None,
-                    }) {
-                        return;
-                    }
-                    tokio::task::yield_now().await;
-                }
-                if !is_truncated {
-                    break;
-                }
-                continuation_token = next_token;
-                if continuation_token.is_none() {
-                    break;
                 }
             }
+            self.enqueue_ledger_entries(&rule, entries).await;
         }
     }
 
@@ -896,6 +1077,7 @@ impl ReplicationManager {
 
     pub fn reload_rules(&self) {
         *self.rules.lock() = load_rules(&self.rules_path);
+        self.prune_ledgers_for_current_rules();
     }
 
     pub fn list_rules(&self) -> Vec<ReplicationRule> {
@@ -907,11 +1089,32 @@ impl ReplicationManager {
     }
 
     pub fn set_rule(&self, rule: ReplicationRule) {
+        let bucket = rule.bucket_name.clone();
+        let active_rule_id = rule.enabled.then(|| replication_rule_id(&rule));
         {
             let mut guard = self.rules.lock();
             guard.insert(rule.bucket_name.clone(), rule);
         }
         self.save_rules();
+        match self.ledger.load(&bucket, active_rule_id.as_deref()) {
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to prune replication ledger after rule change for {}: {}",
+                    bucket,
+                    error
+                );
+                if active_rule_id.is_none() {
+                    if let Err(reset_error) = self.ledger.reset(&bucket) {
+                        tracing::error!(
+                            "Failed to reset disabled replication ledger for {}: {}",
+                            bucket,
+                            reset_error
+                        );
+                    }
+                }
+            }
+        }
     }
 
     pub fn delete_rule(&self, bucket: &str) {
@@ -920,6 +1123,33 @@ impl ReplicationManager {
             guard.remove(bucket);
         }
         self.save_rules();
+        if let Err(error) = self.ledger.reset(bucket) {
+            tracing::error!(
+                "Failed to clear replication ledger after deleting rule for {}: {}",
+                bucket,
+                error
+            );
+        }
+    }
+
+    fn prune_ledgers_for_current_rules(&self) {
+        let rules = self.rules.lock().clone();
+        for bucket in self.ledger.buckets_with_state() {
+            let active_rule_id = rules
+                .get(&bucket)
+                .filter(|rule| rule.enabled)
+                .map(replication_rule_id);
+            if let Err(error) = self.ledger.load(&bucket, active_rule_id.as_deref()) {
+                tracing::warn!(
+                    "Failed to prune reloaded replication ledger for {}: {}",
+                    bucket,
+                    error
+                );
+                if active_rule_id.is_none() {
+                    let _ = self.ledger.reset(&bucket);
+                }
+            }
+        }
     }
 
     pub fn save_rules(&self) {
@@ -947,16 +1177,16 @@ impl ReplicationManager {
         }
     }
 
-    async fn set_replication_status(&self, bucket: &str, key: &str, status: &str) {
+    async fn set_replication_status(&self, bucket: &str, key: &str, status: &str) -> bool {
         let lock_key = format!("{}/{}", bucket, key);
         let handle = self.status_lock_for(&lock_key);
         let _guard = handle.lock.lock().await;
         let mut meta = match self.storage.get_object_metadata(bucket, key).await {
             Ok(m) => m,
-            Err(_) => return,
+            Err(_) => return false,
         };
         if meta.get(REPLICATION_STATUS_KEY).map(|s| s.as_str()) == Some(status) {
-            return;
+            return true;
         }
         meta.insert(REPLICATION_STATUS_KEY.to_string(), status.to_string());
         meta.insert(
@@ -970,7 +1200,9 @@ impl ReplicationManager {
                 key,
                 e
             );
+            return false;
         }
+        true
     }
 
     fn update_last_sync(&self, bucket: &str, key: &str) {
@@ -984,7 +1216,13 @@ impl ReplicationManager {
         self.save_rules();
     }
 
-    pub async fn trigger(self: Arc<Self>, bucket: String, key: String, action: String) {
+    pub async fn trigger(
+        self: Arc<Self>,
+        bucket: String,
+        key: String,
+        action: String,
+        generation: Option<String>,
+    ) {
         let rule = match self.get_rule(&bucket) {
             Some(r) if r.enabled => r,
             _ => return,
@@ -1001,17 +1239,87 @@ impl ReplicationManager {
                 return;
             }
         };
-        if action == "delete" {
+        let kind = match action.as_str() {
+            "delete-marker" => ReplicationOpKind::DeleteMarker,
+            "delete" => ReplicationOpKind::Delete,
+            _ => ReplicationOpKind::Put,
+        };
+        let Some(entry) = self
+            .prepare_ledger_entry(&bucket, &key, &rule, kind, generation)
+            .await
+        else {
+            return;
+        };
+        if kind != ReplicationOpKind::Put {
             self.failures.record_queued_delete(&bucket, &key);
         }
         self.enqueue_work(ReplicationWork {
             bucket,
             key,
-            action,
+            action: kind.action().to_string(),
             rule,
             connection,
             run: None,
+            ledger_identity: entry.identity,
         });
+    }
+
+    async fn prepare_ledger_entry(
+        &self,
+        bucket: &str,
+        key: &str,
+        rule: &ReplicationRule,
+        kind: ReplicationOpKind,
+        generation: Option<String>,
+    ) -> Option<LedgerEntry> {
+        let lock_key = format!("replication-ledger:{}", bucket);
+        let handle = self.status_lock_for(&lock_key);
+        let _guard = handle.lock.lock().await;
+        let generation = match generation {
+            Some(generation) if !generation.is_empty() => generation,
+            _ if kind == ReplicationOpKind::Put => self
+                .storage
+                .get_object_metadata(bucket, key)
+                .await
+                .map(|metadata| replication_generation(&metadata))
+                .unwrap_or_else(|_| format!("event-{}", now_micros())),
+            _ => format!("event-{}", now_micros()),
+        };
+        let identity = LedgerKey {
+            rule_id: replication_rule_id(rule),
+            key: key.to_string(),
+            generation,
+            kind,
+        };
+        let entry = match self.ledger.append(bucket, identity.clone()) {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    "Replication ledger append failed for {}/{}; rebuilding: {}",
+                    bucket,
+                    key,
+                    error
+                );
+                self.rebuild_ledger_from_sidecars_locked(rule).await;
+                match self.ledger.append(bucket, identity) {
+                    Ok(entry) => entry,
+                    Err(retry_error) => {
+                        tracing::error!(
+                            "Replication ledger append retry failed for {}/{}: {}",
+                            bucket,
+                            key,
+                            retry_error
+                        );
+                        return None;
+                    }
+                }
+            }
+        };
+        if kind == ReplicationOpKind::Put {
+            self.set_replication_status(bucket, key, REPLICATION_STATUS_PENDING)
+                .await;
+        }
+        Some(entry)
     }
 
     async fn enqueue_for_run(
@@ -1022,14 +1330,56 @@ impl ReplicationManager {
         rule: ReplicationRule,
         connection: RemoteConnection,
     ) {
+        let entry = if run.kind == BatchRunKind::RetryAll {
+            self.pending_entry_for_action(&rule, &key, &action)
+        } else {
+            None
+        };
+        let entry = match entry {
+            Some(entry) => entry,
+            None => {
+                let kind = match action.as_str() {
+                    "delete-marker" => ReplicationOpKind::DeleteMarker,
+                    "delete" => ReplicationOpKind::Delete,
+                    _ => ReplicationOpKind::Put,
+                };
+                let Some(entry) = self
+                    .prepare_ledger_entry(&run.bucket, &key, &rule, kind, None)
+                    .await
+                else {
+                    run.failed.fetch_add(1, Ordering::Relaxed);
+                    self.maybe_finalize_run(&run);
+                    return;
+                };
+                entry
+            }
+        };
         self.enqueue_work(ReplicationWork {
             bucket: run.bucket.clone(),
             key,
-            action,
+            action: entry.identity.kind.action().to_string(),
             rule,
             connection,
             run: Some(run),
+            ledger_identity: entry.identity,
         });
+    }
+
+    fn pending_entry_for_action(
+        &self,
+        rule: &ReplicationRule,
+        key: &str,
+        action: &str,
+    ) -> Option<LedgerEntry> {
+        let rule_id = replication_rule_id(rule);
+        let LoadResult::Loaded(entries) =
+            self.ledger.load(&rule.bucket_name, Some(&rule_id)).ok()?
+        else {
+            return None;
+        };
+        entries
+            .into_iter()
+            .find(|entry| entry.identity.key == key && entry.identity.kind.action() == action)
     }
 
     fn maybe_finalize_run(&self, run: &Arc<BatchRun>) {
@@ -1210,6 +1560,7 @@ impl ReplicationManager {
         rule: &ReplicationRule,
         conn: &RemoteConnection,
         action: &str,
+        ledger_identity: &LedgerKey,
     ) -> ReplicateOutcome {
         if object_key.starts_with('/') || object_key.starts_with('\\') {
             tracing::error!("Invalid object key (path traversal): {}", object_key);
@@ -1309,6 +1660,7 @@ impl ReplicationManager {
                     );
                     self.update_last_sync(bucket, object_key);
                     self.failures.remove(bucket, object_key);
+                    self.ack_ledger_entry(bucket, ledger_identity);
                     return ReplicateOutcome::Succeeded;
                 }
                 Err(err) => {
@@ -1452,12 +1804,16 @@ impl ReplicationManager {
                         );
                         self.update_last_sync(bucket, object_key);
                         self.failures.remove(bucket, object_key);
-                        self.set_replication_status(
-                            bucket,
-                            object_key,
-                            REPLICATION_STATUS_COMPLETED,
-                        )
-                        .await;
+                        if self
+                            .set_replication_status(
+                                bucket,
+                                object_key,
+                                REPLICATION_STATUS_COMPLETED,
+                            )
+                            .await
+                        {
+                            self.ack_ledger_entry(bucket, ledger_identity);
+                        }
                         return ReplicateOutcome::Skipped;
                     }
                 }
@@ -1554,8 +1910,12 @@ impl ReplicationManager {
                 );
                 self.update_last_sync(bucket, object_key);
                 self.failures.remove(bucket, object_key);
-                self.set_replication_status(bucket, object_key, REPLICATION_STATUS_COMPLETED)
-                    .await;
+                if self
+                    .set_replication_status(bucket, object_key, REPLICATION_STATUS_COMPLETED)
+                    .await
+                {
+                    self.ack_ledger_entry(bucket, ledger_identity);
+                }
                 ReplicateOutcome::Succeeded
             }
             Err(err) => {
@@ -1600,6 +1960,21 @@ impl ReplicationManager {
                     .await;
                 ReplicateOutcome::Failed
             }
+        }
+    }
+
+    fn ack_ledger_entry(&self, bucket: &str, identity: &LedgerKey) {
+        #[cfg(test)]
+        if self.skip_next_ledger_ack.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        if let Err(error) = self.ledger.ack(bucket, identity) {
+            tracing::warn!(
+                "Failed to acknowledge replication ledger entry for {}/{}: {}",
+                bucket,
+                identity.key,
+                error
+            );
         }
     }
 
@@ -1651,8 +2026,32 @@ impl ReplicationManager {
             );
             return false;
         }
-        self.replicate_task(bucket, object_key, &rule, &conn, &failure.action)
-            .await;
+        let entry = match self.pending_entry_for_action(&rule, object_key, &failure.action) {
+            Some(entry) => entry,
+            None => {
+                let kind = if failure.action == "delete" {
+                    ReplicationOpKind::Delete
+                } else {
+                    ReplicationOpKind::Put
+                };
+                let Some(entry) = self
+                    .prepare_ledger_entry(bucket, object_key, &rule, kind, None)
+                    .await
+                else {
+                    return false;
+                };
+                entry
+            }
+        };
+        self.replicate_task(
+            bucket,
+            object_key,
+            &rule,
+            &conn,
+            &failure.action,
+            &entry.identity,
+        )
+        .await;
         true
     }
 
@@ -1881,12 +2280,38 @@ impl ReplicationManager {
                     skipped += 1;
                     continue;
                 }
-                self.replicate_task(&bucket, &f.object_key, &rule, &conn, &f.action)
-                    .await;
+                let entry = match self.pending_entry_for_action(&rule, &f.object_key, &f.action) {
+                    Some(entry) => entry,
+                    None => {
+                        let kind = if f.action == "delete" {
+                            ReplicationOpKind::Delete
+                        } else {
+                            ReplicationOpKind::Put
+                        };
+                        let Some(entry) = self
+                            .prepare_ledger_entry(&bucket, &f.object_key, &rule, kind, None)
+                            .await
+                        else {
+                            skipped += 1;
+                            continue;
+                        };
+                        entry
+                    }
+                };
+                self.replicate_task(
+                    &bucket,
+                    &f.object_key,
+                    &rule,
+                    &conn,
+                    &f.action,
+                    &entry.identity,
+                )
+                .await;
                 healed += 1;
             }
         }
-        self.reconcile_pending_objects().await;
+        self.process_pending_ledger().await;
+        self.run_full_reconcile_if_due().await;
         self.healer_last_pass_healed
             .store(healed, Ordering::Relaxed);
         self.healer_last_pass_skipped
@@ -2929,6 +3354,40 @@ fn load_rules(path: &Path) -> HashMap<String, ReplicationRule> {
     }
 }
 
+fn replication_rule_id(rule: &ReplicationRule) -> String {
+    let mut hasher = Sha256::new();
+    for value in [
+        rule.bucket_name.as_str(),
+        rule.target_connection_id.as_str(),
+        rule.target_bucket.as_str(),
+        rule.mode.as_str(),
+        rule.filter_prefix.as_deref().unwrap_or(""),
+    ] {
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    hasher.update([u8::from(rule.sync_deletions)]);
+    format!("{:x}", hasher.finalize())
+}
+
+fn replication_generation(metadata: &HashMap<String, String>) -> String {
+    if let Some(version_id) = metadata
+        .get("__version_id__")
+        .filter(|version_id| !version_id.is_empty())
+    {
+        return format!("version:{}", version_id);
+    }
+    let last_modified = metadata
+        .get("__last_modified__")
+        .map(String::as_str)
+        .unwrap_or("");
+    let etag = metadata.get("__etag__").map(String::as_str).unwrap_or("");
+    if !last_modified.is_empty() || !etag.is_empty() {
+        return format!("generation:{}:{}", last_modified, etag);
+    }
+    format!("event-{}", now_micros())
+}
+
 fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3114,13 +3573,32 @@ mod tests {
 
     fn build_test_manager() -> ReplicationManager {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let storage = Arc::new(FsStorageBackend::new(tmp.path().to_path_buf()));
-        let connections = Arc::new(ConnectionStore::new(tmp.path()));
-        let manager = ReplicationManager::new(
+        let manager = build_test_manager_at(tmp.path());
+        std::mem::forget(tmp);
+        manager
+    }
+
+    fn build_test_manager_at(root: &Path) -> ReplicationManager {
+        let storage = Arc::new(FsStorageBackend::new(root.to_path_buf()));
+        let connections = Arc::new(ConnectionStore::new(root));
+        if connections.get("connection").is_none() {
+            connections
+                .add(RemoteConnection {
+                    id: "connection".to_string(),
+                    name: "connection".to_string(),
+                    endpoint_url: "http://127.0.0.1:9".to_string(),
+                    access_key: "access".to_string(),
+                    secret_key: "secret".to_string(),
+                    region: "us-east-1".to_string(),
+                    tuning: None,
+                })
+                .unwrap();
+        }
+        ReplicationManager::new(
             storage,
             connections,
             None,
-            tmp.path(),
+            root,
             Duration::from_secs(5),
             Duration::from_secs(60),
             2,
@@ -3130,9 +3608,271 @@ mod tests {
             Duration::from_secs(300),
             4,
             10_000,
-        );
-        std::mem::forget(tmp);
+            None,
+        )
+    }
+
+    fn test_rule(bucket: &str) -> ReplicationRule {
+        ReplicationRule {
+            bucket_name: bucket.to_string(),
+            target_connection_id: "connection".to_string(),
+            target_bucket: "target".to_string(),
+            enabled: true,
+            mode: MODE_NEW_ONLY.to_string(),
+            created_at: None,
+            stats: ReplicationStats::default(),
+            sync_deletions: true,
+            last_pull_at: None,
+            filter_prefix: None,
+        }
+    }
+
+    async fn put_pending_object(manager: &ReplicationManager, bucket: &str, key: &str) {
+        manager.storage.create_bucket(bucket).await.unwrap();
         manager
+            .storage
+            .put_object(
+                bucket,
+                key,
+                Box::pin(std::io::Cursor::new(b"body".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut metadata = manager
+            .storage
+            .get_object_metadata(bucket, key)
+            .await
+            .unwrap();
+        metadata.insert(
+            REPLICATION_STATUS_KEY.to_string(),
+            REPLICATION_STATUS_PENDING.to_string(),
+        );
+        manager
+            .storage
+            .put_object_metadata(bucket, key, &metadata)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_entry_restart_reenqueues_without_sidecar_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = build_test_manager_at(tmp.path());
+        let rule = test_rule("bucket");
+        manager.set_rule(rule.clone());
+        manager
+            .ledger
+            .append(
+                "bucket",
+                LedgerKey {
+                    rule_id: replication_rule_id(&rule),
+                    key: "key".to_string(),
+                    generation: "version-1".to_string(),
+                    kind: ReplicationOpKind::Put,
+                },
+            )
+            .unwrap();
+        drop(manager);
+
+        let manager = build_test_manager_at(tmp.path());
+        manager.initialize_pending_ledgers().await;
+        assert_eq!(manager.recovery_scan_ops.load(Ordering::Relaxed), 0);
+        assert_eq!(manager.queue_depth(), 1);
+    }
+
+    #[tokio::test]
+    async fn crash_after_remote_success_before_ack_restart_replays_idempotently() {
+        use axum::body::Body;
+        use axum::extract::State;
+        use axum::http::{Method, Request, StatusCode};
+        use axum::response::Response;
+        use axum::Router;
+
+        async fn remote(State(puts): State<Arc<AtomicUsize>>, request: Request<Body>) -> Response {
+            let status = match *request.method() {
+                Method::HEAD => StatusCode::NOT_FOUND,
+                Method::PUT => {
+                    puts.fetch_add(1, Ordering::Relaxed);
+                    StatusCode::OK
+                }
+                Method::DELETE => StatusCode::NO_CONTENT,
+                _ => StatusCode::OK,
+            };
+            Response::builder()
+                .status(status)
+                .body(Body::empty())
+                .unwrap()
+        }
+
+        let puts = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().fallback(remote).with_state(puts.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = build_test_manager_at(tmp.path());
+        manager.connections.delete("connection").unwrap();
+        manager
+            .connections
+            .add(RemoteConnection {
+                id: "connection".to_string(),
+                name: "connection".to_string(),
+                endpoint_url: format!("http://{}", address),
+                access_key: "access".to_string(),
+                secret_key: "secret".to_string(),
+                region: "us-east-1".to_string(),
+                tuning: None,
+            })
+            .unwrap();
+        let rule = test_rule("bucket");
+        put_pending_object(&manager, "bucket", "key").await;
+        manager.set_rule(rule.clone());
+        let entry = manager
+            .prepare_ledger_entry("bucket", "key", &rule, ReplicationOpKind::Put, None)
+            .await
+            .unwrap();
+        manager.skip_next_ledger_ack.store(true, Ordering::Release);
+        let connection = manager.connections.get("connection").unwrap();
+        assert_eq!(
+            manager
+                .replicate_task(
+                    "bucket",
+                    "key",
+                    &rule,
+                    &connection,
+                    "write",
+                    &entry.identity,
+                )
+                .await,
+            ReplicateOutcome::Succeeded
+        );
+        assert_eq!(puts.load(Ordering::Relaxed), 1);
+        let LoadResult::Loaded(entries) = manager
+            .ledger
+            .load("bucket", Some(&replication_rule_id(&rule)))
+            .unwrap()
+        else {
+            panic!("ledger missing");
+        };
+        assert_eq!(entries.len(), 1);
+        drop(manager);
+
+        let manager = build_test_manager_at(tmp.path());
+        let LoadResult::Loaded(entries) = manager
+            .ledger
+            .load("bucket", Some(&replication_rule_id(&rule)))
+            .unwrap()
+        else {
+            panic!("ledger missing");
+        };
+        let replay = &entries[0];
+        let connection = manager.connections.get("connection").unwrap();
+        assert_eq!(
+            manager
+                .replicate_task(
+                    "bucket",
+                    "key",
+                    &rule,
+                    &connection,
+                    "write",
+                    &replay.identity,
+                )
+                .await,
+            ReplicateOutcome::Succeeded
+        );
+        assert_eq!(puts.load(Ordering::Relaxed), 2);
+        let LoadResult::Loaded(entries) = manager
+            .ledger
+            .load("bucket", Some(&replication_rule_id(&rule)))
+            .unwrap()
+        else {
+            panic!("ledger missing");
+        };
+        assert!(entries.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn versioned_delete_and_delete_marker_restart_replay_actions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = build_test_manager_at(tmp.path());
+        let rule = test_rule("bucket");
+        manager.set_rule(rule.clone());
+        for (generation, kind) in [
+            ("version-1", ReplicationOpKind::Delete),
+            ("marker-version-2", ReplicationOpKind::DeleteMarker),
+        ] {
+            manager
+                .ledger
+                .append(
+                    "bucket",
+                    LedgerKey {
+                        rule_id: replication_rule_id(&rule),
+                        key: format!("key-{}", generation),
+                        generation: generation.to_string(),
+                        kind,
+                    },
+                )
+                .unwrap();
+        }
+        drop(manager);
+
+        let manager = build_test_manager_at(tmp.path());
+        manager.initialize_pending_ledgers().await;
+        assert_eq!(manager.recovery_scan_ops.load(Ordering::Relaxed), 0);
+        let mut receiver = manager.work_receiver.lock().take().unwrap();
+        let first = receiver.try_recv().unwrap();
+        let second = receiver.try_recv().unwrap();
+        assert_eq!(first.action, "delete");
+        assert_eq!(first.ledger_identity.kind, ReplicationOpKind::Delete);
+        assert_eq!(second.action, "delete");
+        assert_eq!(second.ledger_identity.kind, ReplicationOpKind::DeleteMarker);
+    }
+
+    #[tokio::test]
+    async fn corrupt_ledger_journal_recovery_scan_rediscovers_pending_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = build_test_manager_at(tmp.path());
+        let rule = test_rule("bucket");
+        put_pending_object(&manager, "bucket", "key").await;
+        manager.set_rule(rule.clone());
+        manager.ledger.replace("bucket", Vec::new()).unwrap();
+        std::fs::write(manager.ledger.journal_path("bucket"), b"{bad-json}\n").unwrap();
+        drop(manager);
+
+        let manager = build_test_manager_at(tmp.path());
+        manager.initialize_pending_ledgers().await;
+        assert!(manager.recovery_scan_ops.load(Ordering::Relaxed) > 0);
+        let LoadResult::Loaded(entries) = manager
+            .ledger
+            .load("bucket", Some(&replication_rule_id(&rule)))
+            .unwrap()
+        else {
+            panic!("ledger missing");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].identity.key, "key");
+    }
+
+    #[tokio::test]
+    async fn pre_ledger_migration_scans_once_then_restart_scans_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = build_test_manager_at(tmp.path());
+        let rule = test_rule("bucket");
+        put_pending_object(&manager, "bucket", "key").await;
+        manager.set_rule(rule.clone());
+        manager.initialize_pending_ledgers().await;
+        assert!(manager.recovery_scan_ops.load(Ordering::Relaxed) > 0);
+        drop(manager);
+
+        let manager = build_test_manager_at(tmp.path());
+        manager.initialize_pending_ledgers().await;
+        assert_eq!(manager.recovery_scan_ops.load(Ordering::Relaxed), 0);
+        assert_eq!(manager.queue_depth(), 1);
     }
 
     fn empty_failure(key: &str) -> ReplicationFailure {

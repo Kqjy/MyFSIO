@@ -88,11 +88,12 @@ Core settings:
 | `UI_PORT` | `5100` | UI port |
 | `UI_ENABLED` | `true` | Disable to run API-only |
 | `STORAGE_ROOT` | `./data` | Root directory for buckets and system metadata |
+| `OBJECT_CACHE_MAX_SIZE` | `1024` | Object metadata LRU cache capacity |
 | `IAM_CONFIG` | `<STORAGE_ROOT>/.myfsio.sys/config/iam.json` | IAM config path |
 | `API_BASE_URL` | derived as `http://<HOST>:<PORT>` | Public API base used by the UI and presigned URL generation |
 | `AWS_REGION` | `us-east-1` | Region used in SigV4 scope |
 | `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew (regular SigV4) |
-| `STRICT_STREAMING_SIGV4` | `false` | When `true`, reject streaming SigV4 (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD*`) requests because per-chunk signature validation is not yet implemented. When `false` (default) the server logs a warning and accepts the request without validating chunk signatures — leave it `false` only if you need AWS CLI/SDK compatibility for large uploads and trust the network |
+| `STRICT_STREAMING_SIGV4` | `true` | Validate streaming SigV4 chunk chains, the final zero-length chunk, and signed trailers. Set to `false` only as a compatibility escape hatch; checksum trailers are still verified |
 | `ALLOW_INTERNAL_ENDPOINTS` | `false` | Permit relay/replication targets to resolve to loopback / RFC1918 / link-local / CGNAT addresses. Required for local cluster testing; leave disabled in production unless you intentionally federate over private networks |
 | `MULTIPART_OBJECT_LAYOUT` | `segments` | Completed multipart layout. `segments` keeps uploaded parts as immutable segment files; `concat` is the legacy single-file assembly. Older binaries cannot read `segments` objects |
 | `GC_SEGMENT_MAX_AGE_HOURS` | `24` | Delete orphaned multipart segment directories older than this |
@@ -149,6 +150,7 @@ Metrics and replication tuning:
 | `REPLICATION_HEALER_ENABLED` | `true` |
 | `REPLICATION_HEALER_INTERVAL_SECONDS` | `60` |
 | `REPLICATION_HEALER_MAX_ATTEMPTS` | `12` |
+| `REPLICATION_FULL_RECONCILE_INTERVAL_HOURS` | `0` (off) |
 | `SITE_SYNC_INTERVAL_SECONDS` | `60` |
 | `SITE_SYNC_BATCH_SIZE` | `100` |
 | `SITE_SYNC_CONNECT_TIMEOUT_SECONDS` | `10` |
@@ -190,6 +192,9 @@ data/
       meta/
       versions/
       segments/
+      replication/
+        pending.snapshot.json
+        pending.journal.jsonl
     multipart/
     keys/
 ```

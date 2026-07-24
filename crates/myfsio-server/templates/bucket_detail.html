@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block title %}{{ bucket_name }}{% endblock %}
 {% block content %}
 {% set active_tab = request_args.tab | default(value="objects") %}
 <div class="d-flex flex-column gap-4 h-100">
@@ -209,6 +210,9 @@
           <span id="load-more-status" class="text-muted"></span>
           <span id="folder-view-status" class="text-muted d-none"></span>
         </div>
+        {% if versioning_enabled %}
+        <button type="button" class="btn btn-link btn-sm py-0 px-1 text-decoration-none d-none" id="archived-objects-chip"></button>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -337,7 +341,7 @@
                 Refresh
               </button>
             </div>
-            <div id="version-list" class="list-group list-group-flush small rounded overflow-hidden" style="border: 1px solid var(--myfsio-card-border);"></div>
+            <div id="version-list" class="version-list-stable list-group list-group-flush small rounded" style="border: 1px solid var(--myfsio-card-border);"></div>
           </div>
           <div class="preview-stage border rounded position-relative overflow-hidden" style="border-radius: 0.75rem !important;">
             <div id="preview-placeholder" class="text-muted text-center">
@@ -351,7 +355,7 @@
             <video id="preview-video" class="w-100 d-none" controls style="display: block;"></video>
             <audio id="preview-audio" class="w-100 d-none" controls style="display: block;"></audio>
             <pre id="preview-text" class="w-100 d-none m-0"></pre>
-            <iframe id="preview-iframe" class="w-100 d-none" style="min-height: 200px;"></iframe>
+            <iframe id="preview-iframe" class="w-100 h-100 d-none"></iframe>
           </div>
         </div>
       </div>
@@ -406,7 +410,6 @@
                       <path fill-rule="evenodd" d="M8 8a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm-1 3a1 1 0 1 1 2 0 1 1 0 0 1-2 0z"/>
                     </svg>
                     Quick Presets
-                    <span class="badge bg-secondary-subtle text-secondary ms-2 fw-normal" style="font-size: 0.65rem;">Choose a template</span>
                   </label>
                   <div class="d-flex flex-wrap gap-2">
                     <button type="button" class="btn btn-outline-secondary preset-btn {% if preset_choice == "private" %}active{% endif %}" data-preset="private">
@@ -694,7 +697,7 @@
                 <span class="fw-semibold">Archived Objects</span>
               </div>
               <div class="d-flex align-items-center gap-2">
-                <span class="badge text-bg-secondary" data-archived-count>0 items</span>
+                <span class="badge text-bg-secondary d-none" data-archived-count></span>
                 <button class="btn btn-outline-secondary btn-sm" type="button" data-archived-refresh>
                   <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
                     <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
@@ -877,33 +880,23 @@
               
               <div class="mb-4">
                 <h6 class="small fw-semibold mb-3">Current Usage</h6>
-                <div class="row g-3">
-                  <div class="col-6">
-                    <div class="border rounded p-3 text-center" data-usage-objects data-total-objects="{{ total_objects }}" data-max-objects="{% if has_max_objects %}{{ max_objects }}{% endif %}">
-                      <div class="fs-4 fw-bold text-primary" data-usage-objects-value>{{ total_objects }}</div>
-                      <div class="small text-muted">Total Objects</div>
-                      <div data-usage-objects-limit>
-                      {% if has_max_objects %}
-                      <div class="progress mt-2" style="height: 4px;">
-                        {% if max_objects > 0 %}{% set obj_pct = total_objects / max_objects * 100 | int %}{% else %}{% set obj_pct = 0 %}{% endif %}
-                        <div class="progress-bar {% if obj_pct >= 90 %}bg-danger{% elif obj_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {% if obj_pct > 100 %}100{% else %}{{ obj_pct }}{% endif %}%"></div>
-                      </div>
-                      <div class="small text-muted mt-1">{{ obj_pct }}% of {{ max_objects }} limit</div>
-                      {% else %}
-                      <div class="small text-muted mt-2">No limit</div>
-                      {% endif %}
-                      </div>
-                      {% if version_count > 0 %}
-                      <div class="small text-muted mt-1">
-                        <span class="text-body-secondary">({{ current_objects }} current + {{ version_count }} versions)</span>
-                      </div>
-                      {% endif %}
+                <div class="row g-3" data-usage-objects data-total-objects="{{ total_objects }}" data-max-objects="{% if has_max_objects %}{{ max_objects }}{% endif %}">
+                  <div class="col-md-4">
+                    <div class="border rounded p-3 text-center h-100">
+                      <div class="fs-4 fw-bold text-primary" data-usage-objects-value>{{ current_objects }}</div>
+                      <div class="small text-muted">Objects</div>
                     </div>
                   </div>
-                  <div class="col-6">
-                    <div class="border rounded p-3 text-center" data-usage-bytes data-total-bytes="{{ total_bytes }}" data-max-bytes="{% if has_max_bytes %}{{ max_bytes }}{% endif %}">
+                  <div class="col-md-4">
+                    <div class="border rounded p-3 text-center h-100">
+                      <div class="fs-4 fw-bold text-primary" data-usage-versions-value>{{ version_count }}</div>
+                      <div class="small text-muted">Versions</div>
+                    </div>
+                  </div>
+                  <div class="col-md-4">
+                    <div class="border rounded p-3 text-center h-100" data-usage-bytes data-total-bytes="{{ total_bytes }}" data-max-bytes="{% if has_max_bytes %}{{ max_bytes }}{% endif %}">
                       <div class="fs-4 fw-bold text-primary" data-usage-bytes-value>{{ total_bytes | filesizeformat }}</div>
-                      <div class="small text-muted">Total Storage</div>
+                      <div class="small text-muted">Total stored (incl. versions)</div>
                       <div data-usage-bytes-limit>
                       {% if has_max_bytes %}
                       <div class="progress mt-2" style="height: 4px;">
@@ -922,6 +915,17 @@
                       {% endif %}
                     </div>
                   </div>
+                </div>
+                <div data-usage-objects-limit>
+                {% if has_max_objects %}
+                <div class="progress mt-3" style="height: 4px;">
+                  {% if max_objects > 0 %}{% set obj_pct = total_objects / max_objects * 100 | int %}{% else %}{% set obj_pct = 0 %}{% endif %}
+                  <div class="progress-bar {% if obj_pct >= 90 %}bg-danger{% elif obj_pct >= 75 %}bg-warning{% else %}bg-success{% endif %}" style="width: {% if obj_pct > 100 %}100{% else %}{{ obj_pct }}{% endif %}%"></div>
+                </div>
+                <div class="small text-muted mt-1">{{ obj_pct }}% of {{ max_objects }} stored-copy limit</div>
+                {% else %}
+                <div class="small text-muted mt-2">No stored-copy limit</div>
+                {% endif %}
                 </div>
               </div>
 
@@ -2106,7 +2110,7 @@
       >
           <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}" />
         <div class="modal-body">
-          <p class="text-muted small mb-3">Upload files to <code>{{ bucket_name }}</code>. You can select multiple files at once.</p>
+          <p class="text-muted small mb-3">Upload files to <code id="uploadDestination"></code>. You can select multiple files at once.</p>
           <div class="row g-3">
             <div class="col-12">
               <label class="form-label fw-medium">Select files</label>
@@ -2432,11 +2436,23 @@
             </select>
           </div>
           <div class="col-md-6">
-            <label class="form-label fw-medium">Expires (seconds)</label>
-            <input class="form-control" type="number" id="presignTtl" value="900" min="1" max="604800" />
-            <div class="form-text">Max: 604800 (7 days)</div>
+            <label class="form-label fw-medium" for="presignExpiryPreset">Expires</label>
+            <select class="form-select" id="presignExpiryPreset">
+              <option value="900" selected>15 minutes</option>
+              <option value="3600">1 hour</option>
+              <option value="86400">24 hours</option>
+              <option value="604800">7 days</option>
+              <option value="custom">Custom</option>
+            </select>
+            <div class="mt-2 d-none" id="presignCustomExpiry">
+              <label class="form-label small" for="presignTtl">Seconds</label>
+              <input class="form-control" type="number" id="presignTtl" value="900" min="{{ presigned_url_min_expiry }}" max="{{ presigned_url_max_expiry }}" step="1" required aria-describedby="presignTtlHelp presignTtlFeedback" />
+              <div class="invalid-feedback" id="presignTtlFeedback">Enter a whole number from {{ presigned_url_min_expiry }} to {{ presigned_url_max_expiry }}.</div>
+              <div class="form-text" id="presignTtlHelp">Allowed: {{ presigned_url_min_expiry }}–{{ presigned_url_max_expiry }} seconds</div>
+            </div>
           </div>
         </div>
+        <div class="alert alert-warning py-2 px-3 small mt-3 mb-0 d-none" id="presignClampNote" role="status"></div>
         <label class="form-label fw-medium mt-3">Signed URL</label>
         <div class="input-group">
           <input id="presignLink" class="form-control font-monospace bg-body-tertiary" type="text" readonly />
