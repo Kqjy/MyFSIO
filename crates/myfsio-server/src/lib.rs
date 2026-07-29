@@ -159,6 +159,19 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             post(ui_api::archived_post_dispatch),
         )
         .route("/ui/docs", get(ui_pages::docs_page))
+        .route("/ui/system", get(ui_pages::system_dashboard))
+        .route("/ui/system/gc/status", get(ui_api::gc_status_ui))
+        .route("/ui/system/gc/run", post(ui_api::gc_run_ui))
+        .route("/ui/system/gc/history", get(ui_api::gc_history_ui))
+        .route(
+            "/ui/system/integrity/status",
+            get(ui_api::integrity_status_ui),
+        )
+        .route("/ui/system/integrity/run", post(ui_api::integrity_run_ui))
+        .route(
+            "/ui/system/integrity/history",
+            get(ui_api::integrity_history_ui),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ui::ui_admin_audit_layer,
@@ -266,19 +279,6 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         .route(
             "/ui/metrics/operations/error-summary",
             get(ui_api::metrics_operations_error_summary),
-        )
-        .route("/ui/system", get(ui_pages::system_dashboard))
-        .route("/ui/system/gc/status", get(ui_api::gc_status_ui))
-        .route("/ui/system/gc/run", post(ui_api::gc_run_ui))
-        .route("/ui/system/gc/history", get(ui_api::gc_history_ui))
-        .route(
-            "/ui/system/integrity/status",
-            get(ui_api::integrity_status_ui),
-        )
-        .route("/ui/system/integrity/run", post(ui_api::integrity_run_ui))
-        .route(
-            "/ui/system/integrity/history",
-            get(ui_api::integrity_history_ui),
         )
         .route(
             "/ui/website-domains",

@@ -1305,13 +1305,16 @@ fn check_phantom(
                 "metadata entry without file on disk".to_string(),
             );
         } else if let Some(seg_id) = meta_map.get(myfsio_storage::segments::META_KEY_SEGMENTS) {
-            let seg_dir = bucket_path.parent().map(|root| {
-                root.join(".myfsio.sys")
-                    .join("buckets")
-                    .join(bucket)
-                    .join(myfsio_storage::segments::SEGMENTS_DIR)
-                    .join(seg_id)
-            });
+            let seg_dir = bucket_path
+                .parent()
+                .filter(|_| myfsio_storage::validation::is_valid_multipart_id(seg_id))
+                .map(|root| {
+                    root.join(".myfsio.sys")
+                        .join("buckets")
+                        .join(bucket)
+                        .join(myfsio_storage::segments::SEGMENTS_DIR)
+                        .join(seg_id)
+                });
             let sizes = meta_map
                 .get("__part_sizes__")
                 .and_then(|raw| myfsio_storage::fs_backend::parse_part_sizes(raw));

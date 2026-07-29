@@ -795,6 +795,16 @@ impl FsStorageBackend {
         self.multipart_root().join(bucket_name)
     }
 
+    fn multipart_upload_dir(&self, bucket_name: &str, upload_id: &str) -> StorageResult<PathBuf> {
+        if !validation::is_safe_path_segment(bucket_name) {
+            return Err(StorageError::BucketNotFound(bucket_name.to_string()));
+        }
+        if !validation::is_valid_multipart_id(upload_id) {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+        Ok(self.multipart_bucket_root(bucket_name).join(upload_id))
+    }
+
     fn tmp_dir(&self) -> PathBuf {
         self.system_root_path().join("tmp")
     }
@@ -952,6 +962,12 @@ impl FsStorageBackend {
             key: key.to_string(),
             detail,
         };
+        if !validation::is_valid_multipart_id(seg_id) {
+            return Err(corrupted(format!(
+                "object references a segment set with a non-canonical id: {}",
+                seg_id
+            )));
+        }
         let header = crate::segments::read_stub_header_from(&mut file)
             .map_err(StorageError::Io)?
             .ok_or_else(|| {
@@ -1036,7 +1052,21 @@ impl FsStorageBackend {
     }
 
     fn release_segment_dir(&self, bucket: &str, segment_id: &str) {
-        if segment_id.is_empty() {
+        if !validation::is_safe_path_segment(bucket) {
+            tracing::warn!(
+                bucket = bucket,
+                "refusing to release a segment directory for a non-canonical bucket name"
+            );
+            return;
+        }
+        if !validation::is_valid_multipart_id(segment_id) {
+            if !segment_id.is_empty() {
+                tracing::warn!(
+                    bucket = bucket,
+                    segment_id = segment_id,
+                    "refusing to release a segment directory with a non-canonical id"
+                );
+            }
             return;
         }
         let seg_dir = self.segments_bucket_root(bucket).join(segment_id);
@@ -2214,10 +2244,23 @@ impl FsStorageBackend {
 
         let config_path = self.bucket_config_path(bucket_name);
         let mut config = if config_path.exists() {
-            std::fs::read_to_string(&config_path)
+            match std::fs::read_to_string(&config_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<BucketConfig>(&s).ok())
-                .unwrap_or_default()
+            {
+                Some(parsed) => parsed,
+                None => {
+                    tracing::error!(
+                        bucket = bucket_name,
+                        path = %config_path.display(),
+                        "bucket config is unreadable or corrupt; treating it as fail-closed"
+                    );
+                    BucketConfig {
+                        unreadable: true,
+                        ..BucketConfig::default()
+                    }
+                }
+            }
         } else {
             BucketConfig::default()
         };
@@ -2275,6 +2318,13 @@ impl FsStorageBackend {
         bucket_name: &str,
         config: &BucketConfig,
     ) -> std::io::Result<()> {
+        if config.unreadable {
+            return Err(std::io::Error::other(format!(
+                "Bucket configuration for '{}' is unreadable or corrupt; refusing to overwrite it \
+                 and discard its settings",
+                bucket_name
+            )));
+        }
         let config_path = self.bucket_config_path(bucket_name);
         let json_val = serde_json::to_value(config).map_err(std::io::Error::other)?;
         Self::atomic_write_json_sync(&config_path, &json_val, true)?;
@@ -2302,6 +2352,12 @@ impl FsStorageBackend {
             .clone();
         let _guard = lock.lock();
         let mut config = self.read_bucket_config_sync(bucket_name);
+        if config.unreadable {
+            return Err(StorageError::Internal(format!(
+                "Bucket configuration for '{}' is unreadable or corrupt; refusing to overwrite it",
+                bucket_name
+            )));
+        }
         f(&mut config);
         self.write_bucket_config_sync(bucket_name, &config)
             .map_err(StorageError::Io)?;
@@ -4064,6 +4120,13 @@ impl FsStorageBackend {
         }
 
         let bucket_config = self.read_bucket_config_sync(bucket_name);
+        if bucket_config.unreadable {
+            return Err(StorageError::Internal(format!(
+                "Bucket configuration for '{}' is unreadable or corrupt; refusing to write, \
+                 because versioning and quota settings cannot be determined",
+                bucket_name
+            )));
+        }
         let versioning_status = bucket_config.versioning_status();
 
         if is_overwrite {
@@ -4803,7 +4866,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _guard = self.get_object_lock(bucket, key).write();
             let bucket_path = self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
-            let versioning_status = self.read_bucket_config_sync(bucket).versioning_status();
+            let bucket_config = self.read_bucket_config_sync(bucket);
+            if bucket_config.unreadable {
+                return Err(StorageError::Internal(format!(
+                    "Bucket configuration for '{}' is unreadable or corrupt; refusing to delete, \
+                     because versioning settings cannot be determined",
+                    bucket
+                )));
+            }
+            let versioning_status = bucket_config.versioning_status();
 
             if versioning_status.is_active() {
                 let mut version_mutations = Vec::new();
@@ -5287,7 +5358,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         part_number: u32,
         stream: AsyncReadStream,
     ) -> StorageResult<String> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5373,7 +5444,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         src_version_id: Option<&str>,
         range: Option<(u64, u64)>,
     ) -> StorageResult<(String, DateTime<Utc>)> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5511,7 +5582,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         parts: &[PartInfo],
         options: crate::traits::PutCommitOptions,
     ) -> StorageResult<ObjectMeta> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5754,7 +5825,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn abort_multipart(&self, bucket: &str, upload_id: &str) -> StorageResult<()> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         if upload_dir.exists() {
             std::fs::remove_dir_all(&upload_dir).map_err(StorageError::Io)?;
         }
@@ -5762,7 +5833,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn list_parts(&self, bucket: &str, upload_id: &str) -> StorageResult<Vec<PartMeta>> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5844,7 +5915,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         upload_id: &str,
     ) -> StorageResult<HashMap<String, String>> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5869,7 +5940,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         upload_id: &str,
         part_number: u32,
     ) -> StorageResult<PathBuf> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -6134,6 +6205,96 @@ mod tests {
     async fn put_listing_object(backend: &FsStorageBackend, bucket: &str, key: &str, body: &[u8]) {
         let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body.to_vec()));
         backend.put_object(bucket, key, stream, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_multipart_rejects_traversal_upload_id() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("victim").await.unwrap();
+
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let sentinel = config_dir.join("iam.json");
+        std::fs::write(&sentinel, b"{}").unwrap();
+
+        let result = backend.abort_multipart("victim", "../../config").await;
+
+        assert!(result.is_err());
+        assert!(config_dir.exists());
+        assert!(sentinel.exists());
+    }
+
+    #[tokio::test]
+    async fn abort_multipart_accepts_generated_upload_id() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("uploads").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("uploads", "object.txt", None)
+            .await
+            .unwrap();
+
+        backend
+            .abort_multipart("uploads", &upload_id)
+            .await
+            .unwrap();
+
+        assert!(backend.list_parts("uploads", &upload_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn corrupt_bucket_config_is_unreadable_and_not_overwritten() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("corrupt-cfg").await.unwrap();
+
+        let config_path = backend.bucket_config_path("corrupt-cfg");
+        std::fs::write(&config_path, b"{ this is not json").unwrap();
+        backend.bucket_config_cache.clear();
+
+        let config = backend.read_bucket_config_sync("corrupt-cfg");
+        assert!(config.unreadable);
+        assert!(config.policy.is_none());
+
+        backend.bucket_config_cache.clear();
+        assert!(backend
+            .mutate_bucket_config("corrupt-cfg", |cfg| cfg.versioning_enabled = true)
+            .await
+            .is_err());
+
+        backend.bucket_config_cache.clear();
+        let mut edited = backend.read_bucket_config_sync("corrupt-cfg");
+        edited.versioning_enabled = true;
+        assert!(backend
+            .set_bucket_config("corrupt-cfg", &edited)
+            .await
+            .is_err());
+
+        backend.bucket_config_cache.clear();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        assert!(backend
+            .put_object("corrupt-cfg", "object.txt", stream, None)
+            .await
+            .is_err());
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "{ this is not json"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_segment_dir_ignores_traversal_segment_id() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("victim").await.unwrap();
+
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let sentinel = config_dir.join("iam.json");
+        std::fs::write(&sentinel, b"{}").unwrap();
+
+        backend.release_segment_dir("victim", "../../../config");
+
+        assert!(config_dir.exists());
+        assert!(sentinel.exists());
     }
 
     async fn complete_listing_multipart(

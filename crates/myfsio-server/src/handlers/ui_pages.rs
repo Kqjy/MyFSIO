@@ -2290,7 +2290,18 @@ pub async fn system_dashboard(
         .parse()
         .unwrap_or(chrono_tz::UTC);
 
-    let gc_status = match &state.gc {
+    let can_read_gc =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:gc_read").await;
+    let can_run_gc =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:gc_run").await;
+    let can_read_integrity =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:integrity_read")
+            .await;
+    let can_run_integrity =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:integrity_run")
+            .await;
+
+    let gc_status = match state.gc.as_ref().filter(|_| can_read_gc) {
         Some(gc) => gc.status().await,
         None => json!({
             "dry_run": false,
@@ -2304,7 +2315,7 @@ pub async fn system_dashboard(
             "temp_file_max_age_hours": 24,
         }),
     };
-    let gc_history = match &state.gc {
+    let gc_history = match state.gc.as_ref().filter(|_| can_read_gc) {
         Some(gc) => gc
             .history()
             .await
@@ -2315,7 +2326,7 @@ pub async fn system_dashboard(
         None => Vec::new(),
     };
 
-    let integrity_status = match &state.integrity {
+    let integrity_status = match state.integrity.as_ref().filter(|_| can_read_integrity) {
         Some(checker) => checker.status().await,
         None => json!({
             "auto_heal": false,
@@ -2328,7 +2339,7 @@ pub async fn system_dashboard(
             "scan_elapsed_seconds": Value::Null,
         }),
     };
-    let integrity_history = match &state.integrity {
+    let integrity_history = match state.integrity.as_ref().filter(|_| can_read_integrity) {
         Some(checker) => checker
             .history()
             .await
@@ -2341,6 +2352,10 @@ pub async fn system_dashboard(
 
     ctx.insert("gc_enabled", &state.config.gc_enabled);
     ctx.insert("integrity_enabled", &state.config.integrity_enabled);
+    ctx.insert("can_read_gc", &can_read_gc);
+    ctx.insert("can_run_gc", &can_run_gc);
+    ctx.insert("can_read_integrity", &can_read_integrity);
+    ctx.insert("can_run_integrity", &can_run_integrity);
     ctx.insert("gc_history", &gc_history);
     ctx.insert("integrity_history", &integrity_history);
     ctx.insert("gc_status", &gc_status);
@@ -3812,6 +3827,21 @@ pub async fn update_bucket_policy(
                 return Redirect::to(&redirect_url).into_response();
             }
         };
+        if let Some(clause) = crate::handlers::config::policy_unsupported_clause(&policy) {
+            let message = format!(
+                "Policy statements containing '{}' are not supported by this server",
+                clause
+            );
+            if wants_json {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to(&redirect_url).into_response();
+        }
         config.policy = Some(policy);
     }
 

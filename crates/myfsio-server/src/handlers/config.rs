@@ -636,10 +636,34 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
         }
     };
 
+    if let Some(clause) = policy_unsupported_clause(&policy) {
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            format!(
+                "Policy statements containing '{}' are not supported by this server",
+                clause
+            ),
+        ));
+    }
+
     mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, move |config| {
         config.policy = Some(policy);
     })
     .await
+}
+
+pub(crate) fn policy_unsupported_clause(policy: &serde_json::Value) -> Option<&'static str> {
+    let statements: Vec<&serde_json::Value> = match policy.get("Statement") {
+        Some(serde_json::Value::Array(items)) => items.iter().collect(),
+        Some(other) => vec![other],
+        None => return None,
+    };
+    statements.into_iter().find_map(|statement| {
+        crate::middleware::UNSUPPORTED_POLICY_CLAUSES
+            .iter()
+            .find(|name| statement.get(**name).is_some_and(|value| !value.is_null()))
+            .copied()
+    })
 }
 
 pub async fn delete_policy(state: &AppState, bucket: &str) -> Response {

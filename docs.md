@@ -580,6 +580,8 @@ ENCRYPTION_ENABLED=true KMS_ENABLED=true cargo run -p myfsio-server --
 Notes:
 
 - If `ENCRYPTION_ENABLED=true` and `SECRET_KEY` is not configured, the server still starts, but `--check-config` warns that secure-at-rest config encryption is unavailable.
+- If `ENCRYPTION_ENABLED=true` or `KMS_ENABLED=true` and the corresponding subsystem fails to initialize, the server logs the reason and exits non-zero instead of starting. Starting without it would silently store objects unencrypted while still returning `200 OK`.
+- A bucket configured with default encryption fails its writes with `InternalError` if the encryption service is unavailable or its stored configuration cannot be parsed, rather than falling back to writing plaintext.
 - KMS and the object encryption master key live under `data/.myfsio.sys/keys/`.
 - Encrypted PUTs stream the client body straight through the encryptor into a temp file and commit the ciphertext atomically; plaintext is never installed at the live key path. Encrypted GETs (full, ranged, and SSE-C multipart) decrypt chunk-by-chunk while streaming the response instead of materializing a decrypted temp file. Objects written by older builds without `x-amz-encryption-plaintext-size` metadata fall back to temp-file decryption.
 - One remaining non-atomic window: SSE-S3/SSE-KMS multipart uploads encrypt after CompleteMultipartUpload commits the assembled object; a crash inside that window can leave the assembled plaintext live. Per-part SSE-C multipart uploads are not affected.
@@ -699,6 +701,38 @@ The Rust server exposes:
 - KMS routes under `/myfsio/kms/...`
 
 `CompleteMultipartUpload` includes `x-amz-version-id` on the response when the completed object has a version id.
+
+### Authorization and request validation
+
+- **Per-key authorization on bulk delete.** `POST /<bucket>?delete` authorizes every key in the request body individually, not just the bucket. A principal whose IAM policy is scoped to a prefix can no longer delete keys outside it; unauthorized keys come back as `AccessDenied` entries in the `DeleteResult` while authorized keys still succeed.
+- **Bucket policies fail closed on unsupported clauses.** `Condition`, `NotPrincipal`, `NotAction`, and `NotResource` are not evaluated by this server. `PutBucketPolicy` (and the UI policy editor) now reject statements containing them with `InvalidArgument`. For policies already stored, a matching `Allow` carrying such a clause grants nothing, and a `Deny` carrying one denies. Previously these clauses were silently ignored, so a restrictive-looking policy could be permissive.
+- **Presigned URLs must sign their `x-amz-*` headers.** A presigned request carrying an `x-amz-*` header that is not listed in `X-Amz-SignedHeaders` is rejected with `SignatureDoesNotMatch`. This prevents a URL bearer from adding `x-amz-copy-source`, `x-amz-acl`, `x-amz-bypass-governance-retention`, SSE, or user-metadata headers the signer never authorized. Only `x-amz-content-sha256`, `x-amz-date`, and `x-amz-decoded-content-length` are exempt, since they affect body framing only. SDKs that attach unsigned checksum headers to presigned PUTs will need to include them in the signature, as they already must against AWS.
+- **Reserved metadata keys are dropped.** User metadata keys beginning with `__` or `x-amz-` collide with internal storage and encryption metadata and are discarded on PutObject, CopyObject, POST form uploads, UI multipart initiation, and objects pulled from a peer. Ordinary `x-amz-meta-<name>` metadata is unaffected.
+- **Multipart upload ids are validated.** `uploadId` and internal segment ids must be 32 lowercase hex characters. A malformed id returns `NoSuchUpload` rather than being joined into a filesystem path.
+- **Corrupt bucket configuration fails closed.** If a bucket's `.bucket.json` exists but cannot be read or parsed, the bucket is treated as unusable rather than as an empty configuration: policy evaluation denies, object writes and deletes return `InternalError` (versioning and quota settings cannot be determined, so proceeding could destroy versions on a bucket that is actually versioned), writes needing its encryption settings return `InternalError`, and every configuration write refuses to overwrite it. The last guard matters because the config is a read-modify-write: without it, the next settings change would replace the corrupt file with a near-empty one and silently discard every other bucket setting.
+
+  To recover, stop the server and repair the file, or delete it to return the bucket to default settings — a missing `.bucket.json` is legitimate and reads as an empty configuration. The server logs the bucket name and full path when it detects the condition. Note the bucket config cache holds the failed read for up to `BUCKET_CONFIG_CACHE_TTL_SECONDS` (default 30).
+
+### System maintenance permissions
+
+Garbage collection and integrity scanning are server-wide, not bucket-scoped, so they are authorized by namespaced IAM actions rather than by bucket:
+
+| Action | Grants |
+|--------|--------|
+| `system:gc_read` | `GET /myfsio/admin/gc/status`, `/gc/history`, and the `/ui/system/gc/*` equivalents |
+| `system:gc_run` | `POST /myfsio/admin/gc/run` and `/ui/system/gc/run` |
+| `system:integrity_read` | `GET /myfsio/admin/integrity/status`, `/integrity/history`, and the `/ui/system/integrity/*` equivalents |
+| `system:integrity_run` | `POST /myfsio/admin/integrity/run` and `/ui/system/integrity/run` |
+
+Admin principals pass these checks implicitly. For a non-admin, the granting policy must use `"bucket": "*"`, since a bucket-scoped policy cannot authorize a server-wide operation. `system:*` grants all four, and a `"*"` action grants them as with any other action.
+
+```json
+{ "bucket": "*", "prefix": "*", "actions": ["system:gc_read", "system:integrity_read"] }
+```
+
+The `/ui/system` dashboard honors the read actions per card: without one, that card states which permission is missing instead of exposing status and history, and the Run/Scan buttons are hidden without the matching run action. The rest of the page (version, platform, timezone, feature flags) is unrestricted.
+
+Both the `/myfsio/admin/...` routes and the `/ui/system/...` routes previously required a full admin principal. They now enforce these permissions instead, so maintenance can be delegated without granting admin. The UI routes moved out of the admin-only router group for this; every one of them performs its own permission check, and a principal with no `system:` action sees the dashboard shell with both cards withheld. Admins are unaffected, and relayed cluster maintenance still works because `relay_inbound_layer` substitutes a verified admin principal before the handler runs.
 
 For a route-level view, inspect:
 

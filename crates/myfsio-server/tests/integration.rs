@@ -6014,7 +6014,9 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
-    let state = myfsio_server::state::AppState::new_with_encryption(config).await;
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
     let app = myfsio_server::create_router(state);
     (app, tmp)
 }
@@ -9696,7 +9698,9 @@ async fn test_app_sse_c_with_min(min_part_size: u64) -> (axum::Router, tempfile:
         allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
-    let state = myfsio_server::state::AppState::new_with_encryption(config).await;
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
     let app = myfsio_server::create_router(state);
     (app, tmp)
 }

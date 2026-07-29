@@ -685,15 +685,7 @@ impl IamService {
     }
 
     pub async fn set_user_enabled(&self, identifier: &str, enabled: bool) -> Result<(), String> {
-        let content = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
-
-        let raw: RawIamConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
-        let mut config = IamConfig {
-            version: 2,
-            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
-        };
+        let mut config = self.load_config()?;
 
         let user = config
             .users
@@ -708,12 +700,7 @@ impl IamService {
 
         user.enabled = enabled;
 
-        let json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
-        std::fs::write(&self.config_path, json)
-            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
-
-        self.reload();
+        self.save_config(&config)?;
         Ok(())
     }
 
@@ -747,14 +734,7 @@ impl IamService {
     }
 
     pub fn create_access_key(&self, identifier: &str) -> Result<serde_json::Value, String> {
-        let content = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
-        let raw: RawIamConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
-        let mut config = IamConfig {
-            version: 2,
-            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
-        };
+        let mut config = self.load_config()?;
 
         let user = config
             .users
@@ -778,12 +758,7 @@ impl IamService {
         };
         user.access_keys.push(key);
 
-        let json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
-        std::fs::write(&self.config_path, json)
-            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
-
-        self.reload();
+        self.save_config(&config)?;
         Ok(serde_json::json!({
             "access_key": new_ak,
             "secret_key": new_sk,
@@ -791,14 +766,7 @@ impl IamService {
     }
 
     pub fn delete_access_key(&self, access_key: &str) -> Result<(), String> {
-        let content = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
-        let raw: RawIamConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
-        let mut config = IamConfig {
-            version: 2,
-            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
-        };
+        let mut config = self.load_config()?;
 
         let mut found = false;
         for user in &mut config.users {
@@ -820,12 +788,7 @@ impl IamService {
             return Err(format!("Access key '{}' not found", access_key));
         }
 
-        let json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
-        std::fs::write(&self.config_path, json)
-            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
-
-        self.reload();
+        self.save_config(&config)?;
         Ok(())
     }
 
@@ -1034,8 +997,14 @@ fn action_matches(policy_actions: &[String], action: &str) -> bool {
         if pa == "*" || pa == action {
             return true;
         }
-        if pa == "iam:*" && action.starts_with("iam:") {
-            return true;
+        if let Some(namespace) = pa.strip_suffix(":*") {
+            if !namespace.is_empty()
+                && action.len() > namespace.len() + 1
+                && action.starts_with(namespace)
+                && action.as_bytes()[namespace.len()] == b':'
+            {
+                return true;
+            }
         }
     }
     false
@@ -1054,6 +1023,36 @@ fn prefix_matches(policy_prefix: &str, object_key: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn actions(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn action_matches_namespace_wildcard() {
+        assert!(action_matches(&actions(&["iam:*"]), "iam:create_user"));
+        assert!(action_matches(&actions(&["system:*"]), "system:gc_run"));
+        assert!(action_matches(&actions(&["*"]), "system:gc_run"));
+        assert!(action_matches(
+            &actions(&["system:gc_run"]),
+            "system:gc_run"
+        ));
+
+        assert!(!action_matches(&actions(&["sys:*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["system:*"]), "system"));
+        assert!(!action_matches(&actions(&["system:*"]), "systemgc_run"));
+        assert!(!action_matches(&actions(&[":*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["s3:*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["iam:*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["system:*"]), "system:"));
+
+        assert!(action_matches(&actions(&["SYSTEM:*"]), "system:gc_run"));
+        assert!(action_matches(&actions(&[" system:* "]), "system:gc_run"));
+        assert!(!action_matches(
+            &actions(&["system:gc_run"]),
+            "system:gc_read"
+        ));
+    }
 
     fn test_iam_json() -> String {
         serde_json::json!({

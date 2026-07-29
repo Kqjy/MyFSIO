@@ -270,11 +270,11 @@
               </svg>
             </button>
             <ul class="dropdown-menu dropdown-menu-end">
-              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('copy', '${escapeHtml(obj.key)}')">
+              <li><button class="dropdown-item" type="button" data-copy-object>
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/></svg>
                 Copy
               </button></li>
-              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('move', '${escapeHtml(obj.key)}')">
+              <li><button class="dropdown-item" type="button" data-move-object>
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/></svg>
                 Move
               </button></li>
@@ -958,6 +958,18 @@
           if (deleteObjectKey) deleteObjectKey.textContent = row.dataset.key;
           deleteModal.show();
         }
+      });
+
+      const copyBtn = row.querySelector('[data-copy-object]');
+      copyBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.openCopyMoveModal('copy', row.dataset.key);
+      });
+
+      const moveBtn = row.querySelector('[data-move-object]');
+      moveBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.openCopyMoveModal('move', row.dataset.key);
       });
 
       const selectCheckbox = row.querySelector('[data-object-select]');
@@ -4038,7 +4050,7 @@
     const renderFailures = (failures) => {
       if (!failuresBody) return;
       failuresBody.innerHTML = failures.map(f => `
-        <tr>
+        <tr data-object-key="${escapeHtml(f.object_key)}">
           <td class="ps-3" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.object_key)}">
             <code class="small">${escapeHtml(f.object_key)}</code>
           </td>
@@ -4048,13 +4060,13 @@
           <td class="small text-muted">${new Date(f.timestamp * 1000).toLocaleString()}</td>
           <td class="text-center"><span class="badge bg-secondary">${f.failure_count}</span></td>
           <td class="text-end pe-3">
-            <button class="btn btn-sm btn-outline-primary py-0 px-2" onclick="retryFailure(this, '${escapeHtml(f.object_key)}')" title="Retry">
+            <button class="btn btn-sm btn-outline-primary py-0 px-2" data-retry-failure title="Retry">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
                 <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
                 <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
               </svg>
             </button>
-            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="dismissFailure(this, '${escapeHtml(f.object_key)}')" title="Dismiss">
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" data-dismiss-failure title="Dismiss">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
                 <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
               </svg>
@@ -4063,6 +4075,18 @@
         </tr>
       `).join('');
     };
+
+    failuresBody?.addEventListener('click', (e) => {
+      const retryBtn = e.target.closest('[data-retry-failure]');
+      if (retryBtn) {
+        window.retryFailure(retryBtn, retryBtn.closest('tr')?.dataset.objectKey ?? '');
+        return;
+      }
+      const dismissBtn = e.target.closest('[data-dismiss-failure]');
+      if (dismissBtn) {
+        window.dismissFailure(dismissBtn, dismissBtn.closest('tr')?.dataset.objectKey ?? '');
+      }
+    });
 
     window.retryFailure = async (btn, objectKey) => {
       const originalHtml = btn.innerHTML;

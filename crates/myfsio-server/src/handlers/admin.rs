@@ -1321,7 +1321,7 @@ pub async fn gc_status(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "system:gc_read") {
         return err;
     }
     match &state.gc {
@@ -1338,7 +1338,7 @@ pub async fn gc_run(
     Extension(principal): Extension<Principal>,
     body: Body,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "system:gc_run") {
         return err;
     }
     let gc = match &state.gc {
@@ -1368,7 +1368,7 @@ pub async fn gc_history(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "system:gc_read") {
         return err;
     }
     match &state.gc {
@@ -1384,7 +1384,7 @@ pub async fn integrity_status(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "system:integrity_read") {
         return err;
     }
     match &state.integrity {
@@ -1401,7 +1401,7 @@ pub async fn integrity_run(
     Extension(principal): Extension<Principal>,
     body: Body,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "system:integrity_run") {
         return err;
     }
     let checker = match &state.integrity {
@@ -1435,7 +1435,7 @@ pub async fn integrity_history(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> Response {
-    if let Some(err) = require_admin(&principal) {
+    if let Some(err) = require_iam_action(&state, &principal, "system:integrity_read") {
         return err;
     }
     match &state.integrity {

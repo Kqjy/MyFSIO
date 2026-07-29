@@ -949,7 +949,7 @@ pub async fn ui_can_see_bucket(state: &AppState, principal: &Principal, bucket: 
     .await
 }
 
-async fn authorize_action(
+pub(crate) async fn authorize_action(
     state: &AppState,
     principal: Option<&Principal>,
     bucket: &str,
@@ -1045,6 +1045,9 @@ async fn evaluate_bucket_policy(
         Ok(config) => config,
         Err(_) => return PolicyDecision::Neutral,
     };
+    if config.unreadable {
+        return PolicyDecision::Deny;
+    }
     let policy: &Value = match config.policy.as_ref() {
         Some(policy) => policy,
         None => return PolicyDecision::Neutral,
@@ -1093,6 +1096,16 @@ fn evaluate_policy_statement(
         _ => return PolicyDecision::Neutral,
     };
 
+    let unsupported = statement_has_unsupported_clause(statement);
+
+    if unsupported && matches!(effect, PolicyDecision::Deny) {
+        return if unsupported_deny_may_apply(statement, access_key, bucket, action, object_key) {
+            PolicyDecision::Deny
+        } else {
+            PolicyDecision::Neutral
+        };
+    }
+
     let action_gate = if matches!(effect, PolicyDecision::Allow) {
         write
     } else {
@@ -1106,7 +1119,42 @@ fn evaluate_policy_statement(
         return PolicyDecision::Neutral;
     }
 
+    if unsupported {
+        return PolicyDecision::Neutral;
+    }
+
     effect
+}
+
+fn unsupported_deny_may_apply(
+    statement: &Value,
+    access_key: Option<&str>,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> bool {
+    let principal_ok =
+        statement.get("Principal").is_none() || statement_matches_principal(statement, access_key);
+    let action_ok =
+        statement.get("Action").is_none() || statement_matches_action(statement, action, None);
+    let resource_ok = statement.get("Resource").is_none()
+        || statement_matches_resource(statement, bucket, object_key);
+    principal_ok && action_ok && resource_ok
+}
+
+pub const UNSUPPORTED_POLICY_CLAUSES: &[&str] =
+    &["Condition", "NotPrincipal", "NotAction", "NotResource"];
+
+const PRESIGNED_UNSIGNED_HEADER_ALLOWLIST: &[&str] = &[
+    "x-amz-content-sha256",
+    "x-amz-date",
+    "x-amz-decoded-content-length",
+];
+
+fn statement_has_unsupported_clause(statement: &Value) -> bool {
+    UNSUPPORTED_POLICY_CLAUSES
+        .iter()
+        .any(|name| statement.get(name).is_some_and(|value| !value.is_null()))
 }
 
 fn statement_matches_principal(statement: &Value, access_key: Option<&str>) -> bool {
@@ -1779,6 +1827,20 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
         return AuthResult::Denied(S3Error::new(
             S3ErrorCode::SignatureDoesNotMatch,
             "X-Amz-SignedHeaders must include host",
+        ));
+    }
+    if let Some(unsigned) = req.headers().keys().find(|name| {
+        let lower = name.as_str().to_ascii_lowercase();
+        lower.starts_with("x-amz-")
+            && !PRESIGNED_UNSIGNED_HEADER_ALLOWLIST.contains(&lower.as_str())
+            && !signed_lc.contains(&lower)
+    }) {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            format!(
+                "Header '{}' must be included in X-Amz-SignedHeaders",
+                unsigned.as_str()
+            ),
         ));
     }
     let header_values: Vec<(String, String)> = signed_headers

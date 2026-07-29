@@ -1191,10 +1191,12 @@ pub async fn post_bucket(
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     let peer_marker = peer.as_ref().map(|e| &e.0);
+    let principal_ref = principal.as_ref().map(|e| &e.0);
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
         if host_bucket != bucket {
             return post_object(
@@ -1215,7 +1217,15 @@ pub async fn post_bucket(
             .and_then(|value| value.to_str().ok())
             .map(|value| value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        return delete_objects_handler(&state, &bucket, peer_marker, bypass_governance, body).await;
+        return delete_objects_handler(
+            &state,
+            &bucket,
+            peer_marker,
+            principal_ref,
+            bypass_governance,
+            body,
+        )
+        .await;
     }
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
@@ -2248,6 +2258,9 @@ pub async fn put_object(
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
         if let Some(meta_key) = name_str.strip_prefix("x-amz-meta-") {
+            if myfsio_storage::validation::is_reserved_user_metadata_key(meta_key) {
+                continue;
+            }
             if let Ok(val) = value.to_str() {
                 metadata.insert(meta_key.to_string(), val.to_string());
             }
@@ -4803,6 +4816,9 @@ async fn copy_object_handler(
         for (name, value) in headers.iter() {
             let name_str = name.as_str();
             if let Some(meta_key) = name_str.strip_prefix("x-amz-meta-") {
+                if myfsio_storage::validation::is_reserved_user_metadata_key(meta_key) {
+                    continue;
+                }
                 if let Ok(val) = value.to_str() {
                     m.insert(meta_key.to_string(), val.to_string());
                 }
@@ -4995,6 +5011,7 @@ async fn delete_objects_handler(
     state: &AppState,
     bucket: &str,
     peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    principal: Option<&myfsio_common::types::Principal>,
     bypass_governance: bool,
     body: Body,
 ) -> Response {
@@ -5037,9 +5054,26 @@ async fn delete_objects_handler(
             let state = state.clone();
             let bucket = bucket.to_string();
             let bypass = bypass_governance;
+            let principal = principal.cloned();
             async move {
                 let key = obj.key.clone();
                 let requested_vid = obj.version_id.clone();
+                if let Err(err) = crate::middleware::authorize_action(
+                    &state,
+                    principal.as_ref(),
+                    &bucket,
+                    "delete",
+                    Some(&obj.key),
+                    Some(true),
+                )
+                .await
+                {
+                    return (
+                        key,
+                        requested_vid,
+                        Err((err.code.as_str().to_string(), err.message)),
+                    );
+                }
                 let to_err = |err: myfsio_storage::error::StorageError| -> (String, String) {
                     let s3err = S3Error::from(err);
                     (s3err.code.as_str().to_string(), s3err.message)
@@ -6272,29 +6306,50 @@ async fn resolve_encryption_context(
         return Ok(None);
     }
 
-    if state.encryption.is_some() {
-        if let Ok(config) = state.storage.get_bucket_config(bucket).await {
-            if let Some(enc_val) = &config.encryption {
-                if let Some((algorithm, kms_key_id)) =
-                    crate::handlers::config::parse_encryption_config(enc_val)
-                {
-                    match algorithm.as_str() {
-                        "AES256" => {
-                            return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
-                                algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
-                                kms_key_id: None,
-                                customer_key: None,
-                            }));
-                        }
-                        "aws:kms" => {
-                            return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
-                                algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
-                                kms_key_id,
-                                customer_key: None,
-                            }));
-                        }
-                        _ => {}
-                    }
+    if let Ok(config) = state.storage.get_bucket_config(bucket).await {
+        if config.unreadable {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "Bucket configuration is unreadable; refusing to store an object whose encryption \
+                 requirements cannot be determined",
+            )));
+        }
+        if let Some(enc_val) = &config.encryption {
+            let Some((algorithm, kms_key_id)) =
+                crate::handlers::config::parse_encryption_config(enc_val)
+            else {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InternalError,
+                    "Bucket default encryption configuration could not be parsed",
+                )));
+            };
+            if state.encryption.is_none() {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InternalError,
+                    "Bucket default encryption is configured but server-side encryption is \
+                     unavailable on this server",
+                )));
+            }
+            match algorithm.as_str() {
+                "AES256" => {
+                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
+                        algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
+                        kms_key_id: None,
+                        customer_key: None,
+                    }));
+                }
+                "aws:kms" => {
+                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
+                        algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
+                        kms_key_id,
+                        customer_key: None,
+                    }));
+                }
+                _ => {
+                    return Err(s3_error_response(S3Error::new(
+                        S3ErrorCode::InvalidArgument,
+                        "Bucket default encryption specifies an unsupported algorithm",
+                    )));
                 }
             }
         }
@@ -6786,7 +6841,7 @@ async fn post_object_form_handler(
     for (k, v) in &fields {
         let lower = k.to_ascii_lowercase();
         if let Some(meta_key) = lower.strip_prefix("x-amz-meta-") {
-            if !(meta_key.is_empty() || meta_key.starts_with("__") && meta_key.ends_with("__")) {
+            if !myfsio_storage::validation::is_reserved_user_metadata_key(meta_key) {
                 metadata.insert(meta_key.to_string(), v.clone());
             }
         }

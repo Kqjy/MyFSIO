@@ -140,7 +140,13 @@ async fn main() {
     );
 
     let state = if config.encryption_enabled || config.kms_enabled {
-        AppState::new_with_encryption(config.clone()).await
+        match AppState::new_with_encryption(config.clone()).await {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!("{}", err);
+                std::process::exit(1);
+            }
+        }
     } else {
         AppState::new(config.clone())
     };

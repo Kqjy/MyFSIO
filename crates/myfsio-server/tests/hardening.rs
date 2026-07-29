@@ -561,7 +561,9 @@ async fn encrypted_app() -> (axum::Router, tempfile::TempDir) {
         encryption_chunk_size_bytes: 1024,
         ..myfsio_server::config::ServerConfig::default()
     };
-    let state = myfsio_server::state::AppState::new_with_encryption(config).await;
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
     let app = myfsio_server::create_router(state);
     (app, tmp)
 }
