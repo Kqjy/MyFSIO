@@ -90,8 +90,8 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
 }
 
 fn reject_invalid_bucket(bucket: &str) -> Option<Response> {
-    myfsio_storage::validation::validate_bucket_name(bucket)
-        .map(|_| json_error(StatusCode::BAD_REQUEST, "Invalid bucket name"))
+    myfsio_storage::validation::bucket_name_rejection(bucket)
+        .map(|reason| json_error(StatusCode::BAD_REQUEST, reason))
 }
 
 async fn ensure_ui_authorized(
@@ -437,24 +437,33 @@ fn key_relative_path(key: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+fn checked_bucket(bucket: &str) -> Result<&str, String> {
+    match myfsio_storage::validation::bucket_name_rejection(bucket) {
+        Some(reason) => Err(reason),
+        None => Ok(bucket),
+    }
+}
+
 fn object_live_path(state: &AppState, bucket: &str, key: &str) -> Result<PathBuf, String> {
+    let bucket = checked_bucket(bucket)?;
     let rel = key_relative_path(key)?;
     Ok(state.config.storage_root.join(bucket).join(rel))
 }
 
-fn version_root_for_bucket(state: &AppState, bucket: &str) -> PathBuf {
-    state
+fn version_root_for_bucket(state: &AppState, bucket: &str) -> Result<PathBuf, String> {
+    let bucket = checked_bucket(bucket)?;
+    Ok(state
         .config
         .storage_root
         .join(SYSTEM_ROOT)
         .join(SYSTEM_BUCKETS_DIR)
         .join(bucket)
-        .join(BUCKET_VERSIONS_DIR)
+        .join(BUCKET_VERSIONS_DIR))
 }
 
 fn version_dir_for_object(state: &AppState, bucket: &str, key: &str) -> Result<PathBuf, String> {
     let rel = key_relative_path(key)?;
-    Ok(version_root_for_bucket(state, bucket).join(rel))
+    Ok(version_root_for_bucket(state, bucket)?.join(rel))
 }
 
 fn version_id_component(version_id: &str) -> Result<&str, String> {
@@ -2754,6 +2763,7 @@ pub async fn upload_object(
         State(state),
         Path((bucket_name.clone(), key.clone())),
         Query(ObjectQuery::default()),
+        axum::extract::RawQuery(None),
         None,
         None,
         None,
@@ -3177,8 +3187,14 @@ async fn serve_object_download_or_preview(
 
     let bucket_for_log = bucket.clone();
     let key_for_log = key.clone();
-    let mut response =
-        handlers::get_object(State(state), Path((bucket, key)), Query(query), headers).await;
+    let mut response = handlers::get_object(
+        State(state),
+        Path((bucket, key)),
+        Query(query),
+        axum::extract::RawQuery(None),
+        headers,
+    )
+    .await;
     response
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
@@ -4243,7 +4259,10 @@ pub async fn archived_objects(
     if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
         return resp;
     }
-    let versions_root = version_root_for_bucket(&state, &bucket_name);
+    let versions_root = match version_root_for_bucket(&state, &bucket_name) {
+        Ok(path) => path,
+        Err(_) => return json_error(StatusCode::BAD_REQUEST, "Invalid bucket name"),
+    };
     if !versions_root.exists() {
         return Json(json!({ "objects": [] })).into_response();
     }

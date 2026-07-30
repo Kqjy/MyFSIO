@@ -820,7 +820,8 @@ async fn test_ui_replication_endpoints_are_wired_and_operational() {
             sync_deletions: true,
             last_pull_at: None,
             filter_prefix: None,
-        });
+        })
+        .unwrap();
 
     state.replication.failures.add(
         bucket_name,

@@ -1217,6 +1217,14 @@ pub async fn put_logging(state: &AppState, bucket: &str, body: Body) -> Response
         );
     }
 
+    if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(target_bucket) {
+        return s3_error_response(
+            S3ErrorCode::InvalidBucketName,
+            &reason,
+            StatusCode::BAD_REQUEST,
+        );
+    }
+
     let cfg = crate::services::access_logging::LoggingConfiguration {
         target_bucket: target_bucket.to_string(),
         target_prefix: le

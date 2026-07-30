@@ -145,6 +145,13 @@ pub fn validate_object_key(
     None
 }
 
+pub fn bucket_name_rejection(bucket_name: &str) -> Option<String> {
+    if is_reserved_bucket_name(bucket_name) {
+        return Some(format!("Bucket name '{}' is reserved", bucket_name));
+    }
+    validate_bucket_name(bucket_name)
+}
+
 pub fn is_safe_path_segment(value: &str) -> bool {
     !value.is_empty()
         && value != "."

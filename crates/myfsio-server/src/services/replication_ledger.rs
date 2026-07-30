@@ -106,6 +106,13 @@ impl ReplicationLedger {
             .clone()
     }
 
+    fn guard_bucket(bucket: &str) -> Result<(), String> {
+        match myfsio_storage::validation::bucket_name_rejection(bucket) {
+            Some(reason) => Err(format!("Invalid bucket name '{}': {}", bucket, reason)),
+            None => Ok(()),
+        }
+    }
+
     fn replication_dir(&self, bucket: &str) -> PathBuf {
         self.storage_root
             .join(".myfsio.sys")
@@ -126,6 +133,7 @@ impl ReplicationLedger {
         if state.loaded {
             return Ok(());
         }
+        Self::guard_bucket(bucket)?;
         let snapshot_path = self.snapshot_path(bucket);
         let journal_path = self.journal_path(bucket);
         state.initialized = snapshot_path.exists() || journal_path.exists();
@@ -273,6 +281,7 @@ impl ReplicationLedger {
                 self.max_entries
             ));
         }
+        Self::guard_bucket(bucket)?;
         let state_handle = self.state_for(bucket);
         let mut state = state_handle.lock();
         let mut entries = HashMap::with_capacity(identities.len());

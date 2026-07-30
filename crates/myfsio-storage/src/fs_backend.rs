@@ -796,9 +796,7 @@ impl FsStorageBackend {
     }
 
     fn multipart_upload_dir(&self, bucket_name: &str, upload_id: &str) -> StorageResult<PathBuf> {
-        if !validation::is_safe_path_segment(bucket_name) {
-            return Err(StorageError::BucketNotFound(bucket_name.to_string()));
-        }
+        Self::guard_bucket_name(bucket_name)?;
         if !validation::is_valid_multipart_id(upload_id) {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
@@ -1192,14 +1190,33 @@ impl FsStorageBackend {
         Ok(())
     }
 
-    fn require_bucket(&self, bucket_name: &str) -> StorageResult<PathBuf> {
-        if validation::is_reserved_bucket_name(bucket_name) {
+    fn guard_bucket_name(bucket_name: &str) -> StorageResult<()> {
+        match validation::bucket_name_rejection(bucket_name) {
+            Some(err) => Err(StorageError::InvalidBucketName(err)),
+            None => Ok(()),
+        }
+    }
+
+    fn guard_contained(&self, path: &Path, bucket_name: &str) -> StorageResult<()> {
+        if !path.starts_with(&self.root) {
+            tracing::error!(
+                bucket = bucket_name,
+                path = %path.display(),
+                root = %self.root.display(),
+                "resolved bucket path escapes the storage root; refusing the operation"
+            );
             return Err(StorageError::InvalidBucketName(format!(
-                "Bucket name '{}' is reserved",
+                "Bucket name '{}' resolves outside the storage root",
                 bucket_name
             )));
         }
+        Ok(())
+    }
+
+    fn require_bucket(&self, bucket_name: &str) -> StorageResult<PathBuf> {
+        Self::guard_bucket_name(bucket_name)?;
         let path = self.bucket_path(bucket_name);
+        self.guard_contained(&path, bucket_name)?;
         if !path.exists() {
             return Err(StorageError::BucketNotFound(bucket_name.to_string()));
         }
@@ -2235,6 +2252,13 @@ impl FsStorageBackend {
     }
 
     fn read_bucket_config_sync(&self, bucket_name: &str) -> BucketConfig {
+        if validation::bucket_name_rejection(bucket_name).is_some() {
+            return BucketConfig {
+                unreadable: true,
+                ..BucketConfig::default()
+            };
+        }
+
         if let Some(entry) = self.bucket_config_cache.get(bucket_name) {
             let (config, cached_at) = entry.value();
             if cached_at.elapsed() < self.bucket_config_cache_ttl {
@@ -2318,6 +2342,9 @@ impl FsStorageBackend {
         bucket_name: &str,
         config: &BucketConfig,
     ) -> std::io::Result<()> {
+        if let Some(err) = validation::bucket_name_rejection(bucket_name) {
+            return Err(std::io::Error::other(err));
+        }
         if config.unreadable {
             return Err(std::io::Error::other(format!(
                 "Bucket configuration for '{}' is unreadable or corrupt; refusing to overwrite it \
@@ -4361,7 +4388,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy().to_string();
-                if validation::is_reserved_bucket_name(&name_str) {
+                if let Some(reason) = validation::bucket_name_rejection(&name_str) {
+                    if !validation::is_reserved_bucket_name(&name_str) {
+                        tracing::warn!(
+                            directory = name_str,
+                            "skipping directory in the storage root that is not a valid bucket \
+                             name ({}); it is not served as a bucket. Remove it from the \
+                             filesystem if it is not wanted.",
+                            reason
+                        );
+                    }
                     continue;
                 }
                 let ft = match entry.file_type() {
@@ -4399,16 +4435,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn create_bucket(&self, name: &str) -> StorageResult<()> {
-        if validation::is_reserved_bucket_name(name) {
-            return Err(StorageError::InvalidBucketName(format!(
-                "Bucket name '{}' is reserved",
-                name
-            )));
-        }
-        if let Some(err) = validation::validate_bucket_name(name) {
-            return Err(StorageError::InvalidBucketName(err));
-        }
+        Self::guard_bucket_name(name)?;
         let bucket_path = self.bucket_path(name);
+        self.guard_contained(&bucket_path, name)?;
         if let Some(parent) = bucket_path.parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
@@ -4455,10 +4484,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn bucket_exists(&self, name: &str) -> StorageResult<bool> {
-        if validation::is_reserved_bucket_name(name) {
+        if validation::bucket_name_rejection(name).is_some() {
             return Ok(false);
         }
-        Ok(self.bucket_path(name).exists())
+        let path = self.bucket_path(name);
+        if self.guard_contained(&path, name).is_err() {
+            return Ok(false);
+        }
+        Ok(path.exists())
     }
 
     async fn bucket_stats(&self, name: &str) -> StorageResult<BucketStats> {
@@ -5869,6 +5902,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         &self,
         bucket: &str,
     ) -> StorageResult<Vec<MultipartUploadInfo>> {
+        Self::guard_bucket_name(bucket)?;
         let uploads_root = self.multipart_bucket_root(bucket);
         if !uploads_root.exists() {
             return Ok(Vec::new());
@@ -5967,6 +6001,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn is_versioning_enabled(&self, bucket: &str) -> StorageResult<bool> {
+        Self::guard_bucket_name(bucket)?;
         Ok(self.read_bucket_config_sync(bucket).versioning_enabled)
     }
 
@@ -5986,6 +6021,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn get_versioning_status(&self, bucket: &str) -> StorageResult<VersioningStatus> {
+        Self::guard_bucket_name(bucket)?;
         Ok(self.read_bucket_config_sync(bucket).versioning_status())
     }
 

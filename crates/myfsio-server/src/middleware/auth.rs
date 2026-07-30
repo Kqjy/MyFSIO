@@ -792,22 +792,20 @@ async fn authorize_request(
         .trim_start_matches('/')
         .split('/')
         .filter(|s| !s.is_empty());
-    let bucket = match segments.next() {
+    let bucket_raw = match segments.next() {
         Some(b) => b,
         None => {
             return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
         }
     };
-    if myfsio_storage::validation::is_reserved_bucket_name(bucket) {
-        return Err(S3Error::new(
-            S3ErrorCode::AccessDenied,
-            "Access to reserved bucket names is not permitted",
-        ));
+    let bucket = &urlencoding_decode(bucket_raw);
+    if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(bucket) {
+        return Err(S3Error::new(S3ErrorCode::InvalidBucketName, reason));
     }
-    let remaining: Vec<&str> = segments.collect();
+    let remaining: Vec<String> = segments.map(urlencoding_decode).collect();
 
     if remaining.is_empty() {
-        let action = resolve_bucket_action(method, query);
+        let action = resolve_bucket_action(method, query)?;
         return authorize_action(
             state,
             principal,
@@ -823,19 +821,23 @@ async fn authorize_request(
     if *method == Method::PUT {
         if let Some(copy_source) = copy_source {
             let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
-            if let Some((src_bucket, src_key)) = source.split_once('/') {
-                if myfsio_storage::validation::is_reserved_bucket_name(src_bucket) {
-                    return Err(S3Error::new(
-                        S3ErrorCode::AccessDenied,
-                        "Access to reserved bucket names is not permitted",
-                    ));
+            if let Some((src_bucket_raw, src_key_and_query)) = source.split_once('/') {
+                let src_key_raw = src_key_and_query
+                    .split_once('?')
+                    .map(|(key, _)| key)
+                    .unwrap_or(src_key_and_query);
+                let src_bucket = urlencoding_decode(src_bucket_raw);
+                let src_key = urlencoding_decode(src_key_raw);
+                if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(&src_bucket)
+                {
+                    return Err(S3Error::new(S3ErrorCode::InvalidBucketName, reason));
                 }
                 let source_allowed = authorize_action(
                     state,
                     principal,
-                    src_bucket,
+                    &src_bucket,
                     "read",
-                    Some(src_key),
+                    Some(&src_key),
                     Some(false),
                 )
                 .await
@@ -858,7 +860,7 @@ async fn authorize_request(
         }
     }
 
-    let action = resolve_object_action(method, query);
+    let action = resolve_object_action(method, query)?;
     authorize_action(
         state,
         principal,
@@ -1361,114 +1363,27 @@ fn wildcard_match(value: &str, pattern: &str) -> bool {
     pattern_idx == pattern.len()
 }
 
-fn resolve_bucket_action(method: &Method, query: &str) -> &'static str {
-    if has_query_key(query, "versioning") {
-        return "versioning";
-    }
-    if has_query_key(query, "tagging") {
-        return "tagging";
-    }
-    if has_query_key(query, "cors") {
-        return "cors";
-    }
-    if has_query_key(query, "location") {
-        return "list";
-    }
-    if has_query_key(query, "encryption") {
-        return "encryption";
-    }
-    if has_query_key(query, "lifecycle") {
-        return "lifecycle";
-    }
-    if has_query_key(query, "acl") {
-        return "share";
-    }
-    if has_query_key(query, "policy") || has_query_key(query, "policyStatus") {
-        return "policy";
-    }
-    if has_query_key(query, "replication") {
-        return "replication";
-    }
-    if has_query_key(query, "quota") {
-        return "quota";
-    }
-    if has_query_key(query, "website") {
-        return "website";
-    }
-    if has_query_key(query, "object-lock") {
-        return "object_lock";
-    }
-    if has_query_key(query, "notification") {
-        return "notification";
-    }
-    if has_query_key(query, "logging") {
-        return "logging";
-    }
-    if has_query_key(query, "versions") || has_query_key(query, "uploads") {
-        return "list";
-    }
-    if has_query_key(query, "delete") {
-        return "delete";
-    }
-
-    match *method {
-        Method::GET => "list",
-        Method::HEAD => "read",
-        Method::PUT => "create_bucket",
-        Method::DELETE => "delete_bucket",
-        Method::POST => "write",
-        _ => "list",
+fn resolve_bucket_action(method: &Method, query: &str) -> Result<&'static str, S3Error> {
+    match crate::handlers::parse_bucket_subresource(Some(query)) {
+        Err(selectors) => Err(crate::handlers::ambiguous_subresource_error(&selectors)),
+        Ok(Some(subresource)) => Ok(subresource.action()),
+        Ok(None) => Ok(match *method {
+            Method::GET => "list",
+            Method::HEAD => "read",
+            Method::PUT => "create_bucket",
+            Method::DELETE => "delete_bucket",
+            Method::POST => "write",
+            _ => "list",
+        }),
     }
 }
 
-fn resolve_object_action(method: &Method, query: &str) -> &'static str {
-    if has_query_key(query, "tagging") {
-        return if *method == Method::GET {
-            "read"
-        } else {
-            "write"
-        };
+fn resolve_object_action(method: &Method, query: &str) -> Result<&'static str, S3Error> {
+    match crate::handlers::parse_object_subresource(Some(query)) {
+        Err(selectors) => Err(crate::handlers::ambiguous_subresource_error(&selectors)),
+        Ok(Some(subresource)) => Ok(subresource.action(method)),
+        Ok(None) => Ok(crate::handlers::object_method_default_action(method)),
     }
-    if has_query_key(query, "acl") {
-        return if *method == Method::GET {
-            "read"
-        } else {
-            "write"
-        };
-    }
-    if has_query_key(query, "retention") || has_query_key(query, "legal-hold") {
-        return "object_lock";
-    }
-    if has_query_key(query, "attributes") {
-        return "read";
-    }
-    if has_query_key(query, "uploads") || has_query_key(query, "uploadId") {
-        return match *method {
-            Method::GET => "read",
-            _ => "write",
-        };
-    }
-    if has_query_key(query, "select") {
-        return "read";
-    }
-
-    match *method {
-        Method::GET | Method::HEAD => "read",
-        Method::PUT => "write",
-        Method::DELETE => "delete",
-        Method::POST => "write",
-        _ => "read",
-    }
-}
-
-fn has_query_key(query: &str, key: &str) -> bool {
-    if query.is_empty() {
-        return false;
-    }
-    query
-        .split('&')
-        .filter(|part| !part.is_empty())
-        .any(|part| part == key || part.starts_with(&format!("{}=", key)))
 }
 
 fn try_auth(state: &AppState, req: &Request) -> AuthResult {

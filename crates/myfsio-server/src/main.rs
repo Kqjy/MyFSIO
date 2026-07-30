@@ -837,9 +837,16 @@ fn rebuild_listing_indexes(config: &ServerConfig) {
                 if name == ".myfsio.sys" {
                     continue;
                 }
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    buckets.push(name);
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
                 }
+                if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(&name) {
+                    if !myfsio_storage::validation::is_reserved_bucket_name(&name) {
+                        println!("  {name}: skipped, not a valid bucket name ({reason})");
+                    }
+                    continue;
+                }
+                buckets.push(name);
             }
         }
         Err(err) => {

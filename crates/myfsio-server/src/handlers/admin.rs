@@ -1150,6 +1150,10 @@ pub async fn create_website_domain(
         );
     }
 
+    if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(&bucket) {
+        return json_error("InvalidBucketName", &reason, StatusCode::BAD_REQUEST);
+    }
+
     match state.storage.bucket_exists(&bucket).await {
         Ok(true) => {}
         _ => {
@@ -1253,6 +1257,10 @@ pub async fn update_website_domain(
             "bucket is required",
             StatusCode::BAD_REQUEST,
         );
+    }
+
+    if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(&bucket) {
+        return json_error("InvalidBucketName", &reason, StatusCode::BAD_REQUEST);
     }
 
     match state.storage.bucket_exists(&bucket).await {

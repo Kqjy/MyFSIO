@@ -1088,7 +1088,16 @@ impl ReplicationManager {
         self.rules.lock().get(bucket).cloned()
     }
 
-    pub fn set_rule(&self, rule: ReplicationRule) {
+    pub fn set_rule(&self, rule: ReplicationRule) -> Result<(), String> {
+        if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(&rule.bucket_name) {
+            return Err(format!("Invalid source bucket name: {}", reason));
+        }
+        if !myfsio_storage::validation::is_safe_path_segment(&rule.target_bucket) {
+            return Err(
+                "Invalid target bucket name: must not be empty or contain path separators"
+                    .to_string(),
+            );
+        }
         let bucket = rule.bucket_name.clone();
         let active_rule_id = rule.enabled.then(|| replication_rule_id(&rule));
         {
@@ -1115,6 +1124,7 @@ impl ReplicationManager {
                 }
             }
         }
+        Ok(())
     }
 
     pub fn delete_rule(&self, bucket: &str) {
@@ -1123,6 +1133,9 @@ impl ReplicationManager {
             guard.remove(bucket);
         }
         self.save_rules();
+        if myfsio_storage::validation::bucket_name_rejection(bucket).is_some() {
+            return;
+        }
         if let Err(error) = self.ledger.reset(bucket) {
             tracing::error!(
                 "Failed to clear replication ledger after deleting rule for {}: {}",
@@ -3349,7 +3362,39 @@ fn load_rules(path: &Path) -> HashMap<String, ReplicationRule> {
         return HashMap::new();
     }
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Ok(text) => {
+            let rules: HashMap<String, ReplicationRule> =
+                serde_json::from_str(&text).unwrap_or_default();
+            rules
+                .into_iter()
+                .filter(|(key, rule)| {
+                    if key != &rule.bucket_name {
+                        tracing::error!(
+                            rule = key,
+                            source_bucket = rule.bucket_name,
+                            "ignoring persisted replication rule whose map key does not match its \
+                             source bucket name; it could never have been looked up"
+                        );
+                        return false;
+                    }
+                    match myfsio_storage::validation::bucket_name_rejection(&rule.bucket_name) {
+                        Some(reason) => {
+                            tracing::error!(
+                                rule = key,
+                                source_bucket = rule.bucket_name,
+                                "ignoring persisted replication rule because its source bucket \
+                                 name is not a valid bucket name ({}); no local bucket can have \
+                                 this name, so the rule could never have replicated. Recreate the \
+                                 rule against the correct bucket.",
+                                reason
+                            );
+                            false
+                        }
+                        None => true,
+                    }
+                })
+                .collect()
+        }
         Err(_) => HashMap::new(),
     }
 }
@@ -3660,7 +3705,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manager = build_test_manager_at(tmp.path());
         let rule = test_rule("bucket");
-        manager.set_rule(rule.clone());
+        manager.set_rule(rule.clone()).unwrap();
         manager
             .ledger
             .append(
@@ -3730,7 +3775,7 @@ mod tests {
             .unwrap();
         let rule = test_rule("bucket");
         put_pending_object(&manager, "bucket", "key").await;
-        manager.set_rule(rule.clone());
+        manager.set_rule(rule.clone()).unwrap();
         let entry = manager
             .prepare_ledger_entry("bucket", "key", &rule, ReplicationOpKind::Put, None)
             .await
@@ -3801,7 +3846,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manager = build_test_manager_at(tmp.path());
         let rule = test_rule("bucket");
-        manager.set_rule(rule.clone());
+        manager.set_rule(rule.clone()).unwrap();
         for (generation, kind) in [
             ("version-1", ReplicationOpKind::Delete),
             ("marker-version-2", ReplicationOpKind::DeleteMarker),
@@ -3839,7 +3884,7 @@ mod tests {
         let manager = build_test_manager_at(tmp.path());
         let rule = test_rule("bucket");
         put_pending_object(&manager, "bucket", "key").await;
-        manager.set_rule(rule.clone());
+        manager.set_rule(rule.clone()).unwrap();
         manager.ledger.replace("bucket", Vec::new()).unwrap();
         std::fs::write(manager.ledger.journal_path("bucket"), b"{bad-json}\n").unwrap();
         drop(manager);
@@ -3864,7 +3909,7 @@ mod tests {
         let manager = build_test_manager_at(tmp.path());
         let rule = test_rule("bucket");
         put_pending_object(&manager, "bucket", "key").await;
-        manager.set_rule(rule.clone());
+        manager.set_rule(rule.clone()).unwrap();
         manager.initialize_pending_ledgers().await;
         assert!(manager.recovery_scan_ops.load(Ordering::Relaxed) > 0);
         drop(manager);

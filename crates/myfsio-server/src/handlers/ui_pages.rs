@@ -2696,7 +2696,15 @@ async fn create_peer_replication_rules_impl(
             filter_prefix: None,
         };
 
-        state.replication.set_rule(rule);
+        if let Err(reason) = state.replication.set_rule(rule) {
+            session.write(|s| {
+                s.push_flash(
+                    "danger",
+                    format!("Skipped bucket '{}': {}", bucket_name, reason),
+                )
+            });
+            continue;
+        }
         created += 1;
         if mode == crate::services::replication::MODE_ALL {
             created_existing.push(bucket_name);
@@ -2976,7 +2984,14 @@ pub async fn update_bucket_replication(
                 );
             };
             rule.enabled = false;
-            state.replication.set_rule(rule);
+            if let Err(reason) = state.replication.set_rule(rule) {
+                return respond(
+                    false,
+                    StatusCode::BAD_REQUEST,
+                    reason.clone(),
+                    json!({ "error": reason }),
+                );
+            }
             respond(
                 true,
                 StatusCode::OK,
@@ -3023,7 +3038,14 @@ pub async fn update_bucket_replication(
             }
 
             rule.enabled = true;
-            state.replication.set_rule(rule);
+            if let Err(reason) = state.replication.set_rule(rule) {
+                return respond(
+                    false,
+                    StatusCode::BAD_REQUEST,
+                    reason.clone(),
+                    json!({ "error": reason }),
+                );
+            }
 
             let mut run_id: Option<String> = None;
             let mut race_kind: Option<&'static str> = None;
@@ -3129,25 +3151,34 @@ pub async fn update_bucket_replication(
                 }
             }
 
-            state
-                .replication
-                .set_rule(crate::services::replication::ReplicationRule {
-                    bucket_name: bucket_name.clone(),
-                    target_connection_id: target_connection_id.to_string(),
-                    target_bucket: target_bucket.to_string(),
-                    enabled: true,
-                    mode: mode.to_string(),
-                    created_at: Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs_f64())
-                            .unwrap_or(0.0),
-                    ),
-                    stats: crate::services::replication::ReplicationStats::default(),
-                    sync_deletions: true,
-                    last_pull_at: None,
-                    filter_prefix: None,
-                });
+            if let Err(reason) =
+                state
+                    .replication
+                    .set_rule(crate::services::replication::ReplicationRule {
+                        bucket_name: bucket_name.clone(),
+                        target_connection_id: target_connection_id.to_string(),
+                        target_bucket: target_bucket.to_string(),
+                        enabled: true,
+                        mode: mode.to_string(),
+                        created_at: Some(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0),
+                        ),
+                        stats: crate::services::replication::ReplicationStats::default(),
+                        sync_deletions: true,
+                        last_pull_at: None,
+                        filter_prefix: None,
+                    })
+            {
+                return respond(
+                    false,
+                    StatusCode::BAD_REQUEST,
+                    reason.clone(),
+                    json!({ "error": reason }),
+                );
+            }
 
             let mut conflict_kind: Option<&'static str> = None;
             let message = if mode == crate::services::replication::MODE_ALL {

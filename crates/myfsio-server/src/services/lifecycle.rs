@@ -445,6 +445,15 @@ impl LifecycleService {
 }
 
 pub fn read_history(storage_root: &Path, bucket_name: &str, limit: usize, offset: usize) -> Value {
+    if myfsio_storage::validation::bucket_name_rejection(bucket_name).is_some() {
+        return json!({
+            "executions": Vec::<LifecycleExecutionRecord>::new(),
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "enabled": true,
+        });
+    }
     let path = lifecycle_history_path(storage_root, bucket_name);
     let mut history = load_history(&path);
     let total = history.len();

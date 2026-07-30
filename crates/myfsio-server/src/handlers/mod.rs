@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine;
@@ -415,7 +415,6 @@ pub async fn health_check() -> Response {
 pub async fn create_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    Query(query): Query<BucketQuery>,
     raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
@@ -429,6 +428,7 @@ pub async fn create_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 peer,
                 principal,
                 streaming_sigv4,
@@ -449,50 +449,40 @@ pub async fn create_bucket(
         ));
     }
 
-    if query.quota.is_some() {
-        return config::put_quota(&state, &bucket, body).await;
-    }
-    if query.versioning.is_some() {
-        return config::put_versioning(&state, &bucket, body).await;
-    }
-    if query.tagging.is_some() {
-        return config::put_tagging(&state, &bucket, body).await;
-    }
-    if query.cors.is_some() {
-        return config::put_cors(&state, &bucket, body).await;
-    }
-    if query.encryption.is_some() {
-        return config::put_encryption(&state, &bucket, body).await;
-    }
-    if query.lifecycle.is_some() {
-        return config::put_lifecycle(&state, &bucket, body).await;
-    }
-    if query.acl.is_some() {
-        return config::put_acl(&state, &bucket, body).await;
-    }
-    if query.policy.is_some() {
-        return config::put_policy(&state, &bucket, body).await;
-    }
-    if query.replication.is_some() {
-        return config::put_replication(&state, &bucket, body).await;
-    }
-    if query.website.is_some() {
-        return config::put_website(&state, &bucket, body).await;
-    }
-    if query.object_lock.is_some() {
-        return config::put_object_lock(&state, &bucket, body).await;
-    }
-    if query.ownership_controls.is_some() {
-        return config::put_ownership_controls(&state, &bucket, body).await;
-    }
-    if query.public_access_block.is_some() {
-        return config::put_public_access_block(&state, &bucket, body).await;
-    }
-    if query.notification.is_some() {
-        return config::put_notification(&state, &bucket, body).await;
-    }
-    if query.logging.is_some() {
-        return config::put_logging(&state, &bucket, body).await;
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
+    if let Some(subresource) = subresource {
+        return match subresource {
+            BucketSubresource::Quota => config::put_quota(&state, &bucket, body).await,
+            BucketSubresource::Versioning => config::put_versioning(&state, &bucket, body).await,
+            BucketSubresource::Tagging => config::put_tagging(&state, &bucket, body).await,
+            BucketSubresource::Cors => config::put_cors(&state, &bucket, body).await,
+            BucketSubresource::Encryption => config::put_encryption(&state, &bucket, body).await,
+            BucketSubresource::Lifecycle => config::put_lifecycle(&state, &bucket, body).await,
+            BucketSubresource::Acl => config::put_acl(&state, &bucket, body).await,
+            BucketSubresource::Policy => config::put_policy(&state, &bucket, body).await,
+            BucketSubresource::Replication => config::put_replication(&state, &bucket, body).await,
+            BucketSubresource::Website => config::put_website(&state, &bucket, body).await,
+            BucketSubresource::ObjectLock => config::put_object_lock(&state, &bucket, body).await,
+            BucketSubresource::OwnershipControls => {
+                config::put_ownership_controls(&state, &bucket, body).await
+            }
+            BucketSubresource::PublicAccessBlock => {
+                config::put_public_access_block(&state, &bucket, body).await
+            }
+            BucketSubresource::Notification => {
+                config::put_notification(&state, &bucket, body).await
+            }
+            BucketSubresource::Logging => config::put_logging(&state, &bucket, body).await,
+            BucketSubresource::Location
+            | BucketSubresource::PolicyStatus
+            | BucketSubresource::Uploads
+            | BucketSubresource::Versions
+            | BucketSubresource::Delete => subresource_method_not_allowed(subresource, "PUT"),
+        };
     }
 
     if let Err(resp) = canned_acl_value(&headers) {
@@ -609,27 +599,282 @@ pub struct BucketQuery {
     pub max_uploads: Option<usize>,
 }
 
-const SUPPORTED_BUCKET_SUBRESOURCES: &[&str] = &[
-    "versioning",
-    "tagging",
-    "cors",
-    "encryption",
-    "lifecycle",
-    "acl",
-    "policy",
-    "policyStatus",
-    "replication",
-    "website",
-    "object-lock",
-    "ownershipControls",
-    "publicAccessBlock",
-    "notification",
-    "logging",
-    "quota",
-    "location",
-    "uploads",
-    "delete",
-    "versions",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketSubresource {
+    Acl,
+    Cors,
+    Delete,
+    Encryption,
+    Lifecycle,
+    Location,
+    Logging,
+    Notification,
+    ObjectLock,
+    OwnershipControls,
+    Policy,
+    PolicyStatus,
+    PublicAccessBlock,
+    Quota,
+    Replication,
+    Tagging,
+    Uploads,
+    Versioning,
+    Versions,
+    Website,
+}
+
+const BUCKET_SUBRESOURCE_SELECTORS: &[(&str, BucketSubresource)] = &[
+    ("acl", BucketSubresource::Acl),
+    ("cors", BucketSubresource::Cors),
+    ("delete", BucketSubresource::Delete),
+    ("encryption", BucketSubresource::Encryption),
+    ("lifecycle", BucketSubresource::Lifecycle),
+    ("location", BucketSubresource::Location),
+    ("logging", BucketSubresource::Logging),
+    ("notification", BucketSubresource::Notification),
+    ("object-lock", BucketSubresource::ObjectLock),
+    ("ownershipControls", BucketSubresource::OwnershipControls),
+    ("policy", BucketSubresource::Policy),
+    ("policyStatus", BucketSubresource::PolicyStatus),
+    ("publicAccessBlock", BucketSubresource::PublicAccessBlock),
+    ("quota", BucketSubresource::Quota),
+    ("replication", BucketSubresource::Replication),
+    ("tagging", BucketSubresource::Tagging),
+    ("uploads", BucketSubresource::Uploads),
+    ("versioning", BucketSubresource::Versioning),
+    ("versions", BucketSubresource::Versions),
+    ("website", BucketSubresource::Website),
+];
+
+impl BucketSubresource {
+    pub fn selector(self) -> &'static str {
+        match self {
+            Self::Acl => "acl",
+            Self::Cors => "cors",
+            Self::Delete => "delete",
+            Self::Encryption => "encryption",
+            Self::Lifecycle => "lifecycle",
+            Self::Location => "location",
+            Self::Logging => "logging",
+            Self::Notification => "notification",
+            Self::ObjectLock => "object-lock",
+            Self::OwnershipControls => "ownershipControls",
+            Self::Policy => "policy",
+            Self::PolicyStatus => "policyStatus",
+            Self::PublicAccessBlock => "publicAccessBlock",
+            Self::Quota => "quota",
+            Self::Replication => "replication",
+            Self::Tagging => "tagging",
+            Self::Uploads => "uploads",
+            Self::Versioning => "versioning",
+            Self::Versions => "versions",
+            Self::Website => "website",
+        }
+    }
+
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::Acl => "share",
+            Self::Cors => "cors",
+            Self::Delete => "delete",
+            Self::Encryption => "encryption",
+            Self::Lifecycle => "lifecycle",
+            Self::Location | Self::Uploads | Self::Versions => "list",
+            Self::Logging => "logging",
+            Self::Notification => "notification",
+            Self::ObjectLock => "object_lock",
+            Self::OwnershipControls => "ownership_controls",
+            Self::Policy | Self::PolicyStatus => "policy",
+            Self::PublicAccessBlock => "public_access_block",
+            Self::Quota => "quota",
+            Self::Replication => "replication",
+            Self::Tagging => "tagging",
+            Self::Versioning => "versioning",
+            Self::Website => "website",
+        }
+    }
+}
+
+pub fn parse_bucket_subresource(
+    query: Option<&str>,
+) -> Result<Option<BucketSubresource>, Vec<&'static str>> {
+    let Some(q) = query else {
+        return Ok(None);
+    };
+    if q.is_empty() {
+        return Ok(None);
+    }
+
+    let mut found: Vec<BucketSubresource> = Vec::new();
+    for part in q.split('&').filter(|p| !p.is_empty()) {
+        let key = part.split('=').next().unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        if let Some((_, subresource)) = BUCKET_SUBRESOURCE_SELECTORS
+            .iter()
+            .find(|(name, _)| *name == key)
+        {
+            if !found.contains(subresource) {
+                found.push(*subresource);
+            }
+        }
+    }
+
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(Some(found[0])),
+        _ => Err(found.into_iter().map(BucketSubresource::selector).collect()),
+    }
+}
+
+pub fn ambiguous_subresource_error(selectors: &[&'static str]) -> S3Error {
+    S3Error::new(
+        S3ErrorCode::InvalidArgument,
+        format!(
+            "Request names multiple subresources ({}); specify exactly one",
+            selectors.join(", ")
+        ),
+    )
+}
+
+fn selector_method_not_allowed(selector: &str, method: &str) -> Response {
+    s3_error_response(S3Error::new(
+        S3ErrorCode::MethodNotAllowed,
+        format!(
+            "{} is not supported on the '?{}' subresource",
+            method, selector
+        ),
+    ))
+}
+
+fn subresource_method_not_allowed(subresource: BucketSubresource, method: &str) -> Response {
+    selector_method_not_allowed(subresource.selector(), method)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectSubresource {
+    Acl,
+    Attributes,
+    LegalHold,
+    Retention,
+    Select,
+    Tagging,
+    UploadId,
+    Uploads,
+}
+
+const OBJECT_SUBRESOURCE_SELECTORS: &[(&str, ObjectSubresource)] = &[
+    ("acl", ObjectSubresource::Acl),
+    ("attributes", ObjectSubresource::Attributes),
+    ("legal-hold", ObjectSubresource::LegalHold),
+    ("retention", ObjectSubresource::Retention),
+    ("select", ObjectSubresource::Select),
+    ("tagging", ObjectSubresource::Tagging),
+    ("uploadId", ObjectSubresource::UploadId),
+    ("uploads", ObjectSubresource::Uploads),
+];
+
+pub fn object_method_default_action(method: &Method) -> &'static str {
+    match *method {
+        Method::GET | Method::HEAD => "read",
+        Method::PUT | Method::POST => "write",
+        Method::DELETE => "delete",
+        _ => "read",
+    }
+}
+
+impl ObjectSubresource {
+    pub fn selector(self) -> &'static str {
+        match self {
+            Self::Acl => "acl",
+            Self::Attributes => "attributes",
+            Self::LegalHold => "legal-hold",
+            Self::Retention => "retention",
+            Self::Select => "select",
+            Self::Tagging => "tagging",
+            Self::UploadId => "uploadId",
+            Self::Uploads => "uploads",
+        }
+    }
+
+    pub fn is_dispatched_for(self, method: &Method) -> bool {
+        match self {
+            Self::Tagging | Self::Acl => {
+                matches!(*method, Method::PUT | Method::GET | Method::DELETE)
+            }
+            Self::Retention | Self::LegalHold => matches!(*method, Method::PUT | Method::GET),
+            Self::Attributes => *method == Method::GET,
+            Self::Select | Self::Uploads => *method == Method::POST,
+            Self::UploadId => matches!(
+                *method,
+                Method::PUT | Method::GET | Method::DELETE | Method::POST
+            ),
+        }
+    }
+
+    pub fn action(self, method: &Method) -> &'static str {
+        if !self.is_dispatched_for(method) {
+            return object_method_default_action(method);
+        }
+        match self {
+            Self::Retention | Self::LegalHold => "object_lock",
+            Self::Attributes | Self::Select => "read",
+            Self::Tagging | Self::Acl | Self::UploadId | Self::Uploads => {
+                if matches!(*method, Method::GET | Method::HEAD) {
+                    "read"
+                } else {
+                    "write"
+                }
+            }
+        }
+    }
+}
+
+pub fn parse_object_subresource(
+    query: Option<&str>,
+) -> Result<Option<ObjectSubresource>, Vec<&'static str>> {
+    let Some(q) = query else {
+        return Ok(None);
+    };
+    if q.is_empty() {
+        return Ok(None);
+    }
+
+    let mut found: Vec<ObjectSubresource> = Vec::new();
+    for part in q.split('&').filter(|p| !p.is_empty()) {
+        let key = part.split('=').next().unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        if let Some((_, subresource)) = OBJECT_SUBRESOURCE_SELECTORS
+            .iter()
+            .find(|(name, _)| *name == key)
+        {
+            if !found.contains(subresource) {
+                found.push(*subresource);
+            }
+        }
+    }
+
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(Some(found[0])),
+        _ => Err(found.into_iter().map(ObjectSubresource::selector).collect()),
+    }
+}
+
+fn guard_object_subresource(query: Option<&str>, method: &Method) -> Option<Response> {
+    match parse_object_subresource(query) {
+        Err(selectors) => Some(s3_error_response(ambiguous_subresource_error(&selectors))),
+        Ok(Some(subresource)) if !subresource.is_dispatched_for(method) => Some(
+            selector_method_not_allowed(subresource.selector(), method.as_str()),
+        ),
+        Ok(_) => None,
+    }
+}
+
+const SUPPORTED_BUCKET_LIST_PARAMS: &[&str] = &[
     "list-type",
     "marker",
     "prefix",
@@ -657,9 +902,12 @@ fn unsupported_bucket_subresource(query: Option<&str>) -> Option<String> {
         }
         let key_owned = key.to_string();
         let lower = key_owned.to_ascii_lowercase();
-        let known = SUPPORTED_BUCKET_SUBRESOURCES
+        let known = BUCKET_SUBRESOURCE_SELECTORS
             .iter()
-            .any(|known| known.eq_ignore_ascii_case(&key_owned))
+            .any(|(name, _)| *name == key)
+            || SUPPORTED_BUCKET_LIST_PARAMS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&key_owned))
             || lower.starts_with("x-amz-")
             || lower.starts_with("x-id");
         if !known {
@@ -702,6 +950,7 @@ pub async fn get_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 headers,
             )
             .await;
@@ -722,57 +971,11 @@ pub async fn get_bucket(
         return storage_err_response(myfsio_storage::error::StorageError::BucketNotFound(bucket));
     }
 
-    if query.quota.is_some() {
-        return config::get_quota(&state, &bucket).await;
-    }
-    if query.versioning.is_some() {
-        return config::get_versioning(&state, &bucket).await;
-    }
-    if query.tagging.is_some() {
-        return config::get_tagging(&state, &bucket).await;
-    }
-    if query.cors.is_some() {
-        return config::get_cors(&state, &bucket).await;
-    }
-    if query.location.is_some() {
-        return config::get_location(&state, &bucket).await;
-    }
-    if query.encryption.is_some() {
-        return config::get_encryption(&state, &bucket).await;
-    }
-    if query.lifecycle.is_some() {
-        return config::get_lifecycle(&state, &bucket).await;
-    }
-    if query.acl.is_some() {
-        return config::get_acl(&state, &bucket).await;
-    }
-    if query.policy.is_some() {
-        return config::get_policy(&state, &bucket).await;
-    }
-    if query.policy_status.is_some() {
-        return config::get_policy_status(&state, &bucket).await;
-    }
-    if query.replication.is_some() {
-        return config::get_replication(&state, &bucket).await;
-    }
-    if query.website.is_some() {
-        return config::get_website(&state, &bucket).await;
-    }
-    if query.object_lock.is_some() {
-        return config::get_object_lock(&state, &bucket).await;
-    }
-    if query.ownership_controls.is_some() {
-        return config::get_ownership_controls(&state, &bucket).await;
-    }
-    if query.public_access_block.is_some() {
-        return config::get_public_access_block(&state, &bucket).await;
-    }
-    if query.notification.is_some() {
-        return config::get_notification(&state, &bucket).await;
-    }
-    if query.logging.is_some() {
-        return config::get_logging(&state, &bucket).await;
-    }
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
     let max_keys: usize = match query.max_keys.as_deref() {
         None => 1000,
         Some(raw) => match parse_max_keys(raw) {
@@ -780,20 +983,47 @@ pub async fn get_bucket(
             Err(resp) => return resp,
         },
     };
-    if query.versions.is_some() {
-        return config::list_object_versions(
-            &state,
-            &bucket,
-            query.prefix.as_deref(),
-            query.delimiter.as_deref(),
-            query.key_marker.as_deref(),
-            query.version_id_marker.as_deref(),
-            max_keys,
-        )
-        .await;
-    }
-    if query.uploads.is_some() {
-        return list_multipart_uploads_handler(&state, &bucket, &query).await;
+
+    if let Some(subresource) = subresource {
+        return match subresource {
+            BucketSubresource::Quota => config::get_quota(&state, &bucket).await,
+            BucketSubresource::Versioning => config::get_versioning(&state, &bucket).await,
+            BucketSubresource::Tagging => config::get_tagging(&state, &bucket).await,
+            BucketSubresource::Cors => config::get_cors(&state, &bucket).await,
+            BucketSubresource::Location => config::get_location(&state, &bucket).await,
+            BucketSubresource::Encryption => config::get_encryption(&state, &bucket).await,
+            BucketSubresource::Lifecycle => config::get_lifecycle(&state, &bucket).await,
+            BucketSubresource::Acl => config::get_acl(&state, &bucket).await,
+            BucketSubresource::Policy => config::get_policy(&state, &bucket).await,
+            BucketSubresource::PolicyStatus => config::get_policy_status(&state, &bucket).await,
+            BucketSubresource::Replication => config::get_replication(&state, &bucket).await,
+            BucketSubresource::Website => config::get_website(&state, &bucket).await,
+            BucketSubresource::ObjectLock => config::get_object_lock(&state, &bucket).await,
+            BucketSubresource::OwnershipControls => {
+                config::get_ownership_controls(&state, &bucket).await
+            }
+            BucketSubresource::PublicAccessBlock => {
+                config::get_public_access_block(&state, &bucket).await
+            }
+            BucketSubresource::Notification => config::get_notification(&state, &bucket).await,
+            BucketSubresource::Logging => config::get_logging(&state, &bucket).await,
+            BucketSubresource::Versions => {
+                config::list_object_versions(
+                    &state,
+                    &bucket,
+                    query.prefix.as_deref(),
+                    query.delimiter.as_deref(),
+                    query.key_marker.as_deref(),
+                    query.version_id_marker.as_deref(),
+                    max_keys,
+                )
+                .await
+            }
+            BucketSubresource::Uploads => {
+                list_multipart_uploads_handler(&state, &bucket, &query).await
+            }
+            BucketSubresource::Delete => subresource_method_not_allowed(subresource, "GET"),
+        };
     }
 
     let prefix = query.prefix.clone().unwrap_or_default();
@@ -1189,7 +1419,7 @@ fn skip_past_common_prefix(cp: &str) -> String {
 pub async fn post_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    Query(query): Query<BucketQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
@@ -1203,6 +1433,7 @@ pub async fn post_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 peer,
                 headers,
                 body,
@@ -1211,21 +1442,30 @@ pub async fn post_bucket(
         }
     }
 
-    if query.delete.is_some() {
-        let bypass_governance = headers
-            .get("x-amz-bypass-governance-retention")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        return delete_objects_handler(
-            &state,
-            &bucket,
-            peer_marker,
-            principal_ref,
-            bypass_governance,
-            body,
-        )
-        .await;
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
+    match subresource {
+        Some(BucketSubresource::Delete) => {
+            let bypass_governance = headers
+                .get("x-amz-bypass-governance-retention")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            return delete_objects_handler(
+                &state,
+                &bucket,
+                peer_marker,
+                principal_ref,
+                bypass_governance,
+                body,
+            )
+            .await;
+        }
+        Some(other) => return subresource_method_not_allowed(other, "POST"),
+        None => {}
     }
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
@@ -1242,7 +1482,6 @@ pub async fn post_bucket(
 pub async fn delete_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    Query(query): Query<BucketQuery>,
     raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
@@ -1253,6 +1492,7 @@ pub async fn delete_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 peer,
                 headers,
             )
@@ -1270,57 +1510,40 @@ pub async fn delete_bucket(
         ));
     }
 
-    if query.quota.is_some() {
-        return config::delete_quota(&state, &bucket).await;
-    }
-    if query.tagging.is_some() {
-        return config::delete_tagging(&state, &bucket).await;
-    }
-    if query.cors.is_some() {
-        return config::delete_cors(&state, &bucket).await;
-    }
-    if query.encryption.is_some() {
-        return config::delete_encryption(&state, &bucket).await;
-    }
-    if query.lifecycle.is_some() {
-        return config::delete_lifecycle(&state, &bucket).await;
-    }
-    if query.website.is_some() {
-        return config::delete_website(&state, &bucket).await;
-    }
-    if query.policy.is_some() {
-        return config::delete_policy(&state, &bucket).await;
-    }
-    if query.replication.is_some() {
-        return config::delete_replication(&state, &bucket).await;
-    }
-    if query.object_lock.is_some() {
-        return config::delete_object_lock(&state, &bucket).await;
-    }
-    if query.ownership_controls.is_some() {
-        return config::delete_ownership_controls(&state, &bucket).await;
-    }
-    if query.public_access_block.is_some() {
-        return config::delete_public_access_block(&state, &bucket).await;
-    }
-    if query.notification.is_some() {
-        return config::delete_notification(&state, &bucket).await;
-    }
-    if query.logging.is_some() {
-        return config::delete_logging(&state, &bucket).await;
-    }
-    if query.acl.is_some()
-        || query.versioning.is_some()
-        || query.versions.is_some()
-        || query.uploads.is_some()
-        || query.delete.is_some()
-        || query.location.is_some()
-        || query.policy_status.is_some()
-    {
-        return s3_error_response(S3Error::new(
-            S3ErrorCode::MethodNotAllowed,
-            "DELETE is not supported on this bucket subresource",
-        ));
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
+    if let Some(subresource) = subresource {
+        return match subresource {
+            BucketSubresource::Quota => config::delete_quota(&state, &bucket).await,
+            BucketSubresource::Tagging => config::delete_tagging(&state, &bucket).await,
+            BucketSubresource::Cors => config::delete_cors(&state, &bucket).await,
+            BucketSubresource::Encryption => config::delete_encryption(&state, &bucket).await,
+            BucketSubresource::Lifecycle => config::delete_lifecycle(&state, &bucket).await,
+            BucketSubresource::Website => config::delete_website(&state, &bucket).await,
+            BucketSubresource::Policy => config::delete_policy(&state, &bucket).await,
+            BucketSubresource::Replication => config::delete_replication(&state, &bucket).await,
+            BucketSubresource::ObjectLock => config::delete_object_lock(&state, &bucket).await,
+            BucketSubresource::OwnershipControls => {
+                config::delete_ownership_controls(&state, &bucket).await
+            }
+            BucketSubresource::PublicAccessBlock => {
+                config::delete_public_access_block(&state, &bucket).await
+            }
+            BucketSubresource::Notification => config::delete_notification(&state, &bucket).await,
+            BucketSubresource::Logging => config::delete_logging(&state, &bucket).await,
+            BucketSubresource::Acl
+            | BucketSubresource::Versioning
+            | BucketSubresource::Versions
+            | BucketSubresource::Uploads
+            | BucketSubresource::Delete
+            | BucketSubresource::Location
+            | BucketSubresource::PolicyStatus => {
+                subresource_method_not_allowed(subresource, "DELETE")
+            }
+        };
     }
 
     match state.storage.delete_bucket(&bucket).await {
@@ -2115,12 +2338,16 @@ pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     streaming_sigv4: Option<axum::extract::Extension<crate::middleware::StreamingSigV4Context>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::PUT) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     let owner_id = principal
@@ -2477,8 +2704,12 @@ pub async fn get_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::GET) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     if query.tagging.is_some() {
         return config::get_object_tagging(&state, &bucket, &key, query.version_id.as_deref())
@@ -2765,10 +2996,14 @@ pub async fn post_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::POST) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.uploads.is_some() {
@@ -2799,9 +3034,13 @@ pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::DELETE) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
