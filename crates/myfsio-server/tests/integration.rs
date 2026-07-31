@@ -4515,6 +4515,258 @@ async fn test_max_keys_zero_respects_marker_and_v2_cursors() {
 }
 
 #[tokio::test]
+async fn test_encoding_type_rejects_unknown_values() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/encoding-bucket",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/encoding-bucket/a.txt",
+            Body::from("a"),
+        ))
+        .await
+        .unwrap();
+
+    for uri in [
+        "/encoding-bucket?list-type=2&encoding-type=bogus",
+        "/encoding-bucket?encoding-type=bogus",
+        "/encoding-bucket?versions&encoding-type=bogus",
+        "/encoding-bucket?uploads&encoding-type=bogus",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(Method::GET, uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{}", uri);
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains("<Code>InvalidArgument</Code>"),
+            "{}: {}",
+            uri,
+            body
+        );
+        assert!(
+            body.contains("Invalid Encoding Method specified in Request"),
+            "{}: {}",
+            uri,
+            body
+        );
+    }
+
+    for uri in [
+        "/encoding-bucket?list-type=2&encoding-type=URL",
+        "/encoding-bucket?versions&encoding-type=url",
+        "/encoding-bucket?uploads&encoding-type=url",
+        "/encoding-bucket?list-type=2",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(Method::GET, uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", uri);
+    }
+}
+
+#[tokio::test]
+async fn test_encoding_type_url_encodes_listing_keys() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/encoded-keys-bucket",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/encoded-keys-bucket/space%20file.txt",
+            Body::from("data"),
+        ))
+        .await
+        .unwrap();
+
+    let plain = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/encoded-keys-bucket?list-type=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    let plain_body = String::from_utf8(
+        plain
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        plain_body.contains("<Key>space file.txt</Key>"),
+        "{}",
+        plain_body
+    );
+
+    let encoded = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/encoded-keys-bucket?list-type=2&encoding-type=url",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(encoded.status(), StatusCode::OK);
+    let encoded_body = String::from_utf8(
+        encoded
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        encoded_body.contains("<Key>space%20file.txt</Key>"),
+        "{}",
+        encoded_body
+    );
+    assert!(
+        encoded_body.contains("<EncodingType>url</EncodingType>"),
+        "{}",
+        encoded_body
+    );
+
+    let encoded_v1 = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/encoded-keys-bucket?encoding-type=url",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(encoded_v1.status(), StatusCode::OK);
+    let encoded_v1_body = String::from_utf8(
+        encoded_v1
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        encoded_v1_body.contains("<Key>space%20file.txt</Key>"),
+        "{}",
+        encoded_v1_body
+    );
+}
+
+#[tokio::test]
+async fn test_max_keys_above_limit_is_clamped_to_1000() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/clamp-bucket", Body::empty()))
+        .await
+        .unwrap();
+    for key in ["a.txt", "b.txt"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/clamp-bucket/{}", key),
+                Body::from(key.to_string()),
+            ))
+            .await
+            .unwrap();
+    }
+
+    for uri in [
+        "/clamp-bucket?list-type=2&max-keys=999999999",
+        "/clamp-bucket?max-keys=999999999",
+        "/clamp-bucket?versions&max-keys=999999999",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(Method::GET, uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{}", uri);
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains("<MaxKeys>1000</MaxKeys>"),
+            "{}: {}",
+            uri,
+            body
+        );
+        assert!(
+            body.contains("<IsTruncated>false</IsTruncated>"),
+            "{}: {}",
+            uri,
+            body
+        );
+        assert!(body.contains("<Key>a.txt</Key>"), "{}: {}", uri, body);
+        assert!(body.contains("<Key>b.txt</Key>"), "{}: {}", uri, body);
+    }
+
+    let negative = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/clamp-bucket?list-type=2&max-keys=-1",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(negative.status(), StatusCode::BAD_REQUEST);
+    let negative_body = String::from_utf8(
+        negative
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(negative_body.contains("<Code>InvalidArgument</Code>"));
+}
+
+#[tokio::test]
 async fn test_put_object_tagging_and_standard_headers_are_persisted() {
     let (app, _tmp) = test_app();
 

@@ -96,6 +96,10 @@
   const previewAudio = document.getElementById('preview-audio');
   const previewText = document.getElementById('preview-text');
   const previewIframe = document.getElementById('preview-iframe');
+  const previewStage = previewPlaceholder ? previewPlaceholder.closest('.preview-stage') : document.querySelector('.preview-stage');
+  const setAudioStage = (active) => {
+    if (previewStage) previewStage.classList.toggle('preview-stage-audio', !!active);
+  };
   const downloadButton = document.getElementById('downloadButton');
   const presignButton = document.getElementById('presignButton');
   const presignModalEl = document.getElementById('presignModal');
@@ -2311,6 +2315,7 @@
   }
 
   const resetPreviewMedia = () => {
+    setAudioStage(false);
     [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
       if (!el) return;
       el.classList.add('d-none');
@@ -2336,6 +2341,7 @@
 
   const renderPreviewUnavailable = () => {
     if (!previewPlaceholder) return;
+    setAudioStage(false);
     previewIframe?.classList.add('d-none');
     previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="fw-semibold mb-1">Preview unavailable</div><div class="small text-muted">Download to view</div></div>';
     previewPlaceholder.classList.remove('d-none');
@@ -2462,6 +2468,7 @@
       const currentRow = row;
       previewAudio.onerror = () => {
         if (activeRow !== currentRow) return;
+        setAudioStage(false);
         previewAudio.classList.add('d-none');
         previewPlaceholder.classList.remove('d-none');
         previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
@@ -2470,6 +2477,7 @@
       previewAudio.src = previewUrl;
       previewAudio.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
+      setAudioStage(true);
     } else if (previewUrl && lower.match(/\.(pdf)$/)) {
       const currentRow = row;
       previewIframe.onerror = () => {
@@ -4391,12 +4399,12 @@
       actionText: 'Delete rule',
       onAction: async () => {
         lifecycleRules.splice(idx, 1);
-        await saveLifecycleRules();
+        await saveLifecycleRules('Lifecycle rule deleted');
       },
     });
   };
 
-  const saveLifecycleRules = async () => {
+  const saveLifecycleRules = async (successTitle) => {
     if (!lifecycleUrl) return;
     try {
       const resp = await fetch(lifecycleUrl, {
@@ -4406,7 +4414,7 @@
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to save');
-      showMessage({ title: 'Lifecycle rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      showMessage({ title: successTitle || 'Lifecycle rules saved', body: 'Configuration updated successfully.', variant: 'success' });
       renderLifecycleRules();
     } catch (err) {
       showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
@@ -4518,12 +4526,12 @@
       actionText: 'Delete rule',
       onAction: async () => {
         corsRules.splice(idx, 1);
-        await saveCorsRules();
+        await saveCorsRules('CORS rule deleted');
       },
     });
   };
 
-  const saveCorsRules = async () => {
+  const saveCorsRules = async (successTitle) => {
     if (!corsUrl) return;
     try {
       const resp = await fetch(corsUrl, {
@@ -4533,7 +4541,7 @@
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to save');
-      showMessage({ title: 'CORS rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      showMessage({ title: successTitle || 'CORS rules saved', body: 'Configuration updated successfully.', variant: 'success' });
       renderCorsRules();
     } catch (err) {
       showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
@@ -4833,7 +4841,9 @@
         const resp = await fetch(bucketsForCopyUrl);
         const data = await resp.json();
         const buckets = data.buckets || [];
-        copyMoveDestBucket.innerHTML = buckets.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('');
+        const currentBucket = objectsContainer?.dataset.bucket || '';
+        copyMoveDestBucket.innerHTML = buckets.map(b => `<option value="${escapeHtml(b)}"${b === currentBucket ? ' selected' : ''}>${escapeHtml(b)}</option>`).join('');
+        if (currentBucket && buckets.includes(currentBucket)) copyMoveDestBucket.value = currentBucket;
       } catch {
         copyMoveDestBucket.innerHTML = '<option value="">Failed to load buckets</option>';
       }

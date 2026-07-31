@@ -1540,7 +1540,24 @@ pub async fn cluster_dashboard(
 ) -> Response {
     let mut ctx = page_context(&state, &session, "ui.cluster_dashboard");
 
-    let sites = build_cluster_sites(&state).await;
+    let mut sites = build_cluster_sites(&state).await;
+    for site in sites.iter_mut() {
+        let Some(capacity) = site.get("capacity") else {
+            continue;
+        };
+        if !capacity.is_object() {
+            continue;
+        }
+        let total = capacity
+            .get("total_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let available = capacity
+            .get("available_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        site["capacity"]["used_bytes"] = json!(total.saturating_sub(available));
+    }
 
     let total_buckets: u64 = sites
         .iter()

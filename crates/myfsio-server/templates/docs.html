@@ -2838,11 +2838,11 @@ curl "{{ api_base }}/&lt;bucket&gt;?list-type=2&amp;start-after=photos/2025/" \
               <tr><td><code>list-type=2</code></td><td>Enables v2 API (required)</td></tr>
               <tr><td><code>prefix</code></td><td>Filter to keys starting with this prefix</td></tr>
               <tr><td><code>delimiter</code></td><td>Group keys by delimiter (typically <code>/</code> for folders)</td></tr>
-              <tr><td><code>max-keys</code></td><td>Maximum objects to return (default 1000)</td></tr>
+              <tr><td><code>max-keys</code></td><td>Maximum objects to return (default 1000; higher values are capped to 1000 and the cap is echoed in <code>MaxKeys</code>)</td></tr>
               <tr><td><code>continuation-token</code></td><td>Token from previous response for pagination</td></tr>
               <tr><td><code>start-after</code></td><td>Start listing after this key (first page only)</td></tr>
               <tr><td><code>fetch-owner</code></td><td>Include owner info in response</td></tr>
-              <tr><td><code>encoding-type</code></td><td>Set to <code>url</code> to URL-encode keys in response</td></tr>
+              <tr><td><code>encoding-type</code></td><td>Set to <code>url</code> to URL-encode keys in response; any other value is rejected with <code>InvalidArgument</code></td></tr>
             </tbody>
           </table>
         </div>

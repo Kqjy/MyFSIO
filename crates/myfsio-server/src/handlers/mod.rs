@@ -69,6 +69,16 @@ fn parse_max_keys(raw: &str) -> Result<usize, Response> {
     }
 }
 
+fn validate_encoding_type(query: &BucketQuery) -> Result<(), Response> {
+    match query.encoding_type.as_deref() {
+        Some(value) if !value.eq_ignore_ascii_case("url") => Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Invalid Encoding Method specified in Request",
+        ))),
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn s3_error_response(err: S3Error) -> Response {
     crate::s3_response::s3_error_response(err)
 }
@@ -979,7 +989,7 @@ pub async fn get_bucket(
     let max_keys: usize = match query.max_keys.as_deref() {
         None => 1000,
         Some(raw) => match parse_max_keys(raw) {
-            Ok(v) => v,
+            Ok(v) => v.min(1000),
             Err(resp) => return resp,
         },
     };
@@ -1008,6 +1018,9 @@ pub async fn get_bucket(
             BucketSubresource::Notification => config::get_notification(&state, &bucket).await,
             BucketSubresource::Logging => config::get_logging(&state, &bucket).await,
             BucketSubresource::Versions => {
+                if let Err(resp) = validate_encoding_type(&query) {
+                    return resp;
+                }
                 config::list_object_versions(
                     &state,
                     &bucket,
@@ -1020,10 +1033,17 @@ pub async fn get_bucket(
                 .await
             }
             BucketSubresource::Uploads => {
+                if let Err(resp) = validate_encoding_type(&query) {
+                    return resp;
+                }
                 list_multipart_uploads_handler(&state, &bucket, &query).await
             }
             BucketSubresource::Delete => subresource_method_not_allowed(subresource, "GET"),
         };
+    }
+
+    if let Err(resp) = validate_encoding_type(&query) {
+        return resp;
     }
 
     let prefix = query.prefix.clone().unwrap_or_default();

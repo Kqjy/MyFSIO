@@ -107,6 +107,7 @@ fn register_filters(tera: &mut Tera, display_timezone: &str) {
         },
     );
     tera.register_filter("filesizeformat", filesizeformat_filter);
+    tera.register_filter("intcomma", intcomma_filter);
     tera.register_filter("slice", slice_filter);
     tera.register_filter("json_island", json_island_filter);
 }
@@ -301,6 +302,26 @@ fn filesizeformat_filter(value: &Value, _args: &HashMap<String, Value>) -> tera:
     Ok(Value::String(human_size(bytes)))
 }
 
+fn intcomma_filter(value: &Value, _args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let number = match value {
+        Value::Number(n) => n.as_i64().unwrap_or(0),
+        Value::String(s) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    };
+    let digits = number.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if number < 0 {
+        out.push('-');
+    }
+    for (idx, ch) in digits.chars().enumerate() {
+        if idx > 0 && (digits.len() - idx) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    Ok(Value::String(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +437,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v, Value::String("2024-06-15 12:34:56 UTC".into()));
+    }
+
+    #[test]
+    fn intcomma_groups_thousands() {
+        let call = |v: Value| intcomma_filter(&v, &HashMap::new()).unwrap();
+        assert_eq!(call(Value::from(0)), Value::String("0".into()));
+        assert_eq!(call(Value::from(999)), Value::String("999".into()));
+        assert_eq!(call(Value::from(1000)), Value::String("1,000".into()));
+        assert_eq!(
+            call(Value::from(1234567)),
+            Value::String("1,234,567".into())
+        );
+        assert_eq!(
+            call(Value::String("42891".into())),
+            Value::String("42,891".into())
+        );
+        assert_eq!(call(Value::from(-4200)), Value::String("-4,200".into()));
     }
 
     #[test]

@@ -287,7 +287,19 @@ fn render_cluster_with_sites() {
     ctx.insert("cluster_total_count", &2usize);
     ctx.insert("audit_entries", &Vec::<Value>::new());
     ctx.insert("audit_enabled", &false);
-    render_or_panic("cluster.html", &ctx);
+    let rendered = render_to_string_or_panic("cluster.html", &ctx);
+    let core_idx = rendered
+        .find("js/ui-core.js")
+        .expect("base template must load ui-core.js");
+    let inline_idx = rendered
+        .find("window.MyFSIO.formatBytes")
+        .expect("cluster inline script must be present");
+    assert!(
+        core_idx < inline_idx,
+        "cluster inline script must run after ui-core.js"
+    );
+    assert!(rendered.contains("1.0 MiB"), "{}", rendered);
+    assert!(rendered.contains("95.4 MiB"), "{}", rendered);
 }
 
 #[test]
