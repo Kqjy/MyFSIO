@@ -296,7 +296,7 @@ async fn main() {
             tracing::trace!("failed to set TCP_NODELAY on api socket: {}", err);
         }
     });
-    let api_task = tokio::spawn(async move {
+    let mut api_task = tokio::spawn(async move {
         axum::serve(
             api_listener,
             api_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -307,7 +307,7 @@ async fn main() {
         .await
     });
 
-    let ui_task = if let (Some(listener), Some(app)) = (ui_listener, ui_app) {
+    let mut ui_task = if let (Some(listener), Some(app)) = (ui_listener, ui_app) {
         let ui_shutdown = shutdown.clone();
         let listener = axum::serve::ListenerExt::tap_io(listener, |stream| {
             if let Err(err) = stream.set_nodelay(true) {
@@ -325,16 +325,42 @@ async fn main() {
         None
     };
 
-    wait_for_shutdown_signal().await;
-    tracing::info!("Shutdown signal received");
+    let mut api_joined = false;
+    let mut ui_joined = false;
+    let mut server_died = false;
+    tokio::select! {
+        _ = wait_for_shutdown_signal() => {
+            tracing::info!("Shutdown signal received");
+        }
+        result = &mut api_task => {
+            api_joined = true;
+            server_died = true;
+            tracing::error!(
+                "API server task ended before shutdown: {}",
+                server_exit_reason(result)
+            );
+        }
+        result = wait_for_optional_server(&mut ui_task) => {
+            ui_joined = true;
+            server_died = true;
+            tracing::error!(
+                "UI server task ended before shutdown: {}",
+                server_exit_reason(result)
+            );
+        }
+    }
     shutdown.notify_waiters();
 
-    if let Err(err) = api_task.await.unwrap_or(Ok(())) {
-        tracing::error!("API server exited with error: {}", err);
+    if !api_joined {
+        if let Err(err) = api_task.await.unwrap_or(Ok(())) {
+            tracing::error!("API server exited with error: {}", err);
+        }
     }
-    if let Some(task) = ui_task {
-        if let Err(err) = task.await.unwrap_or(Ok(())) {
-            tracing::error!("UI server exited with error: {}", err);
+    if !ui_joined {
+        if let Some(task) = ui_task {
+            if let Err(err) = task.await.unwrap_or(Ok(())) {
+                tracing::error!("UI server exited with error: {}", err);
+            }
         }
     }
     if let Some(metrics) = &state.metrics {
@@ -353,6 +379,28 @@ async fn main() {
     state.storage.shutdown_listing_compactor();
     if let Err(err) = finish_clean_shutdown(&unclean_shutdown_marker) {
         tracing::error!("Failed to remove unclean-shutdown marker: {}", err);
+    }
+    if server_died {
+        std::process::exit(1);
+    }
+}
+
+type ServerJoinResult = Result<std::io::Result<()>, tokio::task::JoinError>;
+
+async fn wait_for_optional_server(
+    task: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+) -> ServerJoinResult {
+    match task.as_mut() {
+        Some(task) => task.await,
+        None => std::future::pending().await,
+    }
+}
+
+fn server_exit_reason(result: ServerJoinResult) -> String {
+    match result {
+        Ok(Ok(())) => "task returned without an error".to_string(),
+        Ok(Err(err)) => format!("listener error: {}", err),
+        Err(err) => format!("task failed to join: {}", err),
     }
 }
 
@@ -608,42 +656,13 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
-    let secret_key = std::env::var("ADMIN_SECRET_KEY")
+    let env_secret_key = std::env::var("ADMIN_SECRET_KEY")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
-
-    let user_id = format!("u-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
-    let created_at = chrono::Utc::now().to_rfc3339();
-
-    let body = serde_json::json!({
-        "version": 2,
-        "users": [{
-            "user_id": user_id,
-            "display_name": "Local Admin",
-            "enabled": true,
-            "access_keys": [{
-                "access_key": access_key,
-                "secret_key": secret_key,
-                "status": "active",
-                "created_at": created_at,
-            }],
-            "policies": [{
-                "bucket": "*",
-                "actions": ["*"],
-                "prefix": "*",
-            }]
-        }]
-    });
-
-    let json = match serde_json::to_string_pretty(&body) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to serialize IAM bootstrap config: {}", e);
-            return;
-        }
-    };
+        .filter(|s| !s.is_empty());
+    let secret_from_env = env_secret_key.is_some();
+    let secret_key =
+        env_secret_key.unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
 
     if let Some(parent) = iam_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -656,7 +675,9 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         }
     }
 
-    if let Err(e) = std::fs::write(iam_path, json) {
+    let iam =
+        myfsio_auth::iam::IamService::new_with_secret(iam_path.clone(), config.secret_key.clone());
+    if let Err(e) = iam.bootstrap_admin(&access_key, &secret_key) {
         tracing::error!(
             "Failed to write IAM bootstrap config {}: {}",
             iam_path.display(),
@@ -669,7 +690,11 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
     println!("MYFSIO - ADMIN CREDENTIALS INITIALIZED");
     println!("============================================================");
     println!("Access Key: {}", access_key);
-    println!("Secret Key: {}", secret_key);
+    if secret_from_env {
+        println!("Secret Key: (from ADMIN_SECRET_KEY)");
+    } else {
+        println!("Secret Key: {}", secret_key);
+    }
     println!("Saved to: {}", iam_path.display());
     println!("============================================================");
     tracing::info!(
@@ -904,6 +929,13 @@ fn reset_admin_credentials(config: &ServerConfig) {
                 err
             );
             std::process::exit(1);
+        }
+        if let Err(err) = myfsio_common::fs_util::restrict_secret_permissions(&backup) {
+            tracing::debug!(
+                "Failed to restrict permissions on IAM backup {}: {}",
+                backup.display(),
+                err
+            );
         }
         println!("Backed up existing IAM config to {}", backup.display());
         prune_iam_backups(&config.iam_config_path, 5);

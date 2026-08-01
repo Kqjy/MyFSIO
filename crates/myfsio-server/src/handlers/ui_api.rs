@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::Cursor;
 use std::path::{Component, Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sysinfo::{Disks, System};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::io::StreamReader;
 
 use crate::handlers::{self, ObjectQuery};
 use crate::middleware::session::SessionHandle;
@@ -52,6 +53,8 @@ const AWS_QUERY_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 
 const UI_OBJECT_BROWSER_MAX_KEYS: usize = 5000;
+const UI_JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
+const UI_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 fn url_templates_for(bucket: &str) -> Value {
     json!({
@@ -340,6 +343,7 @@ fn storage_status(err: &StorageError) -> StatusCode {
         StorageError::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
         StorageError::InvalidBucketName(_)
         | StorageError::InvalidObjectKey(_)
+        | StorageError::InvalidArgument(_)
         | StorageError::InvalidRange
         | StorageError::QuotaExceeded(_) => StatusCode::BAD_REQUEST,
         StorageError::BucketAlreadyExists(_) => StatusCode::CONFLICT,
@@ -1168,10 +1172,69 @@ async fn has_pdf_magic(state: &AppState, bucket: &str, key: &str) -> Result<bool
     Ok(read == magic.len() && magic == *b"%PDF-")
 }
 
-async fn parse_json_body<T: DeserializeOwned>(body: Body) -> Result<T, Response> {
-    let bytes = to_bytes(body, usize::MAX)
+fn s3_xml_error_detail(xml: &str) -> Option<String> {
+    let doc = Document::parse(xml).ok()?;
+    let root = doc.root_element();
+    let tag_text = |tag: &str| {
+        root.descendants()
+            .find(|node| node.has_tag_name(tag))
+            .and_then(|node| node.text())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    match (tag_text("Code"), tag_text("Message")) {
+        (Some(code), Some(message)) => Some(format!("{} ({})", message, code)),
+        (None, Some(message)) => Some(message),
+        (Some(code), None) => Some(code),
+        (None, None) => None,
+    }
+}
+
+async fn s3_xml_error_to_json(response: Response) -> Response {
+    let status = response.status();
+    let body = handlers::collect_body_capped(response.into_body(), UI_JSON_BODY_LIMIT)
         .await
-        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Failed to read request body"))?;
+        .unwrap_or_default();
+    let detail = s3_xml_error_detail(&String::from_utf8_lossy(&body))
+        .unwrap_or_else(|| format!("Upload failed with status {}", status.as_u16()));
+    json_error(status, detail)
+}
+
+fn multipart_json_error(err: multer::Error) -> Response {
+    match err {
+        multer::Error::FieldSizeExceeded { limit, .. } => json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "A form field other than the file may not exceed {}",
+                human_size(limit)
+            ),
+        ),
+        other => json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Malformed multipart body: {}", other),
+        ),
+    }
+}
+
+async fn read_ui_body(body: Body, limit: usize) -> Result<bytes::Bytes, Response> {
+    handlers::collect_body_capped(body, limit)
+        .await
+        .map_err(|err| match err {
+            handlers::BodyLimitError::Unreadable => {
+                json_error(StatusCode::BAD_REQUEST, "Failed to read request body")
+            }
+            handlers::BodyLimitError::TooLarge(limit) => json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Request body exceeds the {} limit",
+                    human_size(limit as u64)
+                ),
+            ),
+        })
+}
+
+async fn parse_json_body<T: DeserializeOwned>(body: Body) -> Result<T, Response> {
+    let bytes = read_ui_body(body, UI_JSON_BODY_LIMIT).await?;
     serde_json::from_slice::<T>(&bytes)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("Invalid JSON body: {}", e)))
 }
@@ -2600,7 +2663,12 @@ pub async fn upload_object(
     let stream = BodyStream::new(body)
         .map_ok(|frame| frame.into_data().unwrap_or_default())
         .map_err(std::io::Error::other);
-    let mut multipart = multer::Multipart::new(stream, boundary);
+    let constraints = multer::Constraints::new().size_limit(
+        multer::SizeLimit::new()
+            .per_field(handlers::POST_FORM_FIELD_LIMIT)
+            .for_field("object", u64::MAX),
+    );
+    let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
 
     let mut object_key: Option<String> = None;
     let mut metadata_raw: Option<String> = None;
@@ -2610,12 +2678,7 @@ pub async fn upload_object(
 
     while let Some(mut field) = match multipart.next_field().await {
         Ok(field) => field,
-        Err(e) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                format!("Malformed multipart body: {}", e),
-            )
-        }
+        Err(e) => return multipart_json_error(e),
     } {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
@@ -2774,7 +2837,7 @@ pub async fn upload_object(
     drop(temp_file);
 
     if !response.status().is_success() {
-        return response;
+        return s3_xml_error_to_json(response).await;
     }
 
     let mut message = format!("Uploaded '{}'", key);
@@ -2853,19 +2916,64 @@ pub async fn upload_multipart_part(
         );
     }
 
-    let bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) if !bytes.is_empty() => bytes,
-        Ok(_) => return json_error(StatusCode::BAD_REQUEST, "Empty request body"),
-        Err(_) => return json_error(StatusCode::BAD_REQUEST, "Failed to read request body"),
-    };
-    let reader: myfsio_storage::traits::AsyncReadStream = Box::pin(Cursor::new(bytes.to_vec()));
+    let mut frames = BodyStream::new(body)
+        .map_ok(|frame| frame.into_data().unwrap_or_default())
+        .map_err(std::io::Error::other);
+
+    let mut first = bytes::Bytes::new();
+    loop {
+        match frames.next().await {
+            Some(Ok(chunk)) if chunk.is_empty() => continue,
+            Some(Ok(chunk)) => {
+                first = chunk;
+                break;
+            }
+            Some(Err(_)) => {
+                return json_error(StatusCode::BAD_REQUEST, "Failed to read request body")
+            }
+            None => break,
+        }
+    }
+    if first.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "Empty request body");
+    }
+
+    let oversized = Arc::new(AtomicBool::new(false));
+    let overflow_flag = oversized.clone();
+    let chunks = futures::stream::once(std::future::ready(Ok(first)))
+        .chain(frames)
+        .scan(0u64, move |uploaded, chunk| {
+            let next = chunk.and_then(|data| {
+                *uploaded = uploaded.saturating_add(data.len() as u64);
+                if *uploaded > UI_MAX_PART_BYTES {
+                    overflow_flag.store(true, Ordering::Relaxed);
+                    Err(std::io::Error::other("part exceeds the maximum size"))
+                } else {
+                    Ok(data)
+                }
+            });
+            std::future::ready(Some(next))
+        });
+
+    let reader: myfsio_storage::traits::AsyncReadStream = Box::pin(StreamReader::new(chunks));
     match state
         .storage
         .upload_part(&bucket_name, &upload_id, part_number, reader)
         .await
     {
         Ok(etag) => json_ok(json!({ "etag": etag, "part_number": part_number })),
-        Err(err) => storage_json_error(err),
+        Err(err) => {
+            if oversized.load(Ordering::Relaxed) {
+                return json_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "Part exceeds the maximum size of {}",
+                        human_size(UI_MAX_PART_BYTES)
+                    ),
+                );
+            }
+            storage_json_error(err)
+        }
     }
 }
 
@@ -2887,7 +2995,6 @@ pub async fn complete_multipart_upload(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
     let upload_key =
@@ -2913,13 +3020,9 @@ pub async fn complete_multipart_upload(
         })
         .collect::<Vec<_>>();
 
-    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
-        &state,
-        &bucket_name,
-        &upload_key,
-        Some(&headers),
-    )
-    .await
+    if let Err(response) =
+        super::ensure_archived_null_lock_allows_overwrite(&state, &bucket_name, &upload_key, false)
+            .await
     {
         return response;
     }
@@ -2930,6 +3033,12 @@ pub async fn complete_multipart_upload(
         .await
     {
         Ok(meta) => {
+            crate::services::object_lock::apply_default_retention_to_stored(
+                &state,
+                &bucket_name,
+                &meta.key,
+            )
+            .await;
             super::trigger_replication(&state, &bucket_name, &meta.key, "write", None);
             json_ok(json!({
                 "key": meta.key,
@@ -3494,7 +3603,6 @@ async fn copy_object_json(
     session: &SessionHandle,
     bucket: &str,
     key: &str,
-    headers: &HeaderMap,
     body: Body,
 ) -> Response {
     let payload: CopyMovePayload = match parse_json_body(body).await {
@@ -3519,13 +3627,8 @@ async fn copy_object_json(
         return resp;
     }
 
-    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
-        state,
-        dest_bucket,
-        dest_key,
-        Some(headers),
-    )
-    .await
+    if let Err(response) =
+        super::ensure_archived_null_lock_allows_overwrite(state, dest_bucket, dest_key, false).await
     {
         return response;
     }
@@ -3554,7 +3657,6 @@ async fn move_object_json(
     session: &SessionHandle,
     bucket: &str,
     key: &str,
-    headers: &HeaderMap,
     body: Body,
 ) -> Response {
     let payload: CopyMovePayload = match parse_json_body(body).await {
@@ -3592,13 +3694,8 @@ async fn move_object_json(
         return resp;
     }
 
-    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
-        state,
-        dest_bucket,
-        dest_key,
-        Some(headers),
-    )
-    .await
+    if let Err(response) =
+        super::ensure_archived_null_lock_allows_overwrite(state, dest_bucket, dest_key, false).await
     {
         return response;
     }
@@ -3653,9 +3750,9 @@ async fn delete_object_json(
         return resp;
     }
 
-    let body_bytes = match to_bytes(body, usize::MAX).await {
+    let body_bytes = match read_ui_body(body, UI_JSON_BODY_LIMIT).await {
         Ok(bytes) => bytes,
-        Err(_) => return json_error(StatusCode::BAD_REQUEST, "Failed to read request body"),
+        Err(response) => return response,
     };
 
     let content_type = headers
@@ -3988,10 +4085,10 @@ pub async fn object_post_dispatch(
             update_object_tags(&state, &bucket_name, &key, body).await
         }
         ObjectPostAction::Copy => {
-            copy_object_json(&state, &session, &bucket_name, &key, &headers, body).await
+            copy_object_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Move => {
-            move_object_json(&state, &session, &bucket_name, &key, &headers, body).await
+            move_object_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Restore(version_id) => {
             if let Err(resp) =

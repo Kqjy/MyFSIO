@@ -3055,7 +3055,10 @@
       }
     };
 
+    let uploadResultsPending = false;
+
     const resetUploadUI = () => {
+      uploadResultsPending = false;
       if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
       if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
       if (bulkUploadSuccessAlert) bulkUploadSuccessAlert.classList.remove('d-none');
@@ -3277,7 +3280,7 @@
           } else {
             try {
               const data = JSON.parse(xhr.responseText);
-              reject(new Error(data.message || `Upload failed (${xhr.status})`));
+              reject(new Error(data.error || data.message || `Upload failed (${xhr.status})`));
             } catch {
               reject(new Error(`Upload failed (${xhr.status})`));
             }
@@ -3425,6 +3428,7 @@
     };
 
     const finishUploadSession = () => {
+      uploadResultsPending = true;
       if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
       if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
       hideFloatingProgress();
@@ -3471,12 +3475,19 @@
       const errorCount = uploadErrorFiles.length;
       const objectWord = (n) => (n === 1 ? 'object' : 'objects');
       const fileWord = (n) => (n === 1 ? 'file' : 'files');
+      const failureDetail = () => {
+        if (errorCount === 0) return '';
+        const shown = uploadErrorFiles.slice(0, 2).map(f => `${f.name}: ${f.error}`);
+        const remaining = errorCount - shown.length;
+        if (remaining > 0) shown.push(`and ${remaining} more`);
+        return ` ${shown.join('; ')}`;
+      };
       if (successCount > 0 && errorCount > 0) {
-        showMessage({ title: 'Upload complete', body: `${successCount} uploaded, ${errorCount} failed.`, variant: 'warning' });
+        showMessage({ title: 'Upload complete', body: `${successCount} uploaded, ${errorCount} failed.${failureDetail()}`, variant: 'warning' });
       } else if (successCount > 0) {
         showMessage({ title: 'Upload complete', body: `${successCount} ${objectWord(successCount)} uploaded successfully.`, variant: 'success' });
       } else if (errorCount > 0) {
-        showMessage({ title: 'Upload failed', body: `${errorCount} ${fileWord(errorCount)} failed to upload.`, variant: 'danger' });
+        showMessage({ title: 'Upload failed', body: `${errorCount} ${fileWord(errorCount)} failed to upload.${failureDetail()}`, variant: 'danger' });
       }
       if (successCount > 0) refreshBucketUsage();
     };
@@ -3499,6 +3510,7 @@
       if (!isUploading) {
         isUploading = true;
         uploadCancelled = false;
+        uploadResultsPending = false;
         uploadSuccessFiles = [];
         uploadErrorFiles = [];
         uploadStats = {
@@ -3583,7 +3595,7 @@
     });
 
     uploadModalEl?.addEventListener('hidden.bs.modal', () => {
-      if (!isUploading) {
+      if (!isUploading && !uploadResultsPending) {
         resetUploadUI();
         uploadFileInput.value = '';
         refreshUploadDropLabel();

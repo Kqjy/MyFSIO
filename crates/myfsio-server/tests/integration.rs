@@ -583,8 +583,12 @@ fn streaming_sigv4_request(
     builder.body(Body::from(encoded)).unwrap()
 }
 
-fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
-    let tmp = tempfile::TempDir::new().unwrap();
+const WEBSITE_INDEX_BODY: &str = "<!doctype html><h1>Home</h1>";
+
+fn website_server_config(
+    tmp: &tempfile::TempDir,
+    encryption_enabled: bool,
+) -> myfsio_server::config::ServerConfig {
     let iam_path = tmp.path().join(".myfsio.sys").join("config");
     std::fs::create_dir_all(&iam_path).unwrap();
 
@@ -612,7 +616,7 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
     )
     .unwrap();
 
-    let config = myfsio_server::config::ServerConfig {
+    myfsio_server::config::ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
         storage_root: tmp.path().to_path_buf(),
@@ -622,7 +626,7 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         presigned_url_min_expiry: 1,
         presigned_url_max_expiry: 604800,
         secret_key: None,
-        encryption_enabled: false,
+        encryption_enabled,
         kms_enabled: false,
         gc_enabled: false,
         integrity_enabled: false,
@@ -655,8 +659,61 @@ fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
         static_dir: std::path::PathBuf::from("static"),
         allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
-    };
+    }
+}
+
+fn test_website_state() -> (myfsio_server::state::AppState, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = website_server_config(&tmp, false);
     (myfsio_server::state::AppState::new(config), tmp)
+}
+
+async fn test_encrypted_website_app() -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = website_server_config(&tmp, true);
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
+
+    let bucket = "enc-site-bucket";
+    state.storage.create_bucket(bucket).await.unwrap();
+    let mut bucket_config = state.storage.get_bucket_config(bucket).await.unwrap();
+    bucket_config.website = Some(serde_json::json!({ "index_document": "index.html" }));
+    bucket_config.encryption = Some(serde_json::json!({ "sse_algorithm": "AES256" }));
+    state
+        .storage
+        .set_bucket_config(bucket, &bucket_config)
+        .await
+        .unwrap();
+    state
+        .website_domains
+        .as_ref()
+        .unwrap()
+        .set_mapping("site.example.com", bucket);
+
+    (myfsio_server::create_router(state), tmp)
+}
+
+fn website_object_put_request(
+    uri: &str,
+    body: &str,
+    sse_c_key: Option<&[u8; 32]>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header("host", "localhost")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .header("content-type", "text/html");
+    if let Some(key) = sse_c_key {
+        let (key_b64, md5_b64) = sse_c_triplet(key);
+        builder = builder
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", key_b64)
+            .header("x-amz-server-side-encryption-customer-key-MD5", md5_b64);
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
 }
 
 async fn put_website_object(
@@ -685,7 +742,7 @@ async fn test_website_app(error_document: Option<&str>) -> (axum::Router, tempfi
         &state,
         bucket,
         "index.html",
-        "<!doctype html><h1>Home</h1>",
+        WEBSITE_INDEX_BODY,
         "text/html",
     )
     .await;
@@ -729,6 +786,16 @@ fn website_request(method: Method, uri: &str) -> Request<Body> {
         .method(method)
         .uri(uri)
         .header("Host", "site.example.com")
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn website_range_request(uri: &str, range: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .header("Host", "site.example.com")
+        .header("Range", range)
         .body(Body::empty())
         .unwrap()
 }
@@ -6111,6 +6178,249 @@ async fn test_static_website_default_404_returns_html_body() {
 }
 
 #[tokio::test]
+async fn test_static_website_serves_plaintext_object() {
+    let (app, _tmp) = test_website_app(None).await;
+
+    let resp = app
+        .oneshot(website_request(Method::GET, "/"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let content_length = resp
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body, WEBSITE_INDEX_BODY);
+    assert_eq!(content_length, WEBSITE_INDEX_BODY.len());
+}
+
+#[tokio::test]
+async fn test_static_website_range_request_returns_partial_slice() {
+    let (app, _tmp) = test_website_app(None).await;
+    let total = WEBSITE_INDEX_BODY.len();
+
+    let resp = app
+        .clone()
+        .oneshot(website_range_request("/index.html", "bytes=5-9"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        resp.headers()
+            .get("content-range")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("bytes 5-9/{}", total)
+    );
+    assert_eq!(
+        resp.headers()
+            .get("content-length")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "5"
+    );
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body, WEBSITE_INDEX_BODY[5..=9]);
+
+    let unsatisfiable = app
+        .oneshot(website_range_request("/index.html", "bytes=500-600"))
+        .await
+        .unwrap();
+    assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        unsatisfiable
+            .headers()
+            .get("content-range")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("bytes */{}", total)
+    );
+}
+
+#[tokio::test]
+async fn test_static_website_serves_decrypted_sse_s3_object() {
+    let (app, _tmp) = test_encrypted_website_app().await;
+    let app = app.into_service();
+
+    let put = tower::ServiceExt::oneshot(
+        app.clone(),
+        website_object_put_request("/enc-site-bucket/index.html", WEBSITE_INDEX_BODY, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    assert_eq!(
+        put.headers().get("x-amz-server-side-encryption").unwrap(),
+        "AES256"
+    );
+
+    let resp = tower::ServiceExt::oneshot(app, website_request(Method::GET, "/index.html"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_length = resp
+        .headers()
+        .get("content-length")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<usize>()
+        .unwrap();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body, WEBSITE_INDEX_BODY);
+    assert_eq!(content_length, WEBSITE_INDEX_BODY.len());
+}
+
+#[tokio::test]
+async fn test_static_website_head_reports_plaintext_length_for_encrypted_object() {
+    let (app, _tmp) = test_encrypted_website_app().await;
+    let app = app.into_service();
+
+    let put = tower::ServiceExt::oneshot(
+        app.clone(),
+        website_object_put_request("/enc-site-bucket/index.html", WEBSITE_INDEX_BODY, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let resp = tower::ServiceExt::oneshot(app, website_request(Method::HEAD, "/index.html"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-length")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        WEBSITE_INDEX_BODY.len().to_string()
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn test_static_website_range_on_encrypted_object_serves_plaintext_slice() {
+    let (app, _tmp) = test_encrypted_website_app().await;
+    let app = app.into_service();
+
+    let put = tower::ServiceExt::oneshot(
+        app.clone(),
+        website_object_put_request("/enc-site-bucket/index.html", WEBSITE_INDEX_BODY, None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let resp = tower::ServiceExt::oneshot(app, website_range_request("/index.html", "bytes=5-9"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        resp.headers()
+            .get("content-range")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("bytes 5-9/{}", WEBSITE_INDEX_BODY.len())
+    );
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body, WEBSITE_INDEX_BODY[5..=9]);
+}
+
+#[tokio::test]
+async fn test_static_website_rejects_sse_c_object_with_forbidden() {
+    let (app, _tmp) = test_encrypted_website_app().await;
+    let app = app.into_service();
+    let customer_key = [0x41u8; 32];
+
+    let put = tower::ServiceExt::oneshot(
+        app.clone(),
+        website_object_put_request(
+            "/enc-site-bucket/index.html",
+            WEBSITE_INDEX_BODY,
+            Some(&customer_key),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    let resp = tower::ServiceExt::oneshot(app.clone(), website_request(Method::GET, "/index.html"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!body.contains(WEBSITE_INDEX_BODY));
+
+    let head = tower::ServiceExt::oneshot(app, website_request(Method::HEAD, "/index.html"))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn test_non_admin_authorization_enforced() {
     let iam_json = serde_json::json!({
         "version": 2,
@@ -9985,6 +10295,14 @@ fn sse_c_request(method: Method, uri: &str, key: Option<&[u8; 32]>, body: Body) 
     builder.body(body).unwrap()
 }
 
+fn sse_c_range_request(uri: &str, key: Option<&[u8; 32]>, range: &str) -> Request<Body> {
+    let mut request = sse_c_request(Method::GET, uri, key, Body::empty());
+    request
+        .headers_mut()
+        .insert("range", range.parse().unwrap());
+    request
+}
+
 fn extract_upload_id(body: &str) -> String {
     body.split("<UploadId>")
         .nth(1)
@@ -10003,6 +10321,91 @@ fn etag_from_response(resp: &axum::response::Response) -> String {
         .unwrap()
         .trim_matches('"')
         .to_string()
+}
+
+#[tokio::test]
+async fn test_sse_c_range_get_key_errors_match_whole_object_get() {
+    let (app, _tmp) = test_app_sse_c().await;
+    let app = app.into_service();
+
+    let key = [0x53u8; 32];
+    let wrong_key = [0x54u8; 32];
+    let bucket = "ssec-range";
+    let object = "secret.bin";
+    let uri = format!("/{bucket}/{object}");
+    let plaintext: Vec<u8> = (0..5000u32).map(|i| (i % 256) as u8).collect();
+
+    tower::ServiceExt::oneshot(
+        app.clone(),
+        signed_request(Method::PUT, &format!("/{bucket}"), Body::empty()),
+    )
+    .await
+    .unwrap();
+
+    let put = tower::ServiceExt::oneshot(
+        app.clone(),
+        sse_c_request(Method::PUT, &uri, Some(&key), Body::from(plaintext.clone())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+
+    for (customer_key, expected_status, expected_code, expected_message) in [
+        (
+            None,
+            StatusCode::BAD_REQUEST,
+            "<Code>InvalidRequest</Code>",
+            "Object was created with SSE-C; the SSE-C customer key headers are required",
+        ),
+        (
+            Some(&wrong_key),
+            StatusCode::FORBIDDEN,
+            "<Code>AccessDenied</Code>",
+            "The SSE-C customer key does not match the key used to encrypt this object",
+        ),
+    ] {
+        let whole = tower::ServiceExt::oneshot(
+            app.clone(),
+            sse_c_request(Method::GET, &uri, customer_key, Body::empty()),
+        )
+        .await
+        .unwrap();
+        let ranged = tower::ServiceExt::oneshot(
+            app.clone(),
+            sse_c_range_request(&uri, customer_key, "bytes=10-19"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ranged.status(), whole.status());
+        assert_eq!(ranged.status(), expected_status);
+        assert_eq!(
+            ranged.headers().get("x-amz-error-code"),
+            whole.headers().get("x-amz-error-code")
+        );
+        let whole_body = String::from_utf8(body_bytes(whole).await).unwrap();
+        let ranged_body = String::from_utf8(body_bytes(ranged).await).unwrap();
+        assert!(whole_body.contains(expected_code), "{whole_body}");
+        assert!(ranged_body.contains(expected_code), "{ranged_body}");
+        assert!(whole_body.contains(expected_message), "{whole_body}");
+        assert!(ranged_body.contains(expected_message), "{ranged_body}");
+    }
+
+    let ranged =
+        tower::ServiceExt::oneshot(app, sse_c_range_request(&uri, Some(&key), "bytes=10-19"))
+            .await
+            .unwrap();
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        ranged
+            .headers()
+            .get("content-range")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("bytes 10-19/{}", plaintext.len())
+    );
+    assert_eq!(body_bytes(ranged).await, plaintext[10..=19].to_vec());
 }
 
 #[tokio::test]
@@ -10769,4 +11172,1499 @@ async fn test_sse_c_multipart_failed_completion_preserves_versioned_object() {
         "a failed SSE-C completion must not hide the prior version behind a delete marker"
     );
     assert_eq!(body_bytes(resp).await, original);
+}
+
+const GOVERNANCE_DELETER_AK: &str = "AKIAGOVDELETERDELETE";
+const GOVERNANCE_DELETER_SK: &str = "gov-deleter-secret-gov-deleter-secret-00";
+const GOVERNANCE_BYPASSER_AK: &str = "AKIAGOVBYPASSBYPASS0";
+const GOVERNANCE_BYPASSER_SK: &str = "gov-bypasser-secret-gov-bypasser-secret0";
+
+fn governance_bypass_app() -> (axum::Router, tempfile::TempDir) {
+    test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{ "bucket": "*", "actions": ["*"], "prefix": "*" }]
+            },
+            {
+                "user_id": "u-deleter",
+                "display_name": "deleter",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": GOVERNANCE_DELETER_AK,
+                    "secret_key": GOVERNANCE_DELETER_SK,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "locked",
+                    "actions": ["read", "write", "delete", "list", "object_lock"],
+                    "prefix": "*"
+                }]
+            },
+            {
+                "user_id": "u-bypasser",
+                "display_name": "bypasser",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": GOVERNANCE_BYPASSER_AK,
+                    "secret_key": GOVERNANCE_BYPASSER_SK,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "locked",
+                    "actions": ["read", "write", "delete", "list", "object_lock", "bypass_governance"],
+                    "prefix": "*"
+                }]
+            }
+        ]
+    }))
+}
+
+fn bypass_request(
+    method: Method,
+    uri: &str,
+    access_key: &str,
+    secret_key: &str,
+    body: Body,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", access_key)
+        .header("x-secret-key", secret_key)
+        .header("x-amz-bypass-governance-retention", "true")
+        .body(body)
+        .unwrap()
+}
+
+async fn seed_locked_object(app: &axum::Router, key: &str, mode: &str) {
+    let resp = app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/locked", Body::empty()))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success() || resp.status() == StatusCode::CONFLICT);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/locked/{}", key))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-object-lock-mode", mode)
+                .header(
+                    "x-amz-object-lock-retain-until-date",
+                    "2099-01-01T00:00:00Z",
+                )
+                .body(Body::from("payload"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+async fn locked_object_exists(app: &axum::Router, key: &str) -> bool {
+    app.clone()
+        .oneshot(signed_request(
+            Method::HEAD,
+            &format!("/locked/{}", key),
+            Body::empty(),
+        ))
+        .await
+        .unwrap()
+        .status()
+        == StatusCode::OK
+}
+
+#[tokio::test]
+async fn test_governance_bypass_header_requires_bypass_permission() {
+    let (app, _tmp) = governance_bypass_app();
+    seed_locked_object(&app, "obj.txt", "GOVERNANCE").await;
+
+    let denied = app
+        .clone()
+        .oneshot(bypass_request(
+            Method::DELETE,
+            "/locked/obj.txt",
+            GOVERNANCE_DELETER_AK,
+            GOVERNANCE_DELETER_SK,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        denied.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without bypass_governance must not strip GOVERNANCE retention"
+    );
+    assert!(
+        locked_object_exists(&app, "obj.txt").await,
+        "the governance-locked object must survive an unauthorized bypass attempt"
+    );
+
+    let allowed = app
+        .clone()
+        .oneshot(bypass_request(
+            Method::DELETE,
+            "/locked/obj.txt",
+            GOVERNANCE_BYPASSER_AK,
+            GOVERNANCE_BYPASSER_SK,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed.status(),
+        StatusCode::NO_CONTENT,
+        "a principal granted bypass_governance must be able to delete"
+    );
+    assert!(!locked_object_exists(&app, "obj.txt").await);
+}
+
+#[tokio::test]
+async fn test_governance_bypass_allowed_for_admin_principal() {
+    let (app, _tmp) = governance_bypass_app();
+    seed_locked_object(&app, "admin.txt", "GOVERNANCE").await;
+
+    let allowed = app
+        .clone()
+        .oneshot(bypass_request(
+            Method::DELETE,
+            "/locked/admin.txt",
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_compliance_retention_ignores_authorized_bypass() {
+    let (app, _tmp) = governance_bypass_app();
+    seed_locked_object(&app, "compliance.txt", "COMPLIANCE").await;
+
+    for (access_key, secret_key) in [
+        (GOVERNANCE_BYPASSER_AK, GOVERNANCE_BYPASSER_SK),
+        (TEST_ACCESS_KEY, TEST_SECRET_KEY),
+    ] {
+        let denied = app
+            .clone()
+            .oneshot(bypass_request(
+                Method::DELETE,
+                "/locked/compliance.txt",
+                access_key,
+                secret_key,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            StatusCode::FORBIDDEN,
+            "COMPLIANCE retention must hold even for a principal allowed to bypass governance"
+        );
+    }
+    assert!(locked_object_exists(&app, "compliance.txt").await);
+}
+
+#[tokio::test]
+async fn test_bulk_delete_governance_bypass_requires_permission() {
+    let (app, _tmp) = governance_bypass_app();
+    seed_locked_object(&app, "bulk.txt", "GOVERNANCE").await;
+
+    let delete_xml = "<Delete><Object><Key>bulk.txt</Key></Object></Delete>";
+    let resp = app
+        .clone()
+        .oneshot(bypass_request(
+            Method::POST,
+            "/locked?delete",
+            GOVERNANCE_DELETER_AK,
+            GOVERNANCE_DELETER_SK,
+            Body::from(delete_xml),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains("<Error>") && body.contains("AccessDenied"),
+        "bulk delete without bypass_governance must report AccessDenied, got: {}",
+        body
+    );
+    assert!(locked_object_exists(&app, "bulk.txt").await);
+
+    let resp = app
+        .clone()
+        .oneshot(bypass_request(
+            Method::POST,
+            "/locked?delete",
+            GOVERNANCE_BYPASSER_AK,
+            GOVERNANCE_BYPASSER_SK,
+            Body::from(delete_xml),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains("<Deleted>") && !body.contains("<Error>"),
+        "bulk delete with bypass_governance must succeed, got: {}",
+        body
+    );
+    assert!(!locked_object_exists(&app, "bulk.txt").await);
+}
+
+#[tokio::test]
+async fn test_put_object_retention_bypass_requires_permission() {
+    let (app, _tmp) = governance_bypass_app();
+    seed_locked_object(&app, "retention.txt", "GOVERNANCE").await;
+
+    let shorten_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          <Mode>GOVERNANCE</Mode>
+          <RetainUntilDate>2030-01-01T00:00:00Z</RetainUntilDate>
+        </Retention>"#;
+
+    let denied = app
+        .clone()
+        .oneshot(bypass_request(
+            Method::PUT,
+            "/locked/retention.txt?retention",
+            GOVERNANCE_DELETER_AK,
+            GOVERNANCE_DELETER_SK,
+            Body::from(shorten_xml),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        denied.status(),
+        StatusCode::FORBIDDEN,
+        "shortening GOVERNANCE retention requires bypass_governance"
+    );
+
+    let allowed = app
+        .clone()
+        .oneshot(bypass_request(
+            Method::PUT,
+            "/locked/retention.txt?retention",
+            GOVERNANCE_BYPASSER_AK,
+            GOVERNANCE_BYPASSER_SK,
+            Body::from(shorten_xml),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+}
+
+const DEFAULT_LOCK_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+    <ObjectLockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+    <ObjectLockEnabled>Enabled</ObjectLockEnabled>\
+    <Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days></DefaultRetention></Rule>\
+    </ObjectLockConfiguration>";
+
+async fn put_object_lock_config(app: &axum::Router, bucket: &str, xml: &str) -> StatusCode {
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            &format!("/{}?object-lock", bucket),
+            Body::from(xml.to_string()),
+        ))
+        .await
+        .unwrap()
+        .status()
+}
+
+async fn object_retention_body(
+    app: &axum::Router,
+    bucket: &str,
+    key: &str,
+) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            &format!("/{}/{}?retention", bucket, key),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    (status, body)
+}
+
+#[tokio::test]
+async fn test_put_object_lock_requires_versioning_and_valid_xml() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/lock-cfg", Body::empty()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        put_object_lock_config(&app, "lock-cfg", DEFAULT_LOCK_XML).await,
+        StatusCode::CONFLICT,
+        "object lock must be rejected while versioning is not Enabled"
+    );
+
+    enable_versioning(&app, "lock-cfg").await;
+
+    for xml in [
+        "<ObjectLockConfiguration>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ObjectLockConfiguration>\
+         <ObjectLockEnabled>Enabled</ObjectLockEnabled>\
+         <Rule><DefaultRetention><Mode>ARCHIVE</Mode><Days>1</Days></DefaultRetention></Rule>\
+         </ObjectLockConfiguration>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ObjectLockConfiguration>\
+         <ObjectLockEnabled>Enabled</ObjectLockEnabled>\
+         <Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days><Years>1</Years></DefaultRetention></Rule>\
+         </ObjectLockConfiguration>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ObjectLockConfiguration>\
+         <ObjectLockEnabled>Enabled</ObjectLockEnabled>\
+         <Rule><DefaultRetention><Mode>GOVERNANCE</Mode></DefaultRetention></Rule>\
+         </ObjectLockConfiguration>",
+    ] {
+        assert_eq!(
+            put_object_lock_config(&app, "lock-cfg", xml).await,
+            StatusCode::BAD_REQUEST,
+            "expected rejection for {}",
+            xml
+        );
+    }
+
+    assert_eq!(
+        put_object_lock_config(&app, "lock-cfg", DEFAULT_LOCK_XML).await,
+        StatusCode::OK
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/lock-cfg?object-lock",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body, DEFAULT_LOCK_XML);
+}
+
+#[tokio::test]
+async fn test_bucket_default_retention_applies_to_plain_put() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/lock-default", Body::empty()))
+        .await
+        .unwrap();
+    enable_versioning(&app, "lock-default").await;
+    assert_eq!(
+        put_object_lock_config(&app, "lock-default", DEFAULT_LOCK_XML).await,
+        StatusCode::OK
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/lock-default/plain.txt",
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let version_id = resp
+        .headers()
+        .get("x-amz-version-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let (status, body) = object_retention_body(&app, "lock-default", "plain.txt").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<Mode>GOVERNANCE</Mode>"),
+        "expected the bucket default retention, got {}",
+        body
+    );
+    let retain_until = body
+        .split("<RetainUntilDate>")
+        .nth(1)
+        .unwrap()
+        .split("</RetainUntilDate>")
+        .next()
+        .unwrap()
+        .to_string();
+    let retain_until = chrono::DateTime::parse_from_rfc3339(&retain_until)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let delta = retain_until - chrono::Utc::now();
+    assert!(
+        delta > chrono::Duration::hours(23) && delta < chrono::Duration::hours(25),
+        "default retention should land about a day out, got {}",
+        delta
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::DELETE,
+            &format!("/lock-default/plain.txt?versionId={}", version_id),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the default GOVERNANCE retention must block a version delete without bypass"
+    );
+}
+
+#[tokio::test]
+async fn test_explicit_lock_headers_override_bucket_default() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/lock-override", Body::empty()))
+        .await
+        .unwrap();
+    enable_versioning(&app, "lock-override").await;
+    assert_eq!(
+        put_object_lock_config(&app, "lock-override", DEFAULT_LOCK_XML).await,
+        StatusCode::OK
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/lock-override/explicit.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-object-lock-mode", "COMPLIANCE")
+                .header(
+                    "x-amz-object-lock-retain-until-date",
+                    "2099-01-01T00:00:00Z",
+                )
+                .body(Body::from("payload"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, body) = object_retention_body(&app, "lock-override", "explicit.txt").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<Mode>COMPLIANCE</Mode>") && body.contains("2099-01-01"),
+        "explicit lock headers must win over the bucket default, got {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_multipart_complete_inherits_bucket_default_retention() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/lock-mpu", Body::empty()))
+        .await
+        .unwrap();
+    enable_versioning(&app, "lock-mpu").await;
+    assert_eq!(
+        put_object_lock_config(&app, "lock-mpu", DEFAULT_LOCK_XML).await,
+        StatusCode::OK
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/lock-mpu/big.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/lock-mpu/big.bin?uploadId={}&partNumber=1",
+                    upload_id
+                ))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("part-one-bytes"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = resp
+        .headers()
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+
+    let complete_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        etag
+    );
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            &format!("/lock-mpu/big.bin?uploadId={}", upload_id),
+            Body::from(complete_xml),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, body) = object_retention_body(&app, "lock-mpu", "big.bin").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<Mode>GOVERNANCE</Mode>"),
+        "multipart complete must inherit the bucket default retention, got {}",
+        body
+    );
+}
+
+fn retention_xml(mode: &str, date: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <Retention xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Mode>{}</Mode><RetainUntilDate>{}</RetainUntilDate></Retention>",
+        mode, date
+    )
+}
+
+#[tokio::test]
+async fn test_put_object_retention_never_shortens_compliance() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-race",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-race/obj.txt",
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-race/obj.txt?retention",
+            Body::from(retention_xml("COMPLIANCE", "2090-01-01T00:00:00Z")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    for (mode, date) in [
+        ("COMPLIANCE", "2080-01-01T00:00:00Z"),
+        ("GOVERNANCE", "2095-01-01T00:00:00Z"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/retention-race/obj.txt?retention")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header("x-amz-bypass-governance-retention", "true")
+                    .body(Body::from(retention_xml(mode, date)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "COMPLIANCE retention must not be shortened or downgraded to {} {}",
+            mode,
+            date
+        );
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-race/obj.txt?retention",
+            Body::from(retention_xml("COMPLIANCE", "2095-01-01T00:00:00Z")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "extending COMPLIANCE retention must be allowed"
+    );
+
+    let (_, body) = object_retention_body(&app, "retention-race", "obj.txt").await;
+    assert!(
+        body.contains("2095-01-01"),
+        "unexpected retention: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_put_object_version_retention_checks_current_metadata() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-vers",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    enable_versioning(&app, "retention-vers").await;
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-vers/obj.txt",
+            Body::from("v1"),
+        ))
+        .await
+        .unwrap();
+    let version_id = resp
+        .headers()
+        .get("x-amz-version-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-vers/obj.txt",
+            Body::from("v2"),
+        ))
+        .await
+        .unwrap();
+
+    let uri = format!("/retention-vers/obj.txt?retention&versionId={}", version_id);
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            &uri,
+            Body::from(retention_xml("COMPLIANCE", "2090-01-01T00:00:00Z")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(&uri)
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-bypass-governance-retention", "true")
+                .body(Body::from(retention_xml(
+                    "GOVERNANCE",
+                    "2080-01-01T00:00:00Z",
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "an archived version under COMPLIANCE must not be downgraded"
+    );
+}
+
+#[tokio::test]
+async fn test_put_object_legal_hold_preserves_retention() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/lh-preserve", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/lh-preserve/obj.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-object-lock-mode", "COMPLIANCE")
+                .header(
+                    "x-amz-object-lock-retain-until-date",
+                    "2099-01-01T00:00:00Z",
+                )
+                .body(Body::from("payload"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/lh-preserve/obj.txt?legal-hold",
+            Body::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                 <LegalHold xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                 <Status>ON</Status></LegalHold>",
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, body) = object_retention_body(&app, "lh-preserve", "obj.txt").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<Mode>COMPLIANCE</Mode>") && body.contains("2099-01-01"),
+        "setting a legal hold must not clobber retention, got {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_put_object_retention_extends_governance_without_bypass() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/retention-gov", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-gov/obj.txt",
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-gov/obj.txt?retention",
+            Body::from(retention_xml("GOVERNANCE", "2080-01-01T00:00:00Z")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-gov/obj.txt?retention",
+            Body::from(retention_xml("GOVERNANCE", "2090-01-01T00:00:00Z")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "extending GOVERNANCE retention must not require bypass"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/retention-gov/obj.txt?retention",
+            Body::from(retention_xml("GOVERNANCE", "2085-01-01T00:00:00Z")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "shortening GOVERNANCE retention must still require bypass"
+    );
+
+    let (_, body) = object_retention_body(&app, "retention-gov", "obj.txt").await;
+    assert!(
+        body.contains("2090-01-01"),
+        "unexpected retention: {}",
+        body
+    );
+}
+
+fn ui_body_request(
+    method: Method,
+    uri: &str,
+    session_id: &str,
+    csrf: &str,
+    content_type: &str,
+    body: Body,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(
+            "cookie",
+            format!(
+                "{}={}",
+                myfsio_server::session::SESSION_COOKIE_NAME,
+                session_id
+            ),
+        )
+        .header(myfsio_server::session::CSRF_HEADER_NAME, csrf)
+        .header("content-type", content_type)
+        .body(body)
+        .unwrap()
+}
+
+async fn body_string(resp: axum::response::Response) -> String {
+    String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_oversized_bucket_policy_body_is_rejected() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/bigbody", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/bigbody?policy",
+            Body::from("x".repeat(2 * 1024 * 1024)),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("<Code>MaxMessageLengthExceeded</Code>"),
+        "expected MaxMessageLengthExceeded XML, got: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_oversized_delete_objects_body_is_rejected() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/bigdelete", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/bigdelete?delete",
+            Body::from("x".repeat(9 * 1024 * 1024)),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("<Code>MaxMessageLengthExceeded</Code>"),
+        "expected MaxMessageLengthExceeded XML, got: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_ui_oversized_json_body_returns_payload_too_large() {
+    let (s3_app, state, _tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/ui-big-json", Body::empty()))
+        .await
+        .unwrap();
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let payload = format!(r#"{{"object_key":"{}"}}"#, "a".repeat(3 * 1024 * 1024));
+
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(ui_body_request(
+            Method::POST,
+            "/ui/buckets/ui-big-json/multipart/initiate",
+            &session_id,
+            &csrf,
+            "application/json",
+            Body::from(payload),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = body_string(resp).await;
+    let parsed: Value = serde_json::from_str(&body).expect("json_error body expected");
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("exceeds the"),
+        "expected a json_error body naming the limit, got: {}",
+        body
+    );
+}
+
+async fn ui_initiate_upload(
+    state: &myfsio_server::state::AppState,
+    bucket: &str,
+    session_id: &str,
+    csrf: &str,
+    object_key: &str,
+) -> String {
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(ui_body_request(
+            Method::POST,
+            &format!("/ui/buckets/{}/multipart/initiate", bucket),
+            session_id,
+            csrf,
+            "application/json",
+            Body::from(format!(r#"{{"object_key":"{}"}}"#, object_key)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    serde_json::from_str::<Value>(&body).unwrap()["upload_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn test_ui_multipart_part_upload_streams_body() {
+    let (s3_app, state, _tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/ui-stream-mp", Body::empty()))
+        .await
+        .unwrap();
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let upload_id =
+        ui_initiate_upload(&state, "ui-stream-mp", &session_id, &csrf, "streamed.bin").await;
+
+    let part_body = vec![7u8; 128 * 1024];
+    let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = part_body
+        .chunks(8192)
+        .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+        .collect();
+
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(ui_body_request(
+            Method::PUT,
+            &format!(
+                "/ui/buckets/ui-stream-mp/multipart/{}/part?partNumber=1",
+                upload_id
+            ),
+            &session_id,
+            &csrf,
+            "application/octet-stream",
+            Body::from_stream(futures::stream::iter(chunks)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let etag = serde_json::from_str::<Value>(&body).unwrap()["etag"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(ui_body_request(
+            Method::POST,
+            &format!("/ui/buckets/ui-stream-mp/multipart/{}/complete", upload_id),
+            &session_id,
+            &csrf,
+            "application/json",
+            Body::from(format!(
+                r#"{{"parts":[{{"part_number":1,"etag":"{}"}}]}}"#,
+                etag
+            )),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = s3_app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/ui-stream-mp/streamed.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(bytes.len(), part_body.len());
+    assert!(bytes.iter().all(|byte| *byte == 7u8));
+}
+
+#[tokio::test]
+async fn test_ui_multipart_part_upload_rejects_empty_body() {
+    let (s3_app, state, _tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/ui-empty-mp", Body::empty()))
+        .await
+        .unwrap();
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let upload_id =
+        ui_initiate_upload(&state, "ui-empty-mp", &session_id, &csrf, "empty.bin").await;
+
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(ui_body_request(
+            Method::PUT,
+            &format!(
+                "/ui/buckets/ui-empty-mp/multipart/{}/part?partNumber=1",
+                upload_id
+            ),
+            &session_id,
+            &csrf,
+            "application/octet-stream",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_anonymous_ui_request_does_not_persist_a_session() {
+    let (_s3_app, state, _tmp) = test_app_and_state();
+    assert!(state.sessions.is_empty());
+
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ui/buckets")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(resp.status().is_redirection());
+    assert!(
+        state.sessions.is_empty(),
+        "an anonymous request must not insert a session into the store"
+    );
+    assert!(
+        resp.headers().get(axum::http::header::SET_COOKIE).is_none(),
+        "no session cookie should be issued for an ephemeral session"
+    );
+}
+
+#[tokio::test]
+async fn test_login_page_persists_its_session_and_sets_a_cookie() {
+    let (_s3_app, state, _tmp) = test_app_and_state();
+
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get(axum::http::header::SET_COOKIE).is_some(),
+        "GET /login stores a CSRF token, so its session must be persisted with a cookie"
+    );
+    assert_eq!(
+        state.sessions.len(),
+        1,
+        "exactly the login session should be stored"
+    );
+}
+
+async fn burst_until_login_rate_limited(
+    state: &myfsio_server::state::AppState,
+    accept: Option<&str>,
+) -> axum::response::Response {
+    let ui_app = myfsio_server::create_ui_router(state.clone());
+    for _ in 0..40 {
+        let mut builder = Request::builder().method(Method::GET).uri("/login");
+        if let Some(value) = accept {
+            builder = builder.header("accept", value);
+        }
+        let resp = ui_app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            return resp;
+        }
+    }
+    panic!("GET /login must start returning 429 within the burst");
+}
+
+#[tokio::test]
+async fn test_login_is_rate_limited_per_ip() {
+    let (_s3_app, state, _tmp) = test_app_and_state();
+    let resp = burst_until_login_rate_limited(&state, None).await;
+
+    assert!(
+        resp.headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .is_some(),
+        "a rate-limited login response must carry Retry-After"
+    );
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/html"),
+        "a browser request must get the styled HTML page, got: {}",
+        content_type
+    );
+
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("Too many login attempts"),
+        "expected the rate-limit page copy, got: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_login_rate_limit_answers_json_callers_with_json() {
+    let (_s3_app, state, _tmp) = test_app_and_state();
+    let resp = burst_until_login_rate_limited(&state, Some("application/json")).await;
+
+    let body = body_string(resp).await;
+    let parsed: Value = serde_json::from_str(&body).expect("json body expected");
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Too many login attempts"));
+}
+
+fn post_form_auth_fields(key: &str) -> Vec<(String, String)> {
+    use base64::engine::general_purpose::STANDARD as B64Std;
+
+    let policy_b64 = B64Std.encode(r#"{"expiration":"2099-01-01T00:00:00Z"}"#.as_bytes());
+    let date_stamp = "20260426";
+    let region = "us-east-1";
+    let service = "s3";
+    let credential = format!(
+        "{}/{}/{}/{}/aws4_request",
+        TEST_ACCESS_KEY, date_stamp, region, service
+    );
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(TEST_SECRET_KEY, date_stamp, region, service);
+    let signature = myfsio_auth::sigv4::compute_post_policy_signature(&signing_key, &policy_b64);
+
+    vec![
+        ("key".to_string(), key.to_string()),
+        ("policy".to_string(), policy_b64),
+        ("x-amz-credential".to_string(), credential),
+        (
+            "x-amz-algorithm".to_string(),
+            "AWS4-HMAC-SHA256".to_string(),
+        ),
+        ("x-amz-date".to_string(), format!("{}T000000Z", date_stamp)),
+        ("x-amz-signature".to_string(), signature),
+    ]
+}
+
+fn multipart_form_body(
+    boundary: &str,
+    fields: &[(String, String)],
+    file_field: Option<(&str, &[u8])>,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(
+            format!(
+                "--{}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n",
+                boundary, name
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    if let Some((name, data)) = file_field {
+        body.extend_from_slice(
+            format!(
+                "--{}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"f\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+                boundary, name
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+    body
+}
+
+#[tokio::test]
+async fn test_post_form_rejects_oversized_non_file_field() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/form-field-cap",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let boundary = "----FieldCapBoundary";
+    let mut fields = post_form_auth_fields("capped.bin");
+    fields.push(("junk".to_string(), "x".repeat(2 * 1024 * 1024)));
+    let body = multipart_form_body(boundary, &fields, Some(("file", b"payload")));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/form-field-cap")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", boundary),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("<Code>MaxMessageLengthExceeded</Code>"),
+        "expected MaxMessageLengthExceeded XML, got: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn test_post_form_accepts_a_large_file_field() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/form-file-ok", Body::empty()))
+        .await
+        .unwrap();
+
+    let boundary = "----FileOkBoundary";
+    let fields = post_form_auth_fields("large.bin");
+    let payload = vec![3u8; 3 * 1024 * 1024];
+    let body = multipart_form_body(boundary, &fields, Some(("file", &payload)));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/form-file-ok")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={}", boundary),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        resp.status().is_success(),
+        "a file field well over the per-field text cap must still upload, got {}",
+        resp.status()
+    );
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/form-file-ok/large.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(bytes.len(), payload.len());
+}
+
+#[tokio::test]
+async fn test_ui_upload_translates_s3_error_to_json() {
+    let (s3_app, state, _tmp) = test_app_and_state();
+
+    s3_app
+        .clone()
+        .oneshot(signed_request(Method::PUT, "/ui-quota", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = s3_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/ui-quota?quota")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"max_size_bytes": 8}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (session_id, csrf) = authenticated_ui_session(&state);
+    let boundary = "----UiQuotaBoundary";
+    let fields = vec![("object_key".to_string(), "too-big.bin".to_string())];
+    let body = multipart_form_body(boundary, &fields, Some(("object", &[9u8; 4096])));
+
+    let resp = myfsio_server::create_ui_router(state.clone())
+        .oneshot(ui_body_request(
+            Method::POST,
+            "/ui/buckets/ui-quota/upload",
+            &session_id,
+            &csrf,
+            &format!("multipart/form-data; boundary={}", boundary),
+            Body::from(body),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        !resp.status().is_success(),
+        "the quota must reject this upload"
+    );
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("application/json"),
+        "an AJAX upload failure must not answer with S3 XML, got: {}",
+        content_type
+    );
+
+    let body = body_string(resp).await;
+    let parsed: Value = serde_json::from_str(&body).expect("json_error body expected");
+    let message = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("QuotaExceeded"),
+        "the S3 error code and message must reach the UI caller, got: {}",
+        body
+    );
 }

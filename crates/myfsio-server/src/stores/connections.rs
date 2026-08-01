@@ -249,9 +249,7 @@ impl ConnectionStore {
         }
         let bytes = serde_json::to_vec_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &self.path)
+        myfsio_common::fs_util::atomic_write_secret_file(&self.path, &bytes)
     }
 }
 
@@ -265,6 +263,14 @@ fn load_or_create_key(storage_root: &Path) -> String {
         if !trimmed.is_empty() {
             if let Ok(decoded) = URL_SAFE.decode(trimmed) {
                 if decoded.len() == 32 {
+                    if let Err(err) = myfsio_common::fs_util::restrict_secret_permissions(&key_path)
+                    {
+                        tracing::debug!(
+                            "Failed to restrict permissions on {}: {}",
+                            key_path.display(),
+                            err
+                        );
+                    }
                     return trimmed.to_string();
                 }
             }
@@ -276,7 +282,7 @@ fn load_or_create_key(storage_root: &Path) -> String {
     if let Some(parent) = key_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&key_path, &encoded);
+    let _ = myfsio_common::fs_util::atomic_write_secret_file(&key_path, encoded.as_bytes());
     encoded
 }
 
@@ -323,6 +329,82 @@ fn load_from_disk(path: &Path, encryption_key: &str) -> Vec<RemoteConnection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_connection(id: &str, secret: &str) -> RemoteConnection {
+        RemoteConnection {
+            id: id.to_string(),
+            name: format!("conn-{}", id),
+            endpoint_url: "http://example.invalid".to_string(),
+            access_key: "AKTEST".to_string(),
+            secret_key: secret.to_string(),
+            region: default_region(),
+            tuning: None,
+        }
+    }
+
+    #[test]
+    fn connection_secret_round_trips_across_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        store.add(sample_connection("c1", "super-secret")).unwrap();
+
+        let stored = std::fs::read_to_string(
+            dir.path()
+                .join(".myfsio.sys")
+                .join("config")
+                .join("connections.json"),
+        )
+        .unwrap();
+        assert!(!stored.contains("super-secret"));
+
+        let reopened = ConnectionStore::new(dir.path());
+        assert_eq!(reopened.get("c1").unwrap().secret_key, "super-secret");
+    }
+
+    #[test]
+    fn connection_saves_leave_no_temp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        store.add(sample_connection("c1", "one")).unwrap();
+        store.add(sample_connection("c2", "two")).unwrap();
+        store.delete("c1").unwrap();
+
+        let mut names: Vec<String> =
+            std::fs::read_dir(dir.path().join(".myfsio.sys").join("config"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                ".connections_key".to_string(),
+                "connections.json".to_string()
+            ]
+        );
+
+        let reopened = ConnectionStore::new(dir.path());
+        assert!(reopened.get("c1").is_none());
+        assert_eq!(reopened.get("c2").unwrap().secret_key, "two");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_secret_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        store.add(sample_connection("c1", "super-secret")).unwrap();
+
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        for name in [".connections_key", "connections.json"] {
+            let mode = std::fs::metadata(config_dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{}", name);
+        }
+    }
 
     #[test]
     fn legacy_default_uses_documented_values() {

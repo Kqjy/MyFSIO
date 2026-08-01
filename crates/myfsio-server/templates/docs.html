@@ -125,7 +125,7 @@ cargo build --release -p myfsio-server
               </tr>
               <tr>
                 <td><code>SECRET_KEY</code></td>
-                <td>(loaded from <code>.myfsio.sys/config/.secret</code> when present)</td>
+                <td>auto-generated and persisted to <code>.myfsio.sys/config/.secret</code> when unset</td>
                 <td>Session signing and IAM-at-rest encryption key. <strong>Set explicitly in production.</strong></td>
               </tr>
               <tr>

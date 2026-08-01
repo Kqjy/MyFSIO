@@ -71,6 +71,7 @@ impl KmsService {
     fn load_or_create_master_key(path: &Path) -> Result<[u8; 32], CryptoError> {
         if path.exists() {
             let encoded = std::fs::read_to_string(path).map_err(CryptoError::Io)?;
+            let _ = myfsio_common::fs_util::restrict_secret_permissions(path);
             let decoded = B64.decode(encoded.trim()).map_err(|e| {
                 CryptoError::EncryptionFailed(format!("Bad master key encoding: {}", e))
             })?;
@@ -84,7 +85,8 @@ impl KmsService {
             let mut key = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut key);
             let encoded = B64.encode(key);
-            std::fs::write(path, &encoded).map_err(CryptoError::Io)?;
+            myfsio_common::fs_util::write_secret_file(path, encoded.as_bytes())
+                .map_err(CryptoError::Io)?;
             Ok(key)
         }
     }
@@ -135,7 +137,8 @@ impl KmsService {
         let store = KmsStore { keys: keys.clone() };
         let json = serde_json::to_string_pretty(&store)
             .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
-        std::fs::write(&self.keys_path, json).map_err(CryptoError::Io)?;
+        myfsio_common::fs_util::atomic_write_secret_file(&self.keys_path, json.as_bytes())
+            .map_err(CryptoError::Io)?;
         Ok(())
     }
 
@@ -321,6 +324,7 @@ pub async fn load_or_create_master_key(keys_dir: &Path) -> Result<[u8; 32], Cryp
 
     if path.exists() {
         let encoded = std::fs::read_to_string(&path).map_err(CryptoError::Io)?;
+        let _ = myfsio_common::fs_util::restrict_secret_permissions(&path);
         let decoded = B64.decode(encoded.trim()).map_err(|e| {
             CryptoError::EncryptionFailed(format!("Bad master key encoding: {}", e))
         })?;
@@ -334,7 +338,8 @@ pub async fn load_or_create_master_key(keys_dir: &Path) -> Result<[u8; 32], Cryp
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
         let encoded = B64.encode(key);
-        std::fs::write(&path, &encoded).map_err(CryptoError::Io)?;
+        myfsio_common::fs_util::write_secret_file(&path, encoded.as_bytes())
+            .map_err(CryptoError::Io)?;
         Ok(key)
     }
 }
@@ -447,5 +452,80 @@ mod tests {
         let key1 = load_or_create_master_key(dir.path()).await.unwrap();
         let key2 = load_or_create_master_key(dir.path()).await.unwrap();
         assert_eq!(key1, key2);
+    }
+
+    #[tokio::test]
+    async fn key_material_round_trips_after_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (key_id, ciphertext) = {
+            let kms = KmsService::new(dir.path()).await.unwrap();
+            let key = kms.create_key("reload-roundtrip").await.unwrap();
+            let ct = kms
+                .encrypt_data(&key.key_id, b"secret payload")
+                .await
+                .unwrap();
+            (key.key_id, ct)
+        };
+
+        let kms = KmsService::new(dir.path()).await.unwrap();
+        let plaintext = kms.decrypt_data(&key_id, &ciphertext).await.unwrap();
+        assert_eq!(plaintext, b"secret payload");
+    }
+
+    #[tokio::test]
+    async fn key_store_saves_leave_no_temp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let kms = KmsService::new(dir.path()).await.unwrap();
+        let keep = kms.create_key("keep").await.unwrap();
+        let doomed = kms.create_key("doomed").await.unwrap();
+        kms.delete_key(&doomed.key_id).await.unwrap();
+
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["kms_keys.json".to_string(), "kms_master.key".to_string()]
+        );
+
+        let reopened = KmsService::new(dir.path()).await.unwrap();
+        assert!(reopened.get_key(&keep.key_id).await.is_some());
+        assert!(reopened.get_key(&doomed.key_id).await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn secret_key_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let kms = KmsService::new(dir.path()).await.unwrap();
+        kms.create_key("perm-check").await.unwrap();
+        load_or_create_master_key(dir.path()).await.unwrap();
+
+        for name in ["kms_master.key", "kms_keys.json", "master.key"] {
+            let mode = std::fs::metadata(dir.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{}", name);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_master_key_permissions_are_tightened_on_load() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let key1 = load_or_create_master_key(dir.path()).await.unwrap();
+
+        let path = dir.path().join("master.key");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let key2 = load_or_create_master_key(dir.path()).await.unwrap();
+        assert_eq!(key1, key2);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

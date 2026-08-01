@@ -185,12 +185,17 @@ impl LifecycleService {
         rule: &ParsedLifecycleRule,
         result: &mut BucketLifecycleResult,
     ) -> Option<String> {
-        let cutoff = if let Some(days) = rule.expiration_days {
-            Some(Utc::now() - Duration::days(days as i64))
-        } else {
-            rule.expiration_date
+        let cutoff = match rule.expiration_days {
+            Some(days) => Utc::now() - Duration::days(days as i64),
+            None => {
+                let expiration_date = rule.expiration_date?;
+                let now = Utc::now();
+                if now < expiration_date {
+                    return None;
+                }
+                now
+            }
         };
-        let cutoff = cutoff?;
 
         let params = myfsio_common::types::ListParams {
             max_keys: 10_000,
@@ -1003,5 +1008,64 @@ mod tests {
             LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
         let result = service.run_cycle().await.unwrap();
         assert_eq!(result["versions_deleted"], 1);
+    }
+
+    async fn run_date_expiration_cycle(
+        date: DateTime<Utc>,
+    ) -> (Arc<FsStorageBackend>, Value, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FsStorageBackend::new(tmp.path().to_path_buf()));
+        storage.create_bucket("docs").await.unwrap();
+        storage
+            .put_object(
+                "docs",
+                "logs/file.txt",
+                Box::pin(std::io::Cursor::new(b"payload".to_vec())),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let lifecycle_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter><Prefix>logs/</Prefix></Filter>
+                <Expiration><Date>{}</Date></Expiration>
+              </Rule>
+            </LifecycleConfiguration>"#,
+            date.to_rfc3339()
+        );
+        let mut config = storage.get_bucket_config("docs").await.unwrap();
+        config.lifecycle = Some(Value::String(lifecycle_xml));
+        storage.set_bucket_config("docs", &config).await.unwrap();
+
+        let service =
+            LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
+        let result = service.run_cycle().await.unwrap();
+        (storage, result, tmp)
+    }
+
+    #[tokio::test]
+    async fn future_expiration_date_deletes_nothing() {
+        let (storage, result, _tmp) =
+            run_date_expiration_cycle(Utc::now() + Duration::days(365)).await;
+        assert_eq!(
+            result["objects_deleted"], 0,
+            "a rule dated in the future must not expire anything yet"
+        );
+        assert!(storage.head_object("docs", "logs/file.txt").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn past_expiration_date_deletes_objects_modified_after_the_date() {
+        let (storage, result, _tmp) =
+            run_date_expiration_cycle(Utc::now() - Duration::days(1)).await;
+        assert_eq!(
+            result["objects_deleted"], 1,
+            "once the date has passed every matching object expires regardless of its age"
+        );
+        assert!(storage.head_object("docs", "logs/file.txt").await.is_err());
     }
 }

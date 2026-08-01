@@ -522,3 +522,16 @@ fn render_bucket_detail_without_error_document() {
     ctx.insert("objects_stream_url", &"");
     render_or_panic("bucket_detail.html", &ctx);
 }
+
+#[test]
+fn render_login_rate_limited() {
+    let ctx = base_ctx();
+    let html = render_to_string_or_panic("login_rate_limited.html", &ctx);
+    assert!(html.contains("Too many login attempts"));
+}
+
+#[test]
+fn render_login() {
+    let ctx = base_ctx();
+    render_or_panic("login.html", &ctx);
+}

@@ -83,11 +83,9 @@ pub async fn session_layer(
 ) -> Response {
     let cookie_id = extract_session_cookie(&req);
 
-    let (session_id, session_data) =
-        match cookie_id.and_then(|id| state.store.get(&id).map(|data| (id.clone(), data))) {
-            Some((id, data)) => (id, data),
-            None => state.store.create(),
-        };
+    let stored = cookie_id.and_then(|id| state.store.get(&id).map(|data| (id.clone(), data)));
+    let was_stored = stored.is_some();
+    let (session_id, session_data) = stored.unwrap_or_else(|| state.store.ephemeral());
 
     let handle = SessionHandle::new(session_id.clone(), session_data);
     req.extensions_mut().insert(handle.clone());
@@ -98,8 +96,9 @@ pub async fn session_layer(
     let destroy_old = handle.take_destroy_old();
 
     let effective_id = rotated.unwrap_or_else(|| handle.id.clone());
+    let dirty = handle.is_dirty();
 
-    if handle.is_dirty() {
+    if dirty {
         state.store.save(&effective_id, handle.snapshot());
     }
 
@@ -107,9 +106,11 @@ pub async fn session_layer(
         state.store.destroy(&old);
     }
 
-    let cookie = build_session_cookie(&effective_id, state.secure, state.ttl);
-    if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
-        resp.headers_mut().append(header::SET_COOKIE, value);
+    if was_stored || dirty {
+        let cookie = build_session_cookie(&effective_id, state.secure, state.ttl);
+        if let Ok(value) = HeaderValue::from_str(&cookie.to_string()) {
+            resp.headers_mut().append(header::SET_COOKIE, value);
+        }
     }
 
     resp

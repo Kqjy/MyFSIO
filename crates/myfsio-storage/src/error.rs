@@ -61,6 +61,8 @@ pub enum StorageError {
     PreconditionFailed(String),
     #[error("Object locked: {0}")]
     ObjectLocked(String),
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
     #[error("Invalid range")]
     InvalidRange,
     #[error("IO error: {0}")]
@@ -123,6 +125,7 @@ impl From<StorageError> for S3Error {
                 S3Error::new(S3ErrorCode::PreconditionFailed, msg)
             }
             StorageError::ObjectLocked(msg) => S3Error::new(S3ErrorCode::AccessDenied, msg),
+            StorageError::InvalidArgument(msg) => S3Error::new(S3ErrorCode::InvalidArgument, msg),
             StorageError::InvalidRange => S3Error::from_code(S3ErrorCode::InvalidRange),
             StorageError::Io(e) => s3_error_from_io(&e),
             StorageError::Json(e) => S3Error::new(S3ErrorCode::InternalError, e.to_string()),

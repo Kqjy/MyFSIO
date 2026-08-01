@@ -60,12 +60,22 @@ fn require_iam_action(state: &AppState, principal: &Principal, action: &str) -> 
     None
 }
 
-async fn read_json_body(body: Body) -> Option<serde_json::Value> {
-    let bytes = http_body_util::BodyExt::collect(body)
-        .await
-        .ok()?
-        .to_bytes();
-    serde_json::from_slice(&bytes).ok()
+async fn read_json_body(body: Body) -> Result<Option<serde_json::Value>, Response> {
+    let bytes = match super::collect_body_capped(body, super::JSON_API_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(super::BodyLimitError::Unreadable) => return Ok(None),
+        Err(super::BodyLimitError::TooLarge(limit)) => {
+            return Err(json_error(
+                "MaxMessageLengthExceeded",
+                &format!(
+                    "Request body exceeds the {} limit",
+                    crate::ui_format::human_size(limit as u64)
+                ),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ))
+        }
+    };
+    Ok(serde_json::from_slice(&bytes).ok())
 }
 
 fn validate_site_id(site_id: &str) -> Option<String> {
@@ -171,14 +181,15 @@ pub async fn update_local_site(
     };
 
     let payload = match read_json_body(body).await {
-        Some(v) => v,
-        None => {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return json_error(
                 "MalformedJSON",
                 "Invalid JSON body",
                 StatusCode::BAD_REQUEST,
             )
         }
+        Err(response) => return response,
     };
 
     let site_id = match payload.get("site_id").and_then(|v| v.as_str()) {
@@ -294,14 +305,15 @@ pub async fn register_peer_site(
     };
 
     let payload = match read_json_body(body).await {
-        Some(v) => v,
-        None => {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return json_error(
                 "MalformedJSON",
                 "Invalid JSON body",
                 StatusCode::BAD_REQUEST,
             )
         }
+        Err(response) => return response,
     };
 
     let site_id = match payload.get("site_id").and_then(|v| v.as_str()) {
@@ -450,14 +462,15 @@ pub async fn update_peer_site(
     };
 
     let payload = match read_json_body(body).await {
-        Some(v) => v,
-        None => {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return json_error(
                 "MalformedJSON",
                 "Invalid JSON body",
                 StatusCode::BAD_REQUEST,
             )
         }
+        Err(response) => return response,
     };
 
     if let Some(ep) = payload.get("endpoint").and_then(|v| v.as_str()) {
@@ -1110,14 +1123,15 @@ pub async fn create_website_domain(
     };
 
     let payload = match read_json_body(body).await {
-        Some(v) => v,
-        None => {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return json_error(
                 "MalformedJSON",
                 "Invalid JSON body",
                 StatusCode::BAD_REQUEST,
             )
         }
+        Err(response) => return response,
     };
 
     let domain = normalize_domain(payload.get("domain").and_then(|v| v.as_str()).unwrap_or(""));
@@ -1235,14 +1249,15 @@ pub async fn update_website_domain(
 
     let domain = normalize_domain(&domain);
     let payload = match read_json_body(body).await {
-        Some(v) => v,
-        None => {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return json_error(
                 "MalformedJSON",
                 "Invalid JSON body",
                 StatusCode::BAD_REQUEST,
             )
         }
+        Err(response) => return response,
     };
 
     let bucket = payload
@@ -1360,7 +1375,10 @@ pub async fn gc_run(
         }
     };
 
-    let payload = read_json_body(body).await.unwrap_or(serde_json::json!({}));
+    let payload = match read_json_body(body).await {
+        Ok(value) => value.unwrap_or(serde_json::json!({})),
+        Err(response) => return response,
+    };
     let dry_run = payload
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -1423,7 +1441,10 @@ pub async fn integrity_run(
         }
     };
 
-    let payload = read_json_body(body).await.unwrap_or(serde_json::json!({}));
+    let payload = match read_json_body(body).await {
+        Ok(value) => value.unwrap_or(serde_json::json!({})),
+        Err(response) => return response,
+    };
     let dry_run = payload
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -1512,14 +1533,15 @@ pub async fn create_peer_credential(
         return err;
     }
     let payload = match read_json_body(body).await {
-        Some(v) => v,
-        None => {
+        Ok(Some(v)) => v,
+        Ok(None) => {
             return json_error(
                 "InvalidArgument",
                 "Invalid JSON body",
                 StatusCode::BAD_REQUEST,
             )
         }
+        Err(response) => return response,
     };
     let site_id = match payload
         .get("site_id")
@@ -1779,6 +1801,8 @@ pub async fn get_sync_stats(
                 "conflicts_resolved": s.conflicts_resolved,
                 "deletions_applied": s.deletions_applied,
                 "errors": s.errors,
+                "last_error": s.last_error,
+                "last_error_at": s.last_error_at,
             })
         })
         .collect();

@@ -10,8 +10,8 @@ use myfsio_common::types::Principal;
 use myfsio_storage::traits::StorageEngine;
 use serde_json::Value;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
 
+use crate::handlers::object_read;
 use crate::middleware::sha_body::{is_hex_sha256, Sha256VerifyBody};
 use crate::services::acl::acl_from_bucket_config;
 use crate::state::AppState;
@@ -108,33 +108,6 @@ fn default_website_error_body(status: StatusCode) -> String {
     }
 }
 
-fn parse_range_header(range_header: &str, total_size: u64) -> Option<(u64, u64)> {
-    let range_spec = range_header.strip_prefix("bytes=")?;
-    if let Some(suffix) = range_spec.strip_prefix('-') {
-        let suffix_len: u64 = suffix.parse().ok()?;
-        if suffix_len == 0 || suffix_len > total_size {
-            return None;
-        }
-        return Some((total_size - suffix_len, total_size - 1));
-    }
-
-    let (start_str, end_str) = range_spec.split_once('-')?;
-    let start: u64 = start_str.parse().ok()?;
-    let end = if end_str.is_empty() {
-        total_size.saturating_sub(1)
-    } else {
-        end_str
-            .parse::<u64>()
-            .ok()?
-            .min(total_size.saturating_sub(1))
-    };
-
-    if start > end || start >= total_size {
-        return None;
-    }
-    Some((start, end))
-}
-
 fn website_content_type(key: &str, metadata: &std::collections::HashMap<String, String>) -> String {
     metadata
         .get("__content_type__")
@@ -227,61 +200,85 @@ async fn serve_website_document(
     status: StatusCode,
 ) -> Option<Response> {
     let metadata = state.storage.get_object_metadata(bucket, key).await.ok()?;
-    let (meta, mut reader) = state.storage.get_object(bucket, key).await.ok()?;
     let content_type = website_content_type(key, &metadata);
+    let include_body = method != axum::http::Method::HEAD;
 
     if method == axum::http::Method::HEAD {
+        let meta = state.storage.head_object(bucket, key).await.ok()?;
+        if object_read::requires_customer_key(&meta) {
+            return Some(website_error_response(
+                StatusCode::FORBIDDEN,
+                None,
+                "text/plain; charset=utf-8",
+                include_body,
+            ));
+        }
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
         headers.insert(
             header::CONTENT_LENGTH,
-            meta.size.to_string().parse().unwrap(),
+            object_read::plaintext_size(&meta)
+                .to_string()
+                .parse()
+                .unwrap(),
         );
         headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
         apply_website_object_headers(&mut headers, &meta);
         return Some((status, headers).into_response());
     }
 
-    let mut bytes = Vec::new();
-    if reader.read_to_end(&mut bytes).await.is_err() {
-        return None;
+    let range = match status {
+        StatusCode::OK => range_header,
+        _ => None,
+    };
+    let window = range.and_then(object_read::parse_range_hint);
+    let snapshot = object_read::snapshot_object_for_read(state, bucket, key, None, window)
+        .await
+        .ok()?;
+    if object_read::requires_customer_key(&snapshot.meta) {
+        snapshot.discard().await;
+        return Some(website_error_response(
+            StatusCode::FORBIDDEN,
+            None,
+            "text/plain; charset=utf-8",
+            include_body,
+        ));
     }
+
+    let served =
+        match object_read::serve_object_data(state, snapshot, range, &HeaderMap::new()).await {
+            Ok(served) => served,
+            Err(object_read::ObjectReadError::RangeNotSatisfiable(total)) => {
+                let mut range_headers = HeaderMap::new();
+                range_headers.insert(
+                    header::CONTENT_RANGE,
+                    format!("bytes */{}", total).parse().unwrap(),
+                );
+                return Some((StatusCode::RANGE_NOT_SATISFIABLE, range_headers).into_response());
+            }
+            Err(_) => return None,
+        };
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    apply_website_object_headers(&mut headers, &meta);
-
-    if status == StatusCode::OK {
-        if let Some(range_header) = range_header {
-            let Some((start, end)) = parse_range_header(range_header, bytes.len() as u64) else {
-                let mut range_headers = HeaderMap::new();
-                range_headers.insert(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{}", bytes.len()).parse().unwrap(),
-                );
-                return Some((StatusCode::RANGE_NOT_SATISFIABLE, range_headers).into_response());
-            };
-            let body = bytes[start as usize..=end as usize].to_vec();
-            headers.insert(
-                header::CONTENT_RANGE,
-                format!("bytes {}-{}/{}", start, end, bytes.len())
-                    .parse()
-                    .unwrap(),
-            );
-            headers.insert(
-                header::CONTENT_LENGTH,
-                body.len().to_string().parse().unwrap(),
-            );
-            return Some((StatusCode::PARTIAL_CONTENT, headers, body).into_response());
-        }
-    }
-
+    apply_website_object_headers(&mut headers, &served.meta);
     headers.insert(
         header::CONTENT_LENGTH,
-        bytes.len().to_string().parse().unwrap(),
+        served.content_length.to_string().parse().unwrap(),
     );
-    Some((status, headers, bytes).into_response())
+
+    if let Some((start, end)) = served.range {
+        headers.insert(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, end, served.total_size)
+                .parse()
+                .unwrap(),
+        );
+        return Some((StatusCode::PARTIAL_CONTENT, headers, served.body).into_response());
+    }
+
+    Some((status, headers, served.body).into_response())
 }
 
 async fn maybe_serve_website(
@@ -1250,6 +1247,7 @@ const S3_ACTION_TABLE: &[(&str, &str)] = &[
     ("s3:deleteobjectversion", "delete"),
     ("s3:deletebucket", "delete"),
     ("s3:deleteobjecttagging", "delete"),
+    ("s3:bypassgovernanceretention", "bypass_governance"),
     ("s3:putobjectacl", "share"),
     ("s3:putbucketacl", "share"),
     ("s3:getbucketacl", "share"),
@@ -1322,13 +1320,24 @@ fn resource_matches(resource: &str, bucket: &str, object_key: Option<&str>) -> b
 
     match remainder.split_once('/') {
         Some((resource_bucket, resource_key)) => object_key
-            .map(|key| wildcard_match(bucket, resource_bucket) && wildcard_match(key, resource_key))
+            .map(|key| {
+                wildcard_match(bucket, resource_bucket)
+                    && wildcard_match_case_sensitive(key, resource_key)
+            })
             .unwrap_or(false),
         None => object_key.is_none() && wildcard_match(bucket, remainder),
     }
 }
 
 fn wildcard_match(value: &str, pattern: &str) -> bool {
+    wildcard_match_inner(value, pattern, false)
+}
+
+fn wildcard_match_case_sensitive(value: &str, pattern: &str) -> bool {
+    wildcard_match_inner(value, pattern, true)
+}
+
+fn wildcard_match_inner(value: &str, pattern: &str, case_sensitive: bool) -> bool {
     let value = value.as_bytes();
     let pattern = pattern.as_bytes();
     let mut value_idx = 0usize;
@@ -1336,10 +1345,18 @@ fn wildcard_match(value: &str, pattern: &str) -> bool {
     let mut star_idx: Option<usize> = None;
     let mut match_idx = 0usize;
 
+    let literal_matches = |pattern_byte: u8, value_byte: u8| {
+        if case_sensitive {
+            pattern_byte == value_byte
+        } else {
+            pattern_byte.eq_ignore_ascii_case(&value_byte)
+        }
+    };
+
     while value_idx < value.len() {
         if pattern_idx < pattern.len()
             && (pattern[pattern_idx] == b'?'
-                || pattern[pattern_idx].eq_ignore_ascii_case(&value[value_idx]))
+                || literal_matches(pattern[pattern_idx], value[value_idx]))
         {
             value_idx += 1;
             pattern_idx += 1;
@@ -1884,7 +1901,10 @@ fn error_response(err: S3Error, resource: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{action_grant_matches, policy_action_matches, wildcard_match};
+    use super::{
+        action_grant_matches, policy_action_matches, resource_matches, wildcard_match,
+        wildcard_match_case_sensitive,
+    };
 
     #[test]
     fn subresource_read_grant_does_not_authorize_write() {
@@ -1990,5 +2010,74 @@ mod tests {
         assert!(wildcard_match("s3:getobject", "s3:get*"));
         assert!(wildcard_match("s3:listbucket", "s3:list*"));
         assert!(!wildcard_match("s3:listbucket", "s3:get*"));
+    }
+
+    #[test]
+    fn bypass_governance_is_its_own_policy_action() {
+        assert!(policy_action_matches(
+            "s3:BypassGovernanceRetention",
+            "bypass_governance"
+        ));
+        assert!(policy_action_matches("s3:*", "bypass_governance"));
+        assert!(!policy_action_matches(
+            "s3:DeleteObject",
+            "bypass_governance"
+        ));
+        assert!(!policy_action_matches("s3:Delete*", "bypass_governance"));
+        assert!(!policy_action_matches(
+            "s3:BypassGovernanceRetention",
+            "delete"
+        ));
+    }
+
+    #[test]
+    fn action_patterns_remain_case_insensitive() {
+        assert!(policy_action_matches("s3:getobject", "read"));
+        assert!(policy_action_matches("S3:GETOBJECT", "read"));
+        assert!(policy_action_matches("s3:GeT*", "read"));
+        assert!(wildcard_match("s3:GetObject", "S3:get*"));
+    }
+
+    #[test]
+    fn resource_key_segment_matches_case_sensitively() {
+        assert!(resource_matches(
+            "arn:aws:s3:::b/public/*",
+            "b",
+            Some("public/x")
+        ));
+        assert!(!resource_matches(
+            "arn:aws:s3:::b/public/*",
+            "b",
+            Some("PUBLIC/secret")
+        ));
+        assert!(!resource_matches(
+            "arn:aws:s3:::b/public/*",
+            "b",
+            Some("Public/secret")
+        ));
+    }
+
+    #[test]
+    fn resource_bucket_segment_matches_case_insensitively() {
+        assert!(resource_matches("arn:aws:s3:::MyBucket", "mybucket", None));
+        assert!(resource_matches(
+            "arn:aws:s3:::MyBucket/data/*",
+            "mybucket",
+            Some("data/report.csv")
+        ));
+        assert!(resource_matches("arn:aws:s3:::my*", "mybucket", None));
+    }
+
+    #[test]
+    fn case_sensitive_wildcards_preserve_glob_semantics() {
+        assert!(wildcard_match_case_sensitive("public/a/b.txt", "public/*"));
+        assert!(wildcard_match_case_sensitive("public/ab.txt", "public/?b*"));
+        assert!(!wildcard_match_case_sensitive(
+            "public/ab.txt",
+            "public/?B*"
+        ));
+        assert!(wildcard_match_case_sensitive("abc", "*"));
+        assert!(!wildcard_match_case_sensitive("abc", "abcd"));
+        assert!(wildcard_match("public/AB.txt", "public/?b*"));
     }
 }

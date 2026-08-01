@@ -346,8 +346,27 @@ impl GcService {
                     let bucket_name = bucket_entry.file_name().to_string_lossy().to_string();
                     let mut referenced: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
-                    collect_segment_refs(&self.storage_root.join(&bucket_name), &mut referenced);
-                    collect_segment_refs(&bucket_entry.path().join("versions"), &mut referenced);
+                    let mut scan_errors = collect_segment_refs(
+                        &self.storage_root.join(&bucket_name),
+                        &mut referenced,
+                    );
+                    scan_errors.extend(collect_segment_refs(
+                        &bucket_entry.path().join("versions"),
+                        &mut referenced,
+                    ));
+                    if !scan_errors.is_empty() {
+                        let detail = scan_errors.join("; ");
+                        tracing::warn!(
+                            "Skipping segment sweep for bucket {}: reference scan incomplete: {}",
+                            bucket_name,
+                            detail
+                        );
+                        errors.push(format!(
+                            "Skipped segment sweep for bucket {}: reference scan incomplete: {}",
+                            bucket_name, detail
+                        ));
+                        continue;
+                    }
                     if let Ok(seg_dirs) = std::fs::read_dir(&segments_dir) {
                         for seg_entry in seg_dirs.flatten() {
                             let seg_path = seg_entry.path();
@@ -453,35 +472,73 @@ impl GcService {
     }
 }
 
-fn collect_segment_refs(root: &std::path::Path, out: &mut std::collections::HashSet<String>) {
+fn collect_segment_refs(
+    root: &std::path::Path,
+    out: &mut std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut scan_errors: Vec<String> = Vec::new();
     if !root.is_dir() {
-        return;
+        return scan_errors;
     }
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(ft) = entry.file_type() else {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                scan_errors.push(format!("failed to read {}: {}", dir.display(), e));
                 continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    scan_errors.push(format!("failed to read entry in {}: {}", dir.display(), e));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(e) => {
+                    scan_errors.push(format!("failed to stat {}: {}", path.display(), e));
+                    continue;
+                }
             };
             if ft.is_dir() {
                 stack.push(path);
                 continue;
             }
-            let Ok(meta) = entry.metadata() else {
-                continue;
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(e) => {
+                    scan_errors.push(format!(
+                        "failed to read metadata of {}: {}",
+                        path.display(),
+                        e
+                    ));
+                    continue;
+                }
             };
             if meta.len() < myfsio_storage::segments::SEGMENT_MIN_TOTAL {
                 continue;
             }
-            if let Ok(Some(header)) = myfsio_storage::segments::read_stub_header(&path) {
-                out.insert(header.segment_id);
+            match myfsio_storage::segments::read_stub_header(&path) {
+                Ok(Some(header)) => {
+                    out.insert(header.segment_id);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    scan_errors.push(format!(
+                        "failed to read segment stub header of {}: {}",
+                        path.display(),
+                        e
+                    ));
+                }
             }
         }
     }
+    scan_errors
 }
 
 fn dir_total_bytes(path: &std::path::Path) -> u64 {
@@ -529,5 +586,84 @@ mod tests {
 
         assert_eq!(result["temp_files_deleted"], 1);
         assert!(file_path.exists());
+    }
+
+    fn write_segment_fixture(root: &std::path::Path, bucket: &str, segment_id: &str) -> PathBuf {
+        let live_dir = root.join(bucket);
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let header = myfsio_storage::segments::StubHeader::new(
+            segment_id.to_string(),
+            vec![myfsio_storage::segments::SEGMENT_MIN_TOTAL],
+            "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+        );
+        myfsio_storage::segments::write_stub(&live_dir.join("stub.bin"), &header).unwrap();
+        let segments_dir = root
+            .join(".myfsio.sys")
+            .join("buckets")
+            .join(bucket)
+            .join("segments");
+        std::fs::create_dir_all(segments_dir.join(segment_id)).unwrap();
+        std::fs::write(segments_dir.join(segment_id).join("0"), b"part").unwrap();
+        segments_dir
+    }
+
+    #[tokio::test]
+    async fn segment_sweep_deletes_only_unreferenced_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let segments_dir = write_segment_fixture(tmp.path(), "photos", "referenced");
+        let orphan_dir = segments_dir.join("orphaned");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("0"), b"part").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let service = Arc::new(GcService::new(
+            tmp.path().to_path_buf(),
+            GcConfig {
+                segment_max_age_hours: 0.0,
+                ..GcConfig::default()
+            },
+        ));
+
+        let result = service.run_now(false).await.unwrap();
+
+        assert_eq!(result["segment_dirs_deleted"], 1);
+        assert!(segments_dir.join("referenced").exists());
+        assert!(!orphan_dir.exists());
+        assert_eq!(result["errors"].as_array().unwrap().len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn segment_sweep_skips_bucket_when_reference_scan_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let segments_dir = write_segment_fixture(tmp.path(), "photos", "referenced");
+        let orphan_dir = segments_dir.join("orphaned");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("0"), b"part").unwrap();
+        let blocked_dir = tmp.path().join("photos").join("nested");
+        std::fs::create_dir_all(&blocked_dir).unwrap();
+        std::fs::set_permissions(&blocked_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let service = Arc::new(GcService::new(
+            tmp.path().to_path_buf(),
+            GcConfig {
+                segment_max_age_hours: 0.0,
+                ..GcConfig::default()
+            },
+        ));
+
+        let result = service.run_now(false).await.unwrap();
+        std::fs::set_permissions(&blocked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(result["segment_dirs_deleted"], 0);
+        assert!(orphan_dir.exists());
+        assert!(segments_dir.join("referenced").exists());
+        let errors = result["errors"].as_array().unwrap();
+        assert!(errors
+            .iter()
+            .any(|e| e.as_str().unwrap_or_default().contains("photos")));
     }
 }

@@ -17,6 +17,8 @@
 #   --api-url URL        Public API URL (for presigned URLs behind proxy)
 #   --no-systemd         Skip systemd service creation
 #   --binary PATH        Path to myfsio binary (default: ./myfsio)
+#   --adopt-data-dir     Use a non-empty data dir without .myfsio.sys
+#   --overwrite-env      Back up and regenerate an existing myfsio.env
 #   -y, --yes            Skip confirmation prompts
 #
 
@@ -33,24 +35,81 @@ API_URL=""
 SKIP_SYSTEMD=false
 BINARY_PATH=""
 AUTO_YES=false
+ADOPT_DATA_DIR=false
+OVERWRITE_ENV=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --install-dir)  INSTALL_DIR="$2"; shift 2 ;;
-        --data-dir)     DATA_DIR="$2"; shift 2 ;;
-        --log-dir)      LOG_DIR="$2"; shift 2 ;;
-        --user)         SERVICE_USER="$2"; shift 2 ;;
-        --host)         BIND_HOST="$2"; shift 2 ;;
-        --port)         API_PORT="$2"; shift 2 ;;
-        --ui-port)      UI_PORT="$2"; shift 2 ;;
-        --api-url)      API_URL="$2"; shift 2 ;;
-        --no-systemd)   SKIP_SYSTEMD=true; shift ;;
-        --binary)       BINARY_PATH="$2"; shift 2 ;;
-        -y|--yes)       AUTO_YES=true; shift ;;
-        -h|--help)      head -22 "$0" | tail -17; exit 0 ;;
+        --install-dir)     INSTALL_DIR="$2"; shift 2 ;;
+        --data-dir)        DATA_DIR="$2"; shift 2 ;;
+        --log-dir)         LOG_DIR="$2"; shift 2 ;;
+        --user)            SERVICE_USER="$2"; shift 2 ;;
+        --host)            BIND_HOST="$2"; shift 2 ;;
+        --port)            API_PORT="$2"; shift 2 ;;
+        --ui-port)         UI_PORT="$2"; shift 2 ;;
+        --api-url)         API_URL="$2"; shift 2 ;;
+        --no-systemd)      SKIP_SYSTEMD=true; shift ;;
+        --binary)          BINARY_PATH="$2"; shift 2 ;;
+        --adopt-data-dir)  ADOPT_DATA_DIR=true; shift ;;
+        --overwrite-env)   OVERWRITE_ENV=true; shift ;;
+        -y|--yes)          AUTO_YES=true; shift ;;
+        -h|--help)         head -24 "$0" | tail -19; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+RESERVED_PATHS=(/bin /boot /dev /etc /home /lib /lib32 /lib64 /media /mnt /opt /proc /root /run /sbin /srv /sys /tmp /usr /var)
+
+validate_target_path() {
+    local flag="$1"
+    local value="$2"
+    local canonical
+    local shown
+    local reserved
+
+    if [[ "$value" != /* ]]; then
+        echo "  [ERROR] $flag must be an absolute path (got: '$value')"
+        exit 1
+    fi
+
+    canonical=""
+    if command -v realpath &>/dev/null; then
+        canonical=$(realpath -m -- "$value" 2>/dev/null) || canonical=""
+    fi
+    if [[ -z "$canonical" ]]; then
+        canonical="$value"
+        case "$canonical/" in
+            */./*|*/../*)
+                echo "  [ERROR] $flag must not contain '.' or '..' path segments (got: '$value')"
+                exit 1
+                ;;
+        esac
+    fi
+    while [[ "$canonical" == *//* ]]; do
+        canonical="${canonical//\/\///}"
+    done
+    while [[ "$canonical" == */ && "$canonical" != "/" ]]; do
+        canonical="${canonical%/}"
+    done
+
+    shown="'$value'"
+    if [[ "$canonical" != "$value" ]]; then
+        shown="'$value' -> '$canonical'"
+    fi
+
+    if [[ -z "$canonical" || "$canonical" == "/" ]]; then
+        echo "  [ERROR] $flag must not be the filesystem root (got: $shown)"
+        exit 1
+    fi
+    for reserved in "${RESERVED_PATHS[@]}"; do
+        if [[ "$canonical" == "$reserved" ]]; then
+            echo "  [ERROR] $flag must not be the system directory $reserved (got: $shown)"
+            exit 1
+        fi
+    done
+
+    CANONICAL_PATH="$canonical"
+}
 
 echo ""
 echo "============================================================"
@@ -65,6 +124,13 @@ if [[ $EUID -ne 0 ]]; then
     echo "Error: This script must be run as root (use sudo)"
     exit 1
 fi
+
+validate_target_path "--install-dir" "$INSTALL_DIR"
+INSTALL_DIR="$CANONICAL_PATH"
+validate_target_path "--data-dir" "$DATA_DIR"
+DATA_DIR="$CANONICAL_PATH"
+validate_target_path "--log-dir" "$LOG_DIR"
+LOG_DIR="$CANONICAL_PATH"
 
 echo "------------------------------------------------------------"
 echo "STEP 1: Review Installation Configuration"
@@ -95,10 +161,12 @@ echo "------------------------------------------------------------"
 echo "STEP 2: Creating System User"
 echo "------------------------------------------------------------"
 echo ""
+SERVICE_USER_CREATED=false
 if id "$SERVICE_USER" &>/dev/null; then
     echo "  [OK] User '$SERVICE_USER' already exists"
 else
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    SERVICE_USER_CREATED=true
     echo "  [OK] Created user '$SERVICE_USER'"
 fi
 
@@ -107,6 +175,15 @@ echo "------------------------------------------------------------"
 echo "STEP 3: Creating Directories"
 echo "------------------------------------------------------------"
 echo ""
+if [[ -d "$DATA_DIR" && -n "$(ls -A "$DATA_DIR" 2>/dev/null)" && ! -d "$DATA_DIR/.myfsio.sys" ]]; then
+    if [[ "$ADOPT_DATA_DIR" != true ]]; then
+        echo "  [ERROR] $DATA_DIR is not empty and contains no .myfsio.sys directory;"
+        echo "          it does not look like a MyFSIO data directory."
+        echo "          Re-run with --adopt-data-dir to chown and use it anyway."
+        exit 1
+    fi
+    echo "  [OK] Adopting existing data directory $DATA_DIR (--adopt-data-dir)"
+fi
 mkdir -p "$INSTALL_DIR" && echo "  [OK] Created $INSTALL_DIR"
 mkdir -p "$DATA_DIR"    && echo "  [OK] Created $DATA_DIR"
 mkdir -p "$LOG_DIR"     && echo "  [OK] Created $LOG_DIR"
@@ -180,7 +257,23 @@ else
     esac
 fi
 
-cat > "$INSTALL_DIR/myfsio.env" << EOF
+ENV_FILE="$INSTALL_DIR/myfsio.env"
+ENV_TARGET="$ENV_FILE"
+ENV_PRESERVED=false
+
+if [[ -f "$ENV_FILE" ]]; then
+    if [[ "$OVERWRITE_ENV" == true ]]; then
+        ENV_BACKUP="$INSTALL_DIR/myfsio.env.bak-$(date +%s)"
+        cp "$ENV_FILE" "$ENV_BACKUP"
+        chmod 600 "$ENV_BACKUP"
+        echo "  [OK] Backed up existing env file to $ENV_BACKUP"
+    else
+        ENV_TARGET="$INSTALL_DIR/myfsio.env.new"
+        ENV_PRESERVED=true
+    fi
+fi
+
+cat > "$ENV_TARGET" << EOF
 # MyFSIO Configuration
 # Generated by install.sh on $(date)
 # Documentation: https://go.jzwsite.com/myfsio
@@ -282,8 +375,35 @@ RATE_LIMIT_ADMIN=60 per minute
 # ADMIN_ACCESS_KEY=
 # ADMIN_SECRET_KEY=
 EOF
-chmod 600 "$INSTALL_DIR/myfsio.env"
-echo "  [OK] Created $INSTALL_DIR/myfsio.env"
+chmod 600 "$ENV_TARGET"
+if [[ "$ENV_PRESERVED" == true ]]; then
+    echo "  [KEPT] Existing myfsio.env preserved"
+    echo "  [INFO] Freshly generated settings written to $ENV_TARGET for reference"
+else
+    echo "  [OK] Created $ENV_FILE"
+fi
+
+MANIFEST_FILE="$INSTALL_DIR/.install-manifest"
+if [[ "$SERVICE_USER_CREATED" != true && -f "$MANIFEST_FILE" ]]; then
+    PREV_USER=""
+    PREV_CREATED=""
+    while IFS='=' read -r manifest_key manifest_value; do
+        case "$manifest_key" in
+            SERVICE_USER)         PREV_USER="$manifest_value" ;;
+            SERVICE_USER_CREATED) PREV_CREATED="$manifest_value" ;;
+        esac
+    done < "$MANIFEST_FILE"
+    if [[ "$PREV_USER" == "$SERVICE_USER" && "$PREV_CREATED" == true ]]; then
+        SERVICE_USER_CREATED=true
+    fi
+fi
+
+cat > "$MANIFEST_FILE" << EOF
+SERVICE_USER=$SERVICE_USER
+SERVICE_USER_CREATED=$SERVICE_USER_CREATED
+EOF
+chmod 600 "$MANIFEST_FILE"
+echo "  [OK] Created $MANIFEST_FILE"
 
 echo ""
 echo "------------------------------------------------------------"

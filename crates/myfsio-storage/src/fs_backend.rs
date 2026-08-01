@@ -2085,6 +2085,90 @@ impl FsStorageBackend {
         Ok(())
     }
 
+    fn write_live_metadata_entry_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        metadata: &HashMap<String, String>,
+    ) -> StorageResult<()> {
+        let mut entry = self
+            .read_index_entry_sync(bucket_name, key)
+            .unwrap_or_default();
+        let meta_map: serde_json::Map<String, Value> = metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        entry.insert("metadata".to_string(), Value::Object(meta_map));
+        self.write_index_entry_sync(bucket_name, key, &entry)
+            .map_err(StorageError::Io)?;
+        self.invalidate_bucket_caches(bucket_name);
+        self.update_listing_index_after_commit(bucket_name, key);
+        Ok(())
+    }
+
+    fn mutate_object_metadata_locked_sync<F>(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        version_id: Option<&str>,
+        mutate: F,
+    ) -> StorageResult<()>
+    where
+        F: FnOnce(&mut HashMap<String, String>) -> StorageResult<()>,
+    {
+        self.require_bucket(bucket_name)?;
+        self.validate_key(key)?;
+
+        let Some(version_id) = version_id else {
+            let mut metadata = self.read_metadata_sync(bucket_name, key);
+            mutate(&mut metadata)?;
+            return self.write_live_metadata_entry_sync(bucket_name, key, &metadata);
+        };
+
+        Self::validate_version_id(bucket_name, key, version_id)?;
+        if self
+            .try_live_version_record_sync(bucket_name, key, version_id)
+            .is_some()
+        {
+            let mut metadata = self.read_metadata_sync(bucket_name, key);
+            mutate(&mut metadata)?;
+            return self.write_live_metadata_entry_sync(bucket_name, key, &metadata);
+        }
+
+        let (manifest_path, _data_path) = self.version_record_paths(bucket_name, key, version_id);
+        if !manifest_path.is_file() {
+            return Err(StorageError::VersionNotFound {
+                bucket: bucket_name.to_string(),
+                key: key.to_string(),
+                version_id: version_id.to_string(),
+            });
+        }
+        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let mut record: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
+        let mut metadata = Self::version_metadata_from_record(&record);
+        mutate(&mut metadata)?;
+        let meta_map: serde_json::Map<String, Value> = metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        match record {
+            Value::Object(ref mut map) => {
+                map.insert("metadata".to_string(), Value::Object(meta_map));
+            }
+            _ => {
+                return Err(StorageError::Internal(
+                    "Invalid version manifest".to_string(),
+                ));
+            }
+        }
+        let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
+        let tmp = manifest_path.with_extension("json.tmp");
+        std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
+        std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
+        self.invalidate_bucket_caches(bucket_name);
+        Ok(())
+    }
+
     fn delete_metadata_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<()> {
         self.delete_index_entry_sync(bucket_name, key)?;
 
@@ -2780,6 +2864,43 @@ impl FsStorageBackend {
             logical_size,
             delete_marker,
         }))
+    }
+
+    fn rollback_failed_commit_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        previous_metadata: &HashMap<String, String>,
+        archived_version_id: Option<&str>,
+    ) {
+        if let Err(err) = self.write_metadata_sync(bucket_name, key, previous_metadata) {
+            tracing::error!(
+                bucket = bucket_name,
+                key = key,
+                error = %err,
+                "failed to restore the previous object metadata after an aborted commit"
+            );
+        }
+        if let Some(version_id) = archived_version_id {
+            let (manifest_path, data_path) =
+                self.version_record_paths(bucket_name, key, version_id);
+            for path in [&manifest_path, &data_path] {
+                if path.is_file() {
+                    if let Err(err) = Self::safe_unlink(path) {
+                        tracing::error!(
+                            bucket = bucket_name,
+                            key = key,
+                            version_id = version_id,
+                            error = %err,
+                            "failed to remove an archived version after an aborted commit"
+                        );
+                    }
+                }
+            }
+            Self::cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
+        }
+        self.invalidate_bucket_caches(bucket_name);
+        self.update_listing_index_after_commit(bucket_name, key);
     }
 
     fn validate_version_id(bucket_name: &str, key: &str, version_id: &str) -> StorageResult<()> {
@@ -4262,6 +4383,7 @@ impl FsStorageBackend {
 
         let mut release_old_segments: Option<String> = None;
         let mut version_mutations = Vec::new();
+        let mut archived_version_id: Option<String> = None;
         if is_overwrite {
             let old_segments = existing_meta
                 .get(crate::segments::META_KEY_SEGMENTS)
@@ -4272,6 +4394,7 @@ impl FsStorageBackend {
                         .archive_current_version_sync(bucket_name, key, "overwrite")
                         .map_err(StorageError::Io)?
                     {
+                        archived_version_id = Some(mutation.version_id.clone());
                         version_mutations.push(mutation);
                     }
                 }
@@ -4285,6 +4408,7 @@ impl FsStorageBackend {
                             .archive_current_version_sync(bucket_name, key, "overwrite")
                             .map_err(StorageError::Io)?
                         {
+                            archived_version_id = Some(mutation.version_id.clone());
                             version_mutations.push(mutation);
                         }
                     } else {
@@ -4296,16 +4420,19 @@ impl FsStorageBackend {
                 }
             }
         }
-        if matches!(versioning_status, VersioningStatus::Suspended) {
-            if let Some(mutation) = self
-                .purge_archived_null_version_sync(bucket_name, key)
-                .map_err(StorageError::Io)?
-            {
-                version_mutations.push(mutation);
-            }
-        }
 
-        let file_meta = std::fs::metadata(tmp_path).map_err(StorageError::Io)?;
+        let abort_commit = |e: std::io::Error| {
+            let _ = std::fs::remove_file(tmp_path);
+            self.rollback_failed_commit_sync(
+                bucket_name,
+                key,
+                &existing_meta,
+                archived_version_id.as_deref(),
+            );
+            StorageError::Io(e)
+        };
+
+        let file_meta = std::fs::metadata(tmp_path).map_err(abort_commit)?;
         let mtime = file_meta
             .modified()
             .ok()
@@ -4336,14 +4463,20 @@ impl FsStorageBackend {
         }
 
         self.write_metadata_sync(bucket_name, key, &internal_meta)
-            .map_err(StorageError::Io)?;
+            .map_err(abort_commit)?;
 
-        std::fs::rename(tmp_path, &destination).map_err(|e| {
-            let _ = std::fs::remove_file(tmp_path);
-            StorageError::Io(e)
-        })?;
+        std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
         if let Some(parent) = destination.parent() {
             Self::fsync_dir(parent).map_err(StorageError::Io)?;
+        }
+
+        if matches!(versioning_status, VersioningStatus::Suspended) {
+            if let Some(mutation) = self
+                .purge_archived_null_version_sync(bucket_name, key)
+                .map_err(StorageError::Io)?
+            {
+                version_mutations.push(mutation);
+            }
         }
 
         if let Some(seg_id) = release_old_segments {
@@ -5341,6 +5474,45 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         })
     }
 
+    async fn update_object_retention(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        retention: &myfsio_common::object_lock::ObjectLockRetention,
+        bypass_governance: bool,
+    ) -> StorageResult<()> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.mutate_object_metadata_locked_sync(bucket, key, version_id, |metadata| {
+                myfsio_common::object_lock::ensure_retention_update_allowed(
+                    metadata,
+                    retention,
+                    bypass_governance,
+                )
+                .map_err(StorageError::ObjectLocked)?;
+                myfsio_common::object_lock::set_object_retention(metadata, retention)
+                    .map_err(StorageError::InvalidArgument)
+            })
+        })
+    }
+
+    async fn update_object_legal_hold(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        enabled: bool,
+    ) -> StorageResult<()> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.mutate_object_metadata_locked_sync(bucket, key, version_id, |metadata| {
+                myfsio_common::object_lock::set_legal_hold(metadata, enabled);
+                Ok(())
+            })
+        })
+    }
+
     async fn list_objects(
         &self,
         bucket: &str,
@@ -6275,6 +6447,335 @@ mod tests {
             .unwrap();
 
         assert!(backend.list_parts("uploads", &upload_id).await.is_err());
+    }
+
+    fn block_object_destination(backend: &FsStorageBackend, bucket: &str, key: &str) {
+        let blocked = backend.bucket_path(bucket).join(key);
+        std::fs::create_dir_all(&blocked).unwrap();
+        let destination = blocked.join(KEY_DATA_MARKER_FILE);
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("occupant"), b"occupied").unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_commit_restores_metadata_and_keeps_archived_null_version() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-rollback").await.unwrap();
+        backend
+            .set_versioning_status("commit-rollback", VersioningStatus::Suspended)
+            .await
+            .unwrap();
+
+        block_object_destination(&backend, "commit-rollback", "blocked.bin");
+
+        let mut previous = HashMap::new();
+        previous.insert("__etag__".to_string(), "oldetag".to_string());
+        previous.insert("__size__".to_string(), "3".to_string());
+        previous.insert("__version_id__".to_string(), "null".to_string());
+        backend
+            .put_object_metadata("commit-rollback", "blocked.bin", &previous)
+            .await
+            .unwrap();
+
+        let version_dir = backend.version_dir("commit-rollback", "blocked.bin");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let null_manifest = version_dir.join("null.json");
+        let null_data = version_dir.join("null.bin");
+        std::fs::write(&null_data, b"old").unwrap();
+        std::fs::write(
+            &null_manifest,
+            serde_json::json!({
+                "version_id": "null",
+                "key": "blocked.bin",
+                "size": 3,
+                "archived_at": Utc::now().to_rfc3339(),
+                "etag": "oldetag",
+                "metadata": previous,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"replacement".to_vec()));
+        let result = backend
+            .put_object("commit-rollback", "blocked.bin", stream, None)
+            .await;
+        assert!(result.is_err(), "a failed rename must fail the commit");
+
+        let restored = backend
+            .get_object_metadata("commit-rollback", "blocked.bin")
+            .await
+            .unwrap();
+        assert_eq!(restored.get("__etag__"), Some(&"oldetag".to_string()));
+        assert_eq!(restored.get("__size__"), Some(&"3".to_string()));
+        assert!(
+            null_manifest.is_file() && null_data.is_file(),
+            "the archived null version must survive a failed commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_commit_before_rename_undoes_the_archived_version() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-archive").await.unwrap();
+        backend
+            .set_versioning_status("commit-archive", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "commit-archive", "obj.bin", b"v1").await;
+
+        let before = backend
+            .get_object_metadata("commit-archive", "obj.bin")
+            .await
+            .unwrap();
+        let missing_tmp = backend.tmp_dir().join("does-not-exist.tmp");
+        let result = backend.finalize_put_sync(
+            "commit-archive",
+            "obj.bin",
+            &missing_tmp,
+            "deadbeef".to_string(),
+            2,
+            None,
+            &crate::traits::PutCommitOptions::default(),
+        );
+        assert!(
+            result.is_err(),
+            "a missing staged file must fail the commit"
+        );
+
+        assert!(
+            backend
+                .list_object_versions("commit-archive", "obj.bin")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the archived version must be undone when the commit aborts before the rename"
+        );
+        let after = backend
+            .get_object_metadata("commit-archive", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        assert_eq!(after.get("__version_id__"), before.get("__version_id__"));
+
+        let (_, mut stream) = backend
+            .get_object("commit-archive", "obj.bin")
+            .await
+            .unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v1");
+    }
+
+    #[tokio::test]
+    async fn failed_commit_leaves_no_metadata_for_a_new_key() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-fresh").await.unwrap();
+        block_object_destination(&backend, "commit-fresh", "fresh.bin");
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        let result = backend
+            .put_object("commit-fresh", "fresh.bin", stream, None)
+            .await;
+        assert!(result.is_err(), "a failed rename must fail the commit");
+
+        let metadata = backend
+            .get_object_metadata("commit-fresh", "fresh.bin")
+            .await
+            .unwrap();
+        assert!(
+            metadata.is_empty(),
+            "a failed commit must not leave metadata describing bytes that never landed"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_object_retention_rejects_compliance_shortening() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("retention").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        backend
+            .put_object("retention", "locked.bin", stream, None)
+            .await
+            .unwrap();
+
+        let far = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(10),
+        };
+        backend
+            .update_object_retention("retention", "locked.bin", None, &far, false)
+            .await
+            .unwrap();
+
+        let nearer = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(1),
+        };
+        for bypass in [false, true] {
+            let err = backend
+                .update_object_retention("retention", "locked.bin", None, &nearer, bypass)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, StorageError::ObjectLocked(_)));
+        }
+
+        let further = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(20),
+        };
+        backend
+            .update_object_retention("retention", "locked.bin", None, &further, false)
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_metadata("retention", "locked.bin")
+            .await
+            .unwrap();
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, further.retain_until_date);
+    }
+
+    #[tokio::test]
+    async fn update_object_retention_extends_governance_without_bypass() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("governance").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        backend
+            .put_object("governance", "obj.bin", stream, None)
+            .await
+            .unwrap();
+
+        let initial = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(5),
+        };
+        backend
+            .update_object_retention("governance", "obj.bin", None, &initial, false)
+            .await
+            .unwrap();
+
+        let longer = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(9),
+        };
+        backend
+            .update_object_retention("governance", "obj.bin", None, &longer, false)
+            .await
+            .unwrap();
+
+        let shorter = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(1),
+        };
+        let err = backend
+            .update_object_retention("governance", "obj.bin", None, &shorter, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::ObjectLocked(_)));
+        backend
+            .update_object_retention("governance", "obj.bin", None, &shorter, true)
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_metadata("governance", "obj.bin")
+            .await
+            .unwrap();
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, shorter.retain_until_date);
+    }
+
+    #[tokio::test]
+    async fn update_object_legal_hold_preserves_retention() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("legalhold").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        backend
+            .put_object("legalhold", "obj.bin", stream, None)
+            .await
+            .unwrap();
+
+        let retention = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(3),
+        };
+        backend
+            .update_object_retention("legalhold", "obj.bin", None, &retention, false)
+            .await
+            .unwrap();
+        backend
+            .update_object_legal_hold("legalhold", "obj.bin", None, true)
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_metadata("legalhold", "obj.bin")
+            .await
+            .unwrap();
+        assert!(myfsio_common::object_lock::get_legal_hold(&metadata));
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, retention.retain_until_date);
+    }
+
+    #[tokio::test]
+    async fn update_object_retention_applies_to_archived_versions() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("versioned-lock").await.unwrap();
+        backend
+            .set_versioning_status("versioned-lock", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "versioned-lock", "obj.bin", b"v1").await;
+        put_listing_object(&backend, "versioned-lock", "obj.bin", b"v2").await;
+
+        let versions = backend
+            .list_object_versions("versioned-lock", "obj.bin")
+            .await
+            .unwrap();
+        let archived = versions
+            .iter()
+            .find(|version| !version.is_latest)
+            .expect("expected an archived version");
+
+        let retention = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(5),
+        };
+        backend
+            .update_object_retention(
+                "versioned-lock",
+                "obj.bin",
+                Some(&archived.version_id),
+                &retention,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_version_metadata("versioned-lock", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, retention.retain_until_date);
+
+        let shorter = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(1),
+        };
+        let err = backend
+            .update_object_retention(
+                "versioned-lock",
+                "obj.bin",
+                Some(&archived.version_id),
+                &shorter,
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::ObjectLocked(_)));
     }
 
     #[tokio::test]

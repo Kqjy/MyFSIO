@@ -74,6 +74,25 @@ pub fn ensure_retention_mutable(
     }
 }
 
+pub fn ensure_retention_update_allowed(
+    metadata: &HashMap<String, String>,
+    requested: &ObjectLockRetention,
+    bypass_governance: bool,
+) -> Result<(), String> {
+    let Some(existing) = get_object_retention(metadata) else {
+        return Ok(());
+    };
+    if existing.is_expired() {
+        return Ok(());
+    }
+    let extends_same_mode = requested.mode == existing.mode
+        && requested.retain_until_date >= existing.retain_until_date;
+    if extends_same_mode {
+        return Ok(());
+    }
+    ensure_retention_mutable(metadata, bypass_governance)
+}
+
 pub fn can_delete_object(
     metadata: &HashMap<String, String>,
     bypass_governance: bool,

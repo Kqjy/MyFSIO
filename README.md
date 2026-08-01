@@ -103,6 +103,7 @@ Core settings:
 | `RATE_LIMIT_OBJECT_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for object-scoped operations |
 | `RATE_LIMIT_HEAD_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for HEAD requests |
 | `RATE_LIMIT_ADMIN` | `60/min` | Override for `/myfsio/admin/*` |
+| `RATE_LIMIT_UI_LOGIN` | `20/min` | Per-IP limit for `GET`/`POST /login` |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Rate-limit backend. Only `memory://` is supported today; any other value logs a warning and falls back to in-memory limits |
 | `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter skew enforced for peer-credential SigV4 requests |
 | `PEER_NONCE_CACHE_SIZE` | `10000` | Replay-detection LRU capacity for peer requests |

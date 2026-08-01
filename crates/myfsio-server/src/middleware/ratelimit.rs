@@ -177,6 +177,85 @@ pub async fn rate_limit_layer(
     }
 }
 
+#[derive(Clone)]
+pub struct UiLoginRateLimitState {
+    app: crate::state::AppState,
+    limiter: Arc<TokenBucketLimiter>,
+    num_trusted_proxies: usize,
+}
+
+impl UiLoginRateLimitState {
+    pub fn new(
+        app: crate::state::AppState,
+        setting: RateLimitSetting,
+        num_trusted_proxies: usize,
+    ) -> Self {
+        Self {
+            app,
+            limiter: Arc::new(TokenBucketLimiter::new(setting)),
+            num_trusted_proxies,
+        }
+    }
+}
+
+pub async fn ui_login_rate_limit_layer(
+    State(state): State<UiLoginRateLimitState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let ip = client_ip(&req, state.num_trusted_proxies);
+    let key = format!("ui_login:{}", ip);
+    let Err(retry_after) = state.limiter.check(&key) else {
+        return next.run(req).await;
+    };
+
+    tracing::warn!(client_ip = %ip, "Login rate limit exceeded");
+
+    let accept = req
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let wants_json =
+        accept.contains("application/json") || content_type.starts_with("application/json");
+
+    let mut response = if wants_json {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::json!({
+                "error": "Too many login attempts. Please wait a moment and try again."
+            })
+            .to_string(),
+        )
+            .into_response()
+    } else {
+        let handle = req
+            .extensions()
+            .get::<crate::middleware::session::SessionHandle>()
+            .cloned();
+        let ctx = match handle {
+            Some(handle) => crate::handlers::ui::base_context(&handle, None),
+            None => tera::Context::new(),
+        };
+        let mut rendered = crate::handlers::ui::render(&state.app, "login_rate_limited.html", &ctx);
+        if rendered.status() == StatusCode::OK {
+            *rendered.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        }
+        rendered
+    };
+
+    if let Ok(value) = retry_after.to_string().parse() {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
+
 fn too_many_requests(retry_after: u64, resource: &str) -> Response {
     let request_id = uuid::Uuid::new_v4().simple().to_string();
     let body = myfsio_xml::response::rate_limit_exceeded_xml(resource, &request_id);

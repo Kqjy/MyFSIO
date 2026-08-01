@@ -122,6 +122,7 @@ pub struct ServerConfig {
     pub ratelimit_object_ops: RateLimitSetting,
     pub ratelimit_head_ops: RateLimitSetting,
     pub ratelimit_admin: RateLimitSetting,
+    pub ratelimit_ui_login: RateLimitSetting,
     pub ratelimit_storage_uri: String,
     pub ui_enabled: bool,
     pub templates_dir: PathBuf,
@@ -173,18 +174,7 @@ impl ServerConfig {
 
         let secret_key = {
             let env_key = std::env::var("SECRET_KEY").ok();
-            match env_key {
-                Some(k) if !k.is_empty() && k != "dev-secret-key" => Some(k),
-                _ => {
-                    let secret_file = storage_path
-                        .join(".myfsio.sys")
-                        .join("config")
-                        .join(".secret");
-                    std::fs::read_to_string(&secret_file)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                }
-            }
+            resolve_secret_key(&storage_path, env_key)
         };
 
         let encryption_enabled = parse_bool_env("ENCRYPTION_ENABLED", false);
@@ -333,6 +323,8 @@ impl ServerConfig {
         let ratelimit_head_ops = parse_rate_limit_env("RATE_LIMIT_HEAD_OPS", ratelimit_default);
         let ratelimit_admin =
             parse_rate_limit_env("RATE_LIMIT_ADMIN", RateLimitSetting::new(60, 60));
+        let ratelimit_ui_login =
+            parse_rate_limit_env("RATE_LIMIT_UI_LOGIN", RateLimitSetting::new(20, 60));
         let ratelimit_storage_uri =
             std::env::var("RATE_LIMIT_STORAGE_URI").unwrap_or_else(|_| "memory://".to_string());
 
@@ -449,6 +441,7 @@ impl ServerConfig {
             ratelimit_object_ops,
             ratelimit_head_ops,
             ratelimit_admin,
+            ratelimit_ui_login,
             ratelimit_storage_uri,
             ui_enabled,
             templates_dir,
@@ -571,10 +564,118 @@ impl Default for ServerConfig {
             ratelimit_object_ops: RateLimitSetting::new(50_000, 60),
             ratelimit_head_ops: RateLimitSetting::new(50_000, 60),
             ratelimit_admin: RateLimitSetting::new(60, 60),
+            ratelimit_ui_login: RateLimitSetting::new(20, 60),
             ratelimit_storage_uri: "memory://".to_string(),
             ui_enabled: true,
             templates_dir: default_templates_dir(),
             static_dir: default_static_dir(),
+        }
+    }
+}
+
+const REJECTED_SECRET_KEY: &str = "dev-secret-key";
+
+fn secret_file_path(storage_root: &std::path::Path) -> PathBuf {
+    storage_root
+        .join(".myfsio.sys")
+        .join("config")
+        .join(".secret")
+}
+
+pub fn resolve_secret_key(
+    storage_root: &std::path::Path,
+    env_secret: Option<String>,
+) -> Option<String> {
+    if let Some(value) = env_secret {
+        let trimmed = value.trim();
+        if trimmed == REJECTED_SECRET_KEY {
+            tracing::warn!(
+                "SECRET_KEY is set to the placeholder value '{}' and was rejected; \
+                 falling back to the persisted secret file.",
+                REJECTED_SECRET_KEY
+            );
+        } else if !trimmed.is_empty() {
+            return Some(value);
+        }
+    }
+
+    let secret_file = secret_file_path(storage_root);
+    match std::fs::read_to_string(&secret_file) {
+        Ok(text) => {
+            let trimmed = text.trim();
+            if trimmed == REJECTED_SECRET_KEY {
+                tracing::warn!(
+                    "{} contains the placeholder value '{}' and was rejected; \
+                     configuration encryption at rest is disabled. Delete the file to have a \
+                     random secret generated on the next start.",
+                    secret_file.display(),
+                    REJECTED_SECRET_KEY
+                );
+                return None;
+            }
+            if trimmed.is_empty() {
+                return generate_secret_file(&secret_file);
+            }
+            let secret = trimmed.to_string();
+            if let Err(err) = myfsio_common::fs_util::restrict_secret_permissions(&secret_file) {
+                tracing::debug!(
+                    "Failed to restrict permissions on {}: {}",
+                    secret_file.display(),
+                    err
+                );
+            }
+            Some(secret)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            generate_secret_file(&secret_file)
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read {}: {}; configuration encryption at rest is disabled.",
+                secret_file.display(),
+                err
+            );
+            None
+        }
+    }
+}
+
+fn generate_secret_file(path: &std::path::Path) -> Option<String> {
+    use base64::Engine;
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let secret = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                "Failed to create {} for the generated secret: {}; \
+                 configuration encryption at rest is disabled.",
+                parent.display(),
+                err
+            );
+            return None;
+        }
+    }
+
+    match myfsio_common::fs_util::atomic_write_secret_file(path, secret.as_bytes()) {
+        Ok(()) => {
+            tracing::info!(
+                "SECRET_KEY was not configured; generated a new secret and persisted it to {}",
+                path.display()
+            );
+            Some(secret)
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to persist a generated secret to {}: {}; \
+                 configuration encryption at rest is disabled.",
+                path.display(),
+                err
+            );
+            None
         }
     }
 }
@@ -706,6 +807,7 @@ fn parse_rate_limit_env(key: &str, default: RateLimitSetting) -> RateLimitSettin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -736,9 +838,16 @@ mod tests {
         assert_eq!(parse_rate_limit("bad"), None);
     }
 
+    fn isolated_storage_root() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("STORAGE_ROOT", dir.path());
+        dir
+    }
+
     #[test]
     fn env_defaults_and_invalid_values_fall_back() {
         let _guard = env_lock().lock().unwrap();
+        let _storage = isolated_storage_root();
         std::env::remove_var("OBJECT_KEY_MAX_LENGTH_BYTES");
         std::env::set_var("OBJECT_TAG_LIMIT", "not-a-number");
         std::env::set_var("RATE_LIMIT_DEFAULT", "invalid");
@@ -753,11 +862,13 @@ mod tests {
 
         std::env::remove_var("OBJECT_TAG_LIMIT");
         std::env::remove_var("RATE_LIMIT_DEFAULT");
+        std::env::remove_var("STORAGE_ROOT");
     }
 
     #[test]
     fn env_overrides_new_values() {
         let _guard = env_lock().lock().unwrap();
+        let _storage = isolated_storage_root();
         std::env::set_var("OBJECT_KEY_MAX_LENGTH_BYTES", "2048");
         std::env::set_var("GC_DRY_RUN", "true");
         std::env::set_var("RATE_LIMIT_ADMIN", "7 per second");
@@ -780,11 +891,13 @@ mod tests {
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
         std::env::remove_var("STRICT_STREAMING_SIGV4");
+        std::env::remove_var("STORAGE_ROOT");
     }
 
     #[test]
     fn metrics_intervals_and_retentions_are_floored() {
         let _guard = env_lock().lock().unwrap();
+        let _storage = isolated_storage_root();
         std::env::set_var("OPERATION_METRICS_INTERVAL_MINUTES", "0");
         std::env::set_var("OPERATION_METRICS_RETENTION_HOURS", "0");
         std::env::set_var("METRICS_HISTORY_INTERVAL_MINUTES", "0");
@@ -801,5 +914,111 @@ mod tests {
         std::env::remove_var("OPERATION_METRICS_RETENTION_HOURS");
         std::env::remove_var("METRICS_HISTORY_INTERVAL_MINUTES");
         std::env::remove_var("METRICS_HISTORY_RETENTION_HOURS");
+        std::env::remove_var("STORAGE_ROOT");
+    }
+
+    #[test]
+    fn generates_and_reuses_a_persisted_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = secret_file_path(dir.path());
+        assert!(!secret_file.exists());
+
+        let first = resolve_secret_key(dir.path(), None).unwrap();
+        assert!(secret_file.is_file());
+        assert!(!first.is_empty());
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&first)
+                .unwrap()
+                .len(),
+            32
+        );
+
+        let second = resolve_secret_key(dir.path(), None).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read_to_string(&secret_file).unwrap().trim(), first);
+    }
+
+    #[test]
+    fn empty_secret_file_is_regenerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = secret_file_path(dir.path());
+        std::fs::create_dir_all(secret_file.parent().unwrap()).unwrap();
+        std::fs::write(&secret_file, "   \n").unwrap();
+
+        let secret = resolve_secret_key(dir.path(), None).unwrap();
+        assert!(!secret.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&secret_file).unwrap().trim(),
+            secret
+        );
+    }
+
+    #[test]
+    fn env_secret_takes_precedence_and_does_not_generate() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_secret_key(dir.path(), Some("env-provided-secret".to_string()));
+        assert_eq!(resolved.as_deref(), Some("env-provided-secret"));
+        assert!(!secret_file_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn blank_env_secret_falls_back_to_the_secret_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = secret_file_path(dir.path());
+        std::fs::create_dir_all(secret_file.parent().unwrap()).unwrap();
+        std::fs::write(&secret_file, "file-secret\n").unwrap();
+
+        assert_eq!(
+            resolve_secret_key(dir.path(), Some("   ".to_string())).as_deref(),
+            Some("file-secret")
+        );
+    }
+
+    #[test]
+    fn placeholder_secret_is_rejected_from_env_and_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = secret_file_path(dir.path());
+        std::fs::create_dir_all(secret_file.parent().unwrap()).unwrap();
+        std::fs::write(&secret_file, "file-secret").unwrap();
+
+        assert_eq!(
+            resolve_secret_key(dir.path(), Some(REJECTED_SECRET_KEY.to_string())).as_deref(),
+            Some("file-secret")
+        );
+
+        std::fs::write(&secret_file, REJECTED_SECRET_KEY).unwrap();
+        assert!(resolve_secret_key(dir.path(), None).is_none());
+        assert!(resolve_secret_key(dir.path(), Some(REJECTED_SECRET_KEY.to_string())).is_none());
+        assert_eq!(
+            std::fs::read_to_string(&secret_file).unwrap(),
+            REJECTED_SECRET_KEY
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_secret_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        resolve_secret_key(dir.path(), None).unwrap();
+
+        let mode = std::fs::metadata(secret_file_path(dir.path()))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn secret_generation_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        resolve_secret_key(dir.path(), None).unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(secret_file_path(dir.path()).parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec![".secret".to_string()]);
     }
 }

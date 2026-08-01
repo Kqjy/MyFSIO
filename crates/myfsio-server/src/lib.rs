@@ -350,8 +350,18 @@ pub fn create_ui_router(state: state::AppState) -> Router {
 
     let protected = protected.merge(admin_only);
 
+    let login_rate_limit = middleware::UiLoginRateLimitState::new(
+        state.clone(),
+        state.config.ratelimit_ui_login,
+        state.config.num_trusted_proxies,
+    );
+
     let public = Router::new()
         .route("/login", get(ui::login_page).post(ui::login_submit))
+        .route_layer(axum::middleware::from_fn_with_state(
+            login_rate_limit,
+            middleware::ui_login_rate_limit_layer,
+        ))
         .route("/logout", post(ui::logout));
 
     let session_state = middleware::SessionLayerState {

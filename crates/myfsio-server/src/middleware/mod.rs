@@ -8,7 +8,9 @@ pub use auth::{auth_layer, ui_authorize, ui_authorize_list, ui_can_see_bucket};
 pub(crate) use auth::{authorize_action, UNSUPPORTED_POLICY_CLAUSES};
 pub use auth::{StreamingPayloadVariant, StreamingSigV4Context};
 pub use bucket_cors::bucket_cors_layer;
-pub use ratelimit::{rate_limit_layer, RateLimitLayerState};
+pub use ratelimit::{
+    rate_limit_layer, ui_login_rate_limit_layer, RateLimitLayerState, UiLoginRateLimitState,
+};
 pub use session::{csrf_layer, session_layer, SessionHandle, SessionLayerState};
 
 #[derive(Clone, Copy, Debug)]
