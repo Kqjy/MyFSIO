@@ -2234,12 +2234,37 @@ fn format_history_timestamp(timestamp: Option<f64>, tz: chrono_tz::Tz) -> String
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn format_execution_duration(seconds: Option<f64>) -> String {
+    let Some(seconds) = seconds.filter(|value| value.is_finite() && *value >= 0.0) else {
+        return "—".to_string();
+    };
+
+    let rounded_hundredths = (seconds * 100.0).round() / 100.0;
+    if rounded_hundredths < 60.0 {
+        return format!("{rounded_hundredths:.2}s");
+    }
+
+    let total_seconds = seconds.round() as u64;
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else {
+        format!("{minutes}m {seconds:02}s")
+    }
+}
+
 fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
     executions
         .iter()
         .cloned()
         .map(|mut execution| {
             let timestamp = execution.get("timestamp").and_then(|value| value.as_f64());
+            let duration = execution
+                .get("result")
+                .and_then(|result| result.get("execution_time_seconds"))
+                .and_then(|value| value.as_f64());
             let bytes_freed = execution
                 .get("result")
                 .map(|result| {
@@ -2273,6 +2298,10 @@ fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
                     "bytes_freed_display".to_string(),
                     Value::String(human_size(bytes_freed)),
                 );
+                obj.insert(
+                    "duration_display".to_string(),
+                    Value::String(format_execution_duration(duration)),
+                );
             }
             execution
         })
@@ -2285,10 +2314,18 @@ fn decorate_integrity_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Va
         .cloned()
         .map(|mut execution| {
             let timestamp = execution.get("timestamp").and_then(|value| value.as_f64());
+            let duration = execution
+                .get("result")
+                .and_then(|result| result.get("execution_time_seconds"))
+                .and_then(|value| value.as_f64());
             if let Some(obj) = execution.as_object_mut() {
                 obj.insert(
                     "timestamp_display".to_string(),
                     Value::String(format_history_timestamp(timestamp, tz)),
+                );
+                obj.insert(
+                    "duration_display".to_string(),
+                    Value::String(format_execution_duration(duration)),
                 );
             }
             execution
@@ -2354,6 +2391,10 @@ pub async fn system_dashboard(
             "running": false,
             "scanning": false,
             "scan_elapsed_seconds": Value::Null,
+            "last_run_total_issues": 0,
+            "peer_heal_available": false,
+            "persistence_error": Value::Null,
+            "quarantine_retention_days": Value::Null,
         }),
     };
     let integrity_history = match state.integrity.as_ref().filter(|_| can_read_integrity) {
@@ -4089,5 +4130,21 @@ mod connection_form_tests {
         assert!(stored > 0, "must not wrap to 0; got {stored}");
         let resolved = tuning.resolve().multipart_concurrency;
         assert!((1..=64).contains(&resolved), "got {resolved}");
+    }
+}
+
+#[cfg(test)]
+mod history_format_tests {
+    use super::format_execution_duration;
+
+    #[test]
+    fn formats_execution_durations_for_history_tables() {
+        assert_eq!(format_execution_duration(None), "—");
+        assert_eq!(format_execution_duration(Some(f64::NAN)), "—");
+        assert_eq!(format_execution_duration(Some(-1.0)), "—");
+        assert_eq!(format_execution_duration(Some(0.125)), "0.13s");
+        assert_eq!(format_execution_duration(Some(59.999)), "1m 00s");
+        assert_eq!(format_execution_duration(Some(62.4)), "1m 02s");
+        assert_eq!(format_execution_duration(Some(3_723.0)), "1h 02m 03s");
     }
 }

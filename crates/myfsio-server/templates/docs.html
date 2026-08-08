@@ -1806,7 +1806,7 @@ curl "{{ api_base }}/&lt;bucket&gt;?lifecycle" \
               <tr><td><strong>Temp files</strong></td><td><code>.myfsio.sys/tmp/</code></td><td>Older than configured max age</td></tr>
               <tr><td><strong>Orphaned multipart</strong></td><td><code>.myfsio.sys/multipart/</code></td><td>Older than configured max age</td></tr>
               <tr><td><strong>Stale lock files</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/locks/</code></td><td>Older than configured max age</td></tr>
-              <tr><td><strong>Quarantined files</strong></td><td><code>.myfsio.sys/quarantine/&lt;bucket&gt;/</code></td><td>Older than <code>INTEGRITY_QUARANTINE_RETENTION_DAYS</code></td></tr>
+              <tr><td><strong>Quarantined files</strong></td><td><code>.myfsio.sys/quarantine/&lt;bucket&gt;/</code></td><td>Older than <code>INTEGRITY_QUARANTINE_RETENTION_DAYS</code> and no longer referenced by poisoned metadata</td></tr>
               <tr><td><strong>Orphaned segment dirs</strong></td><td><code>.myfsio.sys/buckets/&lt;bucket&gt;/segments/</code></td><td>Unreferenced and older than <code>GC_SEGMENT_MAX_AGE_HOURS</code></td></tr>
               <tr><td><strong>Empty directories</strong></td><td><code>.myfsio.sys/tmp/</code> and <code>.myfsio.sys/multipart/</code></td><td>Directory is empty after cleanup</td></tr>
             </tbody>
@@ -1887,12 +1887,12 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
             <tbody>
               <tr><td><code>INTEGRITY_ENABLED</code></td><td><code>false</code></td><td>Enable the background integrity scanner</td></tr>
               <tr><td><code>INTEGRITY_INTERVAL_HOURS</code></td><td><code>24</code></td><td>Hours between background scans</td></tr>
-              <tr><td><code>INTEGRITY_BATCH_SIZE</code></td><td><code>10000</code></td><td>Maximum objects scanned per cycle</td></tr>
+              <tr><td><code>INTEGRITY_BATCH_SIZE</code></td><td><code>10000</code></td><td>Maximum metadata entries examined by the rotating checksum phase per cycle; structural checks still inspect every bucket</td></tr>
               <tr><td><code>INTEGRITY_AUTO_HEAL</code></td><td><code>false</code></td><td>Attempt heals after each scan</td></tr>
-              <tr><td><code>INTEGRITY_DRY_RUN</code></td><td><code>false</code></td><td>Report heal actions without changing files</td></tr>
+              <tr><td><code>INTEGRITY_DRY_RUN</code></td><td><code>false</code></td><td>When auto-heal is requested, report eligible heal actions without changing files</td></tr>
               <tr><td><code>INTEGRITY_HEAL_CONCURRENCY</code></td><td><code>1</code></td><td>Maximum concurrent heal tasks</td></tr>
-              <tr><td><code>INTEGRITY_SCAN_PACING_MS</code></td><td><code>0</code></td><td>Optional delay between scanned objects</td></tr>
-              <tr><td><code>INTEGRITY_QUARANTINE_RETENTION_DAYS</code></td><td><code>7</code></td><td>How long GC retains quarantined files</td></tr>
+              <tr><td><code>INTEGRITY_SCAN_PACING_MS</code></td><td><code>0</code></td><td>Optional pause after each 100 inspected entries</td></tr>
+              <tr><td><code>INTEGRITY_QUARANTINE_RETENTION_DAYS</code></td><td><code>7</code></td><td>Minimum quarantine age before GC cleanup; entries still awaiting recovery are retained</td></tr>
             </tbody>
           </table>
         </div>
@@ -1909,7 +1909,8 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
               </tr>
             </thead>
             <tbody>
-              <tr><td><strong>Corrupted objects</strong></td><td>File MD5 does not match stored ETag</td><td>Quarantine bytes, try peer restore, otherwise mark poisoned</td></tr>
+              <tr><td><strong>Corrupted objects</strong></td><td>Single-part MD5 or multipart composite checksum does not match the stored ETag</td><td>Single-part objects are quarantined and restored from a peer when possible; recovery is retried on later scans</td></tr>
+              <tr><td><strong>Poisoned objects</strong></td><td>Metadata references quarantined bytes and the live object is unavailable</td><td>Retry a verified peer restore; referenced quarantine data is protected from GC</td></tr>
               <tr><td><strong>Orphaned objects</strong></td><td>File exists without metadata entry</td><td>Reported only; no automatic heal</td></tr>
               <tr><td><strong>Phantom metadata</strong></td><td>Index entry exists but file is missing</td><td>Remove stale entry from index</td></tr>
               <tr><td><strong>Stale versions</strong></td><td>Manifest without data or vice versa</td><td>Move stale version files to quarantine</td></tr>
@@ -1917,6 +1918,7 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
             </tbody>
           </table>
         </div>
+        <p class="small text-muted mb-3">Encrypted objects are counted as content-unverifiable because proactive verification does not have the request-time key material required for every encryption mode. Multipart objects completed before the part-size manifest existed are counted as unverifiable rather than corrupted, because their composite ETag cannot be recomputed. Version checks currently verify manifest/data pairing, not historical object checksums. These limitations are reported explicitly in scan results.</p>
 
         <h3 class="h6 text-uppercase text-muted mt-4">Admin API</h3>
         <div class="table-responsive mb-3">

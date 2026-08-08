@@ -194,14 +194,16 @@ impl ServerConfig {
         let gc_dry_run = parse_bool_env("GC_DRY_RUN", false);
 
         let integrity_enabled = parse_bool_env("INTEGRITY_ENABLED", false);
-        let integrity_interval_hours = parse_f64_env("INTEGRITY_INTERVAL_HOURS", 24.0);
-        let integrity_batch_size = parse_usize_env("INTEGRITY_BATCH_SIZE", 10_000);
+        let integrity_interval_hours =
+            positive_f64(parse_f64_env("INTEGRITY_INTERVAL_HOURS", 24.0), 24.0);
+        let integrity_batch_size = parse_usize_env("INTEGRITY_BATCH_SIZE", 10_000).max(1);
         let integrity_auto_heal = parse_bool_env("INTEGRITY_AUTO_HEAL", false);
         let integrity_dry_run = parse_bool_env("INTEGRITY_DRY_RUN", false);
-        let integrity_heal_concurrency = parse_usize_env("INTEGRITY_HEAL_CONCURRENCY", 1);
+        let integrity_heal_concurrency =
+            parse_usize_env("INTEGRITY_HEAL_CONCURRENCY", 1).clamp(1, 64);
         let integrity_scan_pacing_ms = parse_u64_env("INTEGRITY_SCAN_PACING_MS", 0);
         let integrity_quarantine_retention_days =
-            parse_u64_env("INTEGRITY_QUARANTINE_RETENTION_DAYS", 7);
+            parse_u64_env("INTEGRITY_QUARANTINE_RETENTION_DAYS", 7).max(1);
 
         let metrics_enabled = parse_bool_env("OPERATION_METRICS_ENABLED", false);
 
@@ -726,6 +728,14 @@ fn parse_f64_env(key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+fn positive_f64(value: f64, default: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        default
+    }
+}
+
 fn parse_bool_env(key: &str, default: bool) -> bool {
     std::env::var(key)
         .ok()
@@ -836,6 +846,15 @@ mod tests {
         assert_eq!(parse_rate_limit("0/60"), None);
         assert_eq!(parse_rate_limit("0 per minute"), None);
         assert_eq!(parse_rate_limit("bad"), None);
+    }
+
+    #[test]
+    fn positive_float_configuration_rejects_invalid_intervals() {
+        assert_eq!(positive_f64(2.5, 24.0), 2.5);
+        assert_eq!(positive_f64(0.0, 24.0), 24.0);
+        assert_eq!(positive_f64(-1.0, 24.0), 24.0);
+        assert_eq!(positive_f64(f64::NAN, 24.0), 24.0);
+        assert_eq!(positive_f64(f64::INFINITY, 24.0), 24.0);
     }
 
     fn isolated_storage_root() -> tempfile::TempDir {
