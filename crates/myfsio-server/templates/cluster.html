@@ -55,7 +55,7 @@
         </div>
         <div class="flex-grow-1">
           <div class="text-uppercase text-muted small">Buckets</div>
-          <div class="h3 mb-0" id="cluster-total-buckets">{{ cluster_total_buckets }}</div>
+          <div class="h3 mb-0" id="cluster-total-buckets">{{ cluster_total_buckets | intcomma }}</div>
         </div>
       </div>
     </div>
@@ -70,7 +70,7 @@
         </div>
         <div class="flex-grow-1">
           <div class="text-uppercase text-muted small">Objects</div>
-          <div class="h3 mb-0" id="cluster-total-objects">{{ cluster_total_objects }}</div>
+          <div class="h3 mb-0" id="cluster-total-objects">{{ cluster_total_objects | intcomma }}</div>
         </div>
       </div>
     </div>
@@ -86,7 +86,7 @@
         </div>
         <div class="flex-grow-1">
           <div class="text-uppercase text-muted small">Size</div>
-          <div class="h3 mb-0" id="cluster-total-size" data-bytes="{{ cluster_total_size_bytes }}">{{ cluster_total_size_bytes }}</div>
+          <div class="h3 mb-0" id="cluster-total-size" data-bytes="{{ cluster_total_size_bytes }}">{{ cluster_total_size_bytes | filesizeformat }}</div>
         </div>
       </div>
     </div>
@@ -132,21 +132,21 @@
                 <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" viewBox="0 0 16 16"><path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/></svg>
                 Buckets
               </div>
-              <div class="h4 mb-0 site-buckets">{{ site.buckets | default(value=0) }}</div>
+              <div class="h4 mb-0 site-buckets">{{ site.buckets | default(value=0) | intcomma }}</div>
             </div>
             <div class="col-4">
               <div class="text-uppercase text-muted small mb-1 d-flex align-items-center gap-1">
                 <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" viewBox="0 0 16 16"><path d="M14 14V4.5L9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2z"/></svg>
                 Objects
               </div>
-              <div class="h4 mb-0 site-objects">{{ site.objects | default(value=0) }}</div>
+              <div class="h4 mb-0 site-objects">{{ site.objects | default(value=0) | intcomma }}</div>
             </div>
             <div class="col-4">
               <div class="text-uppercase text-muted small mb-1 d-flex align-items-center gap-1">
                 <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" viewBox="0 0 16 16"><path d="M0 10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8H0v2zM0 4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3H0V4z"/></svg>
                 Size
               </div>
-              <div class="h4 mb-0 site-size" data-bytes="{{ site.size_bytes | default(value=0) }}">{{ site.size_bytes | default(value=0) }}</div>
+              <div class="h4 mb-0 site-size" data-bytes="{{ site.size_bytes | default(value=0) }}">{{ site.size_bytes | default(value=0) | filesizeformat }}</div>
             </div>
           </div>
 
@@ -154,7 +154,7 @@
             <div class="d-flex justify-content-between align-items-center mb-1">
               <span class="text-uppercase text-muted small">Disk Capacity</span>
               <span class="small text-muted">
-                <span class="site-disk-used" data-bytes="0">0</span> / <span class="site-disk-total" data-bytes="{{ site.capacity.total_bytes | default(value=0) }}">{{ site.capacity.total_bytes | default(value=0) }}</span>
+                <span class="site-disk-used" data-bytes="{{ site.capacity.used_bytes | default(value=0) }}">{{ site.capacity.used_bytes | default(value=0) | filesizeformat }}</span> / <span class="site-disk-total" data-bytes="{{ site.capacity.total_bytes | default(value=0) }}">{{ site.capacity.total_bytes | default(value=0) | filesizeformat }}</span>
               </span>
             </div>
             <div class="progress" style="height:6px;border-radius:3px;">
@@ -307,9 +307,16 @@
   </div>
 </div>
 
+{% endblock %}
+
+{% block extra_scripts %}
 <script>
 (function () {
     var fmtBytes = window.MyFSIO.formatBytes;
+    function fmtCount(value) {
+        var n = Number(value);
+        return isFinite(n) ? n.toLocaleString() : String(value == null ? 0 : value);
+    }
     function fmtRel(ts) {
         var diff = Math.max(0, Math.floor(Date.now() / 1000 - ts));
         if (diff < 60) return diff + "s ago";
@@ -392,7 +399,7 @@
         if (online) {
             var setNum = function (sel, val) {
                 var el = card.querySelector(sel);
-                if (el) el.textContent = String(val == null ? 0 : val);
+                if (el) el.textContent = fmtCount(val == null ? 0 : val);
             };
             setNum(".site-buckets", site.buckets);
             setNum(".site-objects", site.objects);
@@ -472,7 +479,7 @@
                 var totals = data.totals || {};
                 var setTotal = function (id, v) {
                     var el = document.getElementById(id);
-                    if (el) el.textContent = String(v == null ? 0 : v);
+                    if (el) el.textContent = fmtCount(v == null ? 0 : v);
                 };
                 setTotal("cluster-total-sites", totals.total_count);
                 setTotal("cluster-total-buckets", totals.buckets);

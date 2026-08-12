@@ -10,7 +10,6 @@ use crc32fast::Hasher;
 use duckdb::types::ValueRef;
 use duckdb::Connection;
 use futures::stream;
-use http_body_util::BodyExt;
 use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_storage::traits::StorageEngine;
 
@@ -33,14 +32,9 @@ pub async fn post_select_object_content(
         return resp;
     }
 
-    let body_bytes = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::MalformedXML,
-                "Unable to parse XML document",
-            ));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let request = match parse_select_request(&body_bytes) {

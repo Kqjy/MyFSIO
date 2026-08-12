@@ -96,15 +96,26 @@ impl SessionStore {
         let ttl = self.ttl;
         guard.retain(|_, data| data.last_accessed.elapsed() <= ttl);
         while guard.len() >= self.capacity {
-            let Some(victim) = guard
+            let victim = guard
                 .iter()
+                .filter(|(_, v)| !v.is_authenticated())
                 .min_by_key(|(_, v)| v.last_accessed)
                 .map(|(k, _)| k.clone())
-            else {
+                .or_else(|| {
+                    guard
+                        .iter()
+                        .min_by_key(|(_, v)| v.last_accessed)
+                        .map(|(k, _)| k.clone())
+                });
+            let Some(victim) = victim else {
                 break;
             };
             guard.remove(&victim);
         }
+    }
+
+    pub fn ephemeral(&self) -> (String, SessionData) {
+        (generate_token(SESSION_ID_BYTES), SessionData::new())
     }
 
     pub fn create(&self) -> (String, SessionData) {
@@ -185,4 +196,61 @@ pub fn csrf_tokens_match(a: &str, b: &str) -> bool {
         return false;
     }
     subtle::ConstantTimeEq::ct_eq(a.as_bytes(), b.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store(capacity: usize) -> SessionStore {
+        SessionStore::with_capacity(Duration::from_secs(3600), capacity)
+    }
+
+    #[test]
+    fn ephemeral_sessions_are_not_stored_until_saved() {
+        let store = store(16);
+        let (id, data) = store.ephemeral();
+        assert!(store.is_empty());
+        assert!(store.get(&id).is_none());
+
+        store.save(&id, data);
+        assert_eq!(store.len(), 1);
+        assert!(store.get(&id).is_some());
+    }
+
+    #[test]
+    fn capacity_eviction_prefers_unauthenticated_sessions() {
+        let store = store(4);
+
+        let mut signed_in = SessionData::new();
+        signed_in.user_id = Some("AKIAADMIN".to_string());
+        store.save("signed-in", signed_in);
+
+        for i in 0..8 {
+            store.save(&format!("anon-{}", i), SessionData::new());
+        }
+
+        assert!(store.len() <= store.capacity());
+        assert!(
+            store.get("signed-in").is_some(),
+            "an authenticated session must outlive anonymous ones under capacity pressure"
+        );
+    }
+
+    #[test]
+    fn authenticated_sessions_are_evicted_only_as_a_last_resort() {
+        let store = store(3);
+
+        for i in 0..6 {
+            let mut data = SessionData::new();
+            data.user_id = Some(format!("AKIAUSER{}", i));
+            store.save(&format!("user-{}", i), data);
+        }
+
+        assert!(store.len() <= store.capacity());
+        assert!(
+            store.get("user-5").is_some(),
+            "the newest authenticated session must survive"
+        );
+    }
 }

@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::io::Cursor;
 use std::path::{Component, Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sysinfo::{Disks, System};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::io::StreamReader;
 
 use crate::handlers::{self, ObjectQuery};
 use crate::middleware::session::SessionHandle;
@@ -52,6 +53,8 @@ const AWS_QUERY_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 
 const UI_OBJECT_BROWSER_MAX_KEYS: usize = 5000;
+const UI_JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
+const UI_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 fn url_templates_for(bucket: &str) -> Value {
     json!({
@@ -90,8 +93,8 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
 }
 
 fn reject_invalid_bucket(bucket: &str) -> Option<Response> {
-    myfsio_storage::validation::validate_bucket_name(bucket)
-        .map(|_| json_error(StatusCode::BAD_REQUEST, "Invalid bucket name"))
+    myfsio_storage::validation::bucket_name_rejection(bucket)
+        .map(|reason| json_error(StatusCode::BAD_REQUEST, reason))
 }
 
 async fn ensure_ui_authorized(
@@ -120,6 +123,46 @@ async fn ensure_ui_authorized(
         Ok(()) => Ok(()),
         Err(message) => Err(json_error(StatusCode::FORBIDDEN, message)),
     }
+}
+
+pub(crate) async fn ui_has_system_action(
+    state: &AppState,
+    session: &SessionHandle,
+    action: &str,
+) -> bool {
+    let Some(access_key) = session.read(|s| s.user_id.clone()) else {
+        return false;
+    };
+    let Some(principal) = state.iam.get_principal(&access_key) else {
+        return false;
+    };
+    state.iam.authorize(&principal, None, action, None)
+}
+
+async fn ensure_ui_system_action(
+    state: &AppState,
+    session: &SessionHandle,
+    action: &str,
+) -> Result<(), Response> {
+    let access_key = match session.read(|s| s.user_id.clone()) {
+        Some(key) => key,
+        None => {
+            return Err(json_error(StatusCode::UNAUTHORIZED, "Sign in to continue."));
+        }
+    };
+    let Some(principal) = state.iam.get_principal(&access_key) else {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "Your session is no longer valid.",
+        ));
+    };
+    if state.iam.authorize(&principal, None, action, None) {
+        return Ok(());
+    }
+    Err(json_error(
+        StatusCode::FORBIDDEN,
+        format!("Requires {} permission", action),
+    ))
 }
 
 async fn authorize_ui_list_prefix(
@@ -300,6 +343,7 @@ fn storage_status(err: &StorageError) -> StatusCode {
         StorageError::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
         StorageError::InvalidBucketName(_)
         | StorageError::InvalidObjectKey(_)
+        | StorageError::InvalidArgument(_)
         | StorageError::InvalidRange
         | StorageError::QuotaExceeded(_) => StatusCode::BAD_REQUEST,
         StorageError::BucketAlreadyExists(_) => StatusCode::CONFLICT,
@@ -397,24 +441,47 @@ fn key_relative_path(key: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+fn checked_bucket(bucket: &str) -> Result<&str, String> {
+    match myfsio_storage::validation::bucket_name_rejection(bucket) {
+        Some(reason) => Err(reason),
+        None => Ok(bucket),
+    }
+}
+
 fn object_live_path(state: &AppState, bucket: &str, key: &str) -> Result<PathBuf, String> {
+    let bucket = checked_bucket(bucket)?;
     let rel = key_relative_path(key)?;
     Ok(state.config.storage_root.join(bucket).join(rel))
 }
 
-fn version_root_for_bucket(state: &AppState, bucket: &str) -> PathBuf {
-    state
+fn version_root_for_bucket(state: &AppState, bucket: &str) -> Result<PathBuf, String> {
+    let bucket = checked_bucket(bucket)?;
+    Ok(state
         .config
         .storage_root
         .join(SYSTEM_ROOT)
         .join(SYSTEM_BUCKETS_DIR)
         .join(bucket)
-        .join(BUCKET_VERSIONS_DIR)
+        .join(BUCKET_VERSIONS_DIR))
 }
 
 fn version_dir_for_object(state: &AppState, bucket: &str, key: &str) -> Result<PathBuf, String> {
     let rel = key_relative_path(key)?;
-    Ok(version_root_for_bucket(state, bucket).join(rel))
+    Ok(version_root_for_bucket(state, bucket)?.join(rel))
+}
+
+fn version_id_component(version_id: &str) -> Result<&str, String> {
+    if version_id.is_empty() || version_id.contains('\\') || version_id.contains('\0') {
+        return Err("Invalid version id".to_string());
+    }
+    let mut components = FsPath::new(version_id).components();
+    let Some(Component::Normal(part)) = components.next() else {
+        return Err("Invalid version id".to_string());
+    };
+    if components.next().is_some() || part.len() != version_id.len() {
+        return Err("Invalid version id".to_string());
+    }
+    Ok(version_id)
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1105,10 +1172,69 @@ async fn has_pdf_magic(state: &AppState, bucket: &str, key: &str) -> Result<bool
     Ok(read == magic.len() && magic == *b"%PDF-")
 }
 
-async fn parse_json_body<T: DeserializeOwned>(body: Body) -> Result<T, Response> {
-    let bytes = to_bytes(body, usize::MAX)
+fn s3_xml_error_detail(xml: &str) -> Option<String> {
+    let doc = Document::parse(xml).ok()?;
+    let root = doc.root_element();
+    let tag_text = |tag: &str| {
+        root.descendants()
+            .find(|node| node.has_tag_name(tag))
+            .and_then(|node| node.text())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    match (tag_text("Code"), tag_text("Message")) {
+        (Some(code), Some(message)) => Some(format!("{} ({})", message, code)),
+        (None, Some(message)) => Some(message),
+        (Some(code), None) => Some(code),
+        (None, None) => None,
+    }
+}
+
+async fn s3_xml_error_to_json(response: Response) -> Response {
+    let status = response.status();
+    let body = handlers::collect_body_capped(response.into_body(), UI_JSON_BODY_LIMIT)
         .await
-        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Failed to read request body"))?;
+        .unwrap_or_default();
+    let detail = s3_xml_error_detail(&String::from_utf8_lossy(&body))
+        .unwrap_or_else(|| format!("Upload failed with status {}", status.as_u16()));
+    json_error(status, detail)
+}
+
+fn multipart_json_error(err: multer::Error) -> Response {
+    match err {
+        multer::Error::FieldSizeExceeded { limit, .. } => json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "A form field other than the file may not exceed {}",
+                human_size(limit)
+            ),
+        ),
+        other => json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Malformed multipart body: {}", other),
+        ),
+    }
+}
+
+async fn read_ui_body(body: Body, limit: usize) -> Result<bytes::Bytes, Response> {
+    handlers::collect_body_capped(body, limit)
+        .await
+        .map_err(|err| match err {
+            handlers::BodyLimitError::Unreadable => {
+                json_error(StatusCode::BAD_REQUEST, "Failed to read request body")
+            }
+            handlers::BodyLimitError::TooLarge(limit) => json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Request body exceeds the {} limit",
+                    human_size(limit as u64)
+                ),
+            ),
+        })
+}
+
+async fn parse_json_body<T: DeserializeOwned>(body: Body) -> Result<T, Response> {
+    let bytes = read_ui_body(body, UI_JSON_BODY_LIMIT).await?;
     serde_json::from_slice::<T>(&bytes)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("Invalid JSON body: {}", e)))
 }
@@ -1611,15 +1737,28 @@ pub async fn list_bucket_folders(
 
 pub async fn list_copy_targets(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(_bucket_name): Path<String>,
 ) -> Response {
-    let buckets: Vec<String> = state
+    let access_key = match session.read(|s| s.user_id.clone()) {
+        Some(key) => key,
+        None => return json_error(StatusCode::UNAUTHORIZED, "Sign in to continue."),
+    };
+    let Some(principal) = state.iam.get_principal(&access_key) else {
+        return json_error(StatusCode::UNAUTHORIZED, "Your session is no longer valid.");
+    };
+    let all: Vec<String> = state
         .storage
         .list_buckets()
         .await
         .map(|list| list.into_iter().map(|b| b.name).collect())
         .unwrap_or_default();
+    let mut buckets = Vec::with_capacity(all.len());
+    for name in all {
+        if crate::middleware::ui_can_see_bucket(&state, &principal, &name).await {
+            buckets.push(name);
+        }
+    }
     Json(json!({ "buckets": buckets })).into_response()
 }
 
@@ -2524,7 +2663,12 @@ pub async fn upload_object(
     let stream = BodyStream::new(body)
         .map_ok(|frame| frame.into_data().unwrap_or_default())
         .map_err(std::io::Error::other);
-    let mut multipart = multer::Multipart::new(stream, boundary);
+    let constraints = multer::Constraints::new().size_limit(
+        multer::SizeLimit::new()
+            .per_field(handlers::POST_FORM_FIELD_LIMIT)
+            .for_field("object", u64::MAX),
+    );
+    let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
 
     let mut object_key: Option<String> = None;
     let mut metadata_raw: Option<String> = None;
@@ -2534,12 +2678,7 @@ pub async fn upload_object(
 
     while let Some(mut field) = match multipart.next_field().await {
         Ok(field) => field,
-        Err(e) => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                format!("Malformed multipart body: {}", e),
-            )
-        }
+        Err(e) => return multipart_json_error(e),
     } {
         let name = field.name().unwrap_or_default().to_string();
         match name.as_str() {
@@ -2687,6 +2826,7 @@ pub async fn upload_object(
         State(state),
         Path((bucket_name.clone(), key.clone())),
         Query(ObjectQuery::default()),
+        axum::extract::RawQuery(None),
         None,
         None,
         None,
@@ -2697,7 +2837,7 @@ pub async fn upload_object(
     drop(temp_file);
 
     if !response.status().is_success() {
-        return response;
+        return s3_xml_error_to_json(response).await;
     }
 
     let mut message = format!("Uploaded '{}'", key);
@@ -2732,9 +2872,15 @@ pub async fn initiate_multipart_upload(
         return resp;
     }
 
+    let metadata = payload.metadata.map(|map| {
+        map.into_iter()
+            .filter(|(key, _)| !myfsio_storage::validation::is_reserved_user_metadata_key(key))
+            .collect::<HashMap<String, String>>()
+    });
+
     match state
         .storage
-        .initiate_multipart(&bucket_name, object_key, payload.metadata)
+        .initiate_multipart(&bucket_name, object_key, metadata)
         .await
     {
         Ok(upload_id) => json_ok(json!({ "upload_id": upload_id })),
@@ -2770,19 +2916,64 @@ pub async fn upload_multipart_part(
         );
     }
 
-    let bytes = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) if !bytes.is_empty() => bytes,
-        Ok(_) => return json_error(StatusCode::BAD_REQUEST, "Empty request body"),
-        Err(_) => return json_error(StatusCode::BAD_REQUEST, "Failed to read request body"),
-    };
-    let reader: myfsio_storage::traits::AsyncReadStream = Box::pin(Cursor::new(bytes.to_vec()));
+    let mut frames = BodyStream::new(body)
+        .map_ok(|frame| frame.into_data().unwrap_or_default())
+        .map_err(std::io::Error::other);
+
+    let mut first = bytes::Bytes::new();
+    loop {
+        match frames.next().await {
+            Some(Ok(chunk)) if chunk.is_empty() => continue,
+            Some(Ok(chunk)) => {
+                first = chunk;
+                break;
+            }
+            Some(Err(_)) => {
+                return json_error(StatusCode::BAD_REQUEST, "Failed to read request body")
+            }
+            None => break,
+        }
+    }
+    if first.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "Empty request body");
+    }
+
+    let oversized = Arc::new(AtomicBool::new(false));
+    let overflow_flag = oversized.clone();
+    let chunks = futures::stream::once(std::future::ready(Ok(first)))
+        .chain(frames)
+        .scan(0u64, move |uploaded, chunk| {
+            let next = chunk.and_then(|data| {
+                *uploaded = uploaded.saturating_add(data.len() as u64);
+                if *uploaded > UI_MAX_PART_BYTES {
+                    overflow_flag.store(true, Ordering::Relaxed);
+                    Err(std::io::Error::other("part exceeds the maximum size"))
+                } else {
+                    Ok(data)
+                }
+            });
+            std::future::ready(Some(next))
+        });
+
+    let reader: myfsio_storage::traits::AsyncReadStream = Box::pin(StreamReader::new(chunks));
     match state
         .storage
         .upload_part(&bucket_name, &upload_id, part_number, reader)
         .await
     {
         Ok(etag) => json_ok(json!({ "etag": etag, "part_number": part_number })),
-        Err(err) => storage_json_error(err),
+        Err(err) => {
+            if oversized.load(Ordering::Relaxed) {
+                return json_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "Part exceeds the maximum size of {}",
+                        human_size(UI_MAX_PART_BYTES)
+                    ),
+                );
+            }
+            storage_json_error(err)
+        }
     }
 }
 
@@ -2804,7 +2995,6 @@ pub async fn complete_multipart_upload(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
     let upload_key =
@@ -2830,13 +3020,9 @@ pub async fn complete_multipart_upload(
         })
         .collect::<Vec<_>>();
 
-    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
-        &state,
-        &bucket_name,
-        &upload_key,
-        Some(&headers),
-    )
-    .await
+    if let Err(response) =
+        super::ensure_archived_null_lock_allows_overwrite(&state, &bucket_name, &upload_key, false)
+            .await
     {
         return response;
     }
@@ -2847,6 +3033,12 @@ pub async fn complete_multipart_upload(
         .await
     {
         Ok(meta) => {
+            crate::services::object_lock::apply_default_retention_to_stored(
+                &state,
+                &bucket_name,
+                &meta.key,
+            )
+            .await;
             super::trigger_replication(&state, &bucket_name, &meta.key, "write", None);
             json_ok(json!({
                 "key": meta.key,
@@ -2891,6 +3083,9 @@ pub async fn bucket_acl(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+        return resp;
+    }
     match get_bucket_config_json(&state, &bucket_name).await {
         Ok(config) => Json(parse_acl_value(
             config.acl.as_ref(),
@@ -2950,9 +3145,12 @@ pub async fn update_bucket_acl(
 
 pub async fn bucket_cors(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+        return resp;
+    }
     match get_bucket_config_json(&state, &bucket_name).await {
         Ok(config) => Json(parse_cors_value(config.cors.as_ref())).into_response(),
         Err(err) => storage_json_error(err),
@@ -3002,9 +3200,12 @@ pub async fn update_bucket_cors(
 
 pub async fn bucket_lifecycle(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+        return resp;
+    }
     match get_bucket_config_json(&state, &bucket_name).await {
         Ok(config) => Json(parse_lifecycle_value(config.lifecycle.as_ref())).into_response(),
         Err(err) => storage_json_error(err),
@@ -3095,8 +3296,14 @@ async fn serve_object_download_or_preview(
 
     let bucket_for_log = bucket.clone();
     let key_for_log = key.clone();
-    let mut response =
-        handlers::get_object(State(state), Path((bucket, key)), Query(query), headers).await;
+    let mut response = handlers::get_object(
+        State(state),
+        Path((bucket, key)),
+        Query(query),
+        axum::extract::RawQuery(None),
+        headers,
+    )
+    .await;
     response
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
@@ -3396,7 +3603,6 @@ async fn copy_object_json(
     session: &SessionHandle,
     bucket: &str,
     key: &str,
-    headers: &HeaderMap,
     body: Body,
 ) -> Response {
     let payload: CopyMovePayload = match parse_json_body(body).await {
@@ -3421,13 +3627,8 @@ async fn copy_object_json(
         return resp;
     }
 
-    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
-        state,
-        dest_bucket,
-        dest_key,
-        Some(headers),
-    )
-    .await
+    if let Err(response) =
+        super::ensure_archived_null_lock_allows_overwrite(state, dest_bucket, dest_key, false).await
     {
         return response;
     }
@@ -3456,7 +3657,6 @@ async fn move_object_json(
     session: &SessionHandle,
     bucket: &str,
     key: &str,
-    headers: &HeaderMap,
     body: Body,
 ) -> Response {
     let payload: CopyMovePayload = match parse_json_body(body).await {
@@ -3494,13 +3694,8 @@ async fn move_object_json(
         return resp;
     }
 
-    if let Err(response) = super::ensure_archived_null_lock_allows_overwrite(
-        state,
-        dest_bucket,
-        dest_key,
-        Some(headers),
-    )
-    .await
+    if let Err(response) =
+        super::ensure_archived_null_lock_allows_overwrite(state, dest_bucket, dest_key, false).await
     {
         return response;
     }
@@ -3555,9 +3750,9 @@ async fn delete_object_json(
         return resp;
     }
 
-    let body_bytes = match to_bytes(body, usize::MAX).await {
+    let body_bytes = match read_ui_body(body, UI_JSON_BODY_LIMIT).await {
         Ok(bytes) => bytes,
-        Err(_) => return json_error(StatusCode::BAD_REQUEST, "Failed to read request body"),
+        Err(response) => return response,
     };
 
     let content_type = headers
@@ -3661,6 +3856,10 @@ async fn restore_object_version_json(
     key: &str,
     version_id: &str,
 ) -> Response {
+    let version_id = match version_id_component(version_id) {
+        Ok(value) => value,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
+    };
     let version_dir = match version_dir_for_object(state, bucket, key) {
         Ok(path) => path,
         Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
@@ -3886,10 +4085,10 @@ pub async fn object_post_dispatch(
             update_object_tags(&state, &bucket_name, &key, body).await
         }
         ObjectPostAction::Copy => {
-            copy_object_json(&state, &session, &bucket_name, &key, &headers, body).await
+            copy_object_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Move => {
-            move_object_json(&state, &session, &bucket_name, &key, &headers, body).await
+            move_object_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Restore(version_id) => {
             if let Err(resp) =
@@ -4157,7 +4356,10 @@ pub async fn archived_objects(
     if let Err(resp) = authorize_ui_list_prefix(&state, &session, &bucket_name, "").await {
         return resp;
     }
-    let versions_root = version_root_for_bucket(&state, &bucket_name);
+    let versions_root = match version_root_for_bucket(&state, &bucket_name) {
+        Ok(path) => path,
+        Err(_) => return json_error(StatusCode::BAD_REQUEST, "Invalid bucket name"),
+    };
     if !versions_root.exists() {
         return Json(json!({ "objects": [] })).into_response();
     }
@@ -4277,8 +4479,11 @@ pub async fn archived_post_dispatch(
 
 pub async fn gc_status_ui(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_system_action(&state, &session, "system:gc_read").await {
+        return resp;
+    }
     match &state.gc {
         Some(gc) => Json(gc.status().await).into_response(),
         None => Json(json!({
@@ -4291,9 +4496,12 @@ pub async fn gc_status_ui(
 
 pub async fn gc_run_ui(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     body: Body,
 ) -> Response {
+    if let Err(resp) = ensure_ui_system_action(&state, &session, "system:gc_run").await {
+        return resp;
+    }
     let Some(gc) = &state.gc else {
         return json_error(StatusCode::BAD_REQUEST, "GC is not enabled");
     };
@@ -4314,9 +4522,12 @@ pub async fn gc_run_ui(
 
 pub async fn gc_history_ui(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_system_action(&state, &session, "system:gc_read").await {
+        return resp;
+    }
     let limit = params.get("limit").and_then(|v| v.parse::<usize>().ok());
     match &state.gc {
         Some(gc) => Json(apply_history_limit(gc.history().await, limit)).into_response(),
@@ -4326,8 +4537,11 @@ pub async fn gc_history_ui(
 
 pub async fn integrity_status_ui(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_system_action(&state, &session, "system:integrity_read").await {
+        return resp;
+    }
     match &state.integrity {
         Some(checker) => Json(checker.status().await).into_response(),
         None => Json(json!({
@@ -4340,9 +4554,12 @@ pub async fn integrity_status_ui(
 
 pub async fn integrity_run_ui(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     body: Body,
 ) -> Response {
+    if let Err(resp) = ensure_ui_system_action(&state, &session, "system:integrity_run").await {
+        return resp;
+    }
     let Some(checker) = &state.integrity else {
         return json_error(StatusCode::BAD_REQUEST, "Integrity checker is not enabled");
     };
@@ -4367,9 +4584,12 @@ pub async fn integrity_run_ui(
 
 pub async fn integrity_history_ui(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_system_action(&state, &session, "system:integrity_read").await {
+        return resp;
+    }
     let limit = params.get("limit").and_then(|v| v.parse::<usize>().ok());
     match &state.integrity {
         Some(checker) => Json(apply_history_limit(checker.history().await, limit)).into_response(),
@@ -4390,10 +4610,13 @@ fn apply_history_limit(mut value: Value, limit: Option<usize>) -> Value {
 
 pub async fn lifecycle_history(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+        return resp;
+    }
     let limit = params
         .get("limit")
         .and_then(|value| value.parse::<usize>().ok())
@@ -4436,10 +4659,13 @@ pub struct ReplicationObjectKeyQuery {
 
 pub async fn replication_status(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
         return resp;
     }
     let Some(rule) = state.replication.get_rule(&bucket_name) else {
@@ -4532,11 +4758,14 @@ fn serialize_batch_run(
 
 pub async fn replication_failures(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationFailuresQuery>,
 ) -> Response {
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
         return resp;
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
@@ -4555,21 +4784,27 @@ pub async fn replication_failures(
 
 pub async fn retry_replication_failure(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+        return resp;
+    }
     retry_replication_failure_key(&state, &bucket_name, q.object_key.trim()).await
 }
 
 pub async fn retry_replication_failure_path(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, rest)): Path<(String, String)>,
 ) -> Response {
     let Some(object_key) = rest.strip_suffix("/retry") else {
         return json_error(StatusCode::NOT_FOUND, "Unknown replication failure action");
     };
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+        return resp;
+    }
     retry_replication_failure_key(&state, &bucket_name, object_key.trim()).await
 }
 
@@ -4601,10 +4836,13 @@ async fn retry_replication_failure_key(
 
 pub async fn retry_all_replication_failures(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
         return resp;
     }
     let result = state.replication.clone().retry_all(&bucket_name).await;
@@ -4632,18 +4870,24 @@ pub async fn retry_all_replication_failures(
 
 pub async fn dismiss_replication_failure(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+        return resp;
+    }
     dismiss_replication_failure_key(&state, &bucket_name, q.object_key.trim())
 }
 
 pub async fn dismiss_replication_failure_path(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path((bucket_name, object_key)): Path<(String, String)>,
 ) -> Response {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+        return resp;
+    }
     dismiss_replication_failure_key(&state, &bucket_name, object_key.trim())
 }
 
@@ -4671,10 +4915,13 @@ fn dismiss_replication_failure_key(
 
 pub async fn clear_replication_failures(
     State(state): State<AppState>,
-    Extension(_session): Extension<SessionHandle>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
+        return resp;
+    }
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
         return resp;
     }
     state.replication.clear_failures(&bucket_name);

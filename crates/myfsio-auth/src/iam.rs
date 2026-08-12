@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use myfsio_common::types::{Principal, PrincipalKind};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -189,6 +189,7 @@ pub struct IamService {
     state: Arc<RwLock<IamState>>,
     check_interval: std::time::Duration,
     fernet_key: Option<String>,
+    mutation_lock: Mutex<()>,
 }
 
 impl IamService {
@@ -210,9 +211,51 @@ impl IamService {
             })),
             check_interval: std::time::Duration::from_secs(2),
             fernet_key,
+            mutation_lock: Mutex::new(()),
         };
         service.reload();
+        service.migrate_plaintext_config();
         service
+    }
+
+    fn migrate_plaintext_config(&self) {
+        if self.fernet_key.is_none() {
+            return;
+        }
+        let _guard = self.mutation_lock.lock();
+        let content = match std::fs::read_to_string(&self.config_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if content.starts_with("MYFSIO_IAM_ENC:") {
+            return;
+        }
+        let raw: RawIamConfig = match serde_json::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    "IAM config {} is neither encrypted nor valid JSON ({}); leaving it untouched",
+                    self.config_path.display(),
+                    e
+                );
+                return;
+            }
+        };
+        let config = IamConfig {
+            version: 2,
+            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
+        };
+        match self.save_config(&config) {
+            Ok(()) => tracing::info!(
+                "Migrated plaintext IAM config {} to encrypted at-rest storage",
+                self.config_path.display()
+            ),
+            Err(e) => tracing::error!(
+                "Failed to migrate plaintext IAM config {} to encrypted storage: {}",
+                self.config_path.display(),
+                e
+            ),
+        }
     }
 
     fn reload_if_needed(&self) {
@@ -247,6 +290,13 @@ impl IamService {
     fn reload(&self) {
         let content = match std::fs::read_to_string(&self.config_path) {
             Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(
+                    "IAM config {} does not exist yet",
+                    self.config_path.display()
+                );
+                return;
+            }
             Err(e) => {
                 tracing::warn!(
                     "Failed to read IAM config {}: {}",
@@ -395,10 +445,11 @@ impl IamService {
             ));
         }
 
-        let is_admin = user
-            .policies
-            .iter()
-            .any(|p| p.bucket == "*" && p.actions.iter().any(|a| a == "*"));
+        let is_admin = user.policies.iter().any(|p| {
+            p.bucket == "*"
+                && p.actions.iter().any(|a| a == "*")
+                && (p.prefix.trim() == "*" || p.prefix.trim().is_empty())
+        });
 
         Some(Principal {
             access_key: access_key.to_string(),
@@ -425,7 +476,6 @@ impl IamService {
         site_id: &str,
         display_name: Option<&str>,
     ) -> Result<serde_json::Value, String> {
-        let mut config = self.load_config()?;
         let new_ak = format!("PEERAK{}", uuid::Uuid::new_v4().simple());
         let new_sk = format!("PEERSK{}", uuid::Uuid::new_v4().simple());
         let user_id = format!("peer-{}", uuid::Uuid::new_v4().simple());
@@ -433,22 +483,24 @@ impl IamService {
             .map(str::to_string)
             .unwrap_or_else(|| format!("peer:{}", site_id));
 
-        let user = IamUser {
-            user_id: user_id.clone(),
-            display_name: display,
-            enabled: true,
-            expires_at: None,
-            access_keys: vec![AccessKey {
-                access_key: new_ak.clone(),
-                secret_key: new_sk.clone(),
-                status: "active".to_string(),
-                created_at: Some(chrono::Utc::now().to_rfc3339()),
-            }],
-            policies: Vec::new(),
-            peer_site_id: Some(site_id.to_string()),
-        };
-        config.users.push(user);
-        self.save_config(&config)?;
+        self.mutate_config(|config| {
+            let user = IamUser {
+                user_id: user_id.clone(),
+                display_name: display,
+                enabled: true,
+                expires_at: None,
+                access_keys: vec![AccessKey {
+                    access_key: new_ak.clone(),
+                    secret_key: new_sk.clone(),
+                    status: "active".to_string(),
+                    created_at: Some(chrono::Utc::now().to_rfc3339()),
+                }],
+                policies: Vec::new(),
+                peer_site_id: Some(site_id.to_string()),
+            };
+            config.users.push(user);
+            Ok(())
+        })?;
         Ok(serde_json::json!({
             "user_id": user_id,
             "access_key": new_ak,
@@ -485,45 +537,45 @@ impl IamService {
         access_key: &str,
         site_id: &str,
     ) -> Result<PeerMigrationOutcome, String> {
-        let mut config = self.load_config()?;
-        for user in &mut config.users {
-            if user.access_keys.iter().any(|k| k.access_key == access_key) {
-                if let Some(existing_site) = user.peer_site_id.as_deref() {
-                    if existing_site == site_id {
-                        return Ok(PeerMigrationOutcome::AlreadyPeer);
+        self.mutate_config(|config| {
+            for user in &mut config.users {
+                if user.access_keys.iter().any(|k| k.access_key == access_key) {
+                    if let Some(existing_site) = user.peer_site_id.as_deref() {
+                        if existing_site == site_id {
+                            return Ok(PeerMigrationOutcome::AlreadyPeer);
+                        }
+                        return Err(format!(
+                            "Access key '{}' is already a peer credential for site '{}'; refusing to retag for '{}'",
+                            access_key, existing_site, site_id
+                        ));
                     }
-                    return Err(format!(
-                        "Access key '{}' is already a peer credential for site '{}'; refusing to retag for '{}'",
-                        access_key, existing_site, site_id
-                    ));
+                    if user.access_keys.len() > 1 {
+                        let others: Vec<String> = user
+                            .access_keys
+                            .iter()
+                            .map(|k| k.access_key.clone())
+                            .filter(|k| k != access_key)
+                            .collect();
+                        return Err(format!(
+                            "Access key '{}' shares user '{}' with {} other access key(s) ({}). \
+                             Migrating would clear that user's policies and convert all of its keys to peer credentials. \
+                             Move this access key to a dedicated user (or delete the other keys) before running --migrate-peer-creds.",
+                            access_key,
+                            user.user_id,
+                            others.len(),
+                            others.join(", ")
+                        ));
+                    }
+                    user.peer_site_id = Some(site_id.to_string());
+                    user.policies.clear();
+                    return Ok(PeerMigrationOutcome::Migrated);
                 }
-                if user.access_keys.len() > 1 {
-                    let others: Vec<String> = user
-                        .access_keys
-                        .iter()
-                        .map(|k| k.access_key.clone())
-                        .filter(|k| k != access_key)
-                        .collect();
-                    return Err(format!(
-                        "Access key '{}' shares user '{}' with {} other access key(s) ({}). \
-                         Migrating would clear that user's policies and convert all of its keys to peer credentials. \
-                         Move this access key to a dedicated user (or delete the other keys) before running --migrate-peer-creds.",
-                        access_key,
-                        user.user_id,
-                        others.len(),
-                        others.join(", ")
-                    ));
-                }
-                user.peer_site_id = Some(site_id.to_string());
-                user.policies.clear();
-                self.save_config(&config)?;
-                return Ok(PeerMigrationOutcome::Migrated);
             }
-        }
-        Err(format!(
-            "Access key '{}' not found in IAM config",
-            access_key
-        ))
+            Err(format!(
+                "Access key '{}' not found in IAM config",
+                access_key
+            ))
+        })
     }
 
     pub fn authenticate(&self, access_key: &str, secret_key: &str) -> Option<Principal> {
@@ -685,36 +737,22 @@ impl IamService {
     }
 
     pub async fn set_user_enabled(&self, identifier: &str, enabled: bool) -> Result<(), String> {
-        let content = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
+        self.mutate_config(|config| {
+            let user = config
+                .users
+                .iter_mut()
+                .find(|u| {
+                    u.user_id == identifier
+                        || u.access_keys.iter().any(|k| k.access_key == identifier)
+                })
+                .ok_or_else(|| "User not found".to_string())?;
+            if user.peer_site_id.is_some() {
+                return Err("Peer credentials cannot be modified via user-management".to_string());
+            }
 
-        let raw: RawIamConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
-        let mut config = IamConfig {
-            version: 2,
-            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
-        };
-
-        let user = config
-            .users
-            .iter_mut()
-            .find(|u| {
-                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
-            })
-            .ok_or_else(|| "User not found".to_string())?;
-        if user.peer_site_id.is_some() {
-            return Err("Peer credentials cannot be modified via user-management".to_string());
-        }
-
-        user.enabled = enabled;
-
-        let json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
-        std::fs::write(&self.config_path, json)
-            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
-
-        self.reload();
-        Ok(())
+            user.enabled = enabled;
+            Ok(())
+        })
     }
 
     pub fn get_display_name(&self, identifier: &str) -> Option<String> {
@@ -747,43 +785,31 @@ impl IamService {
     }
 
     pub fn create_access_key(&self, identifier: &str) -> Result<serde_json::Value, String> {
-        let content = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
-        let raw: RawIamConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
-        let mut config = IamConfig {
-            version: 2,
-            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
-        };
-
-        let user = config
-            .users
-            .iter_mut()
-            .find(|u| {
-                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
-            })
-            .ok_or_else(|| format!("User '{}' not found", identifier))?;
-        if user.peer_site_id.is_some() {
-            return Err("Peer credentials cannot be modified via user-management".to_string());
-        }
-
         let new_ak = format!("AK{}", uuid::Uuid::new_v4().simple());
         let new_sk = format!("SK{}", uuid::Uuid::new_v4().simple());
 
-        let key = AccessKey {
-            access_key: new_ak.clone(),
-            secret_key: new_sk.clone(),
-            status: "active".to_string(),
-            created_at: Some(chrono::Utc::now().to_rfc3339()),
-        };
-        user.access_keys.push(key);
+        self.mutate_config(|config| {
+            let user = config
+                .users
+                .iter_mut()
+                .find(|u| {
+                    u.user_id == identifier
+                        || u.access_keys.iter().any(|k| k.access_key == identifier)
+                })
+                .ok_or_else(|| format!("User '{}' not found", identifier))?;
+            if user.peer_site_id.is_some() {
+                return Err("Peer credentials cannot be modified via user-management".to_string());
+            }
 
-        let json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
-        std::fs::write(&self.config_path, json)
-            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
-
-        self.reload();
+            let key = AccessKey {
+                access_key: new_ak.clone(),
+                secret_key: new_sk.clone(),
+                status: "active".to_string(),
+                created_at: Some(chrono::Utc::now().to_rfc3339()),
+            };
+            user.access_keys.push(key);
+            Ok(())
+        })?;
         Ok(serde_json::json!({
             "access_key": new_ak,
             "secret_key": new_sk,
@@ -791,42 +817,28 @@ impl IamService {
     }
 
     pub fn delete_access_key(&self, access_key: &str) -> Result<(), String> {
-        let content = std::fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read IAM config: {}", e))?;
-        let raw: RawIamConfig = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse IAM config: {}", e))?;
-        let mut config = IamConfig {
-            version: 2,
-            users: raw.users.into_iter().map(|u| u.normalize()).collect(),
-        };
-
-        let mut found = false;
-        for user in &mut config.users {
-            if user.access_keys.iter().any(|k| k.access_key == access_key) {
-                if user.peer_site_id.is_some() {
-                    return Err(
-                        "Peer credentials cannot be modified via user-management".to_string()
-                    );
+        self.mutate_config(|config| {
+            let mut found = false;
+            for user in &mut config.users {
+                if user.access_keys.iter().any(|k| k.access_key == access_key) {
+                    if user.peer_site_id.is_some() {
+                        return Err(
+                            "Peer credentials cannot be modified via user-management".to_string()
+                        );
+                    }
+                    if user.access_keys.len() <= 1 {
+                        return Err("Cannot delete the last access key".to_string());
+                    }
+                    user.access_keys.retain(|k| k.access_key != access_key);
+                    found = true;
+                    break;
                 }
-                if user.access_keys.len() <= 1 {
-                    return Err("Cannot delete the last access key".to_string());
-                }
-                user.access_keys.retain(|k| k.access_key != access_key);
-                found = true;
-                break;
             }
-        }
-        if !found {
-            return Err(format!("Access key '{}' not found", access_key));
-        }
-
-        let json = serde_json::to_string_pretty(&config)
-            .map_err(|e| format!("Failed to serialize IAM config: {}", e))?;
-        std::fs::write(&self.config_path, json)
-            .map_err(|e| format!("Failed to write IAM config: {}", e))?;
-
-        self.reload();
-        Ok(())
+            if !found {
+                return Err(format!("Access key '{}' not found", access_key));
+            }
+            Ok(())
+        })
     }
 
     fn load_config(&self) -> Result<IamConfig, String> {
@@ -861,10 +873,47 @@ impl IamService {
         } else {
             json
         };
-        std::fs::write(&self.config_path, payload)
+        myfsio_common::fs_util::atomic_write_secret_file(&self.config_path, payload.as_bytes())
             .map_err(|e| format!("Failed to write IAM config: {}", e))?;
         self.reload();
         Ok(())
+    }
+
+    fn mutate_config<R>(
+        &self,
+        f: impl FnOnce(&mut IamConfig) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let _guard = self.mutation_lock.lock();
+        let mut config = self.load_config()?;
+        let result = f(&mut config)?;
+        self.save_config(&config)?;
+        Ok(result)
+    }
+
+    pub fn bootstrap_admin(&self, access_key: &str, secret_key: &str) -> Result<(), String> {
+        let _guard = self.mutation_lock.lock();
+        let config = IamConfig {
+            version: 2,
+            users: vec![IamUser {
+                user_id: format!("u-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]),
+                display_name: "Local Admin".to_string(),
+                enabled: true,
+                expires_at: None,
+                access_keys: vec![AccessKey {
+                    access_key: access_key.to_string(),
+                    secret_key: secret_key.to_string(),
+                    status: "active".to_string(),
+                    created_at: Some(chrono::Utc::now().to_rfc3339()),
+                }],
+                policies: vec![IamPolicy {
+                    bucket: "*".to_string(),
+                    actions: vec!["*".to_string()],
+                    prefix: "*".to_string(),
+                }],
+                peer_site_id: None,
+            }],
+        };
+        self.save_config(&config)
     }
 
     pub fn create_user(
@@ -875,8 +924,6 @@ impl IamService {
         secret_key: Option<String>,
         expires_at: Option<String>,
     ) -> Result<serde_json::Value, String> {
-        let mut config = self.load_config()?;
-
         let new_ak = access_key
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
@@ -884,34 +931,35 @@ impl IamService {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
 
-        if config
-            .users
-            .iter()
-            .any(|u| u.access_keys.iter().any(|k| k.access_key == new_ak))
-        {
-            return Err(format!("Access key '{}' already exists", new_ak));
-        }
-
         let user_id = format!("u-{}", uuid::Uuid::new_v4().simple());
         let resolved_policies = policies.unwrap_or_default();
 
-        let user = IamUser {
-            user_id: user_id.clone(),
-            display_name: display_name.to_string(),
-            enabled: true,
-            expires_at,
-            access_keys: vec![AccessKey {
-                access_key: new_ak.clone(),
-                secret_key: new_sk.clone(),
-                status: "active".to_string(),
-                created_at: Some(chrono::Utc::now().to_rfc3339()),
-            }],
-            policies: resolved_policies,
-            peer_site_id: None,
-        };
-        config.users.push(user);
+        self.mutate_config(|config| {
+            if config
+                .users
+                .iter()
+                .any(|u| u.access_keys.iter().any(|k| k.access_key == new_ak))
+            {
+                return Err(format!("Access key '{}' already exists", new_ak));
+            }
 
-        self.save_config(&config)?;
+            let user = IamUser {
+                user_id: user_id.clone(),
+                display_name: display_name.to_string(),
+                enabled: true,
+                expires_at,
+                access_keys: vec![AccessKey {
+                    access_key: new_ak.clone(),
+                    secret_key: new_sk.clone(),
+                    status: "active".to_string(),
+                    created_at: Some(chrono::Utc::now().to_rfc3339()),
+                }],
+                policies: resolved_policies,
+                peer_site_id: None,
+            };
+            config.users.push(user);
+            Ok(())
+        })?;
         Ok(serde_json::json!({
             "user_id": user_id,
             "access_key": new_ak,
@@ -921,33 +969,37 @@ impl IamService {
     }
 
     pub fn delete_user(&self, identifier: &str) -> Result<(), String> {
-        let mut config = self.load_config()?;
-        if config.users.iter().any(|u| {
-            (u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier))
-                && u.peer_site_id.is_some()
-        }) {
-            return Err("Peer credentials cannot be modified via user-management".to_string());
-        }
-        let before = config.users.len();
-        config.users.retain(|u| {
-            u.user_id != identifier && !u.access_keys.iter().any(|k| k.access_key == identifier)
-        });
-        if config.users.len() == before {
-            return Err(format!("User '{}' not found", identifier));
-        }
-        self.save_config(&config)
+        self.mutate_config(|config| {
+            if config.users.iter().any(|u| {
+                (u.user_id == identifier
+                    || u.access_keys.iter().any(|k| k.access_key == identifier))
+                    && u.peer_site_id.is_some()
+            }) {
+                return Err("Peer credentials cannot be modified via user-management".to_string());
+            }
+            let before = config.users.len();
+            config.users.retain(|u| {
+                u.user_id != identifier && !u.access_keys.iter().any(|k| k.access_key == identifier)
+            });
+            if config.users.len() == before {
+                return Err(format!("User '{}' not found", identifier));
+            }
+            Ok(())
+        })
     }
 
     pub fn delete_peer_credential(&self, access_key: &str) -> Result<(), String> {
-        let mut config = self.load_config()?;
-        let before = config.users.len();
-        config.users.retain(|u| {
-            !(u.peer_site_id.is_some() && u.access_keys.iter().any(|k| k.access_key == access_key))
-        });
-        if config.users.len() == before {
-            return Err(format!("Peer credential '{}' not found", access_key));
-        }
-        self.save_config(&config)
+        self.mutate_config(|config| {
+            let before = config.users.len();
+            config.users.retain(|u| {
+                !(u.peer_site_id.is_some()
+                    && u.access_keys.iter().any(|k| k.access_key == access_key))
+            });
+            if config.users.len() == before {
+                return Err(format!("Peer credential '{}' not found", access_key));
+            }
+            Ok(())
+        })
     }
 
     pub fn update_user(
@@ -956,24 +1008,26 @@ impl IamService {
         display_name: Option<String>,
         expires_at: Option<Option<String>>,
     ) -> Result<(), String> {
-        let mut config = self.load_config()?;
-        let user = config
-            .users
-            .iter_mut()
-            .find(|u| {
-                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
-            })
-            .ok_or_else(|| format!("User '{}' not found", identifier))?;
-        if user.peer_site_id.is_some() {
-            return Err("Peer credentials cannot be modified via user-management".to_string());
-        }
-        if let Some(name) = display_name {
-            user.display_name = name;
-        }
-        if let Some(exp) = expires_at {
-            user.expires_at = exp;
-        }
-        self.save_config(&config)
+        self.mutate_config(|config| {
+            let user = config
+                .users
+                .iter_mut()
+                .find(|u| {
+                    u.user_id == identifier
+                        || u.access_keys.iter().any(|k| k.access_key == identifier)
+                })
+                .ok_or_else(|| format!("User '{}' not found", identifier))?;
+            if user.peer_site_id.is_some() {
+                return Err("Peer credentials cannot be modified via user-management".to_string());
+            }
+            if let Some(name) = display_name {
+                user.display_name = name;
+            }
+            if let Some(exp) = expires_at {
+                user.expires_at = exp;
+            }
+            Ok(())
+        })
     }
 
     pub fn update_user_policies(
@@ -981,41 +1035,44 @@ impl IamService {
         identifier: &str,
         policies: Vec<IamPolicy>,
     ) -> Result<(), String> {
-        let mut config = self.load_config()?;
-        let user = config
-            .users
-            .iter_mut()
-            .find(|u| {
-                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
-            })
-            .ok_or_else(|| format!("User '{}' not found", identifier))?;
-        if user.peer_site_id.is_some() {
-            return Err("Peer credentials cannot be modified via user-management".to_string());
-        }
-        user.policies = policies;
-        self.save_config(&config)
+        self.mutate_config(|config| {
+            let user = config
+                .users
+                .iter_mut()
+                .find(|u| {
+                    u.user_id == identifier
+                        || u.access_keys.iter().any(|k| k.access_key == identifier)
+                })
+                .ok_or_else(|| format!("User '{}' not found", identifier))?;
+            if user.peer_site_id.is_some() {
+                return Err("Peer credentials cannot be modified via user-management".to_string());
+            }
+            user.policies = policies;
+            Ok(())
+        })
     }
 
     pub fn rotate_secret(&self, identifier: &str) -> Result<serde_json::Value, String> {
-        let mut config = self.load_config()?;
-        let user = config
-            .users
-            .iter_mut()
-            .find(|u| {
-                u.user_id == identifier || u.access_keys.iter().any(|k| k.access_key == identifier)
-            })
-            .ok_or_else(|| format!("User '{}' not found", identifier))?;
-        if user.peer_site_id.is_some() {
-            return Err("Peer credentials cannot be modified via user-management".to_string());
-        }
-        let key = user
-            .access_keys
-            .first_mut()
-            .ok_or_else(|| "User has no access keys".to_string())?;
         let new_sk = format!("SK{}", uuid::Uuid::new_v4().simple());
-        key.secret_key = new_sk.clone();
-        let ak = key.access_key.clone();
-        self.save_config(&config)?;
+        let ak = self.mutate_config(|config| {
+            let user = config
+                .users
+                .iter_mut()
+                .find(|u| {
+                    u.user_id == identifier
+                        || u.access_keys.iter().any(|k| k.access_key == identifier)
+                })
+                .ok_or_else(|| format!("User '{}' not found", identifier))?;
+            if user.peer_site_id.is_some() {
+                return Err("Peer credentials cannot be modified via user-management".to_string());
+            }
+            let key = user
+                .access_keys
+                .first_mut()
+                .ok_or_else(|| "User has no access keys".to_string())?;
+            key.secret_key = new_sk.clone();
+            Ok(key.access_key.clone())
+        })?;
         Ok(serde_json::json!({
             "access_key": ak,
             "secret_key": new_sk,
@@ -1034,8 +1091,14 @@ fn action_matches(policy_actions: &[String], action: &str) -> bool {
         if pa == "*" || pa == action {
             return true;
         }
-        if pa == "iam:*" && action.starts_with("iam:") {
-            return true;
+        if let Some(namespace) = pa.strip_suffix(":*") {
+            if !namespace.is_empty()
+                && action.len() > namespace.len() + 1
+                && action.starts_with(namespace)
+                && action.as_bytes()[namespace.len()] == b':'
+            {
+                return true;
+            }
         }
     }
     false
@@ -1054,6 +1117,36 @@ fn prefix_matches(policy_prefix: &str, object_key: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn actions(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn action_matches_namespace_wildcard() {
+        assert!(action_matches(&actions(&["iam:*"]), "iam:create_user"));
+        assert!(action_matches(&actions(&["system:*"]), "system:gc_run"));
+        assert!(action_matches(&actions(&["*"]), "system:gc_run"));
+        assert!(action_matches(
+            &actions(&["system:gc_run"]),
+            "system:gc_run"
+        ));
+
+        assert!(!action_matches(&actions(&["sys:*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["system:*"]), "system"));
+        assert!(!action_matches(&actions(&["system:*"]), "systemgc_run"));
+        assert!(!action_matches(&actions(&[":*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["s3:*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["iam:*"]), "system:gc_run"));
+        assert!(!action_matches(&actions(&["system:*"]), "system:"));
+
+        assert!(action_matches(&actions(&["SYSTEM:*"]), "system:gc_run"));
+        assert!(action_matches(&actions(&[" system:* "]), "system:gc_run"));
+        assert!(!action_matches(
+            &actions(&["system:gc_run"]),
+            "system:gc_read"
+        ));
+    }
 
     fn test_iam_json() -> String {
         serde_json::json!({
@@ -1076,6 +1169,136 @@ mod tests {
             }]
         })
         .to_string()
+    }
+
+    fn write_iam_file(dir: &std::path::Path, contents: &str) -> PathBuf {
+        let path = dir.join("iam.json");
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn concurrent_mutations_all_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_iam_file(dir.path(), &test_iam_json());
+        let svc = Arc::new(IamService::new(path.clone()));
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let svc = Arc::clone(&svc);
+            handles.push(std::thread::spawn(move || {
+                svc.create_user(&format!("concurrent-{}", i), None, None, None, None)
+                    .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let reopened = IamService::new(path);
+        let exported = reopened.export_config(true);
+        let users = exported["users"].as_array().unwrap();
+        assert_eq!(users.len(), 9);
+        for i in 0..8 {
+            let expected = format!("concurrent-{}", i);
+            assert!(
+                users.iter().any(|u| u["display_name"] == expected),
+                "missing {}",
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn save_leaves_no_temp_files_and_stays_parseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_iam_file(dir.path(), &test_iam_json());
+        let svc = IamService::new(path.clone());
+        svc.create_user("temp-check", None, None, None, None)
+            .unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["iam.json".to_string()]);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["users"].as_array().unwrap().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_iam_config_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_iam_file(dir.path(), &test_iam_json());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let svc = IamService::new(path.clone());
+        svc.create_user("perm-check", None, None, None, None)
+            .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn plaintext_config_migrates_to_encrypted_at_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_iam_file(dir.path(), &test_iam_json());
+
+        let svc = IamService::new_with_secret(path.clone(), Some("unit-test-secret".to_string()));
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("MYFSIO_IAM_ENC:"));
+        assert_eq!(
+            svc.get_secret_key("AKIAIOSFODNN7EXAMPLE").unwrap(),
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        );
+
+        let reopened = IamService::new_with_secret(path, Some("unit-test-secret".to_string()));
+        assert!(reopened.get_principal("AKIAIOSFODNN7EXAMPLE").is_some());
+    }
+
+    #[test]
+    fn unreadable_config_is_not_clobbered_by_migration() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let encrypted = dir.path().join("encrypted.json");
+        std::fs::write(&encrypted, "MYFSIO_IAM_ENC:not-a-real-token").unwrap();
+        let _svc = IamService::new_with_secret(encrypted.clone(), Some("other-secret".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(&encrypted).unwrap(),
+            "MYFSIO_IAM_ENC:not-a-real-token"
+        );
+
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, "{ not json").unwrap();
+        let _svc = IamService::new_with_secret(corrupt.clone(), Some("other-secret".to_string()));
+        assert_eq!(std::fs::read_to_string(&corrupt).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn bootstrap_admin_writes_encrypted_admin_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("iam.json");
+
+        let svc = IamService::new_with_secret(path.clone(), Some("unit-test-secret".to_string()));
+        svc.bootstrap_admin("AKBOOTSTRAP", "SKBOOTSTRAP").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("MYFSIO_IAM_ENC:"));
+        assert!(!content.contains("SKBOOTSTRAP"));
+
+        let reopened = IamService::new_with_secret(path, Some("unit-test-secret".to_string()));
+        let principal = reopened.get_principal("AKBOOTSTRAP").unwrap();
+        assert_eq!(principal.display_name, "Local Admin");
+        assert!(principal.is_admin);
+        assert_eq!(
+            reopened.get_secret_key("AKBOOTSTRAP").unwrap(),
+            "SKBOOTSTRAP"
+        );
     }
 
     #[test]
@@ -1251,5 +1474,70 @@ mod tests {
         assert!(!svc.authorize(&principal, Some("docs"), "write", Some("reports/2026.csv"),));
         assert!(!svc.authorize(&principal, Some("docs"), "read", Some("private/2026.csv"),));
         assert!(!svc.authorize(&principal, Some("other"), "read", Some("reports/2026.csv"),));
+    }
+
+    fn wildcard_prefix_user_json(prefix: &str) -> String {
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-scoped",
+                "display_name": "scoped",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": "SCOPED_KEY",
+                    "secret_key": "scoped-secret",
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "*",
+                    "actions": ["*"],
+                    "prefix": prefix
+                }]
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn prefix_scoped_wildcard_policy_is_not_admin() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(wildcard_prefix_user_json("data/").as_bytes())
+            .unwrap();
+        tmp.flush().unwrap();
+
+        let svc = IamService::new(tmp.path().to_path_buf());
+        let principal = svc.get_principal("SCOPED_KEY").unwrap();
+        assert!(!principal.is_admin);
+
+        assert!(svc.authorize(&principal, Some("docs"), "delete", Some("data/report.csv")));
+        assert!(svc.authorize(
+            &principal,
+            Some("other"),
+            "write",
+            Some("data/nested/x.bin")
+        ));
+        assert!(!svc.authorize(&principal, Some("docs"), "read", Some("private/report.csv")));
+        assert!(!svc.authorize(&principal, Some("docs"), "delete", Some("home/report.csv")));
+    }
+
+    #[test]
+    fn unrestricted_wildcard_policy_is_still_admin() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(wildcard_prefix_user_json("*").as_bytes())
+            .unwrap();
+        tmp.flush().unwrap();
+
+        let svc = IamService::new(tmp.path().to_path_buf());
+        let principal = svc.get_principal("SCOPED_KEY").unwrap();
+        assert!(principal.is_admin);
+        assert!(svc.authorize(&principal, Some("docs"), "read", Some("private/report.csv")));
+
+        let mut empty = tempfile::NamedTempFile::new().unwrap();
+        empty
+            .write_all(wildcard_prefix_user_json("").as_bytes())
+            .unwrap();
+        empty.flush().unwrap();
+        let svc = IamService::new(empty.path().to_path_buf());
+        assert!(svc.get_principal("SCOPED_KEY").unwrap().is_admin);
     }
 }

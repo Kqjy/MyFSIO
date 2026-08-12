@@ -12,8 +12,8 @@ use crate::services::acl::{
 };
 use crate::services::notifications::parse_notification_configurations;
 use crate::services::object_lock::{
-    ensure_retention_mutable, get_legal_hold, get_object_retention as retention_from_metadata,
-    set_legal_hold, set_object_retention as store_retention, ObjectLockRetention, RetentionMode,
+    get_legal_hold, get_object_retention as retention_from_metadata,
+    parse_object_lock_configuration, ObjectLockRetention, RetentionMode,
 };
 use crate::state::AppState;
 
@@ -128,11 +128,9 @@ pub async fn get_versioning(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_versioning(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
@@ -193,11 +191,9 @@ pub async fn get_tagging(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_tagging(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
@@ -233,9 +229,9 @@ pub async fn get_cors(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_cors(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let body_str = String::from_utf8_lossy(&body_bytes);
@@ -408,11 +404,9 @@ pub async fn get_encryption(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_encryption(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let xml_str = String::from_utf8_lossy(&body_bytes);
     let (algorithm, kms_key_id) = match parse_encryption_xml(&xml_str) {
@@ -476,9 +470,9 @@ pub async fn get_lifecycle(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_lifecycle(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let raw = String::from_utf8_lossy(&body_bytes).to_string();
     if let Err(message) = validate_lifecycle_days(&raw) {
@@ -556,14 +550,9 @@ pub async fn get_quota(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_quota(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::new(
-                S3ErrorCode::InvalidArgument,
-                "Invalid quota payload",
-            ));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let payload: serde_json::Value = match serde_json::from_slice(&body_bytes) {
@@ -616,14 +605,9 @@ pub async fn get_policy(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::new(
-                S3ErrorCode::MalformedXML,
-                "Failed to read policy body",
-            ));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let policy: serde_json::Value = match serde_json::from_slice(&body_bytes) {
@@ -636,10 +620,34 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
         }
     };
 
+    if let Some(clause) = policy_unsupported_clause(&policy) {
+        return xml_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            format!(
+                "Policy statements containing '{}' are not supported by this server",
+                clause
+            ),
+        ));
+    }
+
     mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, move |config| {
         config.policy = Some(policy);
     })
     .await
+}
+
+pub(crate) fn policy_unsupported_clause(policy: &serde_json::Value) -> Option<&'static str> {
+    let statements: Vec<&serde_json::Value> = match policy.get("Statement") {
+        Some(serde_json::Value::Array(items)) => items.iter().collect(),
+        Some(other) => vec![other],
+        None => return None,
+    };
+    statements.into_iter().find_map(|statement| {
+        crate::middleware::UNSUPPORTED_POLICY_CLAUSES
+            .iter()
+            .find(|name| statement.get(**name).is_some_and(|value| !value.is_null()))
+            .copied()
+    })
 }
 
 pub async fn delete_policy(state: &AppState, bucket: &str) -> Response {
@@ -684,14 +692,9 @@ pub async fn get_replication(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_replication(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::new(
-                S3ErrorCode::MalformedXML,
-                "Failed to read replication body",
-            ));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     if body_bytes.is_empty() {
@@ -779,9 +782,9 @@ fn default_owner_for(_state: &AppState) -> String {
 }
 
 pub async fn put_acl(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
 
@@ -808,9 +811,9 @@ pub async fn get_website(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_website(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
 
@@ -845,14 +848,9 @@ pub async fn get_ownership_controls(state: &AppState, bucket: &str) -> Response 
 }
 
 pub async fn put_ownership_controls(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::new(
-                S3ErrorCode::MalformedXML,
-                "Failed to read OwnershipControls body",
-            ));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
     if roxmltree::Document::parse(&body_str).is_err() {
@@ -889,14 +887,9 @@ pub async fn get_public_access_block(state: &AppState, bucket: &str) -> Response
 }
 
 pub async fn put_public_access_block(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::new(
-                S3ErrorCode::MalformedXML,
-                "Failed to read PublicAccessBlock body",
-            ));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let body_str = String::from_utf8_lossy(&body_bytes).to_string();
     if roxmltree::Document::parse(&body_str).is_err() {
@@ -1065,12 +1058,28 @@ fn parse_logging_config_xml(
 }
 
 pub async fn put_object_lock(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
-    let value = serde_json::Value::String(String::from_utf8_lossy(&body_bytes).to_string());
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+    if let Err(err) = parse_object_lock_configuration(&body_str) {
+        return xml_error_response(err);
+    }
 
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => {
+            if config.versioning_status() != myfsio_common::types::VersioningStatus::Enabled {
+                return xml_error_response(S3Error::new(
+                    S3ErrorCode::InvalidBucketState,
+                    "Object Lock requires versioning to be enabled on the bucket",
+                ));
+            }
+        }
+        Err(e) => return storage_err(e),
+    }
+
+    let value = serde_json::Value::String(body_str);
     mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
         config.object_lock = Some(value);
     })
@@ -1085,15 +1094,9 @@ pub async fn delete_object_lock(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn put_notification(state: &AppState, bucket: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return custom_xml_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedXML",
-                "Unable to parse XML document",
-            )
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let raw = String::from_utf8_lossy(&body_bytes).to_string();
     let notification = if raw.trim().is_empty() {
@@ -1136,9 +1139,9 @@ pub async fn put_logging(state: &AppState, bucket: &str, body: Body) -> Response
         Err(e) => return storage_err(e),
     }
 
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     if body_bytes.iter().all(u8::is_ascii_whitespace) {
@@ -1189,6 +1192,14 @@ pub async fn put_logging(state: &AppState, bucket: &str, body: Body) -> Response
         return s3_error_response(
             S3ErrorCode::InvalidArgument,
             "TargetBucket is required",
+            StatusCode::BAD_REQUEST,
+        );
+    }
+
+    if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(target_bucket) {
+        return s3_error_response(
+            S3ErrorCode::InvalidBucketName,
+            &reason,
             StatusCode::BAD_REQUEST,
         );
     }
@@ -1536,11 +1547,9 @@ pub async fn get_object_tagging(
 }
 
 pub async fn put_object_tagging(state: &AppState, bucket: &str, key: &str, body: Body) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
@@ -1592,11 +1601,9 @@ pub async fn put_object_acl(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return xml_error_response(S3Error::from_code(S3ErrorCode::MalformedXML));
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let body_str = String::from_utf8_lossy(&body_bytes);
     let body_trimmed = body_str.trim();
@@ -1711,6 +1718,7 @@ pub async fn put_object_retention(
     bucket: &str,
     key: &str,
     version_id: Option<&str>,
+    principal: Option<&myfsio_common::types::Principal>,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
@@ -1722,15 +1730,9 @@ pub async fn put_object_retention(
         return storage_err(e);
     }
 
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return custom_xml_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedXML",
-                "Unable to parse XML document",
-            )
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let body_str = String::from_utf8_lossy(&body_bytes);
     let doc = match roxmltree::Document::parse(&body_str) {
@@ -1774,51 +1776,22 @@ pub async fn put_object_retention(
         }
     };
 
-    let bypass_governance = headers
-        .get("x-amz-bypass-governance-retention")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let metadata_res = match version_id {
-        Some(vid) => {
-            state
-                .storage
-                .get_object_version_metadata(bucket, key, vid)
-                .await
-        }
-        None => state.storage.get_object_metadata(bucket, key).await,
-    };
-    let mut metadata = match metadata_res {
-        Ok(m) => m,
-        Err(err) => return storage_err(err),
-    };
-    if let Err(message) = ensure_retention_mutable(&metadata, bypass_governance) {
-        return custom_xml_error(StatusCode::FORBIDDEN, "AccessDenied", &message);
-    }
-    if let Err(message) = store_retention(
-        &mut metadata,
-        &ObjectLockRetention {
-            mode,
-            retain_until_date,
-        },
-    ) {
-        return custom_xml_error(StatusCode::BAD_REQUEST, "InvalidArgument", &message);
-    }
-    let put_res = match version_id {
-        Some(vid) => {
-            state
-                .storage
-                .put_object_version_metadata(bucket, key, vid, &metadata)
-                .await
-        }
-        None => {
-            state
-                .storage
-                .put_object_metadata(bucket, key, &metadata)
-                .await
-        }
-    };
-    match put_res {
+    let bypass_governance =
+        super::governance_bypass_allowed(state, principal, bucket, Some(key), headers).await;
+    match state
+        .storage
+        .update_object_retention(
+            bucket,
+            key,
+            version_id,
+            &ObjectLockRetention {
+                mode,
+                retain_until_date,
+            },
+            bypass_governance,
+        )
+        .await
+    {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => storage_err(err),
     }
@@ -1879,15 +1852,9 @@ pub async fn put_object_legal_hold(
         return storage_err(e);
     }
 
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return custom_xml_error(
-                StatusCode::BAD_REQUEST,
-                "MalformedXML",
-                "Unable to parse XML document",
-            )
-        }
+    let body_bytes = match super::collect_body_limited(body, super::CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
     let body_str = String::from_utf8_lossy(&body_bytes);
     let doc = match roxmltree::Document::parse(&body_str) {
@@ -1912,35 +1879,11 @@ pub async fn put_object_legal_hold(
             )
         }
     };
-    let metadata_res = match version_id {
-        Some(vid) => {
-            state
-                .storage
-                .get_object_version_metadata(bucket, key, vid)
-                .await
-        }
-        None => state.storage.get_object_metadata(bucket, key).await,
-    };
-    let mut metadata = match metadata_res {
-        Ok(m) => m,
-        Err(err) => return storage_err(err),
-    };
-    set_legal_hold(&mut metadata, enabled);
-    let put_res = match version_id {
-        Some(vid) => {
-            state
-                .storage
-                .put_object_version_metadata(bucket, key, vid, &metadata)
-                .await
-        }
-        None => {
-            state
-                .storage
-                .put_object_metadata(bucket, key, &metadata)
-                .await
-        }
-    };
-    match put_res {
+    match state
+        .storage
+        .update_object_legal_hold(bucket, key, version_id, enabled)
+        .await
+    {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => storage_err(err),
     }

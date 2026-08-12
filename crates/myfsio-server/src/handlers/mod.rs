@@ -4,6 +4,7 @@ mod checksum_stream;
 mod chunked;
 mod config;
 pub mod kms;
+pub(crate) mod object_read;
 mod select;
 pub mod static_assets;
 pub mod ui;
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine;
@@ -25,7 +26,6 @@ use serde_json::json;
 use myfsio_common::error::{S3Error, S3ErrorCode};
 use myfsio_common::types::PartInfo;
 use myfsio_storage::traits::StorageEngine;
-use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 
 use crate::services::notifications;
@@ -69,8 +69,67 @@ fn parse_max_keys(raw: &str) -> Result<usize, Response> {
     }
 }
 
+fn validate_encoding_type(query: &BucketQuery) -> Result<(), Response> {
+    match query.encoding_type.as_deref() {
+        Some(value) if !value.eq_ignore_ascii_case("url") => Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidArgument,
+            "Invalid Encoding Method specified in Request",
+        ))),
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn s3_error_response(err: S3Error) -> Response {
     crate::s3_response::s3_error_response(err)
+}
+
+pub(crate) const CONFIG_BODY_LIMIT: usize = 1024 * 1024;
+pub(crate) const BULK_XML_BODY_LIMIT: usize = 8 * 1024 * 1024;
+pub(crate) const JSON_API_BODY_LIMIT: usize = 1024 * 1024;
+pub(crate) const POST_FORM_FIELD_LIMIT: u64 = 1024 * 1024;
+
+pub(crate) enum BodyLimitError {
+    Unreadable,
+    TooLarge(usize),
+}
+
+pub(crate) async fn collect_body_capped(
+    body: Body,
+    max: usize,
+) -> Result<bytes::Bytes, BodyLimitError> {
+    use futures::StreamExt;
+
+    let mut frames = http_body_util::BodyStream::new(body);
+    let mut buffer = bytes::BytesMut::new();
+    while let Some(frame) = frames.next().await {
+        let data = match frame {
+            Ok(frame) => frame.into_data().unwrap_or_default(),
+            Err(_) => return Err(BodyLimitError::Unreadable),
+        };
+        if buffer.len() + data.len() > max {
+            return Err(BodyLimitError::TooLarge(max));
+        }
+        buffer.extend_from_slice(&data);
+    }
+    Ok(buffer.freeze())
+}
+
+pub(crate) async fn collect_body_limited(body: Body, max: usize) -> Result<bytes::Bytes, Response> {
+    collect_body_capped(body, max)
+        .await
+        .map_err(|err| match err {
+            BodyLimitError::Unreadable => s3_error_response(S3Error::new(
+                S3ErrorCode::InvalidRequest,
+                "Failed to read request body",
+            )),
+            BodyLimitError::TooLarge(limit) => s3_error_response(S3Error::new(
+                S3ErrorCode::MaxMessageLengthExceeded,
+                format!(
+                    "Your request was too big; this operation accepts at most {} bytes of request body",
+                    limit
+                ),
+            )),
+        })
 }
 
 pub(crate) const CANONICAL_DEFAULT_OWNER_ID: &str = "myfsio";
@@ -251,7 +310,7 @@ async fn ensure_object_lock_allows_write(
     state: &AppState,
     bucket: &str,
     key: &str,
-    headers: Option<&HeaderMap>,
+    bypass_governance: bool,
 ) -> Result<(), Response> {
     let head_res = state.storage.head_object(bucket, key).await;
     let needs_lock_check = match &head_res {
@@ -269,14 +328,6 @@ async fn ensure_object_lock_allows_write(
         Ok(metadata) => metadata,
         Err(err) => return Err(storage_err_response(err)),
     };
-    let bypass_governance = headers
-        .and_then(|headers| {
-            headers
-                .get("x-amz-bypass-governance-retention")
-                .and_then(|value| value.to_str().ok())
-        })
-        .map(|value| value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
         return Err(s3_error_response(S3Error::new(
             S3ErrorCode::AccessDenied,
@@ -290,7 +341,7 @@ async fn ensure_archived_null_lock_allows_overwrite(
     state: &AppState,
     bucket: &str,
     key: &str,
-    headers: Option<&HeaderMap>,
+    bypass_governance: bool,
 ) -> Result<(), Response> {
     let status = match state.storage.get_versioning_status(bucket).await {
         Ok(status) => status,
@@ -309,14 +360,6 @@ async fn ensure_archived_null_lock_allows_overwrite(
         Ok(None) => return Ok(()),
         Err(err) => return Err(storage_err_response(err)),
     };
-    let bypass_governance = headers
-        .and_then(|headers| {
-            headers
-                .get("x-amz-bypass-governance-retention")
-                .and_then(|value| value.to_str().ok())
-        })
-        .map(|value| value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
         return Err(s3_error_response(S3Error::new(
             S3ErrorCode::AccessDenied,
@@ -331,7 +374,7 @@ async fn ensure_object_version_lock_allows_delete(
     bucket: &str,
     key: &str,
     version_id: &str,
-    headers: &HeaderMap,
+    bypass_governance: bool,
 ) -> Result<(), Response> {
     let metadata = match state
         .storage
@@ -341,11 +384,6 @@ async fn ensure_object_version_lock_allows_delete(
         Ok(metadata) => metadata,
         Err(err) => return Err(storage_err_response(err)),
     };
-    let bypass_governance = headers
-        .get("x-amz-bypass-governance-retention")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     if let Err(message) = object_lock::can_delete_object(&metadata, bypass_governance) {
         return Err(s3_error_response(S3Error::new(
             S3ErrorCode::AccessDenied,
@@ -415,7 +453,6 @@ pub async fn health_check() -> Response {
 pub async fn create_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    Query(query): Query<BucketQuery>,
     raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
@@ -429,6 +466,7 @@ pub async fn create_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 peer,
                 principal,
                 streaming_sigv4,
@@ -449,64 +487,49 @@ pub async fn create_bucket(
         ));
     }
 
-    if query.quota.is_some() {
-        return config::put_quota(&state, &bucket, body).await;
-    }
-    if query.versioning.is_some() {
-        return config::put_versioning(&state, &bucket, body).await;
-    }
-    if query.tagging.is_some() {
-        return config::put_tagging(&state, &bucket, body).await;
-    }
-    if query.cors.is_some() {
-        return config::put_cors(&state, &bucket, body).await;
-    }
-    if query.encryption.is_some() {
-        return config::put_encryption(&state, &bucket, body).await;
-    }
-    if query.lifecycle.is_some() {
-        return config::put_lifecycle(&state, &bucket, body).await;
-    }
-    if query.acl.is_some() {
-        return config::put_acl(&state, &bucket, body).await;
-    }
-    if query.policy.is_some() {
-        return config::put_policy(&state, &bucket, body).await;
-    }
-    if query.replication.is_some() {
-        return config::put_replication(&state, &bucket, body).await;
-    }
-    if query.website.is_some() {
-        return config::put_website(&state, &bucket, body).await;
-    }
-    if query.object_lock.is_some() {
-        return config::put_object_lock(&state, &bucket, body).await;
-    }
-    if query.ownership_controls.is_some() {
-        return config::put_ownership_controls(&state, &bucket, body).await;
-    }
-    if query.public_access_block.is_some() {
-        return config::put_public_access_block(&state, &bucket, body).await;
-    }
-    if query.notification.is_some() {
-        return config::put_notification(&state, &bucket, body).await;
-    }
-    if query.logging.is_some() {
-        return config::put_logging(&state, &bucket, body).await;
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
+    if let Some(subresource) = subresource {
+        return match subresource {
+            BucketSubresource::Quota => config::put_quota(&state, &bucket, body).await,
+            BucketSubresource::Versioning => config::put_versioning(&state, &bucket, body).await,
+            BucketSubresource::Tagging => config::put_tagging(&state, &bucket, body).await,
+            BucketSubresource::Cors => config::put_cors(&state, &bucket, body).await,
+            BucketSubresource::Encryption => config::put_encryption(&state, &bucket, body).await,
+            BucketSubresource::Lifecycle => config::put_lifecycle(&state, &bucket, body).await,
+            BucketSubresource::Acl => config::put_acl(&state, &bucket, body).await,
+            BucketSubresource::Policy => config::put_policy(&state, &bucket, body).await,
+            BucketSubresource::Replication => config::put_replication(&state, &bucket, body).await,
+            BucketSubresource::Website => config::put_website(&state, &bucket, body).await,
+            BucketSubresource::ObjectLock => config::put_object_lock(&state, &bucket, body).await,
+            BucketSubresource::OwnershipControls => {
+                config::put_ownership_controls(&state, &bucket, body).await
+            }
+            BucketSubresource::PublicAccessBlock => {
+                config::put_public_access_block(&state, &bucket, body).await
+            }
+            BucketSubresource::Notification => {
+                config::put_notification(&state, &bucket, body).await
+            }
+            BucketSubresource::Logging => config::put_logging(&state, &bucket, body).await,
+            BucketSubresource::Location
+            | BucketSubresource::PolicyStatus
+            | BucketSubresource::Uploads
+            | BucketSubresource::Versions
+            | BucketSubresource::Delete => subresource_method_not_allowed(subresource, "PUT"),
+        };
     }
 
     if let Err(resp) = canned_acl_value(&headers) {
         return resp;
     }
 
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => {
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::InvalidRequest,
-                "Failed to read request body",
-            ));
-        }
+    let body_bytes = match collect_body_limited(body, CONFIG_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     if let Some(constraint) = parse_location_constraint(&body_bytes) {
@@ -609,27 +632,282 @@ pub struct BucketQuery {
     pub max_uploads: Option<usize>,
 }
 
-const SUPPORTED_BUCKET_SUBRESOURCES: &[&str] = &[
-    "versioning",
-    "tagging",
-    "cors",
-    "encryption",
-    "lifecycle",
-    "acl",
-    "policy",
-    "policyStatus",
-    "replication",
-    "website",
-    "object-lock",
-    "ownershipControls",
-    "publicAccessBlock",
-    "notification",
-    "logging",
-    "quota",
-    "location",
-    "uploads",
-    "delete",
-    "versions",
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketSubresource {
+    Acl,
+    Cors,
+    Delete,
+    Encryption,
+    Lifecycle,
+    Location,
+    Logging,
+    Notification,
+    ObjectLock,
+    OwnershipControls,
+    Policy,
+    PolicyStatus,
+    PublicAccessBlock,
+    Quota,
+    Replication,
+    Tagging,
+    Uploads,
+    Versioning,
+    Versions,
+    Website,
+}
+
+const BUCKET_SUBRESOURCE_SELECTORS: &[(&str, BucketSubresource)] = &[
+    ("acl", BucketSubresource::Acl),
+    ("cors", BucketSubresource::Cors),
+    ("delete", BucketSubresource::Delete),
+    ("encryption", BucketSubresource::Encryption),
+    ("lifecycle", BucketSubresource::Lifecycle),
+    ("location", BucketSubresource::Location),
+    ("logging", BucketSubresource::Logging),
+    ("notification", BucketSubresource::Notification),
+    ("object-lock", BucketSubresource::ObjectLock),
+    ("ownershipControls", BucketSubresource::OwnershipControls),
+    ("policy", BucketSubresource::Policy),
+    ("policyStatus", BucketSubresource::PolicyStatus),
+    ("publicAccessBlock", BucketSubresource::PublicAccessBlock),
+    ("quota", BucketSubresource::Quota),
+    ("replication", BucketSubresource::Replication),
+    ("tagging", BucketSubresource::Tagging),
+    ("uploads", BucketSubresource::Uploads),
+    ("versioning", BucketSubresource::Versioning),
+    ("versions", BucketSubresource::Versions),
+    ("website", BucketSubresource::Website),
+];
+
+impl BucketSubresource {
+    pub fn selector(self) -> &'static str {
+        match self {
+            Self::Acl => "acl",
+            Self::Cors => "cors",
+            Self::Delete => "delete",
+            Self::Encryption => "encryption",
+            Self::Lifecycle => "lifecycle",
+            Self::Location => "location",
+            Self::Logging => "logging",
+            Self::Notification => "notification",
+            Self::ObjectLock => "object-lock",
+            Self::OwnershipControls => "ownershipControls",
+            Self::Policy => "policy",
+            Self::PolicyStatus => "policyStatus",
+            Self::PublicAccessBlock => "publicAccessBlock",
+            Self::Quota => "quota",
+            Self::Replication => "replication",
+            Self::Tagging => "tagging",
+            Self::Uploads => "uploads",
+            Self::Versioning => "versioning",
+            Self::Versions => "versions",
+            Self::Website => "website",
+        }
+    }
+
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::Acl => "share",
+            Self::Cors => "cors",
+            Self::Delete => "delete",
+            Self::Encryption => "encryption",
+            Self::Lifecycle => "lifecycle",
+            Self::Location | Self::Uploads | Self::Versions => "list",
+            Self::Logging => "logging",
+            Self::Notification => "notification",
+            Self::ObjectLock => "object_lock",
+            Self::OwnershipControls => "ownership_controls",
+            Self::Policy | Self::PolicyStatus => "policy",
+            Self::PublicAccessBlock => "public_access_block",
+            Self::Quota => "quota",
+            Self::Replication => "replication",
+            Self::Tagging => "tagging",
+            Self::Versioning => "versioning",
+            Self::Website => "website",
+        }
+    }
+}
+
+pub fn parse_bucket_subresource(
+    query: Option<&str>,
+) -> Result<Option<BucketSubresource>, Vec<&'static str>> {
+    let Some(q) = query else {
+        return Ok(None);
+    };
+    if q.is_empty() {
+        return Ok(None);
+    }
+
+    let mut found: Vec<BucketSubresource> = Vec::new();
+    for part in q.split('&').filter(|p| !p.is_empty()) {
+        let key = part.split('=').next().unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        if let Some((_, subresource)) = BUCKET_SUBRESOURCE_SELECTORS
+            .iter()
+            .find(|(name, _)| *name == key)
+        {
+            if !found.contains(subresource) {
+                found.push(*subresource);
+            }
+        }
+    }
+
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(Some(found[0])),
+        _ => Err(found.into_iter().map(BucketSubresource::selector).collect()),
+    }
+}
+
+pub fn ambiguous_subresource_error(selectors: &[&'static str]) -> S3Error {
+    S3Error::new(
+        S3ErrorCode::InvalidArgument,
+        format!(
+            "Request names multiple subresources ({}); specify exactly one",
+            selectors.join(", ")
+        ),
+    )
+}
+
+fn selector_method_not_allowed(selector: &str, method: &str) -> Response {
+    s3_error_response(S3Error::new(
+        S3ErrorCode::MethodNotAllowed,
+        format!(
+            "{} is not supported on the '?{}' subresource",
+            method, selector
+        ),
+    ))
+}
+
+fn subresource_method_not_allowed(subresource: BucketSubresource, method: &str) -> Response {
+    selector_method_not_allowed(subresource.selector(), method)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectSubresource {
+    Acl,
+    Attributes,
+    LegalHold,
+    Retention,
+    Select,
+    Tagging,
+    UploadId,
+    Uploads,
+}
+
+const OBJECT_SUBRESOURCE_SELECTORS: &[(&str, ObjectSubresource)] = &[
+    ("acl", ObjectSubresource::Acl),
+    ("attributes", ObjectSubresource::Attributes),
+    ("legal-hold", ObjectSubresource::LegalHold),
+    ("retention", ObjectSubresource::Retention),
+    ("select", ObjectSubresource::Select),
+    ("tagging", ObjectSubresource::Tagging),
+    ("uploadId", ObjectSubresource::UploadId),
+    ("uploads", ObjectSubresource::Uploads),
+];
+
+pub fn object_method_default_action(method: &Method) -> &'static str {
+    match *method {
+        Method::GET | Method::HEAD => "read",
+        Method::PUT | Method::POST => "write",
+        Method::DELETE => "delete",
+        _ => "read",
+    }
+}
+
+impl ObjectSubresource {
+    pub fn selector(self) -> &'static str {
+        match self {
+            Self::Acl => "acl",
+            Self::Attributes => "attributes",
+            Self::LegalHold => "legal-hold",
+            Self::Retention => "retention",
+            Self::Select => "select",
+            Self::Tagging => "tagging",
+            Self::UploadId => "uploadId",
+            Self::Uploads => "uploads",
+        }
+    }
+
+    pub fn is_dispatched_for(self, method: &Method) -> bool {
+        match self {
+            Self::Tagging | Self::Acl => {
+                matches!(*method, Method::PUT | Method::GET | Method::DELETE)
+            }
+            Self::Retention | Self::LegalHold => matches!(*method, Method::PUT | Method::GET),
+            Self::Attributes => *method == Method::GET,
+            Self::Select | Self::Uploads => *method == Method::POST,
+            Self::UploadId => matches!(
+                *method,
+                Method::PUT | Method::GET | Method::DELETE | Method::POST
+            ),
+        }
+    }
+
+    pub fn action(self, method: &Method) -> &'static str {
+        if !self.is_dispatched_for(method) {
+            return object_method_default_action(method);
+        }
+        match self {
+            Self::Retention | Self::LegalHold => "object_lock",
+            Self::Attributes | Self::Select => "read",
+            Self::Tagging | Self::Acl | Self::UploadId | Self::Uploads => {
+                if matches!(*method, Method::GET | Method::HEAD) {
+                    "read"
+                } else {
+                    "write"
+                }
+            }
+        }
+    }
+}
+
+pub fn parse_object_subresource(
+    query: Option<&str>,
+) -> Result<Option<ObjectSubresource>, Vec<&'static str>> {
+    let Some(q) = query else {
+        return Ok(None);
+    };
+    if q.is_empty() {
+        return Ok(None);
+    }
+
+    let mut found: Vec<ObjectSubresource> = Vec::new();
+    for part in q.split('&').filter(|p| !p.is_empty()) {
+        let key = part.split('=').next().unwrap_or("");
+        if key.is_empty() {
+            continue;
+        }
+        if let Some((_, subresource)) = OBJECT_SUBRESOURCE_SELECTORS
+            .iter()
+            .find(|(name, _)| *name == key)
+        {
+            if !found.contains(subresource) {
+                found.push(*subresource);
+            }
+        }
+    }
+
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(Some(found[0])),
+        _ => Err(found.into_iter().map(ObjectSubresource::selector).collect()),
+    }
+}
+
+fn guard_object_subresource(query: Option<&str>, method: &Method) -> Option<Response> {
+    match parse_object_subresource(query) {
+        Err(selectors) => Some(s3_error_response(ambiguous_subresource_error(&selectors))),
+        Ok(Some(subresource)) if !subresource.is_dispatched_for(method) => Some(
+            selector_method_not_allowed(subresource.selector(), method.as_str()),
+        ),
+        Ok(_) => None,
+    }
+}
+
+const SUPPORTED_BUCKET_LIST_PARAMS: &[&str] = &[
     "list-type",
     "marker",
     "prefix",
@@ -657,9 +935,12 @@ fn unsupported_bucket_subresource(query: Option<&str>) -> Option<String> {
         }
         let key_owned = key.to_string();
         let lower = key_owned.to_ascii_lowercase();
-        let known = SUPPORTED_BUCKET_SUBRESOURCES
+        let known = BUCKET_SUBRESOURCE_SELECTORS
             .iter()
-            .any(|known| known.eq_ignore_ascii_case(&key_owned))
+            .any(|(name, _)| *name == key)
+            || SUPPORTED_BUCKET_LIST_PARAMS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&key_owned))
             || lower.starts_with("x-amz-")
             || lower.starts_with("x-id");
         if !known {
@@ -702,6 +983,7 @@ pub async fn get_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 headers,
             )
             .await;
@@ -722,78 +1004,69 @@ pub async fn get_bucket(
         return storage_err_response(myfsio_storage::error::StorageError::BucketNotFound(bucket));
     }
 
-    if query.quota.is_some() {
-        return config::get_quota(&state, &bucket).await;
-    }
-    if query.versioning.is_some() {
-        return config::get_versioning(&state, &bucket).await;
-    }
-    if query.tagging.is_some() {
-        return config::get_tagging(&state, &bucket).await;
-    }
-    if query.cors.is_some() {
-        return config::get_cors(&state, &bucket).await;
-    }
-    if query.location.is_some() {
-        return config::get_location(&state, &bucket).await;
-    }
-    if query.encryption.is_some() {
-        return config::get_encryption(&state, &bucket).await;
-    }
-    if query.lifecycle.is_some() {
-        return config::get_lifecycle(&state, &bucket).await;
-    }
-    if query.acl.is_some() {
-        return config::get_acl(&state, &bucket).await;
-    }
-    if query.policy.is_some() {
-        return config::get_policy(&state, &bucket).await;
-    }
-    if query.policy_status.is_some() {
-        return config::get_policy_status(&state, &bucket).await;
-    }
-    if query.replication.is_some() {
-        return config::get_replication(&state, &bucket).await;
-    }
-    if query.website.is_some() {
-        return config::get_website(&state, &bucket).await;
-    }
-    if query.object_lock.is_some() {
-        return config::get_object_lock(&state, &bucket).await;
-    }
-    if query.ownership_controls.is_some() {
-        return config::get_ownership_controls(&state, &bucket).await;
-    }
-    if query.public_access_block.is_some() {
-        return config::get_public_access_block(&state, &bucket).await;
-    }
-    if query.notification.is_some() {
-        return config::get_notification(&state, &bucket).await;
-    }
-    if query.logging.is_some() {
-        return config::get_logging(&state, &bucket).await;
-    }
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
     let max_keys: usize = match query.max_keys.as_deref() {
         None => 1000,
         Some(raw) => match parse_max_keys(raw) {
-            Ok(v) => v,
+            Ok(v) => v.min(1000),
             Err(resp) => return resp,
         },
     };
-    if query.versions.is_some() {
-        return config::list_object_versions(
-            &state,
-            &bucket,
-            query.prefix.as_deref(),
-            query.delimiter.as_deref(),
-            query.key_marker.as_deref(),
-            query.version_id_marker.as_deref(),
-            max_keys,
-        )
-        .await;
+
+    if let Some(subresource) = subresource {
+        return match subresource {
+            BucketSubresource::Quota => config::get_quota(&state, &bucket).await,
+            BucketSubresource::Versioning => config::get_versioning(&state, &bucket).await,
+            BucketSubresource::Tagging => config::get_tagging(&state, &bucket).await,
+            BucketSubresource::Cors => config::get_cors(&state, &bucket).await,
+            BucketSubresource::Location => config::get_location(&state, &bucket).await,
+            BucketSubresource::Encryption => config::get_encryption(&state, &bucket).await,
+            BucketSubresource::Lifecycle => config::get_lifecycle(&state, &bucket).await,
+            BucketSubresource::Acl => config::get_acl(&state, &bucket).await,
+            BucketSubresource::Policy => config::get_policy(&state, &bucket).await,
+            BucketSubresource::PolicyStatus => config::get_policy_status(&state, &bucket).await,
+            BucketSubresource::Replication => config::get_replication(&state, &bucket).await,
+            BucketSubresource::Website => config::get_website(&state, &bucket).await,
+            BucketSubresource::ObjectLock => config::get_object_lock(&state, &bucket).await,
+            BucketSubresource::OwnershipControls => {
+                config::get_ownership_controls(&state, &bucket).await
+            }
+            BucketSubresource::PublicAccessBlock => {
+                config::get_public_access_block(&state, &bucket).await
+            }
+            BucketSubresource::Notification => config::get_notification(&state, &bucket).await,
+            BucketSubresource::Logging => config::get_logging(&state, &bucket).await,
+            BucketSubresource::Versions => {
+                if let Err(resp) = validate_encoding_type(&query) {
+                    return resp;
+                }
+                config::list_object_versions(
+                    &state,
+                    &bucket,
+                    query.prefix.as_deref(),
+                    query.delimiter.as_deref(),
+                    query.key_marker.as_deref(),
+                    query.version_id_marker.as_deref(),
+                    max_keys,
+                )
+                .await
+            }
+            BucketSubresource::Uploads => {
+                if let Err(resp) = validate_encoding_type(&query) {
+                    return resp;
+                }
+                list_multipart_uploads_handler(&state, &bucket, &query).await
+            }
+            BucketSubresource::Delete => subresource_method_not_allowed(subresource, "GET"),
+        };
     }
-    if query.uploads.is_some() {
-        return list_multipart_uploads_handler(&state, &bucket, &query).await;
+
+    if let Err(resp) = validate_encoding_type(&query) {
+        return resp;
     }
 
     let prefix = query.prefix.clone().unwrap_or_default();
@@ -1189,19 +1462,23 @@ fn skip_past_common_prefix(cp: &str) -> String {
 pub async fn post_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    Query(query): Query<BucketQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     let peer_marker = peer.as_ref().map(|e| &e.0);
+    let principal_ref = principal.as_ref().map(|e| &e.0);
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
         if host_bucket != bucket {
             return post_object(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 peer,
+                principal,
                 headers,
                 body,
             )
@@ -1209,20 +1486,40 @@ pub async fn post_bucket(
         }
     }
 
-    if query.delete.is_some() {
-        let bypass_governance = headers
-            .get("x-amz-bypass-governance-retention")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        return delete_objects_handler(&state, &bucket, peer_marker, bypass_governance, body).await;
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
+    match subresource {
+        Some(BucketSubresource::Delete) => {
+            return delete_objects_handler(
+                &state,
+                &bucket,
+                peer_marker,
+                principal_ref,
+                bypass_governance_header(&headers),
+                body,
+            )
+            .await;
+        }
+        Some(other) => return subresource_method_not_allowed(other, "POST"),
+        None => {}
     }
 
     if let Some(ct) = headers.get("content-type").and_then(|v| v.to_str().ok()) {
         if ct.to_ascii_lowercase().starts_with("multipart/form-data") {
             let ct = ct.to_string();
-            return post_object_form_handler(&state, &bucket, &ct, &headers, peer_marker, body)
-                .await;
+            return post_object_form_handler(
+                &state,
+                &bucket,
+                &ct,
+                &headers,
+                peer_marker,
+                principal_ref,
+                body,
+            )
+            .await;
         }
     }
 
@@ -1232,9 +1529,9 @@ pub async fn post_bucket(
 pub async fn delete_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    Query(query): Query<BucketQuery>,
     raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
 ) -> Response {
     if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
@@ -1243,7 +1540,9 @@ pub async fn delete_bucket(
                 State(state),
                 Path((host_bucket, bucket)),
                 Query(ObjectQuery::default()),
+                axum::extract::RawQuery(None),
                 peer,
+                principal,
                 headers,
             )
             .await;
@@ -1260,57 +1559,40 @@ pub async fn delete_bucket(
         ));
     }
 
-    if query.quota.is_some() {
-        return config::delete_quota(&state, &bucket).await;
-    }
-    if query.tagging.is_some() {
-        return config::delete_tagging(&state, &bucket).await;
-    }
-    if query.cors.is_some() {
-        return config::delete_cors(&state, &bucket).await;
-    }
-    if query.encryption.is_some() {
-        return config::delete_encryption(&state, &bucket).await;
-    }
-    if query.lifecycle.is_some() {
-        return config::delete_lifecycle(&state, &bucket).await;
-    }
-    if query.website.is_some() {
-        return config::delete_website(&state, &bucket).await;
-    }
-    if query.policy.is_some() {
-        return config::delete_policy(&state, &bucket).await;
-    }
-    if query.replication.is_some() {
-        return config::delete_replication(&state, &bucket).await;
-    }
-    if query.object_lock.is_some() {
-        return config::delete_object_lock(&state, &bucket).await;
-    }
-    if query.ownership_controls.is_some() {
-        return config::delete_ownership_controls(&state, &bucket).await;
-    }
-    if query.public_access_block.is_some() {
-        return config::delete_public_access_block(&state, &bucket).await;
-    }
-    if query.notification.is_some() {
-        return config::delete_notification(&state, &bucket).await;
-    }
-    if query.logging.is_some() {
-        return config::delete_logging(&state, &bucket).await;
-    }
-    if query.acl.is_some()
-        || query.versioning.is_some()
-        || query.versions.is_some()
-        || query.uploads.is_some()
-        || query.delete.is_some()
-        || query.location.is_some()
-        || query.policy_status.is_some()
-    {
-        return s3_error_response(S3Error::new(
-            S3ErrorCode::MethodNotAllowed,
-            "DELETE is not supported on this bucket subresource",
-        ));
+    let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
+        Ok(value) => value,
+        Err(selectors) => return s3_error_response(ambiguous_subresource_error(&selectors)),
+    };
+
+    if let Some(subresource) = subresource {
+        return match subresource {
+            BucketSubresource::Quota => config::delete_quota(&state, &bucket).await,
+            BucketSubresource::Tagging => config::delete_tagging(&state, &bucket).await,
+            BucketSubresource::Cors => config::delete_cors(&state, &bucket).await,
+            BucketSubresource::Encryption => config::delete_encryption(&state, &bucket).await,
+            BucketSubresource::Lifecycle => config::delete_lifecycle(&state, &bucket).await,
+            BucketSubresource::Website => config::delete_website(&state, &bucket).await,
+            BucketSubresource::Policy => config::delete_policy(&state, &bucket).await,
+            BucketSubresource::Replication => config::delete_replication(&state, &bucket).await,
+            BucketSubresource::ObjectLock => config::delete_object_lock(&state, &bucket).await,
+            BucketSubresource::OwnershipControls => {
+                config::delete_ownership_controls(&state, &bucket).await
+            }
+            BucketSubresource::PublicAccessBlock => {
+                config::delete_public_access_block(&state, &bucket).await
+            }
+            BucketSubresource::Notification => config::delete_notification(&state, &bucket).await,
+            BucketSubresource::Logging => config::delete_logging(&state, &bucket).await,
+            BucketSubresource::Acl
+            | BucketSubresource::Versioning
+            | BucketSubresource::Versions
+            | BucketSubresource::Uploads
+            | BucketSubresource::Delete
+            | BucketSubresource::Location
+            | BucketSubresource::PolicyStatus => {
+                subresource_method_not_allowed(subresource, "DELETE")
+            }
+        };
     }
 
     match state.storage.delete_bucket(&bucket).await {
@@ -2105,17 +2387,21 @@ pub async fn put_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
     principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     streaming_sigv4: Option<axum::extract::Extension<crate::middleware::StreamingSigV4Context>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::PUT) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
-    let owner_id = principal
-        .as_ref()
-        .map(|p| p.0.user_id.clone())
+    let principal_ref = principal.as_ref().map(|e| &e.0);
+    let owner_id = principal_ref
+        .map(|p| p.user_id.clone())
         .unwrap_or_else(|| "myfsio".to_string());
     if query.tagging.is_some() {
         if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
@@ -2143,6 +2429,7 @@ pub async fn put_object(
             &bucket,
             &key,
             query.version_id.as_deref(),
+            principal_ref,
             &headers,
             body,
         )
@@ -2206,17 +2493,27 @@ pub async fn put_object(
         .get("x-amz-copy-source")
         .and_then(|v| v.to_str().ok())
     {
-        return copy_object_handler(&state, copy_source, &bucket, &key, peer_marker, &headers)
-            .await;
+        return copy_object_handler(
+            &state,
+            copy_source,
+            &bucket,
+            &key,
+            peer_marker,
+            principal_ref,
+            &headers,
+        )
+        .await;
     }
 
+    let bypass_governance =
+        governance_bypass_allowed(&state, principal_ref, &bucket, Some(&key), &headers).await;
     if let Err(response) =
-        ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
+        ensure_object_lock_allows_write(&state, &bucket, &key, bypass_governance).await
     {
         return response;
     }
     if let Err(response) =
-        ensure_archived_null_lock_allows_overwrite(&state, &bucket, &key, Some(&headers)).await
+        ensure_archived_null_lock_allows_overwrite(&state, &bucket, &key, bypass_governance).await
     {
         return response;
     }
@@ -2248,6 +2545,9 @@ pub async fn put_object(
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
         if let Some(meta_key) = name_str.strip_prefix("x-amz-meta-") {
+            if myfsio_storage::validation::is_reserved_user_metadata_key(meta_key) {
+                continue;
+            }
             if let Ok(val) = value.to_str() {
                 metadata.insert(meta_key.to_string(), val.to_string());
             }
@@ -2273,6 +2573,7 @@ pub async fn put_object(
     }
 
     persist_additional_checksums(&headers, &mut metadata);
+    object_lock::apply_default_retention(&state, &bucket, &mut metadata).await;
 
     let aws_chunked = is_aws_chunked(&headers);
     let declared_len = declared_body_length(&headers, aws_chunked);
@@ -2313,7 +2614,7 @@ pub async fn put_object(
     let commit_options = myfsio_storage::traits::PutCommitOptions {
         etag_override: None,
         conditions: put_conditions_from_headers(&headers),
-        bypass_governance: bypass_governance_header(&headers),
+        bypass_governance,
     };
 
     if let Some(enc_ctx) = resolved_enc_ctx {
@@ -2464,8 +2765,12 @@ pub async fn get_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::GET) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     if query.tagging.is_some() {
         return config::get_object_tagging(&state, &bucket, &key, query.version_id.as_deref())
@@ -2507,11 +2812,6 @@ pub async fn get_object(
         return range_get_handler(&state, &bucket, &key, range_str, &query, &headers).await;
     }
 
-    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
-
-    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
-    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-    let snap_link = tmp_dir.join(format!("src-{}", uuid::Uuid::new_v4()));
     let part_window = match query.part_number {
         Some(part_number) => {
             let head = match version_id {
@@ -2528,34 +2828,24 @@ pub async fn get_object(
         }
         None => None,
     };
-    let snap_res = match version_id {
-        Some(v) => {
-            state
-                .storage
-                .snapshot_object_version_to_link_windowed(&bucket, &key, v, &snap_link, part_window)
-                .await
-        }
-        None => {
-            state
-                .storage
-                .snapshot_object_to_link_windowed(&bucket, &key, &snap_link, part_window)
-                .await
-        }
-    };
-    let (snap_meta, snap_source) = match snap_res {
-        Ok(m) => m,
-        Err(e) => return storage_err_response(e),
-    };
+    let snapshot =
+        match object_read::snapshot_object_for_read(&state, &bucket, &key, version_id, part_window)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(e) => return storage_err_response(e),
+        };
 
-    if mpu_is_sse_c(&snap_meta.internal_metadata) {
-        if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
-            let _ = tokio::fs::remove_file(&snap_link).await;
+    if mpu_is_sse_c(&snapshot.meta.internal_metadata) {
+        if let Some(resp) = evaluate_get_preconditions(&headers, &snapshot.meta) {
+            snapshot.discard().await;
             return resp;
         }
+        let object_read::ObjectSnapshot { meta, link, .. } = snapshot;
         return serve_mpu_sse_c(
             &state,
-            snap_link,
-            snap_meta,
+            link,
+            meta,
             &headers,
             &query,
             None,
@@ -2565,23 +2855,22 @@ pub async fn get_object(
     }
 
     if let Some(part_number) = query.part_number {
-        match resolve_part_view(&snap_meta, part_number) {
+        match resolve_part_view(&snapshot.meta, part_number) {
             Ok(view) if view.multipart => {
                 if view.length == 0 {
-                    if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
-                        let _ = tokio::fs::remove_file(&snap_link).await;
+                    if let Some(resp) = evaluate_get_preconditions(&headers, &snapshot.meta) {
+                        snapshot.discard().await;
                         return resp;
                     }
-                    let _ = tokio::fs::remove_file(&snap_link).await;
-                    let mut h = build_part_response_headers(&key, &snap_meta, &view, &query);
-                    apply_user_metadata(&mut h, &snap_meta.metadata);
+                    snapshot.discard().await;
+                    let mut h = build_part_response_headers(&key, &snapshot.meta, &view, &query);
+                    apply_user_metadata(&mut h, &snapshot.meta.metadata);
                     return (StatusCode::PARTIAL_CONTENT, h).into_response();
                 }
                 let range_str = format!("bytes={}-{}", view.start, view.start + view.length - 1);
                 return serve_range_from_snapshot(
                     &state,
-                    snap_source,
-                    snap_meta,
+                    snapshot,
                     &range_str,
                     &query,
                     &headers,
@@ -2591,128 +2880,35 @@ pub async fn get_object(
             }
             Ok(_) => {}
             Err(resp) => {
-                let _ = tokio::fs::remove_file(&snap_link).await;
+                snapshot.discard().await;
                 return resp;
             }
         }
     }
 
-    if let Some(resp) = evaluate_get_preconditions(&headers, &snap_meta) {
-        let _ = tokio::fs::remove_file(&snap_link).await;
+    if let Some(resp) = evaluate_get_preconditions(&headers, &snapshot.meta) {
+        snapshot.discard().await;
         return resp;
     }
 
-    let disk_permit = match acquire_disk_read_permit(&state).await {
-        Ok(permit) => permit,
-        Err(response) => {
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            return response;
-        }
+    if let Err(resp) = require_sse_c_key_for_object(&state, &snapshot.meta, &headers) {
+        snapshot.discard().await;
+        return resp;
+    }
+
+    let served = match object_read::serve_object_data(&state, snapshot, None, &headers).await {
+        Ok(served) => served,
+        Err(err) => return object_read_error_response(err),
     };
+    let enc_header = served.encryption_algorithm.as_deref();
+    let body = served.body;
 
-    let enc_info =
-        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&snap_meta.internal_metadata);
-
-    let (reader, file_size, enc_header): (
-        myfsio_storage::traits::AsyncReadStream,
-        u64,
-        Option<&str>,
-    ) = match (enc_info.as_ref(), state.encryption.as_ref()) {
-        (Some(enc_info), Some(enc_svc)) => {
-            if enc_info.algorithm == "AES256" && enc_info.encrypted_data_key.is_none() {
-                if let Err(resp) = require_sse_c_key_match(&headers, &snap_meta.internal_metadata) {
-                    let _ = tokio::fs::remove_file(&snap_link).await;
-                    return resp;
-                }
-            }
-            let customer_key = match extract_sse_c_key(&headers) {
-                Ok(key) => key,
-                Err(resp) => {
-                    let _ = tokio::fs::remove_file(&snap_link).await;
-                    return resp;
-                }
-            };
-            if let Some(plain_size) = enc_info.plaintext_size {
-                match enc_svc
-                    .decrypt_object_stream(
-                        &snap_link,
-                        enc_info,
-                        customer_key.as_deref(),
-                        None,
-                        true,
-                    )
-                    .await
-                {
-                    Ok(stream) => (stream, plain_size, Some(enc_info.algorithm.as_str())),
-                    Err(e) => {
-                        let _ = tokio::fs::remove_file(&snap_link).await;
-                        return s3_error_response(S3Error::new(
-                            myfsio_common::error::S3ErrorCode::InternalError,
-                            format!("Decryption failed: {}", e),
-                        ));
-                    }
-                }
-            } else {
-                let dec_tmp = tmp_dir.join(format!("dec-{}", uuid::Uuid::new_v4()));
-                let decrypt_res = enc_svc
-                    .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
-                    .await;
-                let _ = tokio::fs::remove_file(&snap_link).await;
-                if let Err(e) = decrypt_res {
-                    let _ = tokio::fs::remove_file(&dec_tmp).await;
-                    return s3_error_response(S3Error::new(
-                        myfsio_common::error::S3ErrorCode::InternalError,
-                        format!("Decryption failed: {}", e),
-                    ));
-                }
-                let file = match open_self_deleting(dec_tmp.clone()).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        let _ = tokio::fs::remove_file(&dec_tmp).await;
-                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-                    }
-                };
-                let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-                (Box::pin(file), file_size, Some(enc_info.algorithm.as_str()))
-            }
-        }
-        (Some(_), None) => {
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::InternalError,
-                "Object is encrypted but encryption service is disabled".to_string(),
-            ));
-        }
-        (None, _) => match snap_source {
-            myfsio_storage::traits::SnapshotSource::LinkedFile(_) => {
-                let file = match open_self_deleting(snap_link.clone()).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        let _ = tokio::fs::remove_file(&snap_link).await;
-                        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-                    }
-                };
-                (Box::pin(file), snap_meta.size, None)
-            }
-            segments => {
-                let stream = match segments.into_range_stream(0, None).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return storage_err_response(myfsio_storage::error::StorageError::Io(e))
-                    }
-                };
-                (stream, snap_meta.size, None)
-            }
-        },
-    };
-
-    let reader = attach_read_permit(reader, disk_permit);
-    let stream = ReaderStream::with_capacity(reader, stream_cap);
-    let body = Body::from_stream(stream);
-
-    let meta = &snap_meta;
+    let meta = &served.meta;
     let mut resp_headers = HeaderMap::new();
-    resp_headers.insert("content-length", file_size.to_string().parse().unwrap());
+    resp_headers.insert(
+        "content-length",
+        served.content_length.to_string().parse().unwrap(),
+    );
     if let Some(ref etag) = meta.etag {
         resp_headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
     }
@@ -2752,12 +2948,18 @@ pub async fn post_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::POST) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
+    let principal_ref = principal.as_ref().map(|e| &e.0);
     if query.uploads.is_some() {
         return initiate_multipart_handler(&state, &bucket, &key, &headers).await;
     }
@@ -2769,6 +2971,7 @@ pub async fn post_object(
             &key,
             upload_id,
             peer_marker,
+            principal_ref,
             &headers,
             body,
         )
@@ -2786,11 +2989,17 @@ pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    raw_query: axum::extract::RawQuery,
     peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
     headers: HeaderMap,
 ) -> Response {
+    if let Some(resp) = guard_object_subresource(raw_query.0.as_deref(), &Method::DELETE) {
+        return resp;
+    }
     let key = normalize_object_key(key);
     let peer_marker = peer.as_ref().map(|e| &e.0);
+    let principal_ref = principal.as_ref().map(|e| &e.0);
     if query.tagging.is_some() {
         if query.version_id.as_deref().is_some_and(|v| !v.is_empty()) {
             return s3_error_response(S3Error::new(
@@ -2812,21 +3021,24 @@ pub async fn delete_object(
         return abort_multipart_handler(&state, &bucket, upload_id).await;
     }
 
+    let bypass_governance =
+        governance_bypass_allowed(&state, principal_ref, &bucket, Some(&key), &headers).await;
+
     if let Some(version_id) = query.version_id.as_deref() {
-        if let Err(response) =
-            ensure_object_version_lock_allows_delete(&state, &bucket, &key, version_id, &headers)
-                .await
+        if let Err(response) = ensure_object_version_lock_allows_delete(
+            &state,
+            &bucket,
+            &key,
+            version_id,
+            bypass_governance,
+        )
+        .await
         {
             return response;
         }
         return match state
             .storage
-            .delete_object_version_checked(
-                &bucket,
-                &key,
-                version_id,
-                bypass_governance_header(&headers),
-            )
+            .delete_object_version_checked(&bucket, &key, version_id, bypass_governance)
             .await
         {
             Ok(outcome) => {
@@ -2860,14 +3072,14 @@ pub async fn delete_object(
     }
 
     if let Err(response) =
-        ensure_object_lock_allows_write(&state, &bucket, &key, Some(&headers)).await
+        ensure_object_lock_allows_write(&state, &bucket, &key, bypass_governance).await
     {
         return response;
     }
 
     match state
         .storage
-        .delete_object_checked(&bucket, &key, bypass_governance_header(&headers))
+        .delete_object_checked(&bucket, &key, bypass_governance)
         .await
     {
         Ok(outcome) => {
@@ -2955,10 +3167,7 @@ pub async fn head_object(
             }
 
             let mut headers = HeaderMap::new();
-            let plaintext_size = enc_info
-                .as_ref()
-                .and_then(|info| info.plaintext_size)
-                .unwrap_or(meta.size);
+            let plaintext_size = object_read::plaintext_size(&meta);
             headers.insert(
                 "content-length",
                 plaintext_size.to_string().parse().unwrap(),
@@ -3921,6 +4130,7 @@ async fn complete_multipart_handler(
     key: &str,
     upload_id: &str,
     peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    principal: Option<&myfsio_common::types::Principal>,
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
@@ -3947,20 +4157,17 @@ async fn complete_multipart_handler(
         ));
     }
 
+    let bypass_governance =
+        governance_bypass_allowed(state, principal, bucket, Some(key), headers).await;
     if let Err(response) =
-        ensure_archived_null_lock_allows_overwrite(state, bucket, key, Some(headers)).await
+        ensure_archived_null_lock_allows_overwrite(state, bucket, key, bypass_governance).await
     {
         return response;
     }
 
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::MalformedXML,
-                "Failed to read request body",
-            ));
-        }
+    let body_bytes = match collect_body_limited(body, BULK_XML_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
@@ -4104,7 +4311,7 @@ async fn complete_multipart_handler(
             myfsio_storage::traits::PutCommitOptions {
                 etag_override: None,
                 conditions: put_conditions_from_headers(headers),
-                bypass_governance: bypass_governance_header(headers),
+                bypass_governance,
             },
         )
         .await
@@ -4207,6 +4414,8 @@ async fn complete_multipart_handler(
                     }
                 }
             }
+
+            object_lock::apply_default_retention_to_stored(state, bucket, key).await;
 
             let xml = myfsio_xml::response::complete_multipart_upload_xml(
                 bucket,
@@ -4599,15 +4808,19 @@ async fn copy_object_handler(
     dst_bucket: &str,
     dst_key: &str,
     peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    principal: Option<&myfsio_common::types::Principal>,
     headers: &HeaderMap,
 ) -> Response {
+    let bypass_governance =
+        governance_bypass_allowed(state, principal, dst_bucket, Some(dst_key), headers).await;
     if let Err(response) =
-        ensure_object_lock_allows_write(state, dst_bucket, dst_key, Some(headers)).await
+        ensure_object_lock_allows_write(state, dst_bucket, dst_key, bypass_governance).await
     {
         return response;
     }
     if let Err(response) =
-        ensure_archived_null_lock_allows_overwrite(state, dst_bucket, dst_key, Some(headers)).await
+        ensure_archived_null_lock_allows_overwrite(state, dst_bucket, dst_key, bypass_governance)
+            .await
     {
         return response;
     }
@@ -4803,6 +5016,9 @@ async fn copy_object_handler(
         for (name, value) in headers.iter() {
             let name_str = name.as_str();
             if let Some(meta_key) = name_str.strip_prefix("x-amz-meta-") {
+                if myfsio_storage::validation::is_reserved_user_metadata_key(meta_key) {
+                    continue;
+                }
                 if let Ok(val) = value.to_str() {
                     m.insert(meta_key.to_string(), val.to_string());
                 }
@@ -4868,6 +5084,7 @@ async fn copy_object_handler(
     strip_storage_managed_keys(&mut dst_metadata);
     dst_metadata.remove(myfsio_storage::segments::META_KEY_SEGMENTS);
     dst_metadata.remove("__part_sizes__");
+    object_lock::apply_default_retention(state, dst_bucket, &mut dst_metadata).await;
 
     let (publish_path, publish_metadata, plaintext_etag_override) = if let Some(enc_ctx) =
         dst_enc_ctx
@@ -4995,17 +5212,13 @@ async fn delete_objects_handler(
     state: &AppState,
     bucket: &str,
     peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
-    bypass_governance: bool,
+    principal: Option<&myfsio_common::types::Principal>,
+    bypass_requested: bool,
     body: Body,
 ) -> Response {
-    let body_bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
-            return s3_error_response(S3Error::new(
-                myfsio_common::error::S3ErrorCode::MalformedXML,
-                "Failed to read request body",
-            ));
-        }
+    let body_bytes = match collect_body_limited(body, BULK_XML_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let xml_str = String::from_utf8_lossy(&body_bytes);
@@ -5036,10 +5249,34 @@ async fn delete_objects_handler(
         .map(|obj| {
             let state = state.clone();
             let bucket = bucket.to_string();
-            let bypass = bypass_governance;
+            let principal = principal.cloned();
             async move {
                 let key = obj.key.clone();
                 let requested_vid = obj.version_id.clone();
+                if let Err(err) = crate::middleware::authorize_action(
+                    &state,
+                    principal.as_ref(),
+                    &bucket,
+                    "delete",
+                    Some(&obj.key),
+                    Some(true),
+                )
+                .await
+                {
+                    return (
+                        key,
+                        requested_vid,
+                        Err((err.code.as_str().to_string(), err.message)),
+                    );
+                }
+                let bypass = bypass_requested
+                    && governance_bypass_authorized(
+                        &state,
+                        principal.as_ref(),
+                        &bucket,
+                        Some(&obj.key),
+                    )
+                    .await;
                 let to_err = |err: myfsio_storage::error::StorageError| -> (String, String) {
                     let s3err = S3Error::from(err);
                     (s3err.code.as_str().to_string(), s3err.message)
@@ -5085,17 +5322,14 @@ async fn delete_objects_handler(
                                 state
                                     .storage
                                     .delete_object_version_checked(
-                                        &bucket,
-                                        &obj.key,
-                                        version_id,
-                                        bypass_governance,
+                                        &bucket, &obj.key, version_id, bypass,
                                     )
                                     .await
                             }
                             None => {
                                 state
                                     .storage
-                                    .delete_object_checked(&bucket, &obj.key, bypass_governance)
+                                    .delete_object_checked(&bucket, &obj.key, bypass)
                                     .await
                             }
                         };
@@ -5164,28 +5398,6 @@ async fn range_get_handler(
     range_get_handler_inner(state, bucket, key, range_str, query, headers, None).await
 }
 
-fn parse_range_hint(range_str: &str) -> Option<myfsio_storage::traits::RangeHint> {
-    let spec = range_str.trim().strip_prefix("bytes=")?;
-    if spec.contains(',') {
-        return None;
-    }
-    let (raw_start, raw_end) = spec.split_once('-')?;
-    let start = if raw_start.trim().is_empty() {
-        None
-    } else {
-        Some(raw_start.trim().parse::<u64>().ok()?)
-    };
-    let end = if raw_end.trim().is_empty() {
-        None
-    } else {
-        Some(raw_end.trim().parse::<u64>().ok()?)
-    };
-    if start.is_none() && end.is_none() {
-        return None;
-    }
-    Some(myfsio_storage::traits::RangeHint { start, end })
-}
-
 async fn range_get_handler_inner(
     state: &AppState,
     bucket: &str,
@@ -5195,283 +5407,91 @@ async fn range_get_handler_inner(
     headers: &HeaderMap,
     parts_count: Option<u32>,
 ) -> Response {
-    let version_id = query.version_id.as_deref();
-
-    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
-    let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-    let snap_link = tmp_dir.join(format!("rsrc-{}", uuid::Uuid::new_v4()));
-
-    let window = parse_range_hint(range_str);
-    let snap_meta = match version_id {
-        Some(v) => {
-            state
-                .storage
-                .snapshot_object_version_to_link_windowed(bucket, key, v, &snap_link, window)
-                .await
-        }
-        None => {
-            state
-                .storage
-                .snapshot_object_to_link_windowed(bucket, key, &snap_link, window)
-                .await
-        }
-    };
-    let (meta, snap_source) = match snap_meta {
-        Ok(m) => m,
+    let window = object_read::parse_range_hint(range_str);
+    let snapshot = match object_read::snapshot_object_for_read(
+        state,
+        bucket,
+        key,
+        query.version_id.as_deref(),
+        window,
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
         Err(e) => return storage_err_response(e),
     };
 
-    serve_range_from_snapshot(
-        state,
-        snap_source,
-        meta,
-        range_str,
-        query,
-        headers,
-        parts_count,
-    )
-    .await
+    serve_range_from_snapshot(state, snapshot, range_str, query, headers, parts_count).await
 }
 
 async fn serve_range_from_snapshot(
     state: &AppState,
-    snap_source: myfsio_storage::traits::SnapshotSource,
-    meta: myfsio_common::types::ObjectMeta,
+    snapshot: object_read::ObjectSnapshot,
     range_str: &str,
     query: &ObjectQuery,
     headers: &HeaderMap,
     parts_count: Option<u32>,
 ) -> Response {
-    let snap_link = match snap_source {
-        myfsio_storage::traits::SnapshotSource::LinkedFile(link) => link,
-        segments => {
-            return serve_range_from_segments(
-                state,
-                segments,
-                meta,
-                range_str,
-                query,
-                headers,
-                parts_count,
-            )
-            .await;
-        }
-    };
-    let key = meta.key.as_str();
-    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
-
-    if let Some(resp) = evaluate_get_preconditions(headers, &meta) {
-        let _ = tokio::fs::remove_file(&snap_link).await;
+    if let Some(resp) = evaluate_get_preconditions(headers, &snapshot.meta) {
+        snapshot.discard().await;
         return resp;
     }
 
-    if mpu_is_sse_c(&meta.internal_metadata) {
-        return serve_mpu_sse_c(
-            state,
-            snap_link,
-            meta,
-            headers,
-            query,
-            Some(range_str),
-            None,
-        )
-        .await;
+    if mpu_is_sse_c(&snapshot.meta.internal_metadata) {
+        let object_read::ObjectSnapshot { meta, link, .. } = snapshot;
+        return serve_mpu_sse_c(state, link, meta, headers, query, Some(range_str), None).await;
     }
 
-    let disk_permit = match acquire_disk_read_permit(state).await {
-        Ok(permit) => permit,
-        Err(response) => {
-            let _ = tokio::fs::remove_file(&snap_link).await;
-            return response;
-        }
-    };
+    if let Err(resp) = require_sse_c_key_for_object(state, &snapshot.meta, headers) {
+        snapshot.discard().await;
+        return resp;
+    }
 
-    let enc_info =
-        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta.internal_metadata);
-
-    let (body_path, plaintext_size, enc_header): (std::path::PathBuf, u64, Option<&str>) =
-        match (enc_info.as_ref(), state.encryption.as_ref()) {
-            (Some(enc_info), Some(enc_svc)) => {
-                let customer_key = match extract_sse_c_key(headers) {
-                    Ok(key) => key,
-                    Err(resp) => {
-                        let _ = tokio::fs::remove_file(&snap_link).await;
-                        return resp;
-                    }
-                };
-                let has_fast_path =
-                    enc_info.chunk_size.is_some() && enc_info.plaintext_size.is_some();
-
-                if has_fast_path {
-                    let plaintext_size = enc_info.plaintext_size.unwrap();
-                    let (start, end) = match parse_range(range_str, plaintext_size) {
-                        Some(r) => r,
-                        None => {
-                            let _ = tokio::fs::remove_file(&snap_link).await;
-                            let mut extra = HeaderMap::new();
-                            if let Ok(v) = format!("bytes */{}", plaintext_size).parse() {
-                                extra.insert(axum::http::header::CONTENT_RANGE, v);
-                            }
-                            return crate::s3_response::s3_error_response_with_headers(
-                                S3Error::new(
-                                    myfsio_common::error::S3ErrorCode::InvalidRange,
-                                    format!("Range not satisfiable for size {}", plaintext_size),
-                                ),
-                                extra,
-                            );
-                        }
-                    };
-
-                    let stream = match enc_svc
-                        .decrypt_object_stream(
-                            &snap_link,
-                            enc_info,
-                            customer_key.as_deref(),
-                            Some((start, end)),
-                            true,
-                        )
-                        .await
-                    {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            let _ = tokio::fs::remove_file(&snap_link).await;
-                            return s3_error_response(S3Error::new(
-                                myfsio_common::error::S3ErrorCode::InternalError,
-                                format!("Decryption failed: {}", e),
-                            ));
-                        }
-                    };
-                    let stream = attach_read_permit(stream, disk_permit);
-                    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
-                    let body = Body::from_stream(ReaderStream::with_capacity(stream, stream_cap));
-                    let resp_headers = partial_content_headers(
-                        start,
-                        end,
-                        plaintext_size,
-                        &meta,
-                        key,
-                        query,
-                        headers,
-                        Some(enc_info.algorithm.as_str()),
-                        parts_count,
-                    );
-                    return (StatusCode::PARTIAL_CONTENT, resp_headers, body).into_response();
-                }
-
-                let dec_tmp = tmp_dir.join(format!("rdec-{}", uuid::Uuid::new_v4()));
-                let res = enc_svc
-                    .decrypt_object(&snap_link, &dec_tmp, enc_info, customer_key.as_deref())
-                    .await;
-                let _ = tokio::fs::remove_file(&snap_link).await;
-                if let Err(e) = res {
-                    let _ = tokio::fs::remove_file(&dec_tmp).await;
-                    return s3_error_response(S3Error::new(
-                        myfsio_common::error::S3ErrorCode::InternalError,
-                        format!("Decryption failed: {}", e),
-                    ));
-                }
-                let plaintext_size = tokio::fs::metadata(&dec_tmp)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                (dec_tmp, plaintext_size, Some(enc_info.algorithm.as_str()))
-            }
-            (Some(_), None) => {
-                let _ = tokio::fs::remove_file(&snap_link).await;
-                return s3_error_response(S3Error::new(
-                    myfsio_common::error::S3ErrorCode::InternalError,
-                    "Object is encrypted but encryption service is disabled".to_string(),
-                ));
-            }
-            (None, _) => (snap_link.clone(), meta.size, None),
+    let served =
+        match object_read::serve_object_data(state, snapshot, Some(range_str), headers).await {
+            Ok(served) => served,
+            Err(err) => return object_read_error_response(err),
         };
 
-    let (start, end) = match parse_range(range_str, plaintext_size) {
-        Some(r) => r,
-        None => {
-            let _ = tokio::fs::remove_file(&body_path).await;
-            let mut extra = HeaderMap::new();
-            if let Ok(v) = format!("bytes */{}", plaintext_size).parse() {
-                extra.insert(axum::http::header::CONTENT_RANGE, v);
-            }
-            return crate::s3_response::s3_error_response_with_headers(
-                S3Error::new(
-                    myfsio_common::error::S3ErrorCode::InvalidRange,
-                    format!("Range not satisfiable for size {}", plaintext_size),
-                ),
-                extra,
-            );
-        }
-    };
-
-    stream_partial_content(
-        state,
-        &body_path,
+    let (start, end) = served
+        .range
+        .unwrap_or((0, served.total_size.saturating_sub(1)));
+    let resp_headers = partial_content_headers(
         start,
         end,
-        plaintext_size,
-        &meta,
-        key,
+        served.total_size,
+        &served.meta,
+        served.meta.key.as_str(),
         query,
         headers,
-        enc_header,
-        false,
-        parts_count,
-        disk_permit,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn stream_partial_content(
-    state: &AppState,
-    body_path: &std::path::Path,
-    start: u64,
-    end: u64,
-    plaintext_size: u64,
-    meta: &myfsio_common::types::ObjectMeta,
-    key: &str,
-    query: &ObjectQuery,
-    request_headers: &HeaderMap,
-    enc_header: Option<&str>,
-    already_trimmed: bool,
-    parts_count: Option<u32>,
-    disk_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-) -> Response {
-    let length = end - start + 1;
-
-    let mut file = match open_self_deleting(body_path.to_path_buf()).await {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(body_path).await;
-            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-        }
-    };
-
-    if !already_trimmed {
-        if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
-            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
-        }
-    }
-    let limited: myfsio_storage::traits::AsyncReadStream = Box::pin(file.take(length));
-    let limited = attach_read_permit(limited, disk_permit);
-
-    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
-    let stream = ReaderStream::with_capacity(limited, stream_cap);
-    let body = Body::from_stream(stream);
-
-    let headers = partial_content_headers(
-        start,
-        end,
-        plaintext_size,
-        meta,
-        key,
-        query,
-        request_headers,
-        enc_header,
+        served.encryption_algorithm.as_deref(),
         parts_count,
     );
-    (StatusCode::PARTIAL_CONTENT, headers, body).into_response()
+    (StatusCode::PARTIAL_CONTENT, resp_headers, served.body).into_response()
+}
+
+fn object_read_error_response(err: object_read::ObjectReadError) -> Response {
+    match err {
+        object_read::ObjectReadError::Storage(e) => storage_err_response(e),
+        object_read::ObjectReadError::Rejected(response) => response,
+        object_read::ObjectReadError::RangeNotSatisfiable(total) => {
+            let mut extra = HeaderMap::new();
+            if let Ok(v) = format!("bytes */{}", total).parse() {
+                extra.insert(axum::http::header::CONTENT_RANGE, v);
+            }
+            crate::s3_response::s3_error_response_with_headers(
+                S3Error::new(
+                    myfsio_common::error::S3ErrorCode::InvalidRange,
+                    format!("Range not satisfiable for size {}", total),
+                ),
+                extra,
+            )
+        }
+        object_read::ObjectReadError::Internal(message) => s3_error_response(S3Error::new(
+            myfsio_common::error::S3ErrorCode::InternalError,
+            message,
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5532,66 +5552,6 @@ fn partial_content_headers(
         headers.insert("x-amz-mp-parts-count", count.to_string().parse().unwrap());
     }
     headers
-}
-
-async fn serve_range_from_segments(
-    state: &AppState,
-    snap_source: myfsio_storage::traits::SnapshotSource,
-    meta: myfsio_common::types::ObjectMeta,
-    range_str: &str,
-    query: &ObjectQuery,
-    headers: &HeaderMap,
-    parts_count: Option<u32>,
-) -> Response {
-    let key = meta.key.as_str();
-    if let Some(resp) = evaluate_get_preconditions(headers, &meta) {
-        return resp;
-    }
-
-    let total = meta.size;
-    let (start, end) = match parse_range(range_str, total) {
-        Some(r) => r,
-        None => {
-            let mut extra = HeaderMap::new();
-            if let Ok(v) = format!("bytes */{}", total).parse() {
-                extra.insert(axum::http::header::CONTENT_RANGE, v);
-            }
-            return crate::s3_response::s3_error_response_with_headers(
-                S3Error::new(
-                    myfsio_common::error::S3ErrorCode::InvalidRange,
-                    format!("Range not satisfiable for size {}", total),
-                ),
-                extra,
-            );
-        }
-    };
-    let length = end - start + 1;
-
-    let disk_permit = match acquire_disk_read_permit(state).await {
-        Ok(permit) => permit,
-        Err(response) => return response,
-    };
-
-    let reader = match snap_source.into_range_stream(start, Some(length)).await {
-        Ok(r) => r,
-        Err(e) => return storage_err_response(myfsio_storage::error::StorageError::Io(e)),
-    };
-    let reader = attach_read_permit(reader, disk_permit);
-    let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
-    let body = Body::from_stream(ReaderStream::with_capacity(reader, stream_cap));
-
-    let resp_headers = partial_content_headers(
-        start,
-        end,
-        total,
-        &meta,
-        key,
-        query,
-        headers,
-        None,
-        parts_count,
-    );
-    (StatusCode::PARTIAL_CONTENT, resp_headers, body).into_response()
 }
 
 async fn serve_mpu_sse_c(
@@ -6055,6 +6015,41 @@ fn bypass_governance_header(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) async fn governance_bypass_authorized(
+    state: &AppState,
+    principal: Option<&myfsio_common::types::Principal>,
+    bucket: &str,
+    key: Option<&str>,
+) -> bool {
+    let Some(principal) = principal else {
+        return false;
+    };
+    if principal.is_admin {
+        return true;
+    }
+    crate::middleware::authorize_action(
+        state,
+        Some(principal),
+        bucket,
+        "bypass_governance",
+        key,
+        None,
+    )
+    .await
+    .is_ok()
+}
+
+pub(crate) async fn governance_bypass_allowed(
+    state: &AppState,
+    principal: Option<&myfsio_common::types::Principal>,
+    bucket: &str,
+    key: Option<&str>,
+    headers: &HeaderMap,
+) -> bool {
+    bypass_governance_header(headers)
+        && governance_bypass_authorized(state, principal, bucket, key).await
+}
+
 fn put_conditions_from_headers(headers: &HeaderMap) -> myfsio_storage::traits::PutConditions {
     myfsio_storage::traits::PutConditions {
         if_match: headers
@@ -6207,7 +6202,6 @@ mod range_tests {
 
 use futures::TryStreamExt;
 use http_body_util;
-use tokio::io::AsyncReadExt;
 
 async fn resolve_encryption_context(
     state: &AppState,
@@ -6272,29 +6266,50 @@ async fn resolve_encryption_context(
         return Ok(None);
     }
 
-    if state.encryption.is_some() {
-        if let Ok(config) = state.storage.get_bucket_config(bucket).await {
-            if let Some(enc_val) = &config.encryption {
-                if let Some((algorithm, kms_key_id)) =
-                    crate::handlers::config::parse_encryption_config(enc_val)
-                {
-                    match algorithm.as_str() {
-                        "AES256" => {
-                            return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
-                                algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
-                                kms_key_id: None,
-                                customer_key: None,
-                            }));
-                        }
-                        "aws:kms" => {
-                            return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
-                                algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
-                                kms_key_id,
-                                customer_key: None,
-                            }));
-                        }
-                        _ => {}
-                    }
+    if let Ok(config) = state.storage.get_bucket_config(bucket).await {
+        if config.unreadable {
+            return Err(s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "Bucket configuration is unreadable; refusing to store an object whose encryption \
+                 requirements cannot be determined",
+            )));
+        }
+        if let Some(enc_val) = &config.encryption {
+            let Some((algorithm, kms_key_id)) =
+                crate::handlers::config::parse_encryption_config(enc_val)
+            else {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InternalError,
+                    "Bucket default encryption configuration could not be parsed",
+                )));
+            };
+            if state.encryption.is_none() {
+                return Err(s3_error_response(S3Error::new(
+                    S3ErrorCode::InternalError,
+                    "Bucket default encryption is configured but server-side encryption is \
+                     unavailable on this server",
+                )));
+            }
+            match algorithm.as_str() {
+                "AES256" => {
+                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
+                        algorithm: myfsio_crypto::encryption::SseAlgorithm::Aes256,
+                        kms_key_id: None,
+                        customer_key: None,
+                    }));
+                }
+                "aws:kms" => {
+                    return Ok(Some(myfsio_crypto::encryption::EncryptionContext {
+                        algorithm: myfsio_crypto::encryption::SseAlgorithm::AwsKms,
+                        kms_key_id,
+                        customer_key: None,
+                    }));
+                }
+                _ => {
+                    return Err(s3_error_response(S3Error::new(
+                        S3ErrorCode::InvalidArgument,
+                        "Bucket default encryption specifies an unsupported algorithm",
+                    )));
                 }
             }
         }
@@ -6366,6 +6381,17 @@ fn extract_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {
             "SSE-C requires algorithm, key, and key-MD5 headers together",
         ))),
     }
+}
+
+fn require_sse_c_key_for_object(
+    state: &AppState,
+    meta: &myfsio_common::types::ObjectMeta,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    if state.encryption.is_some() && object_read::requires_customer_key(meta) {
+        require_sse_c_key_match(headers, &meta.internal_metadata)?;
+    }
+    Ok(())
 }
 
 fn require_sse_c_key_match(
@@ -6492,12 +6518,29 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+fn post_form_error(err: multer::Error) -> S3Error {
+    match err {
+        multer::Error::FieldSizeExceeded { limit, .. } => S3Error::new(
+            S3ErrorCode::MaxMessageLengthExceeded,
+            format!(
+                "Your request was too big; a form field other than the file may not exceed {} bytes",
+                limit
+            ),
+        ),
+        other => S3Error::new(
+            S3ErrorCode::MalformedXML,
+            format!("Malformed multipart: {}", other),
+        ),
+    }
+}
+
 async fn post_object_form_handler(
     state: &AppState,
     bucket: &str,
     content_type: &str,
     headers: &HeaderMap,
     peer_marker: Option<&crate::middleware::ReplicationPeerRequest>,
+    principal: Option<&myfsio_common::types::Principal>,
     body: Body,
 ) -> Response {
     use base64::engine::general_purpose::STANDARD as B64;
@@ -6521,7 +6564,12 @@ async fn post_object_form_handler(
     let stream = http_body_util::BodyStream::new(body)
         .map_ok(|frame| frame.into_data().unwrap_or_default())
         .map_err(std::io::Error::other);
-    let mut multipart = multer::Multipart::new(stream, boundary);
+    let constraints = multer::Constraints::new().size_limit(
+        multer::SizeLimit::new()
+            .per_field(POST_FORM_FIELD_LIMIT)
+            .for_field("file", u64::MAX),
+    );
+    let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
 
     enum PostFormEvent {
         Text {
@@ -6534,16 +6582,14 @@ async fn post_object_form_handler(
         },
     }
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Result<PostFormEvent, String>>(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<Result<PostFormEvent, S3Error>>(8);
     tokio::spawn(async move {
         loop {
             let mut field = match multipart.next_field().await {
                 Ok(Some(f)) => f,
                 Ok(None) => return,
                 Err(e) => {
-                    let _ = event_tx
-                        .send(Err(format!("Malformed multipart: {}", e)))
-                        .await;
+                    let _ = event_tx.send(Err(post_form_error(e))).await;
                     return;
                 }
             };
@@ -6589,9 +6635,7 @@ async fn post_object_form_handler(
                         }
                     }
                     Err(e) => {
-                        let _ = event_tx
-                            .send(Err(format!("Malformed multipart: {}", e)))
-                            .await;
+                        let _ = event_tx.send(Err(post_form_error(e))).await;
                         return;
                     }
                 }
@@ -6604,8 +6648,8 @@ async fn post_object_form_handler(
     let mut file_name: Option<String> = None;
     while let Some(event) = event_rx.recv().await {
         match event {
-            Err(message) => {
-                return s3_error_response(S3Error::new(S3ErrorCode::MalformedXML, message));
+            Err(err) => {
+                return s3_error_response(err);
             }
             Ok(PostFormEvent::Text { name, value }) => {
                 fields.insert(name, value);
@@ -6786,7 +6830,7 @@ async fn post_object_form_handler(
     for (k, v) in &fields {
         let lower = k.to_ascii_lowercase();
         if let Some(meta_key) = lower.strip_prefix("x-amz-meta-") {
-            if !(meta_key.is_empty() || meta_key.starts_with("__") && meta_key.ends_with("__")) {
+            if !myfsio_storage::validation::is_reserved_user_metadata_key(meta_key) {
                 metadata.insert(meta_key.to_string(), v.clone());
             }
         }
@@ -6824,9 +6868,13 @@ async fn post_object_form_handler(
         }
     }
     persist_additional_checksums(&checksum_headers, &mut metadata);
+    object_lock::apply_default_retention(state, bucket, &mut metadata).await;
 
+    let bypass_governance =
+        governance_bypass_allowed(state, principal, bucket, Some(&object_key), headers).await;
     if let Err(response) =
-        ensure_archived_null_lock_allows_overwrite(state, bucket, &object_key, Some(headers)).await
+        ensure_archived_null_lock_allows_overwrite(state, bucket, &object_key, bypass_governance)
+            .await
     {
         return response;
     }

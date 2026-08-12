@@ -304,6 +304,23 @@ pub trait StorageEngine: Send + Sync {
         metadata: &HashMap<String, String>,
     ) -> StorageResult<()>;
 
+    async fn update_object_retention(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        retention: &myfsio_common::object_lock::ObjectLockRetention,
+        bypass_governance: bool,
+    ) -> StorageResult<()>;
+
+    async fn update_object_legal_hold(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        enabled: bool,
+    ) -> StorageResult<()>;
+
     async fn list_objects(
         &self,
         bucket: &str,

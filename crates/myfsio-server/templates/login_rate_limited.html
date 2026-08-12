@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Too Many Login Attempts{% endblock %}
+{% block content %}
+<div class="text-center py-5">
+  <p class="text-uppercase text-muted small mb-2">Rate Limited</p>
+  <h1 class="display-6 mb-3">Too many login attempts</h1>
+  <p class="text-muted mb-4">Sign-in requests from your address are coming in too quickly. Please wait a moment and try again.</p>
+  <div class="d-flex flex-wrap justify-content-center gap-3">
+    <a class="btn btn-primary" href="/login">Back to sign in</a>
+  </div>
+</div>
+{% endblock %}

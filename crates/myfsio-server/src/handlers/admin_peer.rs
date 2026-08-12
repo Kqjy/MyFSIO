@@ -506,13 +506,19 @@ pub async fn relay_outbound(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let body_bytes = match req.into_body().collect().await {
+    let body_bytes = match http_body_util::Limited::new(req.into_body(), MAX_RELAY_BODY_BYTES)
+        .collect()
+        .await
+    {
         Ok(c) => c.to_bytes().to_vec(),
         Err(e) => {
             return json_error(
-                "InternalError",
-                &format!("Body read failed: {}", e),
-                StatusCode::INTERNAL_SERVER_ERROR,
+                "InvalidRequest",
+                &format!(
+                    "Body read failed or exceeds {} bytes: {}",
+                    MAX_RELAY_BODY_BYTES, e
+                ),
+                StatusCode::PAYLOAD_TOO_LARGE,
             );
         }
     };

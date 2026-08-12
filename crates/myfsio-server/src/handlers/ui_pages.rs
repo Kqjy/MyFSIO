@@ -1540,7 +1540,24 @@ pub async fn cluster_dashboard(
 ) -> Response {
     let mut ctx = page_context(&state, &session, "ui.cluster_dashboard");
 
-    let sites = build_cluster_sites(&state).await;
+    let mut sites = build_cluster_sites(&state).await;
+    for site in sites.iter_mut() {
+        let Some(capacity) = site.get("capacity") else {
+            continue;
+        };
+        if !capacity.is_object() {
+            continue;
+        }
+        let total = capacity
+            .get("total_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let available = capacity
+            .get("available_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        site["capacity"]["used_bytes"] = json!(total.saturating_sub(available));
+    }
 
     let total_buckets: u64 = sites
         .iter()
@@ -2217,12 +2234,37 @@ fn format_history_timestamp(timestamp: Option<f64>, tz: chrono_tz::Tz) -> String
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn format_execution_duration(seconds: Option<f64>) -> String {
+    let Some(seconds) = seconds.filter(|value| value.is_finite() && *value >= 0.0) else {
+        return "—".to_string();
+    };
+
+    let rounded_hundredths = (seconds * 100.0).round() / 100.0;
+    if rounded_hundredths < 60.0 {
+        return format!("{rounded_hundredths:.2}s");
+    }
+
+    let total_seconds = seconds.round() as u64;
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else {
+        format!("{minutes}m {seconds:02}s")
+    }
+}
+
 fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
     executions
         .iter()
         .cloned()
         .map(|mut execution| {
             let timestamp = execution.get("timestamp").and_then(|value| value.as_f64());
+            let duration = execution
+                .get("result")
+                .and_then(|result| result.get("execution_time_seconds"))
+                .and_then(|value| value.as_f64());
             let bytes_freed = execution
                 .get("result")
                 .map(|result| {
@@ -2256,6 +2298,10 @@ fn decorate_gc_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Value> {
                     "bytes_freed_display".to_string(),
                     Value::String(human_size(bytes_freed)),
                 );
+                obj.insert(
+                    "duration_display".to_string(),
+                    Value::String(format_execution_duration(duration)),
+                );
             }
             execution
         })
@@ -2268,10 +2314,18 @@ fn decorate_integrity_history(executions: &[Value], tz: chrono_tz::Tz) -> Vec<Va
         .cloned()
         .map(|mut execution| {
             let timestamp = execution.get("timestamp").and_then(|value| value.as_f64());
+            let duration = execution
+                .get("result")
+                .and_then(|result| result.get("execution_time_seconds"))
+                .and_then(|value| value.as_f64());
             if let Some(obj) = execution.as_object_mut() {
                 obj.insert(
                     "timestamp_display".to_string(),
                     Value::String(format_history_timestamp(timestamp, tz)),
+                );
+                obj.insert(
+                    "duration_display".to_string(),
+                    Value::String(format_execution_duration(duration)),
                 );
             }
             execution
@@ -2290,7 +2344,18 @@ pub async fn system_dashboard(
         .parse()
         .unwrap_or(chrono_tz::UTC);
 
-    let gc_status = match &state.gc {
+    let can_read_gc =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:gc_read").await;
+    let can_run_gc =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:gc_run").await;
+    let can_read_integrity =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:integrity_read")
+            .await;
+    let can_run_integrity =
+        crate::handlers::ui_api::ui_has_system_action(&state, &session, "system:integrity_run")
+            .await;
+
+    let gc_status = match state.gc.as_ref().filter(|_| can_read_gc) {
         Some(gc) => gc.status().await,
         None => json!({
             "dry_run": false,
@@ -2304,7 +2369,7 @@ pub async fn system_dashboard(
             "temp_file_max_age_hours": 24,
         }),
     };
-    let gc_history = match &state.gc {
+    let gc_history = match state.gc.as_ref().filter(|_| can_read_gc) {
         Some(gc) => gc
             .history()
             .await
@@ -2315,7 +2380,7 @@ pub async fn system_dashboard(
         None => Vec::new(),
     };
 
-    let integrity_status = match &state.integrity {
+    let integrity_status = match state.integrity.as_ref().filter(|_| can_read_integrity) {
         Some(checker) => checker.status().await,
         None => json!({
             "auto_heal": false,
@@ -2326,9 +2391,13 @@ pub async fn system_dashboard(
             "running": false,
             "scanning": false,
             "scan_elapsed_seconds": Value::Null,
+            "last_run_total_issues": 0,
+            "peer_heal_available": false,
+            "persistence_error": Value::Null,
+            "quarantine_retention_days": Value::Null,
         }),
     };
-    let integrity_history = match &state.integrity {
+    let integrity_history = match state.integrity.as_ref().filter(|_| can_read_integrity) {
         Some(checker) => checker
             .history()
             .await
@@ -2341,6 +2410,10 @@ pub async fn system_dashboard(
 
     ctx.insert("gc_enabled", &state.config.gc_enabled);
     ctx.insert("integrity_enabled", &state.config.integrity_enabled);
+    ctx.insert("can_read_gc", &can_read_gc);
+    ctx.insert("can_run_gc", &can_run_gc);
+    ctx.insert("can_read_integrity", &can_read_integrity);
+    ctx.insert("can_run_integrity", &can_run_integrity);
     ctx.insert("gc_history", &gc_history);
     ctx.insert("integrity_history", &integrity_history);
     ctx.insert("gc_status", &gc_status);
@@ -2681,7 +2754,15 @@ async fn create_peer_replication_rules_impl(
             filter_prefix: None,
         };
 
-        state.replication.set_rule(rule);
+        if let Err(reason) = state.replication.set_rule(rule) {
+            session.write(|s| {
+                s.push_flash(
+                    "danger",
+                    format!("Skipped bucket '{}': {}", bucket_name, reason),
+                )
+            });
+            continue;
+        }
         created += 1;
         if mode == crate::services::replication::MODE_ALL {
             created_existing.push(bucket_name);
@@ -2961,7 +3042,14 @@ pub async fn update_bucket_replication(
                 );
             };
             rule.enabled = false;
-            state.replication.set_rule(rule);
+            if let Err(reason) = state.replication.set_rule(rule) {
+                return respond(
+                    false,
+                    StatusCode::BAD_REQUEST,
+                    reason.clone(),
+                    json!({ "error": reason }),
+                );
+            }
             respond(
                 true,
                 StatusCode::OK,
@@ -3008,7 +3096,14 @@ pub async fn update_bucket_replication(
             }
 
             rule.enabled = true;
-            state.replication.set_rule(rule);
+            if let Err(reason) = state.replication.set_rule(rule) {
+                return respond(
+                    false,
+                    StatusCode::BAD_REQUEST,
+                    reason.clone(),
+                    json!({ "error": reason }),
+                );
+            }
 
             let mut run_id: Option<String> = None;
             let mut race_kind: Option<&'static str> = None;
@@ -3114,25 +3209,34 @@ pub async fn update_bucket_replication(
                 }
             }
 
-            state
-                .replication
-                .set_rule(crate::services::replication::ReplicationRule {
-                    bucket_name: bucket_name.clone(),
-                    target_connection_id: target_connection_id.to_string(),
-                    target_bucket: target_bucket.to_string(),
-                    enabled: true,
-                    mode: mode.to_string(),
-                    created_at: Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs_f64())
-                            .unwrap_or(0.0),
-                    ),
-                    stats: crate::services::replication::ReplicationStats::default(),
-                    sync_deletions: true,
-                    last_pull_at: None,
-                    filter_prefix: None,
-                });
+            if let Err(reason) =
+                state
+                    .replication
+                    .set_rule(crate::services::replication::ReplicationRule {
+                        bucket_name: bucket_name.clone(),
+                        target_connection_id: target_connection_id.to_string(),
+                        target_bucket: target_bucket.to_string(),
+                        enabled: true,
+                        mode: mode.to_string(),
+                        created_at: Some(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0),
+                        ),
+                        stats: crate::services::replication::ReplicationStats::default(),
+                        sync_deletions: true,
+                        last_pull_at: None,
+                        filter_prefix: None,
+                    })
+            {
+                return respond(
+                    false,
+                    StatusCode::BAD_REQUEST,
+                    reason.clone(),
+                    json!({ "error": reason }),
+                );
+            }
 
             let mut conflict_kind: Option<&'static str> = None;
             let message = if mode == crate::services::replication::MODE_ALL {
@@ -3812,6 +3916,21 @@ pub async fn update_bucket_policy(
                 return Redirect::to(&redirect_url).into_response();
             }
         };
+        if let Some(clause) = crate::handlers::config::policy_unsupported_clause(&policy) {
+            let message = format!(
+                "Policy statements containing '{}' are not supported by this server",
+                clause
+            );
+            if wants_json {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to(&redirect_url).into_response();
+        }
         config.policy = Some(policy);
     }
 
@@ -4011,5 +4130,21 @@ mod connection_form_tests {
         assert!(stored > 0, "must not wrap to 0; got {stored}");
         let resolved = tuning.resolve().multipart_concurrency;
         assert!((1..=64).contains(&resolved), "got {resolved}");
+    }
+}
+
+#[cfg(test)]
+mod history_format_tests {
+    use super::format_execution_duration;
+
+    #[test]
+    fn formats_execution_durations_for_history_tables() {
+        assert_eq!(format_execution_duration(None), "—");
+        assert_eq!(format_execution_duration(Some(f64::NAN)), "—");
+        assert_eq!(format_execution_duration(Some(-1.0)), "—");
+        assert_eq!(format_execution_duration(Some(0.125)), "0.13s");
+        assert_eq!(format_execution_duration(Some(59.999)), "1m 00s");
+        assert_eq!(format_execution_duration(Some(62.4)), "1m 02s");
+        assert_eq!(format_execution_duration(Some(3_723.0)), "1h 02m 03s");
     }
 }

@@ -23,6 +23,7 @@ fn json_ok(value: Value) -> Response {
 fn json_err(status: StatusCode, msg: &str) -> Response {
     let type_name = match status {
         StatusCode::BAD_REQUEST => "ValidationException",
+        StatusCode::PAYLOAD_TOO_LARGE => "ValidationException",
         StatusCode::NOT_FOUND => "NotFoundException",
         StatusCode::SERVICE_UNAVAILABLE => "KMSInternalException",
         StatusCode::FORBIDDEN => "AccessDeniedException",
@@ -45,10 +46,20 @@ fn json_err_typed(status: StatusCode, type_name: &str, msg: &str) -> Response {
 }
 
 async fn read_json(body: Body) -> Result<Value, Response> {
-    let body_bytes = http_body_util::BodyExt::collect(body)
+    let body_bytes = super::collect_body_capped(body, super::JSON_API_BODY_LIMIT)
         .await
-        .map_err(|_| json_err(StatusCode::BAD_REQUEST, "Invalid request body"))?
-        .to_bytes();
+        .map_err(|err| match err {
+            super::BodyLimitError::Unreadable => {
+                json_err(StatusCode::BAD_REQUEST, "Invalid request body")
+            }
+            super::BodyLimitError::TooLarge(limit) => json_err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!(
+                    "Request body exceeds the {} limit",
+                    crate::ui_format::human_size(limit as u64)
+                ),
+            ),
+        })?;
     if body_bytes.is_empty() {
         Ok(json!({}))
     } else {

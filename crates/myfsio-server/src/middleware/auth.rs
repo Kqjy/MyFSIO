@@ -10,8 +10,8 @@ use myfsio_common::types::Principal;
 use myfsio_storage::traits::StorageEngine;
 use serde_json::Value;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
 
+use crate::handlers::object_read;
 use crate::middleware::sha_body::{is_hex_sha256, Sha256VerifyBody};
 use crate::services::acl::acl_from_bucket_config;
 use crate::state::AppState;
@@ -108,33 +108,6 @@ fn default_website_error_body(status: StatusCode) -> String {
     }
 }
 
-fn parse_range_header(range_header: &str, total_size: u64) -> Option<(u64, u64)> {
-    let range_spec = range_header.strip_prefix("bytes=")?;
-    if let Some(suffix) = range_spec.strip_prefix('-') {
-        let suffix_len: u64 = suffix.parse().ok()?;
-        if suffix_len == 0 || suffix_len > total_size {
-            return None;
-        }
-        return Some((total_size - suffix_len, total_size - 1));
-    }
-
-    let (start_str, end_str) = range_spec.split_once('-')?;
-    let start: u64 = start_str.parse().ok()?;
-    let end = if end_str.is_empty() {
-        total_size.saturating_sub(1)
-    } else {
-        end_str
-            .parse::<u64>()
-            .ok()?
-            .min(total_size.saturating_sub(1))
-    };
-
-    if start > end || start >= total_size {
-        return None;
-    }
-    Some((start, end))
-}
-
 fn website_content_type(key: &str, metadata: &std::collections::HashMap<String, String>) -> String {
     metadata
         .get("__content_type__")
@@ -227,61 +200,85 @@ async fn serve_website_document(
     status: StatusCode,
 ) -> Option<Response> {
     let metadata = state.storage.get_object_metadata(bucket, key).await.ok()?;
-    let (meta, mut reader) = state.storage.get_object(bucket, key).await.ok()?;
     let content_type = website_content_type(key, &metadata);
+    let include_body = method != axum::http::Method::HEAD;
 
     if method == axum::http::Method::HEAD {
+        let meta = state.storage.head_object(bucket, key).await.ok()?;
+        if object_read::requires_customer_key(&meta) {
+            return Some(website_error_response(
+                StatusCode::FORBIDDEN,
+                None,
+                "text/plain; charset=utf-8",
+                include_body,
+            ));
+        }
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
         headers.insert(
             header::CONTENT_LENGTH,
-            meta.size.to_string().parse().unwrap(),
+            object_read::plaintext_size(&meta)
+                .to_string()
+                .parse()
+                .unwrap(),
         );
         headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
         apply_website_object_headers(&mut headers, &meta);
         return Some((status, headers).into_response());
     }
 
-    let mut bytes = Vec::new();
-    if reader.read_to_end(&mut bytes).await.is_err() {
-        return None;
+    let range = match status {
+        StatusCode::OK => range_header,
+        _ => None,
+    };
+    let window = range.and_then(object_read::parse_range_hint);
+    let snapshot = object_read::snapshot_object_for_read(state, bucket, key, None, window)
+        .await
+        .ok()?;
+    if object_read::requires_customer_key(&snapshot.meta) {
+        snapshot.discard().await;
+        return Some(website_error_response(
+            StatusCode::FORBIDDEN,
+            None,
+            "text/plain; charset=utf-8",
+            include_body,
+        ));
     }
+
+    let served =
+        match object_read::serve_object_data(state, snapshot, range, &HeaderMap::new()).await {
+            Ok(served) => served,
+            Err(object_read::ObjectReadError::RangeNotSatisfiable(total)) => {
+                let mut range_headers = HeaderMap::new();
+                range_headers.insert(
+                    header::CONTENT_RANGE,
+                    format!("bytes */{}", total).parse().unwrap(),
+                );
+                return Some((StatusCode::RANGE_NOT_SATISFIABLE, range_headers).into_response());
+            }
+            Err(_) => return None,
+        };
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    apply_website_object_headers(&mut headers, &meta);
-
-    if status == StatusCode::OK {
-        if let Some(range_header) = range_header {
-            let Some((start, end)) = parse_range_header(range_header, bytes.len() as u64) else {
-                let mut range_headers = HeaderMap::new();
-                range_headers.insert(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{}", bytes.len()).parse().unwrap(),
-                );
-                return Some((StatusCode::RANGE_NOT_SATISFIABLE, range_headers).into_response());
-            };
-            let body = bytes[start as usize..=end as usize].to_vec();
-            headers.insert(
-                header::CONTENT_RANGE,
-                format!("bytes {}-{}/{}", start, end, bytes.len())
-                    .parse()
-                    .unwrap(),
-            );
-            headers.insert(
-                header::CONTENT_LENGTH,
-                body.len().to_string().parse().unwrap(),
-            );
-            return Some((StatusCode::PARTIAL_CONTENT, headers, body).into_response());
-        }
-    }
-
+    apply_website_object_headers(&mut headers, &served.meta);
     headers.insert(
         header::CONTENT_LENGTH,
-        bytes.len().to_string().parse().unwrap(),
+        served.content_length.to_string().parse().unwrap(),
     );
-    Some((status, headers, bytes).into_response())
+
+    if let Some((start, end)) = served.range {
+        headers.insert(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, end, served.total_size)
+                .parse()
+                .unwrap(),
+        );
+        return Some((StatusCode::PARTIAL_CONTENT, headers, served.body).into_response());
+    }
+
+    Some((status, headers, served.body).into_response())
 }
 
 async fn maybe_serve_website(
@@ -792,22 +789,20 @@ async fn authorize_request(
         .trim_start_matches('/')
         .split('/')
         .filter(|s| !s.is_empty());
-    let bucket = match segments.next() {
+    let bucket_raw = match segments.next() {
         Some(b) => b,
         None => {
             return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
         }
     };
-    if myfsio_storage::validation::is_reserved_bucket_name(bucket) {
-        return Err(S3Error::new(
-            S3ErrorCode::AccessDenied,
-            "Access to reserved bucket names is not permitted",
-        ));
+    let bucket = &urlencoding_decode(bucket_raw);
+    if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(bucket) {
+        return Err(S3Error::new(S3ErrorCode::InvalidBucketName, reason));
     }
-    let remaining: Vec<&str> = segments.collect();
+    let remaining: Vec<String> = segments.map(urlencoding_decode).collect();
 
     if remaining.is_empty() {
-        let action = resolve_bucket_action(method, query);
+        let action = resolve_bucket_action(method, query)?;
         return authorize_action(
             state,
             principal,
@@ -823,19 +818,23 @@ async fn authorize_request(
     if *method == Method::PUT {
         if let Some(copy_source) = copy_source {
             let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
-            if let Some((src_bucket, src_key)) = source.split_once('/') {
-                if myfsio_storage::validation::is_reserved_bucket_name(src_bucket) {
-                    return Err(S3Error::new(
-                        S3ErrorCode::AccessDenied,
-                        "Access to reserved bucket names is not permitted",
-                    ));
+            if let Some((src_bucket_raw, src_key_and_query)) = source.split_once('/') {
+                let src_key_raw = src_key_and_query
+                    .split_once('?')
+                    .map(|(key, _)| key)
+                    .unwrap_or(src_key_and_query);
+                let src_bucket = urlencoding_decode(src_bucket_raw);
+                let src_key = urlencoding_decode(src_key_raw);
+                if let Some(reason) = myfsio_storage::validation::bucket_name_rejection(&src_bucket)
+                {
+                    return Err(S3Error::new(S3ErrorCode::InvalidBucketName, reason));
                 }
                 let source_allowed = authorize_action(
                     state,
                     principal,
-                    src_bucket,
+                    &src_bucket,
                     "read",
-                    Some(src_key),
+                    Some(&src_key),
                     Some(false),
                 )
                 .await
@@ -858,7 +857,7 @@ async fn authorize_request(
         }
     }
 
-    let action = resolve_object_action(method, query);
+    let action = resolve_object_action(method, query)?;
     authorize_action(
         state,
         principal,
@@ -949,7 +948,7 @@ pub async fn ui_can_see_bucket(state: &AppState, principal: &Principal, bucket: 
     .await
 }
 
-async fn authorize_action(
+pub(crate) async fn authorize_action(
     state: &AppState,
     principal: Option<&Principal>,
     bucket: &str,
@@ -1045,6 +1044,9 @@ async fn evaluate_bucket_policy(
         Ok(config) => config,
         Err(_) => return PolicyDecision::Neutral,
     };
+    if config.unreadable {
+        return PolicyDecision::Deny;
+    }
     let policy: &Value = match config.policy.as_ref() {
         Some(policy) => policy,
         None => return PolicyDecision::Neutral,
@@ -1093,6 +1095,16 @@ fn evaluate_policy_statement(
         _ => return PolicyDecision::Neutral,
     };
 
+    let unsupported = statement_has_unsupported_clause(statement);
+
+    if unsupported && matches!(effect, PolicyDecision::Deny) {
+        return if unsupported_deny_may_apply(statement, access_key, bucket, action, object_key) {
+            PolicyDecision::Deny
+        } else {
+            PolicyDecision::Neutral
+        };
+    }
+
     let action_gate = if matches!(effect, PolicyDecision::Allow) {
         write
     } else {
@@ -1106,7 +1118,42 @@ fn evaluate_policy_statement(
         return PolicyDecision::Neutral;
     }
 
+    if unsupported {
+        return PolicyDecision::Neutral;
+    }
+
     effect
+}
+
+fn unsupported_deny_may_apply(
+    statement: &Value,
+    access_key: Option<&str>,
+    bucket: &str,
+    action: &str,
+    object_key: Option<&str>,
+) -> bool {
+    let principal_ok =
+        statement.get("Principal").is_none() || statement_matches_principal(statement, access_key);
+    let action_ok =
+        statement.get("Action").is_none() || statement_matches_action(statement, action, None);
+    let resource_ok = statement.get("Resource").is_none()
+        || statement_matches_resource(statement, bucket, object_key);
+    principal_ok && action_ok && resource_ok
+}
+
+pub const UNSUPPORTED_POLICY_CLAUSES: &[&str] =
+    &["Condition", "NotPrincipal", "NotAction", "NotResource"];
+
+const PRESIGNED_UNSIGNED_HEADER_ALLOWLIST: &[&str] = &[
+    "x-amz-content-sha256",
+    "x-amz-date",
+    "x-amz-decoded-content-length",
+];
+
+fn statement_has_unsupported_clause(statement: &Value) -> bool {
+    UNSUPPORTED_POLICY_CLAUSES
+        .iter()
+        .any(|name| statement.get(name).is_some_and(|value| !value.is_null()))
 }
 
 fn statement_matches_principal(statement: &Value, access_key: Option<&str>) -> bool {
@@ -1200,6 +1247,7 @@ const S3_ACTION_TABLE: &[(&str, &str)] = &[
     ("s3:deleteobjectversion", "delete"),
     ("s3:deletebucket", "delete"),
     ("s3:deleteobjecttagging", "delete"),
+    ("s3:bypassgovernanceretention", "bypass_governance"),
     ("s3:putobjectacl", "share"),
     ("s3:putbucketacl", "share"),
     ("s3:getbucketacl", "share"),
@@ -1272,13 +1320,24 @@ fn resource_matches(resource: &str, bucket: &str, object_key: Option<&str>) -> b
 
     match remainder.split_once('/') {
         Some((resource_bucket, resource_key)) => object_key
-            .map(|key| wildcard_match(bucket, resource_bucket) && wildcard_match(key, resource_key))
+            .map(|key| {
+                wildcard_match(bucket, resource_bucket)
+                    && wildcard_match_case_sensitive(key, resource_key)
+            })
             .unwrap_or(false),
         None => object_key.is_none() && wildcard_match(bucket, remainder),
     }
 }
 
 fn wildcard_match(value: &str, pattern: &str) -> bool {
+    wildcard_match_inner(value, pattern, false)
+}
+
+fn wildcard_match_case_sensitive(value: &str, pattern: &str) -> bool {
+    wildcard_match_inner(value, pattern, true)
+}
+
+fn wildcard_match_inner(value: &str, pattern: &str, case_sensitive: bool) -> bool {
     let value = value.as_bytes();
     let pattern = pattern.as_bytes();
     let mut value_idx = 0usize;
@@ -1286,10 +1345,18 @@ fn wildcard_match(value: &str, pattern: &str) -> bool {
     let mut star_idx: Option<usize> = None;
     let mut match_idx = 0usize;
 
+    let literal_matches = |pattern_byte: u8, value_byte: u8| {
+        if case_sensitive {
+            pattern_byte == value_byte
+        } else {
+            pattern_byte.eq_ignore_ascii_case(&value_byte)
+        }
+    };
+
     while value_idx < value.len() {
         if pattern_idx < pattern.len()
             && (pattern[pattern_idx] == b'?'
-                || pattern[pattern_idx].eq_ignore_ascii_case(&value[value_idx]))
+                || literal_matches(pattern[pattern_idx], value[value_idx]))
         {
             value_idx += 1;
             pattern_idx += 1;
@@ -1313,114 +1380,27 @@ fn wildcard_match(value: &str, pattern: &str) -> bool {
     pattern_idx == pattern.len()
 }
 
-fn resolve_bucket_action(method: &Method, query: &str) -> &'static str {
-    if has_query_key(query, "versioning") {
-        return "versioning";
-    }
-    if has_query_key(query, "tagging") {
-        return "tagging";
-    }
-    if has_query_key(query, "cors") {
-        return "cors";
-    }
-    if has_query_key(query, "location") {
-        return "list";
-    }
-    if has_query_key(query, "encryption") {
-        return "encryption";
-    }
-    if has_query_key(query, "lifecycle") {
-        return "lifecycle";
-    }
-    if has_query_key(query, "acl") {
-        return "share";
-    }
-    if has_query_key(query, "policy") || has_query_key(query, "policyStatus") {
-        return "policy";
-    }
-    if has_query_key(query, "replication") {
-        return "replication";
-    }
-    if has_query_key(query, "quota") {
-        return "quota";
-    }
-    if has_query_key(query, "website") {
-        return "website";
-    }
-    if has_query_key(query, "object-lock") {
-        return "object_lock";
-    }
-    if has_query_key(query, "notification") {
-        return "notification";
-    }
-    if has_query_key(query, "logging") {
-        return "logging";
-    }
-    if has_query_key(query, "versions") || has_query_key(query, "uploads") {
-        return "list";
-    }
-    if has_query_key(query, "delete") {
-        return "delete";
-    }
-
-    match *method {
-        Method::GET => "list",
-        Method::HEAD => "read",
-        Method::PUT => "create_bucket",
-        Method::DELETE => "delete_bucket",
-        Method::POST => "write",
-        _ => "list",
+fn resolve_bucket_action(method: &Method, query: &str) -> Result<&'static str, S3Error> {
+    match crate::handlers::parse_bucket_subresource(Some(query)) {
+        Err(selectors) => Err(crate::handlers::ambiguous_subresource_error(&selectors)),
+        Ok(Some(subresource)) => Ok(subresource.action()),
+        Ok(None) => Ok(match *method {
+            Method::GET => "list",
+            Method::HEAD => "read",
+            Method::PUT => "create_bucket",
+            Method::DELETE => "delete_bucket",
+            Method::POST => "write",
+            _ => "list",
+        }),
     }
 }
 
-fn resolve_object_action(method: &Method, query: &str) -> &'static str {
-    if has_query_key(query, "tagging") {
-        return if *method == Method::GET {
-            "read"
-        } else {
-            "write"
-        };
+fn resolve_object_action(method: &Method, query: &str) -> Result<&'static str, S3Error> {
+    match crate::handlers::parse_object_subresource(Some(query)) {
+        Err(selectors) => Err(crate::handlers::ambiguous_subresource_error(&selectors)),
+        Ok(Some(subresource)) => Ok(subresource.action(method)),
+        Ok(None) => Ok(crate::handlers::object_method_default_action(method)),
     }
-    if has_query_key(query, "acl") {
-        return if *method == Method::GET {
-            "read"
-        } else {
-            "write"
-        };
-    }
-    if has_query_key(query, "retention") || has_query_key(query, "legal-hold") {
-        return "object_lock";
-    }
-    if has_query_key(query, "attributes") {
-        return "read";
-    }
-    if has_query_key(query, "uploads") || has_query_key(query, "uploadId") {
-        return match *method {
-            Method::GET => "read",
-            _ => "write",
-        };
-    }
-    if has_query_key(query, "select") {
-        return "read";
-    }
-
-    match *method {
-        Method::GET | Method::HEAD => "read",
-        Method::PUT => "write",
-        Method::DELETE => "delete",
-        Method::POST => "write",
-        _ => "read",
-    }
-}
-
-fn has_query_key(query: &str, key: &str) -> bool {
-    if query.is_empty() {
-        return false;
-    }
-    query
-        .split('&')
-        .filter(|part| !part.is_empty())
-        .any(|part| part == key || part.starts_with(&format!("{}=", key)))
 }
 
 fn try_auth(state: &AppState, req: &Request) -> AuthResult {
@@ -1781,6 +1761,20 @@ fn verify_sigv4_query(state: &AppState, req: &Request) -> AuthResult {
             "X-Amz-SignedHeaders must include host",
         ));
     }
+    if let Some(unsigned) = req.headers().keys().find(|name| {
+        let lower = name.as_str().to_ascii_lowercase();
+        lower.starts_with("x-amz-")
+            && !PRESIGNED_UNSIGNED_HEADER_ALLOWLIST.contains(&lower.as_str())
+            && !signed_lc.contains(&lower)
+    }) {
+        return AuthResult::Denied(S3Error::new(
+            S3ErrorCode::SignatureDoesNotMatch,
+            format!(
+                "Header '{}' must be included in X-Amz-SignedHeaders",
+                unsigned.as_str()
+            ),
+        ));
+    }
     let header_values: Vec<(String, String)> = signed_headers
         .iter()
         .map(|&name| {
@@ -1907,7 +1901,10 @@ fn error_response(err: S3Error, resource: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{action_grant_matches, policy_action_matches, wildcard_match};
+    use super::{
+        action_grant_matches, policy_action_matches, resource_matches, wildcard_match,
+        wildcard_match_case_sensitive,
+    };
 
     #[test]
     fn subresource_read_grant_does_not_authorize_write() {
@@ -2013,5 +2010,74 @@ mod tests {
         assert!(wildcard_match("s3:getobject", "s3:get*"));
         assert!(wildcard_match("s3:listbucket", "s3:list*"));
         assert!(!wildcard_match("s3:listbucket", "s3:get*"));
+    }
+
+    #[test]
+    fn bypass_governance_is_its_own_policy_action() {
+        assert!(policy_action_matches(
+            "s3:BypassGovernanceRetention",
+            "bypass_governance"
+        ));
+        assert!(policy_action_matches("s3:*", "bypass_governance"));
+        assert!(!policy_action_matches(
+            "s3:DeleteObject",
+            "bypass_governance"
+        ));
+        assert!(!policy_action_matches("s3:Delete*", "bypass_governance"));
+        assert!(!policy_action_matches(
+            "s3:BypassGovernanceRetention",
+            "delete"
+        ));
+    }
+
+    #[test]
+    fn action_patterns_remain_case_insensitive() {
+        assert!(policy_action_matches("s3:getobject", "read"));
+        assert!(policy_action_matches("S3:GETOBJECT", "read"));
+        assert!(policy_action_matches("s3:GeT*", "read"));
+        assert!(wildcard_match("s3:GetObject", "S3:get*"));
+    }
+
+    #[test]
+    fn resource_key_segment_matches_case_sensitively() {
+        assert!(resource_matches(
+            "arn:aws:s3:::b/public/*",
+            "b",
+            Some("public/x")
+        ));
+        assert!(!resource_matches(
+            "arn:aws:s3:::b/public/*",
+            "b",
+            Some("PUBLIC/secret")
+        ));
+        assert!(!resource_matches(
+            "arn:aws:s3:::b/public/*",
+            "b",
+            Some("Public/secret")
+        ));
+    }
+
+    #[test]
+    fn resource_bucket_segment_matches_case_insensitively() {
+        assert!(resource_matches("arn:aws:s3:::MyBucket", "mybucket", None));
+        assert!(resource_matches(
+            "arn:aws:s3:::MyBucket/data/*",
+            "mybucket",
+            Some("data/report.csv")
+        ));
+        assert!(resource_matches("arn:aws:s3:::my*", "mybucket", None));
+    }
+
+    #[test]
+    fn case_sensitive_wildcards_preserve_glob_semantics() {
+        assert!(wildcard_match_case_sensitive("public/a/b.txt", "public/*"));
+        assert!(wildcard_match_case_sensitive("public/ab.txt", "public/?b*"));
+        assert!(!wildcard_match_case_sensitive(
+            "public/ab.txt",
+            "public/?B*"
+        ));
+        assert!(wildcard_match_case_sensitive("abc", "*"));
+        assert!(!wildcard_match_case_sensitive("abc", "abcd"));
+        assert!(wildcard_match("public/AB.txt", "public/?b*"));
     }
 }

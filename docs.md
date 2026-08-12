@@ -136,7 +136,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `AUDIT_LOG_ENABLED` | `false` | When `true`, append-only JSONL log of relayed admin actions at `<STORAGE_ROOT>/.myfsio.sys/audit/YYYYMMDD.jsonl` |
 | `PRESIGNED_URL_MIN_EXPIRY_SECONDS` | `1` | Minimum presigned URL lifetime; the UI validates custom expiry values against this bound |
 | `PRESIGNED_URL_MAX_EXPIRY_SECONDS` | `604800` | Maximum presigned URL lifetime; the UI reports when a preset is clamped to this bound |
-| `SECRET_KEY` | unset, then fallback to `.myfsio.sys/config/.secret` if present | Session signing and IAM config encryption key |
+| `SECRET_KEY` | auto-generated | Session signing and IAM config encryption key. Resolved from the environment variable first, then `.myfsio.sys/config/.secret`. When neither is set, the server generates a random 32-byte base64 secret, persists it to `.myfsio.sys/config/.secret` (owner-only on Unix), and reuses it on every later start. The literal placeholder `dev-secret-key` is rejected from both the environment and the file |
 | `ADMIN_ACCESS_KEY` | unset | Optional deterministic first-run/reset access key |
 | `ADMIN_SECRET_KEY` | unset | Optional deterministic first-run/reset secret key |
 | `SESSION_LIFETIME_DAYS` | `1` | UI session lifetime in days |
@@ -159,6 +159,16 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 
 The web UI uses 1024-byte binary units consistently and labels them `KiB`, `MiB`, `GiB`, `TiB`, and `PiB`. Presigned-link custom expiry values must be whole seconds; empty or non-numeric values are rejected, and any server-side bound adjustment is shown in the dialog.
 
+### Credential and secret files
+
+- IAM mutations are serialized and atomic. Every write path that changes `iam.json` (user create/update/delete, enable/disable, access-key create/delete, policy updates, secret rotation, peer-credential create/delete/tag, and first-run bootstrap) takes a process-wide mutation lock and performs one load-modify-save cycle under it, so concurrent edits can no longer lose an update or resurrect a revoked key. The save itself writes a uniquely named temp file in the same directory, fsyncs it, renames it over `iam.json`, and fsyncs the parent directory on platforms that support it, so a crash mid-write cannot truncate or corrupt the credential store. Read paths (authentication, authorization, listing) do not take the mutation lock.
+- First-run and `--reset-cred` credentials are encrypted at rest. Bootstrap now writes through the same IAM service the running server uses, so when `SECRET_KEY` is configured (from the environment or `.myfsio.sys/config/.secret`) the initial admin file is fernet-encrypted with the `MYFSIO_IAM_ENC:` prefix instead of being left as plaintext JSON.
+- Plaintext IAM configs migrate on load. When the service starts with a secret configured and finds an unencrypted but well-formed `iam.json`, it re-saves it once through the encrypted atomic path and logs a single info line. A file that is encrypted-but-undecryptable, or that fails to parse, is never rewritten.
+- The generated secret is only echoed when it was generated. The first-run banner still prints the access key and the file location, but when `ADMIN_SECRET_KEY` supplied the value the secret line reads `(from ADMIN_SECRET_KEY)` rather than repeating the secret to stdout and the console scrollback.
+- The server generates its own `.secret` when one is needed. Previously only the Linux installer created `.myfsio.sys/config/.secret`, so a bare `myfsio-server serve` without `SECRET_KEY` ran with no secret at all and stored IAM credentials as plaintext. The resolution path now generates and persists a random 32-byte base64 secret when the environment variable is unset and the file is missing or empty, and reuses it afterwards. If the secret cannot be persisted the server keeps running without one rather than encrypting against a key that would be lost on restart. The placeholder `dev-secret-key` is rejected from both sources; a `.secret` containing it is left on disk untouched and logged as a warning, so deleting the file is all that is needed to get a real one generated.
+- Writes to secret files are atomic. `iam.json`, `connections.json`, `.connections_key`, `kms_keys.json`, and a generated `.secret` are all written to a uniquely named temp file in the same directory, fsynced, renamed into place, and followed by a parent-directory fsync on Unix, so a crash mid-write cannot truncate a credential or key store. `connections.json` previously used a single fixed temp name, which could collide between concurrent saves.
+- Secret-bearing files are created owner-only (`0600`) on Unix: `iam.json` and its `.bak-...` backups, `.myfsio.sys/keys/kms_master.key`, `.myfsio.sys/keys/kms_keys.json`, `.myfsio.sys/keys/master.key`, `.myfsio.sys/config/.connections_key`, and `.myfsio.sys/config/connections.json`. Existing `kms_master.key`, `master.key`, `.connections_key`, and `.secret` files are tightened to `0600` best-effort when they are read, so deployments created before this change are corrected on the next start. On Windows the permission step is a no-op and files inherit directory ACLs.
+
 ### Rate limiting
 
 | Variable | Default | Description |
@@ -169,6 +179,7 @@ The web UI uses 1024-byte binary units consistently and labels them `KiB`, `MiB`
 | `RATE_LIMIT_OBJECT_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for `/{bucket}/{key}` |
 | `RATE_LIMIT_HEAD_OPS` | inherits `RATE_LIMIT_DEFAULT` | Override for HEAD requests |
 | `RATE_LIMIT_ADMIN` | `60 per minute` | Override for `/myfsio/admin/*` |
+| `RATE_LIMIT_UI_LOGIN` | `20 per minute` | Per-IP limit for `GET`/`POST /login`. Browser form posts get a styled 429 page with `Retry-After`; JSON/AJAX callers get a 429 JSON error |
 | `RATE_LIMIT_STORAGE_URI` | `memory://` | Backend for rate-limit state. Only `memory://` is supported today |
 
 ### Disk admission control
@@ -246,6 +257,9 @@ These limits gate S3 object data reads and writes only. Admin and UI requests, H
 | `SITE_SYNC_READ_TIMEOUT_SECONDS` | `120` | Site sync read timeout |
 | `SITE_SYNC_MAX_RETRIES` | `2` | Site sync retry count |
 | `SITE_SYNC_CLOCK_SKEW_TOLERANCE_SECONDS` | `1.0` | Allowed skew between peers |
+
+- **A failed remote listing aborts the sync cycle.** If listing the remote bucket fails for any reason, the cycle for that bucket stops before anything is pulled or deleted and the reason is logged (`remote bucket '<name>' not found (skipping sync cycle to protect local data)` for a missing or renamed remote bucket, the underlying transport error otherwise). Previously a `NoSuchBucket`/404 response was treated as an empty remote listing, so a rule with `sync_deletions` enabled deleted every locally synchronized object the next time the remote bucket was missing or transiently unreachable.
+- **A failed sync cycle is visible in the sync stats, not just the log.** Each failure increments the bucket's `errors` counter and stores `last_error` / `last_error_at`, which are persisted in `data/.myfsio.sys/config/site_sync_stats.json` and returned by `GET /myfsio/admin/sync-stats`. The counter feeds the per-peer `N err` badge on the Sites page and the `sync.errors` figure in the cluster overview, so a bucket whose cycles keep aborting no longer reports as healthy. The next successful cycle resets the bucket's counters and clears `last_error`. Stats files written before these fields existed still load.
 
 ### Garbage collection
 
@@ -478,6 +492,7 @@ Current Rust behavior:
 - Runs as a Tokio background task, not a cron job
 - Default interval is 3600 seconds
 - Evaluates bucket lifecycle configuration and applies expiration and multipart abort rules
+- A `Days` expiration rule expires objects older than that many days. A `Date` expiration rule does nothing until the date has passed, and from then on expires every object matching the rule filter regardless of age, as AWS does. Previously the configured date was used directly as the age cutoff, so a rule dated in the future deleted every matching object on the next cycle.
 
 At the moment, the interval is hardcoded through `LifecycleConfig::default()` rather than exposed as an environment variable.
 
@@ -498,7 +513,9 @@ Defaults (override with the env vars in section 6):
 - `GC_SEGMENT_MAX_AGE_HOURS=24`
 - `GC_DRY_RUN=false`
 
-Each GC cycle also sweeps `data/.myfsio.sys/quarantine/<bucket>/<ts>/` directories whose `<ts>` mtime is older than `INTEGRITY_QUARANTINE_RETENTION_DAYS`, freeing the bytes recorded in `quarantine_bytes_freed` / `quarantine_entries_deleted` in the result JSON. It also deletes unreferenced `data/.myfsio.sys/buckets/<bucket>/segments/<upload_id>/` directories older than `GC_SEGMENT_MAX_AGE_HOURS`, reported as `segment_dirs_deleted` / `segment_bytes_freed`.
+Each GC cycle also sweeps `data/.myfsio.sys/quarantine/<bucket>/<ts>/` directories whose `<ts>` mtime is older than `INTEGRITY_QUARANTINE_RETENTION_DAYS`, freeing the bytes recorded in `quarantine_bytes_freed` / `quarantine_entries_deleted` in the result JSON. Age alone is not sufficient: before deleting anything the sweep collects every `__quarantine_path__` still referenced by poisoned object metadata (sidecar and legacy layouts both) and retains those directories, counting them as `quarantine_entries_protected`. If that reference scan hits any read or parse error, every aged entry is retained for that cycle and the error is reported — an incomplete scan must never delete the only surviving copy of a poisoned object's bytes. The scan itself runs only when at least one entry is actually past retention. It also deletes unreferenced `data/.myfsio.sys/buckets/<bucket>/segments/<upload_id>/` directories older than `GC_SEGMENT_MAX_AGE_HOURS`, reported as `segment_dirs_deleted` / `segment_bytes_freed`.
+
+Deciding which segment directories are orphaned requires a complete walk of the bucket's live tree and its archived versions. If any part of that walk fails — an unreadable directory or entry, or an unreadable segment stub header — the segment sweep is skipped for that bucket, a `Skipped segment sweep for bucket <name>: reference scan incomplete: …` line is added to the run's `errors` array (so it appears in the result JSON and in GC history), and a warning is logged. Every other GC phase still runs, and buckets whose scan completed sweep normally. Previously the scan swallowed these failures, so one transient IO error could make live segmented objects look unreferenced and delete them while still reporting a clean run.
 
 History is persisted at `data/.myfsio.sys/config/gc_history.json` and can be triggered manually via `POST /myfsio/admin/gc/run` (use `{"dry_run": true}` to preview).
 
@@ -521,16 +538,22 @@ INTEGRITY_HEAL_CONCURRENCY=1
 INTEGRITY_QUARANTINE_RETENTION_DAYS=7
 ```
 
+The checksum phase verifies single-part objects against their stored MD5 and multipart objects against a recomputed composite ETag, reading either the segment files or the concatenated body according to the `__part_sizes__` manifest. Objects the scanner cannot verify are counted rather than accused: `encrypted_objects_unverifiable` for server-side-encrypted objects, and `multipart_objects_unverifiable` for multipart objects completed before `__part_sizes__` existed. A read failure that indicates damaged content (short read, trailing bytes, wrong segment size) is reported as `corrupted_object`; any other IO failure is reported in `errors` and the object is left alone.
+
 When `INTEGRITY_AUTO_HEAL=true` (and `INTEGRITY_DRY_RUN=false`), each scan ends with a heal phase that processes the issues it just recorded. For `corrupted_object` the bad bytes are renamed into `data/.myfsio.sys/quarantine/<bucket>/<ts>/<key>` and the heal logic tries, in order:
 
 1. **Pull from peer.** If a replication rule for the bucket points at a healthy remote whose `HEAD` returns the same ETag the local index has, the body is streamed to a temp file, MD5-verified against the stored ETag, and atomically swapped into the live path. The poison flags are cleared on success.
-2. **Poison the entry.** If there is no replication target, the peer disagrees on the ETag, the peer is unreachable, or the downloaded body fails verification, the index entry is mutated to add `__corrupted__: "true"`, `__corrupted_at__`, `__corruption_detail__`, and `__quarantine_path__`. The data file stays in quarantine for `INTEGRITY_QUARANTINE_RETENTION_DAYS`.
+2. **Poison the entry.** If there is no replication target, the peer disagrees on the ETag, the peer is unreachable, or the downloaded body fails verification, the index entry is mutated to add `__corrupted__: "true"`, `__corrupted_at__`, `__corruption_detail__`, `__quarantine_path__`, `__corruption_retry_count__`, and `__corruption_last_retry_at__`. The data file stays in quarantine until it is recovered or stops being referenced.
 
-Subsequent reads (`GET`, `HEAD`, `CopyObject` source) on a poisoned key return `422 ObjectCorrupted` instead of serving rotted bytes; the response includes an `x-amz-error-code: ObjectCorrupted` header so HEAD callers (which receive no body) can still detect the condition. Replication push skips poisoned keys; subsequent integrity scans skip poisoned keys instead of re-flagging them. Overwriting the key with a fresh `PUT` clears the poison.
+Quarantine, heal-install, recovery-failure recording, and phantom-metadata deletion are all check-and-set operations performed by the storage backend under the per-object write lock: the object is re-hashed under the lock before it is quarantined, a healed body is re-verified against the expected ETag before it is installed, and every one of them re-reads the metadata and aborts if the object was overwritten in the meantime. A concurrent `PUT` therefore always wins against an in-flight heal.
 
-`stale_version`, `etag_cache_inconsistency`, and `phantom_metadata` issues are healed locally (move-to-quarantine, rebuild cache, drop entry); `orphaned_object` is reported only.
+Poisoned entries whose live object is gone are re-reported on every scan as `poisoned_object` and retried by the heal phase, oldest-failure-first so a permanently unrecoverable key cannot starve the rest out of the per-type issue cap. With no peer configured the retry is skipped rather than recorded, since it cannot make progress.
 
-Override per-invocation by passing `auto_heal` / `dry_run` to `POST /myfsio/admin/integrity/run`. The response and history records now include a `heal_stats` map keyed by issue type with `{found, healed, poisoned, peer_mismatch, peer_unavailable, verify_failed, failed, skipped}`. History is at `data/.myfsio.sys/config/integrity_history.json`.
+Subsequent reads (`GET`, `HEAD`, `CopyObject` source) on a poisoned key return `422 ObjectCorrupted` instead of serving rotted bytes; the response includes an `x-amz-error-code: ObjectCorrupted` header so HEAD callers (which receive no body) can still detect the condition. Replication push skips poisoned keys; the checksum phase skips poisoned keys instead of re-flagging them as corrupt. Overwriting the key with a fresh `PUT` clears the poison.
+
+`stale_version`, `etag_cache_inconsistency`, and `phantom_metadata` issues are healed locally (move-to-quarantine, rebuild cache, drop entry); `orphaned_object` is reported only. A metadata key that does not resolve to a path inside its bucket is reported as `invalid_metadata_key` and never touched.
+
+Override per-invocation by passing `auto_heal` / `dry_run` to `POST /myfsio/admin/integrity/run`. Setting both requests a heal preview: the scan runs, every issue is classified as healable or not, and nothing is modified — reported as `issues_would_heal` and the per-type `would_heal` count. The response and history records include a `heal_stats` map keyed by issue type with `{found, healed, poisoned, peer_mismatch, peer_unavailable, verify_failed, failed, skipped, would_heal}`. History is at `data/.myfsio.sys/config/integrity_history.json`; if it cannot be written the error is surfaced on the System page instead of being silently dropped.
 
 ### Metrics history
 
@@ -580,6 +603,8 @@ ENCRYPTION_ENABLED=true KMS_ENABLED=true cargo run -p myfsio-server --
 Notes:
 
 - If `ENCRYPTION_ENABLED=true` and `SECRET_KEY` is not configured, the server still starts, but `--check-config` warns that secure-at-rest config encryption is unavailable.
+- If `ENCRYPTION_ENABLED=true` or `KMS_ENABLED=true` and the corresponding subsystem fails to initialize, the server logs the reason and exits non-zero instead of starting. Starting without it would silently store objects unencrypted while still returning `200 OK`.
+- A bucket configured with default encryption fails its writes with `InternalError` if the encryption service is unavailable or its stored configuration cannot be parsed, rather than falling back to writing plaintext.
 - KMS and the object encryption master key live under `data/.myfsio.sys/keys/`.
 - Encrypted PUTs stream the client body straight through the encryptor into a temp file and commit the ciphertext atomically; plaintext is never installed at the live key path. Encrypted GETs (full, ranged, and SSE-C multipart) decrypt chunk-by-chunk while streaming the response instead of materializing a decrypted temp file. Objects written by older builds without `x-amz-encryption-plaintext-size` metadata fall back to temp-file decryption.
 - One remaining non-atomic window: SSE-S3/SSE-KMS multipart uploads encrypt after CompleteMultipartUpload commits the assembled object; a crash inside that window can leave the assembled plaintext live. Per-part SSE-C multipart uploads are not affected.
@@ -630,6 +655,8 @@ sudo ./scripts/install.sh --binary ./target/release/myfsio-server
 
 The installer copies that binary to `/opt/myfsio/myfsio`, creates `/opt/myfsio/myfsio.env`, and can register a `myfsio.service` systemd unit.
 
+If either listener task ends on its own — a listener error or a panic — the process logs which one and why, drains the surviving listener, runs the normal shutdown sequence, and exits with status 1 so the unit's `Restart=` policy takes effect. Previously the process kept running with a dead endpoint, and health checks against the other listener still passed.
+
 ## 12. Updating and Rollback
 
 Recommended update flow:
@@ -671,9 +698,9 @@ cargo run -p myfsio-server -- --reset-cred
 
 The command:
 
-- backs up the existing IAM file with a timestamped `.bak-...` suffix
-- writes a fresh admin config
-- respects `ADMIN_ACCESS_KEY` and `ADMIN_SECRET_KEY` if you set them
+- backs up the existing IAM file with a timestamped `.bak-...` suffix, tightening the backup to `0600` on Unix
+- writes a fresh admin config through the atomic, owner-only, encrypted-when-`SECRET_KEY`-is-set save path
+- respects `ADMIN_ACCESS_KEY` and `ADMIN_SECRET_KEY` if you set them, and prints `(from ADMIN_SECRET_KEY)` instead of the secret value when the secret came from the environment
 
 ## 14. Testing
 
@@ -699,6 +726,61 @@ The Rust server exposes:
 - KMS routes under `/myfsio/kms/...`
 
 `CompleteMultipartUpload` includes `x-amz-version-id` on the response when the completed object has a version id.
+
+### Authorization and request validation
+
+- **Per-key authorization on bulk delete.** `POST /<bucket>?delete` authorizes every key in the request body individually, not just the bucket. A principal whose IAM policy is scoped to a prefix can no longer delete keys outside it; unauthorized keys come back as `AccessDenied` entries in the `DeleteResult` while authorized keys still succeed.
+- **A request may name at most one subresource.** The authorization middleware and the request dispatchers previously scanned the query string in independent orders, so a request naming two selectors could be authorized as one operation and executed as another. `PUT /<bucket>?location=&policy=` was authorized as `list` but dispatched to `PutBucketPolicy`, letting a list-only principal replace a bucket policy — and because an `AllUsers` bucket ACL grants `list` to anonymous callers, the same request installed an attacker-chosen policy on a public-read bucket with no credentials at all. The object level had the same defect in a worse form: `?attributes` mapped to the `read` action for every method while no PUT or DELETE handler branched on it, so `PUT /<bucket>/<key>?attributes=` and `DELETE /<bucket>/<key>?attributes=` were authorized as reads and then performed a real overwrite or delete.
+
+  Bucket and object selectors are now each resolved by one parser shared between the middleware and every dispatcher, so the two layers cannot disagree. A request carrying more than one recognized selector is rejected with `InvalidArgument` at authorization time, before the operation is dispatched. A selector that the dispatcher for that method does not implement returns `MethodNotAllowed` rather than falling through to the method's default operation — notably `PUT /<bucket>?location`, `?policyStatus`, `?versions`, `?uploads` and `?delete`, which previously **created the bucket**; `GET /<bucket>?delete`, which previously returned an object listing; `POST /<bucket>?<anything but delete>`; and `PUT`/`DELETE` of an object with `?attributes`, `?select` or `?uploads`. When a selector is not implemented for the requested method, authorization uses that method's default action, so it is never weaker than what the request could perform.
+
+  Two bucket selectors that authorization did not previously recognize at all now have their own IAM actions instead of falling through to the method default (`create_bucket` on PUT): `?ownershipControls` requires `ownership_controls` and `?publicAccessBlock` requires `public_access_block`. Grant these explicitly to any non-admin principal that manages those settings.
+- **Governance-retention bypass is a permission, not a header.** `x-amz-bypass-governance-retention: true` is only honored for an admin principal or for a principal granted the `bypass_governance` IAM action (or `s3:BypassGovernanceRetention` in a bucket policy) on the bucket and key being modified. An unauthorized caller, including an anonymous one on a public bucket, is treated as if the header were absent: a `GOVERNANCE`-locked object then refuses the delete, overwrite or retention change, while unlocked objects are unaffected. This is enforced on `DeleteObject`, versioned deletes, `POST /<bucket>?delete` (per key, so a prefix-scoped policy applies key by key), `PutObject`, `CopyObject`, POST form uploads, `CompleteMultipartUpload` and `PutObjectRetention`. `COMPLIANCE` retention remains absolute and no permission overrides it. The web UI never bypasses governance retention.
+- **A prefix-scoped wildcard policy is no longer an admin policy.** A principal is admin only when a policy grants `"bucket": "*"` with `"actions": ["*"]` and an unrestricted prefix (`"*"` or empty). Previously the prefix was ignored, so `{"bucket": "*", "actions": ["*"], "prefix": "home/"}` (a legitimate "everything under this prefix, in any bucket" grant) produced an admin principal that skipped every later check, including its own prefix scoping and admin-only APIs. Such a principal is now evaluated by the normal policy loop and stays confined to its prefix.
+- **Bucket-policy resource keys match case-sensitively.** S3 object keys are case-sensitive, so the key segment of a `Resource` ARN is compared case-sensitively: `arn:aws:s3:::b/public/*` matches `public/x` but not `PUBLIC/secret`. The bucket segment stays case-insensitive, since a policy may spell the bucket name in mixed case, and `Action` matching stays case-insensitive as AWS does.
+- **Bucket policies fail closed on unsupported clauses.** `Condition`, `NotPrincipal`, `NotAction`, and `NotResource` are not evaluated by this server. `PutBucketPolicy` (and the UI policy editor) now reject statements containing them with `InvalidArgument`. For policies already stored, a matching `Allow` carrying such a clause grants nothing, and a `Deny` carrying one denies. Previously these clauses were silently ignored, so a restrictive-looking policy could be permissive.
+- **Presigned URLs must sign their `x-amz-*` headers.** A presigned request carrying an `x-amz-*` header that is not listed in `X-Amz-SignedHeaders` is rejected with `SignatureDoesNotMatch`. This prevents a URL bearer from adding `x-amz-copy-source`, `x-amz-acl`, `x-amz-bypass-governance-retention`, SSE, or user-metadata headers the signer never authorized. Only `x-amz-content-sha256`, `x-amz-date`, and `x-amz-decoded-content-length` are exempt, since they affect body framing only. SDKs that attach unsigned checksum headers to presigned PUTs will need to include them in the signature, as they already must against AWS.
+- **Reserved metadata keys are dropped.** User metadata keys beginning with `__` or `x-amz-` collide with internal storage and encryption metadata and are discarded on PutObject, CopyObject, POST form uploads, UI multipart initiation, and objects pulled from a peer. Ordinary `x-amz-meta-<name>` metadata is unaffected.
+- **A ranged GET of an SSE-C object validates the customer key like any other read.** `GET` with a `Range` header (or `partNumber`) on an SSE-C object returns `400 InvalidRequest` when the `x-amz-server-side-encryption-customer-*` headers are absent and `403 AccessDenied` when the supplied key does not match the one the object was written with — the same responses the whole-object `GET` has always returned. Previously only the whole-object path checked, so a ranged read failed inside the decryptor and surfaced as `500 InternalError` carrying an internal error string.
+- **Multipart upload ids are validated.** `uploadId` and internal segment ids must be 32 lowercase hex characters. A malformed id returns `NoSuchUpload` rather than being joined into a filesystem path.
+- **Listing parameters are validated and bounded.** `encoding-type` accepts only `url` (case-insensitive); any other value returns `InvalidArgument` with `Invalid Encoding Method specified in Request` on `ListObjects`, `ListObjectsV2`, `ListObjectVersions` and `ListMultipartUploads`, instead of being silently ignored. `max-keys` above `1000` is capped at `1000` as AWS does, and the capped value is what the response echoes in `MaxKeys`, so an oversized page request can no longer force an unbounded single-page listing. Negative or non-integer `max-keys` values still return `InvalidArgument`, and `max-keys=0` still returns an empty listing.
+- **Bucket names are validated on every access, not only on creation.** Full S3 bucket-name syntax (3–63 characters, lowercase letters, digits, dots and hyphens) is enforced inside the storage backend for every read, write, delete, list, configuration and multipart operation, and the resolved path is checked to still fall under `STORAGE_ROOT`. Previously only `CreateBucket` ran the syntax check while every other operation checked reserved names alone, so a percent-encoded absolute path in the bucket position (`/C%3A%5CWindows%5CTemp/file.txt`) was joined onto the storage root and replaced it, giving a signed request read, write and delete access outside the configured storage directory. The authorization middleware also percent-decodes the bucket and key before evaluating them, so it can no longer authorize a different string than the handler acts on. Malformed names now return `InvalidBucketName`. Bucket names supplied in request bodies and UI forms rather than in the path are validated too: the `PutBucketLogging` `TargetBucket`, website-domain mappings, and a replication rule's source bucket all reject an invalid name with `InvalidBucketName` instead of reporting that the bucket does not exist, and a persisted replication rule whose source bucket name is invalid is ignored at load with an error log. A replication rule's *target* bucket lives on a remote server, so it is only checked for path safety — a remote bucket may legitimately carry a name this server would not issue locally. Directories in the storage root whose names are not valid bucket names are skipped by `ListBuckets` with a warning rather than being served as buckets, and `--rebuild-listing` skips them instead of failing the run.
+- **Corrupt bucket configuration fails closed.** If a bucket's `.bucket.json` exists but cannot be read or parsed, the bucket is treated as unusable rather than as an empty configuration: policy evaluation denies, object writes and deletes return `InternalError` (versioning and quota settings cannot be determined, so proceeding could destroy versions on a bucket that is actually versioned), writes needing its encryption settings return `InternalError`, and every configuration write refuses to overwrite it. The last guard matters because the config is a read-modify-write: without it, the next settings change would replace the corrupt file with a near-empty one and silently discard every other bucket setting.
+
+  To recover, stop the server and repair the file, or delete it to return the bucket to default settings — a missing `.bucket.json` is legitimate and reads as an empty configuration. The server logs the bucket name and full path when it detects the condition. Note the bucket config cache holds the failed read for up to `BUCKET_CONFIG_CACHE_TTL_SECONDS` (default 30).
+
+- **Every buffered request body is bounded.** Requests whose body is parsed in full — bucket and object subresource XML (`?versioning`, `?tagging`, `?cors`, `?encryption`, `?lifecycle`, `?quota`, `?policy`, `?replication`, `?acl`, `?website`, `?ownershipControls`, `?publicAccessBlock`, `?object-lock`, `?notification`, `?logging`, `?retention`, `?legal-hold`), `CreateBucket`'s location constraint and the S3 Select request document — accept at most 1 MiB and otherwise return `400 MaxMessageLengthExceeded` (`Your request was too big`). `CompleteMultipartUpload` and `POST /<bucket>?delete` accept 8 MiB, enough for the 10,000-part and 1,000-key maxima. KMS and `/myfsio/admin/*` JSON bodies accept 1 MiB and answer with a `413` in their own JSON error shape; UI JSON and form bodies accept 2 MiB and answer `413 {"error": "Request body exceeds the 2.0 MiB limit"}`. Bodies are read frame by frame and abandoned the moment they pass the cap, so an oversized request is never buffered. Object data paths (`PutObject`, `UploadPart`, POST form uploads) are unaffected — they stream to disk and are governed by `UPLOAD_STREAM_BUFFER_BYTES` as before. Previously every one of these call sites read the body with no limit at all, so a single authenticated request could exhaust server memory.
+- **Multipart form fields other than the file are capped at 1 MiB.** `POST /<bucket>` (browser-based POST form upload) and the UI's `POST /ui/buckets/<bucket>/upload` both read their non-file fields (`key`, `policy`, the `x-amz-*` fields, `object_key`, `metadata`) fully into memory. Each is now limited to 1 MiB while the file field itself stays unlimited and streams as before; an oversized field returns `400 MaxMessageLengthExceeded` on the S3 endpoint and `413` in the UI's JSON error shape.
+- **`POST /myfsio/admin/relay/<site_id>/<path>` bounds the body it forwards.** The outbound relay handler now reads its request body through the same 8 MiB limit as the inbound relay layer and the peer-response reader, answering `413 InvalidRequest` past it. It was the one relay path still collecting without a limit.
+- **The UI upload endpoint answers AJAX callers in JSON, not S3 XML.** When the proxied `PutObject` fails, `POST /ui/buckets/<bucket>/upload` now returns the S3 status with `{"error": "<Message> (<Code>)"}` instead of forwarding the raw S3 error XML, so the upload dialog shows the real reason (quota exceeded, object lock, and so on) rather than a bare "Upload failed (403)".
+- **The UI multipart part upload streams.** `PUT /ui/buckets/<bucket>/multipart/<upload_id>?partNumber=N` feeds the request body straight into the storage layer as an async read stream instead of collecting it into memory and then copying it a second time into a cursor. A part larger than S3's 5 GiB maximum is rejected with `413` once the limit is crossed rather than after the whole part is resident. An empty body still returns `400`.
+- **UI sessions are created only when something is stored in them.** A request that arrives without a session cookie — or with one naming a session that no longer exists — is served from an in-memory session that is never inserted into the session store, and no `Set-Cookie` is emitted for it. The session is persisted (and the cookie set) only when a handler actually writes to it, which is what `GET /login` does when it issues a CSRF token, so the login flow is unchanged. Previously every cookie-less request inserted a session, and because the store is capped at 10,000 entries, a flood of anonymous requests evicted signed-in users' sessions and logged them out. When the cap is reached, eviction now takes the oldest *unauthenticated* session first and only touches a signed-in session when no anonymous one remains.
+- **`/login` is rate limited per IP.** `GET` and `POST /login` share a token bucket sized by `RATE_LIMIT_UI_LOGIN` (default `20 per minute`, parsed like the other `RATE_LIMIT_*` values and honoring `NUM_TRUSTED_PROXIES`). Over the limit, a browser form post gets a styled "Too many login attempts" page with `Retry-After`; a JSON or AJAX caller gets `429 {"error": ...}`. Neither the sign-in form nor the credential check had any limiter before.
+
+### System maintenance permissions
+
+Garbage collection and integrity scanning are server-wide, not bucket-scoped, so they are authorized by namespaced IAM actions rather than by bucket:
+
+| Action | Grants |
+|--------|--------|
+| `system:gc_read` | `GET /myfsio/admin/gc/status`, `/gc/history`, and the `/ui/system/gc/*` equivalents |
+| `system:gc_run` | `POST /myfsio/admin/gc/run` and `/ui/system/gc/run` |
+| `system:integrity_read` | `GET /myfsio/admin/integrity/status`, `/integrity/history`, and the `/ui/system/integrity/*` equivalents |
+| `system:integrity_run` | `POST /myfsio/admin/integrity/run` and `/ui/system/integrity/run` |
+
+Admin principals pass these checks implicitly. For a non-admin, the granting policy must use `"bucket": "*"`, since a bucket-scoped policy cannot authorize a server-wide operation. `system:*` grants all four, and a `"*"` action grants them as with any other action.
+
+```json
+{ "bucket": "*", "prefix": "*", "actions": ["system:gc_read", "system:integrity_read"] }
+```
+
+The `/ui/system` dashboard honors the read actions per card: without one, that card states which permission is missing instead of exposing status and history, and the Run/Scan buttons are hidden without the matching run action. The rest of the page (version, platform, timezone, feature flags) is unrestricted.
+
+Both the `/myfsio/admin/...` routes and the `/ui/system/...` routes previously required a full admin principal. They now enforce these permissions instead, so maintenance can be delegated without granting admin. The UI routes moved out of the admin-only router group for this; every one of them performs its own permission check, and a principal with no `system:` action sees the dashboard shell with both cards withheld. Admins are unaffected, and relayed cluster maintenance still works because `relay_inbound_layer` substitutes a verified admin principal before the handler runs.
+
+### Static website hosting
+
+- **Website responses stream and decrypt.** A website request is served through the same data path as the S3 `GetObject` handler instead of reading the whole object into memory first, so an anonymous request can no longer make the server buffer an entire object, and a `Range` request produces a real `206` computed from plaintext offsets rather than a slice of a fully-read buffer (an unsatisfiable range still returns `416` with `Content-Range: bytes */<size>`). Objects encrypted with SSE-S3 or SSE-KMS — including through bucket default encryption — are decrypted before they are sent; they were previously served as raw ciphertext. `HEAD` reports the plaintext `Content-Length`, the same size `HeadObject` reports. An SSE-C object can only be decrypted with the caller's key, which a browser cannot supply, so a website `GET` or `HEAD` of one returns `403` rather than ciphertext. Index-document resolution, the configured error document, and its `404` status are unchanged.
 
 For a route-level view, inspect:
 

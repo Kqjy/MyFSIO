@@ -14,6 +14,7 @@
 #   --log-dir DIR       Log directory (default: /var/log/myfsio)
 #   --user USER         System user (default: myfsio)
 #   --no-systemd        Skip systemd service teardown
+#   --remove-user       Remove the service user even if not installer-created
 #   -y, --yes           Skip confirmation prompts
 #
 
@@ -27,6 +28,7 @@ KEEP_DATA=false
 KEEP_LOGS=false
 SKIP_SYSTEMD=false
 AUTO_YES=false
+REMOVE_USER=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -37,11 +39,65 @@ while [[ $# -gt 0 ]]; do
         --log-dir)      LOG_DIR="$2"; shift 2 ;;
         --user)         SERVICE_USER="$2"; shift 2 ;;
         --no-systemd)   SKIP_SYSTEMD=true; shift ;;
+        --remove-user)  REMOVE_USER=true; shift ;;
         -y|--yes)       AUTO_YES=true; shift ;;
-        -h|--help)      head -21 "$0" | tail -16; exit 0 ;;
+        -h|--help)      head -20 "$0" | tail -15; exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+RESERVED_PATHS=(/bin /boot /dev /etc /home /lib /lib32 /lib64 /media /mnt /opt /proc /root /run /sbin /srv /sys /tmp /usr /var)
+
+validate_target_path() {
+    local flag="$1"
+    local value="$2"
+    local canonical
+    local shown
+    local reserved
+
+    if [[ "$value" != /* ]]; then
+        echo "  [ERROR] $flag must be an absolute path (got: '$value')"
+        exit 1
+    fi
+
+    canonical=""
+    if command -v realpath &>/dev/null; then
+        canonical=$(realpath -m -- "$value" 2>/dev/null) || canonical=""
+    fi
+    if [[ -z "$canonical" ]]; then
+        canonical="$value"
+        case "$canonical/" in
+            */./*|*/../*)
+                echo "  [ERROR] $flag must not contain '.' or '..' path segments (got: '$value')"
+                exit 1
+                ;;
+        esac
+    fi
+    while [[ "$canonical" == *//* ]]; do
+        canonical="${canonical//\/\///}"
+    done
+    while [[ "$canonical" == */ && "$canonical" != "/" ]]; do
+        canonical="${canonical%/}"
+    done
+
+    shown="'$value'"
+    if [[ "$canonical" != "$value" ]]; then
+        shown="'$value' -> '$canonical'"
+    fi
+
+    if [[ -z "$canonical" || "$canonical" == "/" ]]; then
+        echo "  [ERROR] $flag must not be the filesystem root (got: $shown)"
+        exit 1
+    fi
+    for reserved in "${RESERVED_PATHS[@]}"; do
+        if [[ "$canonical" == "$reserved" ]]; then
+            echo "  [ERROR] $flag must not be the system directory $reserved (got: $shown)"
+            exit 1
+        fi
+    done
+
+    CANONICAL_PATH="$canonical"
+}
 
 echo ""
 echo "============================================================"
@@ -54,6 +110,35 @@ echo ""
 if [[ $EUID -ne 0 ]]; then
     echo "Error: This script must be run as root (use sudo)"
     exit 1
+fi
+
+validate_target_path "--install-dir" "$INSTALL_DIR"
+INSTALL_DIR="$CANONICAL_PATH"
+validate_target_path "--data-dir" "$DATA_DIR"
+DATA_DIR="$CANONICAL_PATH"
+validate_target_path "--log-dir" "$LOG_DIR"
+LOG_DIR="$CANONICAL_PATH"
+
+MANIFEST_FILE="$INSTALL_DIR/.install-manifest"
+SERVICE_USER_CREATED=false
+if [[ -f "$MANIFEST_FILE" ]]; then
+    MANIFEST_USER=""
+    MANIFEST_CREATED=""
+    while IFS='=' read -r manifest_key manifest_value; do
+        case "$manifest_key" in
+            SERVICE_USER)         MANIFEST_USER="$manifest_value" ;;
+            SERVICE_USER_CREATED) MANIFEST_CREATED="$manifest_value" ;;
+        esac
+    done < "$MANIFEST_FILE"
+    if [[ "$MANIFEST_USER" == "$SERVICE_USER" && "$MANIFEST_CREATED" == true ]]; then
+        SERVICE_USER_CREATED=true
+    fi
+fi
+
+if [[ "$SERVICE_USER_CREATED" == true || "$REMOVE_USER" == true ]]; then
+    REMOVE_SERVICE_USER=true
+else
+    REMOVE_SERVICE_USER=false
 fi
 
 echo "------------------------------------------------------------"
@@ -75,7 +160,11 @@ else
     echo "  Log directory:     $LOG_DIR (WILL BE KEPT)"
 fi
 echo "  Systemd service:   /etc/systemd/system/myfsio.service"
-echo "  System user:       $SERVICE_USER"
+if [[ "$REMOVE_SERVICE_USER" == true ]]; then
+    echo "  System user:       $SERVICE_USER"
+else
+    echo "  System user:       $SERVICE_USER (WILL BE KEPT)"
+fi
 echo ""
 
 if [[ "$AUTO_YES" != true ]]; then
@@ -198,8 +287,13 @@ echo "STEP 8: Removing System User"
 echo "------------------------------------------------------------"
 echo ""
 if id "$SERVICE_USER" &>/dev/null; then
-    userdel "$SERVICE_USER" 2>/dev/null || true
-    echo "  [OK] Removed user '$SERVICE_USER'"
+    if [[ "$REMOVE_SERVICE_USER" == true ]]; then
+        userdel "$SERVICE_USER" 2>/dev/null || true
+        echo "  [OK] Removed user '$SERVICE_USER'"
+    else
+        echo "  [SKIP] User '$SERVICE_USER' was not created by the installer - preserving"
+        echo "         Use --remove-user to delete it anyway"
+    fi
 else
     echo "  [SKIP] User not found: $SERVICE_USER"
 fi

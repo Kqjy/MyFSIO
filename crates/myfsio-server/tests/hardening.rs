@@ -561,7 +561,9 @@ async fn encrypted_app() -> (axum::Router, tempfile::TempDir) {
         encryption_chunk_size_bytes: 1024,
         ..myfsio_server::config::ServerConfig::default()
     };
-    let state = myfsio_server::state::AppState::new_with_encryption(config).await;
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
     let app = myfsio_server::create_router(state);
     (app, tmp)
 }
@@ -909,4 +911,366 @@ async fn upload_part_copy_range_from_middle_of_segmented_source() {
     assert_eq!(copied.len(), 3000);
     assert!(copied[..2000].iter().all(|b| *b == b'B'));
     assert!(copied[2000..].iter().all(|b| *b == b'C'));
+}
+
+const SCOPED_ACCESS_KEY: &str = "AKIASCOPEDLISTONLY01";
+const SCOPED_SECRET_KEY: &str = "scopedListOnlySecretKeyForTests012345678";
+
+fn app_with_scoped_principal(actions: serde_json::Value) -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [
+                {
+                    "user_id": "u-test1234",
+                    "display_name": "admin",
+                    "enabled": true,
+                    "access_keys": [{
+                        "access_key": TEST_ACCESS_KEY,
+                        "secret_key": TEST_SECRET_KEY,
+                        "status": "active"
+                    }],
+                    "policies": [{ "bucket": "*", "actions": ["*"], "prefix": "*" }]
+                },
+                {
+                    "user_id": "u-scoped01",
+                    "display_name": "scoped",
+                    "enabled": true,
+                    "access_keys": [{
+                        "access_key": SCOPED_ACCESS_KEY,
+                        "secret_key": SCOPED_SECRET_KEY,
+                        "status": "active"
+                    }],
+                    "policies": [{ "bucket": "*", "actions": actions, "prefix": "*" }]
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        iam_config_path: iam_path.join("iam.json"),
+        ui_enabled: false,
+        multipart_min_part_size: 1,
+        allow_legacy_header_auth: true,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new(config);
+    let app = myfsio_server::create_router(state);
+    (app, tmp)
+}
+
+fn scoped_request(method: Method, uri: &str, body: Body) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", SCOPED_ACCESS_KEY)
+        .header("x-secret-key", SCOPED_SECRET_KEY)
+        .body(body)
+        .unwrap()
+}
+
+fn percent_encode_all(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                (*b as char).to_string()
+            }
+            other => format!("%{:02X}", other),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn absolute_bucket_name_cannot_escape_storage_root() {
+    let (app, _tmp) = app();
+    let outside = tempfile::TempDir::new().unwrap();
+
+    let escape_target = outside.path().join("escape_target");
+    std::fs::create_dir_all(&escape_target).unwrap();
+    let encoded = percent_encode_all(&escape_target.to_string_lossy());
+    let resp = app
+        .clone()
+        .oneshot(request(
+            Method::PUT,
+            &format!("/{}/proof.txt", encoded),
+            Body::from("ESCAPED"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(
+        body.contains("InvalidBucketName"),
+        "unexpected body: {}",
+        body
+    );
+    assert!(!escape_target.join("proof.txt").exists());
+
+    let secret_dir = outside.path().join("secret_outside");
+    std::fs::create_dir_all(&secret_dir).unwrap();
+    std::fs::write(secret_dir.join("secret.txt"), b"TOP-SECRET").unwrap();
+    let encoded_secret = percent_encode_all(&secret_dir.to_string_lossy());
+    let resp = app
+        .oneshot(request(
+            Method::GET,
+            &format!("/{}/secret.txt", encoded_secret),
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    assert!(!body.contains("TOP-SECRET"), "secret leaked: {}", body);
+    assert!(
+        body.contains("InvalidBucketName"),
+        "unexpected body: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn malformed_bucket_names_are_rejected() {
+    let (app, _tmp) = app();
+    for bucket in ["..%2F..%2Fescape", "%2E%2E", "UPPERCASE", "ab", "a%3Ab"] {
+        let resp = app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                &format!("/{}/probe.txt", bucket),
+                Body::from("x"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "bucket name {} should be rejected as invalid",
+            bucket
+        );
+        let body = String::from_utf8(body_bytes(resp).await).unwrap();
+        assert!(
+            body.contains("InvalidBucketName"),
+            "bucket name {} gave unexpected body: {}",
+            bucket,
+            body
+        );
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_bucket_subresources_are_rejected() {
+    let (app, _tmp) = app();
+    app.clone()
+        .oneshot(request(Method::PUT, "/ambig-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    for uri in [
+        "/ambig-bucket?location=&policy=",
+        "/ambig-bucket?acl=&policy=",
+        "/ambig-bucket?versioning=&website=",
+        "/ambig-bucket?quota=&tagging=",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(request(Method::PUT, uri, Body::from("{}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "PUT {} should be rejected as ambiguous",
+            uri
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(request(Method::DELETE, uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "DELETE {} should be rejected as ambiguous",
+            uri
+        );
+    }
+}
+
+#[tokio::test]
+async fn list_only_principal_cannot_write_bucket_policy_via_location_shadow() {
+    let (app, _tmp) = app_with_scoped_principal(serde_json::json!(["list"]));
+    app.clone()
+        .oneshot(request(Method::PUT, "/shadow-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"*","Resource":["arn:aws:s3:::shadow-bucket/*"]}]}"#;
+    let resp = app
+        .clone()
+        .oneshot(scoped_request(
+            Method::PUT,
+            "/shadow-bucket?location=&policy=",
+            Body::from(policy),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let resp = app
+        .oneshot(request(
+            Method::GET,
+            "/shadow-bucket?policy=",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "no policy should have been installed"
+    );
+}
+
+#[tokio::test]
+async fn read_only_principal_cannot_write_or_delete_via_object_selector_shadow() {
+    let (app, _tmp) = app_with_scoped_principal(serde_json::json!(["list", "read"]));
+    app.clone()
+        .oneshot(request(Method::PUT, "/objshadow", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(request(
+            Method::PUT,
+            "/objshadow/victim.txt",
+            Body::from("original"),
+        ))
+        .await
+        .unwrap();
+
+    for uri in [
+        "/objshadow/victim.txt?attributes=",
+        "/objshadow/victim.txt?select=",
+        "/objshadow/victim.txt?uploads=",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(scoped_request(Method::PUT, uri, Body::from("TAMPERED")))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "PUT {} must not succeed for a read-only principal",
+            uri
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(scoped_request(Method::DELETE, uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "DELETE {} must not succeed for a read-only principal",
+            uri
+        );
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(scoped_request(
+            Method::DELETE,
+            "/objshadow/victim.txt?retention=",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = app
+        .oneshot(request(Method::GET, "/objshadow/victim.txt", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_bytes(resp).await, b"original");
+}
+
+#[tokio::test]
+async fn ambiguous_object_subresources_are_rejected() {
+    let (app, _tmp) = app();
+    app.clone()
+        .oneshot(request(Method::PUT, "/objambig", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(request(
+            Method::PUT,
+            "/objambig/file.txt",
+            Body::from("data"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(request(
+            Method::PUT,
+            "/objambig/file.txt?attributes=&tagging=",
+            Body::from("<Tagging></Tagging>"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let resp = app
+        .oneshot(request(
+            Method::GET,
+            "/objambig/file.txt?acl=&tagging=",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn read_only_selector_on_put_cannot_create_bucket() {
+    let (app, _tmp) = app_with_scoped_principal(serde_json::json!(["list"]));
+
+    for uri in [
+        "/sneaky-bucket?location=",
+        "/sneaky-bucket?versions=",
+        "/sneaky-bucket?uploads=",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(scoped_request(Method::PUT, uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "{} must not create a bucket",
+            uri
+        );
+    }
+
+    let resp = app
+        .oneshot(request(Method::HEAD, "/sneaky-bucket", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

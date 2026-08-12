@@ -1406,6 +1406,12 @@ html.sidebar-will-collapse .sidebar-user {
 	justify-content: center;
 }
 
+.preview-stage.preview-stage-audio {
+	height: auto;
+	min-height: 0;
+	padding: 1rem;
+}
+
 #preview-placeholder {
 	padding: 2rem 1rem;
 	width: 100%;

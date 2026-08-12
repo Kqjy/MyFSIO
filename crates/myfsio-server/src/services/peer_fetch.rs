@@ -93,9 +93,12 @@ impl PeerFetcher {
         };
 
         let expected_etag = resp.e_tag().unwrap_or("").trim_matches('"').to_string();
-        let metadata: Option<HashMap<String, String>> = resp
-            .metadata()
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        let metadata: Option<HashMap<String, String>> = resp.metadata().map(|m| {
+            m.iter()
+                .filter(|(k, _)| !myfsio_storage::validation::is_reserved_user_metadata_key(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        });
 
         let tmp_dir = self.storage.system_tmp_dir();
         if let Err(err) = tokio::fs::create_dir_all(&tmp_dir).await {

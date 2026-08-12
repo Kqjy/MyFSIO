@@ -145,6 +145,36 @@ pub fn validate_object_key(
     None
 }
 
+pub fn bucket_name_rejection(bucket_name: &str) -> Option<String> {
+    if is_reserved_bucket_name(bucket_name) {
+        return Some(format!("Bucket name '{}' is reserved", bucket_name));
+    }
+    validate_bucket_name(bucket_name)
+}
+
+pub fn is_safe_path_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+        && !value.contains(':')
+        && !value.contains('\0')
+}
+
+pub fn is_valid_multipart_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+pub fn is_reserved_metadata_key(key: &str) -> bool {
+    key.is_empty() || key.starts_with("__")
+}
+
+pub fn is_reserved_user_metadata_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    is_reserved_metadata_key(&lower) || lower.starts_with("x-amz-")
+}
+
 pub fn validate_bucket_name(bucket_name: &str) -> Option<String> {
     let len = bucket_name.len();
     if !(3..=63).contains(&len) {
@@ -270,6 +300,73 @@ mod tests {
         assert!(validate_object_key("a\u{0001}b", 1024, false, None).is_none());
         assert!(validate_object_key("a\nb", 1024, false, None).is_none());
         assert!(validate_object_key("a\0b", 1024, false, None).is_some());
+    }
+
+    #[test]
+    fn test_multipart_id_accepts_generated_ids() {
+        let generated = uuid::Uuid::new_v4().to_string().replace('-', "");
+        assert!(is_valid_multipart_id(&generated));
+        assert!(is_valid_multipart_id(&"a".repeat(32)));
+        assert!(is_valid_multipart_id("0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
+    fn test_multipart_id_rejects_traversal_and_non_canonical() {
+        assert!(!is_valid_multipart_id("../../config"));
+        assert!(!is_valid_multipart_id(".."));
+        assert!(!is_valid_multipart_id("../0123456789abcdef0123456789abcd"));
+        assert!(!is_valid_multipart_id(""));
+        assert!(!is_valid_multipart_id("0123456789ABCDEF0123456789ABCDEF"));
+        assert!(!is_valid_multipart_id("0123456789abcdef0123456789abcde"));
+        assert!(!is_valid_multipart_id("0123456789abcdef0123456789abcdef0"));
+        assert!(!is_valid_multipart_id("0123456789abcdef0123456789abcde/"));
+        assert!(!is_valid_multipart_id("0123456789abcdef0123456789abcdeg"));
+    }
+
+    #[test]
+    fn test_safe_path_segment_rejects_escapes() {
+        assert!(is_safe_path_segment("my-bucket"));
+        assert!(is_safe_path_segment("a.b.c"));
+
+        assert!(!is_safe_path_segment(""));
+        assert!(!is_safe_path_segment("."));
+        assert!(!is_safe_path_segment(".."));
+        assert!(!is_safe_path_segment("../etc"));
+        assert!(!is_safe_path_segment("a/b"));
+        assert!(!is_safe_path_segment("a\\b"));
+        assert!(!is_safe_path_segment("C:"));
+        assert!(!is_safe_path_segment("c:"));
+        assert!(!is_safe_path_segment("C:foo"));
+        assert!(!is_safe_path_segment("a\0b"));
+    }
+
+    #[test]
+    fn test_reserved_user_metadata_keys() {
+        assert!(is_reserved_user_metadata_key("__segments__"));
+        assert!(is_reserved_user_metadata_key("x-amz-encryption-nonce"));
+        assert!(is_reserved_user_metadata_key("X-Amz-Encryption-Nonce"));
+        assert!(is_reserved_user_metadata_key(
+            "x-amz-server-side-encryption"
+        ));
+        assert!(!is_reserved_user_metadata_key("author"));
+        assert!(!is_reserved_user_metadata_key("amz-thing"));
+    }
+
+    #[test]
+    fn test_reserved_metadata_keys() {
+        assert!(is_reserved_metadata_key("__segments__"));
+        assert!(is_reserved_metadata_key("__etag__"));
+        assert!(is_reserved_metadata_key("__content_type__"));
+        assert!(is_reserved_metadata_key("__object_retention__"));
+        assert!(is_reserved_metadata_key("__legal_hold__"));
+        assert!(is_reserved_metadata_key("__"));
+        assert!(is_reserved_metadata_key("__anything"));
+        assert!(is_reserved_metadata_key(""));
+
+        assert!(!is_reserved_metadata_key("author"));
+        assert!(!is_reserved_metadata_key("_single"));
+        assert!(!is_reserved_metadata_key("segments"));
+        assert!(!is_reserved_metadata_key("x__y__"));
     }
 
     #[test]

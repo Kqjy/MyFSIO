@@ -196,6 +196,8 @@ pub struct BucketConfig {
     pub ownership_controls: Option<serde_json::Value>,
     #[serde(default)]
     pub public_access_block: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub unreadable: bool,
 }
 
 impl BucketConfig {

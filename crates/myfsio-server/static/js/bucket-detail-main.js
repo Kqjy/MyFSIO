@@ -96,6 +96,10 @@
   const previewAudio = document.getElementById('preview-audio');
   const previewText = document.getElementById('preview-text');
   const previewIframe = document.getElementById('preview-iframe');
+  const previewStage = previewPlaceholder ? previewPlaceholder.closest('.preview-stage') : document.querySelector('.preview-stage');
+  const setAudioStage = (active) => {
+    if (previewStage) previewStage.classList.toggle('preview-stage-audio', !!active);
+  };
   const downloadButton = document.getElementById('downloadButton');
   const presignButton = document.getElementById('presignButton');
   const presignModalEl = document.getElementById('presignModal');
@@ -270,11 +274,11 @@
               </svg>
             </button>
             <ul class="dropdown-menu dropdown-menu-end">
-              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('copy', '${escapeHtml(obj.key)}')">
+              <li><button class="dropdown-item" type="button" data-copy-object>
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2Zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6ZM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1H2Z"/></svg>
                 Copy
               </button></li>
-              <li><button class="dropdown-item" type="button" onclick="openCopyMoveModal('move', '${escapeHtml(obj.key)}')">
+              <li><button class="dropdown-item" type="button" data-move-object>
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/></svg>
                 Move
               </button></li>
@@ -958,6 +962,18 @@
           if (deleteObjectKey) deleteObjectKey.textContent = row.dataset.key;
           deleteModal.show();
         }
+      });
+
+      const copyBtn = row.querySelector('[data-copy-object]');
+      copyBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.openCopyMoveModal('copy', row.dataset.key);
+      });
+
+      const moveBtn = row.querySelector('[data-move-object]');
+      moveBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.openCopyMoveModal('move', row.dataset.key);
       });
 
       const selectCheckbox = row.querySelector('[data-object-select]');
@@ -2299,6 +2315,7 @@
   }
 
   const resetPreviewMedia = () => {
+    setAudioStage(false);
     [previewImage, previewVideo, previewAudio, previewIframe].forEach((el) => {
       if (!el) return;
       el.classList.add('d-none');
@@ -2324,6 +2341,7 @@
 
   const renderPreviewUnavailable = () => {
     if (!previewPlaceholder) return;
+    setAudioStage(false);
     previewIframe?.classList.add('d-none');
     previewPlaceholder.innerHTML = '<div class="preview-unavailable-card"><div class="fw-semibold mb-1">Preview unavailable</div><div class="small text-muted">Download to view</div></div>';
     previewPlaceholder.classList.remove('d-none');
@@ -2450,6 +2468,7 @@
       const currentRow = row;
       previewAudio.onerror = () => {
         if (activeRow !== currentRow) return;
+        setAudioStage(false);
         previewAudio.classList.add('d-none');
         previewPlaceholder.classList.remove('d-none');
         previewPlaceholder.innerHTML = '<div class="small text-muted">Failed to load preview</div>';
@@ -2458,6 +2477,7 @@
       previewAudio.src = previewUrl;
       previewAudio.classList.remove('d-none');
       previewPlaceholder.classList.add('d-none');
+      setAudioStage(true);
     } else if (previewUrl && lower.match(/\.(pdf)$/)) {
       const currentRow = row;
       previewIframe.onerror = () => {
@@ -3035,7 +3055,10 @@
       }
     };
 
+    let uploadResultsPending = false;
+
     const resetUploadUI = () => {
+      uploadResultsPending = false;
       if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
       if (bulkUploadResults) bulkUploadResults.classList.add('d-none');
       if (bulkUploadSuccessAlert) bulkUploadSuccessAlert.classList.remove('d-none');
@@ -3257,7 +3280,7 @@
           } else {
             try {
               const data = JSON.parse(xhr.responseText);
-              reject(new Error(data.message || `Upload failed (${xhr.status})`));
+              reject(new Error(data.error || data.message || `Upload failed (${xhr.status})`));
             } catch {
               reject(new Error(`Upload failed (${xhr.status})`));
             }
@@ -3405,6 +3428,7 @@
     };
 
     const finishUploadSession = () => {
+      uploadResultsPending = true;
       if (bulkUploadProgress) bulkUploadProgress.classList.add('d-none');
       if (bulkUploadResults) bulkUploadResults.classList.remove('d-none');
       hideFloatingProgress();
@@ -3451,12 +3475,19 @@
       const errorCount = uploadErrorFiles.length;
       const objectWord = (n) => (n === 1 ? 'object' : 'objects');
       const fileWord = (n) => (n === 1 ? 'file' : 'files');
+      const failureDetail = () => {
+        if (errorCount === 0) return '';
+        const shown = uploadErrorFiles.slice(0, 2).map(f => `${f.name}: ${f.error}`);
+        const remaining = errorCount - shown.length;
+        if (remaining > 0) shown.push(`and ${remaining} more`);
+        return ` ${shown.join('; ')}`;
+      };
       if (successCount > 0 && errorCount > 0) {
-        showMessage({ title: 'Upload complete', body: `${successCount} uploaded, ${errorCount} failed.`, variant: 'warning' });
+        showMessage({ title: 'Upload complete', body: `${successCount} uploaded, ${errorCount} failed.${failureDetail()}`, variant: 'warning' });
       } else if (successCount > 0) {
         showMessage({ title: 'Upload complete', body: `${successCount} ${objectWord(successCount)} uploaded successfully.`, variant: 'success' });
       } else if (errorCount > 0) {
-        showMessage({ title: 'Upload failed', body: `${errorCount} ${fileWord(errorCount)} failed to upload.`, variant: 'danger' });
+        showMessage({ title: 'Upload failed', body: `${errorCount} ${fileWord(errorCount)} failed to upload.${failureDetail()}`, variant: 'danger' });
       }
       if (successCount > 0) refreshBucketUsage();
     };
@@ -3479,6 +3510,7 @@
       if (!isUploading) {
         isUploading = true;
         uploadCancelled = false;
+        uploadResultsPending = false;
         uploadSuccessFiles = [];
         uploadErrorFiles = [];
         uploadStats = {
@@ -3563,7 +3595,7 @@
     });
 
     uploadModalEl?.addEventListener('hidden.bs.modal', () => {
-      if (!isUploading) {
+      if (!isUploading && !uploadResultsPending) {
         resetUploadUI();
         uploadFileInput.value = '';
         refreshUploadDropLabel();
@@ -4038,7 +4070,7 @@
     const renderFailures = (failures) => {
       if (!failuresBody) return;
       failuresBody.innerHTML = failures.map(f => `
-        <tr>
+        <tr data-object-key="${escapeHtml(f.object_key)}">
           <td class="ps-3" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.object_key)}">
             <code class="small">${escapeHtml(f.object_key)}</code>
           </td>
@@ -4048,13 +4080,13 @@
           <td class="small text-muted">${new Date(f.timestamp * 1000).toLocaleString()}</td>
           <td class="text-center"><span class="badge bg-secondary">${f.failure_count}</span></td>
           <td class="text-end pe-3">
-            <button class="btn btn-sm btn-outline-primary py-0 px-2" onclick="retryFailure(this, '${escapeHtml(f.object_key)}')" title="Retry">
+            <button class="btn btn-sm btn-outline-primary py-0 px-2" data-retry-failure title="Retry">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
                 <path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2v1z"/>
                 <path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466z"/>
               </svg>
             </button>
-            <button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="dismissFailure(this, '${escapeHtml(f.object_key)}')" title="Dismiss">
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2" data-dismiss-failure title="Dismiss">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
                 <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
               </svg>
@@ -4063,6 +4095,18 @@
         </tr>
       `).join('');
     };
+
+    failuresBody?.addEventListener('click', (e) => {
+      const retryBtn = e.target.closest('[data-retry-failure]');
+      if (retryBtn) {
+        window.retryFailure(retryBtn, retryBtn.closest('tr')?.dataset.objectKey ?? '');
+        return;
+      }
+      const dismissBtn = e.target.closest('[data-dismiss-failure]');
+      if (dismissBtn) {
+        window.dismissFailure(dismissBtn, dismissBtn.closest('tr')?.dataset.objectKey ?? '');
+      }
+    });
 
     window.retryFailure = async (btn, objectKey) => {
       const originalHtml = btn.innerHTML;
@@ -4367,12 +4411,12 @@
       actionText: 'Delete rule',
       onAction: async () => {
         lifecycleRules.splice(idx, 1);
-        await saveLifecycleRules();
+        await saveLifecycleRules('Lifecycle rule deleted');
       },
     });
   };
 
-  const saveLifecycleRules = async () => {
+  const saveLifecycleRules = async (successTitle) => {
     if (!lifecycleUrl) return;
     try {
       const resp = await fetch(lifecycleUrl, {
@@ -4382,7 +4426,7 @@
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to save');
-      showMessage({ title: 'Lifecycle rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      showMessage({ title: successTitle || 'Lifecycle rules saved', body: 'Configuration updated successfully.', variant: 'success' });
       renderLifecycleRules();
     } catch (err) {
       showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
@@ -4494,12 +4538,12 @@
       actionText: 'Delete rule',
       onAction: async () => {
         corsRules.splice(idx, 1);
-        await saveCorsRules();
+        await saveCorsRules('CORS rule deleted');
       },
     });
   };
 
-  const saveCorsRules = async () => {
+  const saveCorsRules = async (successTitle) => {
     if (!corsUrl) return;
     try {
       const resp = await fetch(corsUrl, {
@@ -4509,7 +4553,7 @@
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Failed to save');
-      showMessage({ title: 'CORS rules saved', body: 'Configuration updated successfully.', variant: 'success' });
+      showMessage({ title: successTitle || 'CORS rules saved', body: 'Configuration updated successfully.', variant: 'success' });
       renderCorsRules();
     } catch (err) {
       showMessage({ title: 'Save failed', body: err.message, variant: 'danger' });
@@ -4809,7 +4853,9 @@
         const resp = await fetch(bucketsForCopyUrl);
         const data = await resp.json();
         const buckets = data.buckets || [];
-        copyMoveDestBucket.innerHTML = buckets.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('');
+        const currentBucket = objectsContainer?.dataset.bucket || '';
+        copyMoveDestBucket.innerHTML = buckets.map(b => `<option value="${escapeHtml(b)}"${b === currentBucket ? ' selected' : ''}>${escapeHtml(b)}</option>`).join('');
+        if (currentBucket && buckets.includes(currentBucket)) copyMoveDestBucket.value = currentBucket;
       } catch {
         copyMoveDestBucket.innerHTML = '<option value="">Failed to load buckets</option>';
       }

@@ -28,6 +28,8 @@ pub const META_KEY_CORRUPTED: &str = "__corrupted__";
 pub const META_KEY_CORRUPTED_AT: &str = "__corrupted_at__";
 pub const META_KEY_CORRUPTION_DETAIL: &str = "__corruption_detail__";
 pub const META_KEY_QUARANTINE_PATH: &str = "__quarantine_path__";
+pub const META_KEY_CORRUPTION_RETRY_COUNT: &str = "__corruption_retry_count__";
+pub const META_KEY_CORRUPTION_LAST_RETRY_AT: &str = "__corruption_last_retry_at__";
 pub const META_KEY_PART_SIZES: &str = "__part_sizes__";
 
 pub const SIDECAR_FILE_PREFIX: &str = ".__myfsio_meta__";
@@ -41,7 +43,20 @@ const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
     "__size__",
     "__last_modified__",
     "__version_id__",
+    META_KEY_CORRUPTED,
+    META_KEY_CORRUPTED_AT,
+    META_KEY_CORRUPTION_DETAIL,
+    META_KEY_QUARANTINE_PATH,
+    META_KEY_CORRUPTION_RETRY_COUNT,
+    META_KEY_CORRUPTION_LAST_RETRY_AT,
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityQuarantineOutcome {
+    Quarantined,
+    Healthy,
+    Skipped,
+}
 
 pub enum OpenedObjectContent {
     Single(std::fs::File),
@@ -795,6 +810,14 @@ impl FsStorageBackend {
         self.multipart_root().join(bucket_name)
     }
 
+    fn multipart_upload_dir(&self, bucket_name: &str, upload_id: &str) -> StorageResult<PathBuf> {
+        Self::guard_bucket_name(bucket_name)?;
+        if !validation::is_valid_multipart_id(upload_id) {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+        Ok(self.multipart_bucket_root(bucket_name).join(upload_id))
+    }
+
     fn tmp_dir(&self) -> PathBuf {
         self.system_root_path().join("tmp")
     }
@@ -952,6 +975,12 @@ impl FsStorageBackend {
             key: key.to_string(),
             detail,
         };
+        if !validation::is_valid_multipart_id(seg_id) {
+            return Err(corrupted(format!(
+                "object references a segment set with a non-canonical id: {}",
+                seg_id
+            )));
+        }
         let header = crate::segments::read_stub_header_from(&mut file)
             .map_err(StorageError::Io)?
             .ok_or_else(|| {
@@ -1036,7 +1065,21 @@ impl FsStorageBackend {
     }
 
     fn release_segment_dir(&self, bucket: &str, segment_id: &str) {
-        if segment_id.is_empty() {
+        if !validation::is_safe_path_segment(bucket) {
+            tracing::warn!(
+                bucket = bucket,
+                "refusing to release a segment directory for a non-canonical bucket name"
+            );
+            return;
+        }
+        if !validation::is_valid_multipart_id(segment_id) {
+            if !segment_id.is_empty() {
+                tracing::warn!(
+                    bucket = bucket,
+                    segment_id = segment_id,
+                    "refusing to release a segment directory with a non-canonical id"
+                );
+            }
             return;
         }
         let seg_dir = self.segments_bucket_root(bucket).join(segment_id);
@@ -1162,14 +1205,33 @@ impl FsStorageBackend {
         Ok(())
     }
 
-    fn require_bucket(&self, bucket_name: &str) -> StorageResult<PathBuf> {
-        if validation::is_reserved_bucket_name(bucket_name) {
+    fn guard_bucket_name(bucket_name: &str) -> StorageResult<()> {
+        match validation::bucket_name_rejection(bucket_name) {
+            Some(err) => Err(StorageError::InvalidBucketName(err)),
+            None => Ok(()),
+        }
+    }
+
+    fn guard_contained(&self, path: &Path, bucket_name: &str) -> StorageResult<()> {
+        if !path.starts_with(&self.root) {
+            tracing::error!(
+                bucket = bucket_name,
+                path = %path.display(),
+                root = %self.root.display(),
+                "resolved bucket path escapes the storage root; refusing the operation"
+            );
             return Err(StorageError::InvalidBucketName(format!(
-                "Bucket name '{}' is reserved",
+                "Bucket name '{}' resolves outside the storage root",
                 bucket_name
             )));
         }
+        Ok(())
+    }
+
+    fn require_bucket(&self, bucket_name: &str) -> StorageResult<PathBuf> {
+        Self::guard_bucket_name(bucket_name)?;
         let path = self.bucket_path(bucket_name);
+        self.guard_contained(&path, bucket_name)?;
         if !path.exists() {
             return Err(StorageError::BucketNotFound(bucket_name.to_string()));
         }
@@ -2038,6 +2100,90 @@ impl FsStorageBackend {
         Ok(())
     }
 
+    fn write_live_metadata_entry_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        metadata: &HashMap<String, String>,
+    ) -> StorageResult<()> {
+        let mut entry = self
+            .read_index_entry_sync(bucket_name, key)
+            .unwrap_or_default();
+        let meta_map: serde_json::Map<String, Value> = metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        entry.insert("metadata".to_string(), Value::Object(meta_map));
+        self.write_index_entry_sync(bucket_name, key, &entry)
+            .map_err(StorageError::Io)?;
+        self.invalidate_bucket_caches(bucket_name);
+        self.update_listing_index_after_commit(bucket_name, key);
+        Ok(())
+    }
+
+    fn mutate_object_metadata_locked_sync<F>(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        version_id: Option<&str>,
+        mutate: F,
+    ) -> StorageResult<()>
+    where
+        F: FnOnce(&mut HashMap<String, String>) -> StorageResult<()>,
+    {
+        self.require_bucket(bucket_name)?;
+        self.validate_key(key)?;
+
+        let Some(version_id) = version_id else {
+            let mut metadata = self.read_metadata_sync(bucket_name, key);
+            mutate(&mut metadata)?;
+            return self.write_live_metadata_entry_sync(bucket_name, key, &metadata);
+        };
+
+        Self::validate_version_id(bucket_name, key, version_id)?;
+        if self
+            .try_live_version_record_sync(bucket_name, key, version_id)
+            .is_some()
+        {
+            let mut metadata = self.read_metadata_sync(bucket_name, key);
+            mutate(&mut metadata)?;
+            return self.write_live_metadata_entry_sync(bucket_name, key, &metadata);
+        }
+
+        let (manifest_path, _data_path) = self.version_record_paths(bucket_name, key, version_id);
+        if !manifest_path.is_file() {
+            return Err(StorageError::VersionNotFound {
+                bucket: bucket_name.to_string(),
+                key: key.to_string(),
+                version_id: version_id.to_string(),
+            });
+        }
+        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
+        let mut record: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
+        let mut metadata = Self::version_metadata_from_record(&record);
+        mutate(&mut metadata)?;
+        let meta_map: serde_json::Map<String, Value> = metadata
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        match record {
+            Value::Object(ref mut map) => {
+                map.insert("metadata".to_string(), Value::Object(meta_map));
+            }
+            _ => {
+                return Err(StorageError::Internal(
+                    "Invalid version manifest".to_string(),
+                ));
+            }
+        }
+        let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
+        let tmp = manifest_path.with_extension("json.tmp");
+        std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
+        std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
+        self.invalidate_bucket_caches(bucket_name);
+        Ok(())
+    }
+
     fn delete_metadata_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<()> {
         self.delete_index_entry_sync(bucket_name, key)?;
 
@@ -2064,6 +2210,221 @@ impl FsStorageBackend {
             }
             self.update_listing_index_after_commit(bucket, key);
             Ok(())
+        })
+    }
+
+    pub fn validated_object_path(&self, bucket: &str, key: &str) -> StorageResult<PathBuf> {
+        self.require_bucket(bucket)?;
+        self.object_path(bucket, key)
+    }
+
+    fn validated_quarantine_path(&self, relative: &Path) -> StorageResult<PathBuf> {
+        if relative.is_absolute() {
+            return Err(StorageError::InvalidObjectKey(
+                "quarantine path must be relative".to_string(),
+            ));
+        }
+        let normalized = normalize_path(relative).ok_or_else(|| {
+            StorageError::InvalidObjectKey("quarantine path escapes storage root".to_string())
+        })?;
+        let quarantine_root = Path::new(SYSTEM_ROOT).join("quarantine");
+        if !normalized.starts_with(&quarantine_root) {
+            return Err(StorageError::InvalidObjectKey(
+                "quarantine path is outside the quarantine root".to_string(),
+            ));
+        }
+        let full = self.root.join(normalized);
+        self.guard_contained(&full, "quarantine")?;
+        Ok(full)
+    }
+
+    pub async fn quarantine_corrupted_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected_etag: &str,
+        quarantine_relative: &Path,
+        detail: &str,
+    ) -> StorageResult<IntegrityQuarantineOutcome> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.require_bucket(bucket)?;
+            let live_path = self.object_path(bucket, key)?;
+            let quarantine_path = self.validated_quarantine_path(quarantine_relative)?;
+            if !live_path.is_file() {
+                return Ok(IntegrityQuarantineOutcome::Skipped);
+            }
+
+            let mut metadata = self.read_metadata_sync(bucket, key);
+            let current_etag = metadata.get("__etag__").map(String::as_str).unwrap_or("");
+            if current_etag != expected_etag
+                || current_etag.is_empty()
+                || metadata_is_corrupted(&metadata)
+                || is_multipart_etag(current_etag)
+                || myfsio_crypto::encryption::EncryptionMetadata::is_encrypted(&metadata)
+            {
+                return Ok(IntegrityQuarantineOutcome::Skipped);
+            }
+
+            let actual = myfsio_crypto::hashing::md5_file(&live_path)
+                .map_err(|error| StorageError::Io(std::io::Error::other(error)))?;
+            if actual == current_etag {
+                return Ok(IntegrityQuarantineOutcome::Healthy);
+            }
+
+            if let Some(parent) = quarantine_path.parent() {
+                std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+            }
+            std::fs::rename(&live_path, &quarantine_path).map_err(StorageError::Io)?;
+
+            metadata.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
+            metadata.insert(META_KEY_CORRUPTED_AT.to_string(), Utc::now().to_rfc3339());
+            metadata.insert(META_KEY_CORRUPTION_DETAIL.to_string(), detail.to_string());
+            metadata.insert(
+                META_KEY_QUARANTINE_PATH.to_string(),
+                quarantine_relative.to_string_lossy().replace('\\', "/"),
+            );
+            metadata.insert(META_KEY_CORRUPTION_RETRY_COUNT.to_string(), "0".to_string());
+            metadata.insert(
+                META_KEY_CORRUPTION_LAST_RETRY_AT.to_string(),
+                Utc::now().to_rfc3339(),
+            );
+
+            if let Err(error) = self.write_live_metadata_entry_sync(bucket, key, &metadata) {
+                let _ = std::fs::rename(&quarantine_path, &live_path);
+                return Err(error);
+            }
+            if let Some(parent) = live_path.parent() {
+                let _ = Self::fsync_dir(parent);
+            }
+            if let Some(parent) = quarantine_path.parent() {
+                let _ = Self::fsync_dir(parent);
+            }
+            Ok(IntegrityQuarantineOutcome::Quarantined)
+        })
+    }
+
+    pub async fn install_healed_object_if_still_poisoned(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected_etag: &str,
+        prepared_path: &Path,
+    ) -> StorageResult<bool> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.require_bucket(bucket)?;
+            let live_path = self.object_path(bucket, key)?;
+            if !prepared_path.starts_with(&self.root) {
+                return Err(StorageError::InvalidObjectKey(
+                    "prepared heal path escapes storage root".to_string(),
+                ));
+            }
+            if live_path.exists() || !prepared_path.is_file() {
+                return Ok(false);
+            }
+
+            let prepared_etag = myfsio_crypto::hashing::md5_file(prepared_path)
+                .map_err(|error| StorageError::Io(std::io::Error::other(error)))?;
+            if prepared_etag != expected_etag {
+                return Err(StorageError::PreconditionFailed(format!(
+                    "prepared heal checksum {} does not match expected {}",
+                    prepared_etag, expected_etag
+                )));
+            }
+
+            let mut metadata = self.read_metadata_sync(bucket, key);
+            if !metadata_is_corrupted(&metadata)
+                || metadata.get("__etag__").map(String::as_str) != Some(expected_etag)
+            {
+                return Ok(false);
+            }
+
+            if let Some(parent) = live_path.parent() {
+                std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+            }
+            std::fs::rename(prepared_path, &live_path).map_err(StorageError::Io)?;
+            metadata.remove(META_KEY_CORRUPTED);
+            metadata.remove(META_KEY_CORRUPTED_AT);
+            metadata.remove(META_KEY_CORRUPTION_DETAIL);
+            metadata.remove(META_KEY_QUARANTINE_PATH);
+            metadata.remove(META_KEY_CORRUPTION_RETRY_COUNT);
+            metadata.remove(META_KEY_CORRUPTION_LAST_RETRY_AT);
+            if let Err(error) = self.write_live_metadata_entry_sync(bucket, key, &metadata) {
+                let _ = std::fs::rename(&live_path, prepared_path);
+                return Err(error);
+            }
+            if let Some(parent) = live_path.parent() {
+                let _ = Self::fsync_dir(parent);
+            }
+            Ok(true)
+        })
+    }
+
+    pub async fn record_poisoned_recovery_failure(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected_etag: &str,
+        detail: &str,
+    ) -> StorageResult<bool> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.require_bucket(bucket)?;
+            let live_path = self.object_path(bucket, key)?;
+            if live_path.exists() {
+                return Ok(false);
+            }
+            let mut metadata = self.read_metadata_sync(bucket, key);
+            if !metadata_is_corrupted(&metadata)
+                || metadata.get("__etag__").map(String::as_str) != Some(expected_etag)
+            {
+                return Ok(false);
+            }
+            let retries = metadata
+                .get(META_KEY_CORRUPTION_RETRY_COUNT)
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            metadata.insert(META_KEY_CORRUPTION_DETAIL.to_string(), detail.to_string());
+            metadata.insert(
+                META_KEY_CORRUPTION_RETRY_COUNT.to_string(),
+                retries.to_string(),
+            );
+            metadata.insert(
+                META_KEY_CORRUPTION_LAST_RETRY_AT.to_string(),
+                Utc::now().to_rfc3339(),
+            );
+            self.write_live_metadata_entry_sync(bucket, key, &metadata)?;
+            Ok(true)
+        })
+    }
+
+    pub async fn delete_phantom_metadata_if_still_missing(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected_etag: Option<&str>,
+    ) -> StorageResult<bool> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.require_bucket(bucket)?;
+            let live_path = self.object_path(bucket, key)?;
+            if live_path.is_file() {
+                return Ok(false);
+            }
+            let metadata = self.read_metadata_sync(bucket, key);
+            if metadata_is_corrupted(&metadata)
+                || expected_etag.is_some()
+                    && metadata.get("__etag__").map(String::as_str) != expected_etag
+            {
+                return Ok(false);
+            }
+            self.delete_metadata_sync(bucket, key)
+                .map_err(StorageError::Io)?;
+            self.invalidate_bucket_caches(bucket);
+            self.update_listing_index_after_commit(bucket, key);
+            Ok(true)
         })
     }
 
@@ -2205,6 +2566,13 @@ impl FsStorageBackend {
     }
 
     fn read_bucket_config_sync(&self, bucket_name: &str) -> BucketConfig {
+        if validation::bucket_name_rejection(bucket_name).is_some() {
+            return BucketConfig {
+                unreadable: true,
+                ..BucketConfig::default()
+            };
+        }
+
         if let Some(entry) = self.bucket_config_cache.get(bucket_name) {
             let (config, cached_at) = entry.value();
             if cached_at.elapsed() < self.bucket_config_cache_ttl {
@@ -2214,10 +2582,23 @@ impl FsStorageBackend {
 
         let config_path = self.bucket_config_path(bucket_name);
         let mut config = if config_path.exists() {
-            std::fs::read_to_string(&config_path)
+            match std::fs::read_to_string(&config_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<BucketConfig>(&s).ok())
-                .unwrap_or_default()
+            {
+                Some(parsed) => parsed,
+                None => {
+                    tracing::error!(
+                        bucket = bucket_name,
+                        path = %config_path.display(),
+                        "bucket config is unreadable or corrupt; treating it as fail-closed"
+                    );
+                    BucketConfig {
+                        unreadable: true,
+                        ..BucketConfig::default()
+                    }
+                }
+            }
         } else {
             BucketConfig::default()
         };
@@ -2275,6 +2656,16 @@ impl FsStorageBackend {
         bucket_name: &str,
         config: &BucketConfig,
     ) -> std::io::Result<()> {
+        if let Some(err) = validation::bucket_name_rejection(bucket_name) {
+            return Err(std::io::Error::other(err));
+        }
+        if config.unreadable {
+            return Err(std::io::Error::other(format!(
+                "Bucket configuration for '{}' is unreadable or corrupt; refusing to overwrite it \
+                 and discard its settings",
+                bucket_name
+            )));
+        }
         let config_path = self.bucket_config_path(bucket_name);
         let json_val = serde_json::to_value(config).map_err(std::io::Error::other)?;
         Self::atomic_write_json_sync(&config_path, &json_val, true)?;
@@ -2302,6 +2693,12 @@ impl FsStorageBackend {
             .clone();
         let _guard = lock.lock();
         let mut config = self.read_bucket_config_sync(bucket_name);
+        if config.unreadable {
+            return Err(StorageError::Internal(format!(
+                "Bucket configuration for '{}' is unreadable or corrupt; refusing to overwrite it",
+                bucket_name
+            )));
+        }
         f(&mut config);
         self.write_bucket_config_sync(bucket_name, &config)
             .map_err(StorageError::Io)?;
@@ -2697,6 +3094,43 @@ impl FsStorageBackend {
             logical_size,
             delete_marker,
         }))
+    }
+
+    fn rollback_failed_commit_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        previous_metadata: &HashMap<String, String>,
+        archived_version_id: Option<&str>,
+    ) {
+        if let Err(err) = self.write_metadata_sync(bucket_name, key, previous_metadata) {
+            tracing::error!(
+                bucket = bucket_name,
+                key = key,
+                error = %err,
+                "failed to restore the previous object metadata after an aborted commit"
+            );
+        }
+        if let Some(version_id) = archived_version_id {
+            let (manifest_path, data_path) =
+                self.version_record_paths(bucket_name, key, version_id);
+            for path in [&manifest_path, &data_path] {
+                if path.is_file() {
+                    if let Err(err) = Self::safe_unlink(path) {
+                        tracing::error!(
+                            bucket = bucket_name,
+                            key = key,
+                            version_id = version_id,
+                            error = %err,
+                            "failed to remove an archived version after an aborted commit"
+                        );
+                    }
+                }
+            }
+            Self::cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
+        }
+        self.invalidate_bucket_caches(bucket_name);
+        self.update_listing_index_after_commit(bucket_name, key);
     }
 
     fn validate_version_id(bucket_name: &str, key: &str, version_id: &str) -> StorageResult<()> {
@@ -4064,6 +4498,13 @@ impl FsStorageBackend {
         }
 
         let bucket_config = self.read_bucket_config_sync(bucket_name);
+        if bucket_config.unreadable {
+            return Err(StorageError::Internal(format!(
+                "Bucket configuration for '{}' is unreadable or corrupt; refusing to write, \
+                 because versioning and quota settings cannot be determined",
+                bucket_name
+            )));
+        }
         let versioning_status = bucket_config.versioning_status();
 
         if is_overwrite {
@@ -4172,6 +4613,7 @@ impl FsStorageBackend {
 
         let mut release_old_segments: Option<String> = None;
         let mut version_mutations = Vec::new();
+        let mut archived_version_id: Option<String> = None;
         if is_overwrite {
             let old_segments = existing_meta
                 .get(crate::segments::META_KEY_SEGMENTS)
@@ -4182,6 +4624,7 @@ impl FsStorageBackend {
                         .archive_current_version_sync(bucket_name, key, "overwrite")
                         .map_err(StorageError::Io)?
                     {
+                        archived_version_id = Some(mutation.version_id.clone());
                         version_mutations.push(mutation);
                     }
                 }
@@ -4195,6 +4638,7 @@ impl FsStorageBackend {
                             .archive_current_version_sync(bucket_name, key, "overwrite")
                             .map_err(StorageError::Io)?
                         {
+                            archived_version_id = Some(mutation.version_id.clone());
                             version_mutations.push(mutation);
                         }
                     } else {
@@ -4206,16 +4650,19 @@ impl FsStorageBackend {
                 }
             }
         }
-        if matches!(versioning_status, VersioningStatus::Suspended) {
-            if let Some(mutation) = self
-                .purge_archived_null_version_sync(bucket_name, key)
-                .map_err(StorageError::Io)?
-            {
-                version_mutations.push(mutation);
-            }
-        }
 
-        let file_meta = std::fs::metadata(tmp_path).map_err(StorageError::Io)?;
+        let abort_commit = |e: std::io::Error| {
+            let _ = std::fs::remove_file(tmp_path);
+            self.rollback_failed_commit_sync(
+                bucket_name,
+                key,
+                &existing_meta,
+                archived_version_id.as_deref(),
+            );
+            StorageError::Io(e)
+        };
+
+        let file_meta = std::fs::metadata(tmp_path).map_err(abort_commit)?;
         let mtime = file_meta
             .modified()
             .ok()
@@ -4246,14 +4693,20 @@ impl FsStorageBackend {
         }
 
         self.write_metadata_sync(bucket_name, key, &internal_meta)
-            .map_err(StorageError::Io)?;
+            .map_err(abort_commit)?;
 
-        std::fs::rename(tmp_path, &destination).map_err(|e| {
-            let _ = std::fs::remove_file(tmp_path);
-            StorageError::Io(e)
-        })?;
+        std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
         if let Some(parent) = destination.parent() {
             Self::fsync_dir(parent).map_err(StorageError::Io)?;
+        }
+
+        if matches!(versioning_status, VersioningStatus::Suspended) {
+            if let Some(mutation) = self
+                .purge_archived_null_version_sync(bucket_name, key)
+                .map_err(StorageError::Io)?
+            {
+                version_mutations.push(mutation);
+            }
         }
 
         if let Some(seg_id) = release_old_segments {
@@ -4298,7 +4751,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy().to_string();
-                if validation::is_reserved_bucket_name(&name_str) {
+                if let Some(reason) = validation::bucket_name_rejection(&name_str) {
+                    if !validation::is_reserved_bucket_name(&name_str) {
+                        tracing::warn!(
+                            directory = name_str,
+                            "skipping directory in the storage root that is not a valid bucket \
+                             name ({}); it is not served as a bucket. Remove it from the \
+                             filesystem if it is not wanted.",
+                            reason
+                        );
+                    }
                     continue;
                 }
                 let ft = match entry.file_type() {
@@ -4336,16 +4798,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn create_bucket(&self, name: &str) -> StorageResult<()> {
-        if validation::is_reserved_bucket_name(name) {
-            return Err(StorageError::InvalidBucketName(format!(
-                "Bucket name '{}' is reserved",
-                name
-            )));
-        }
-        if let Some(err) = validation::validate_bucket_name(name) {
-            return Err(StorageError::InvalidBucketName(err));
-        }
+        Self::guard_bucket_name(name)?;
         let bucket_path = self.bucket_path(name);
+        self.guard_contained(&bucket_path, name)?;
         if let Some(parent) = bucket_path.parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
@@ -4392,10 +4847,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn bucket_exists(&self, name: &str) -> StorageResult<bool> {
-        if validation::is_reserved_bucket_name(name) {
+        if validation::bucket_name_rejection(name).is_some() {
             return Ok(false);
         }
-        Ok(self.bucket_path(name).exists())
+        let path = self.bucket_path(name);
+        if self.guard_contained(&path, name).is_err() {
+            return Ok(false);
+        }
+        Ok(path.exists())
     }
 
     async fn bucket_stats(&self, name: &str) -> StorageResult<BucketStats> {
@@ -4803,7 +5262,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _guard = self.get_object_lock(bucket, key).write();
             let bucket_path = self.require_bucket(bucket)?;
             let path = self.object_path(bucket, key)?;
-            let versioning_status = self.read_bucket_config_sync(bucket).versioning_status();
+            let bucket_config = self.read_bucket_config_sync(bucket);
+            if bucket_config.unreadable {
+                return Err(StorageError::Internal(format!(
+                    "Bucket configuration for '{}' is unreadable or corrupt; refusing to delete, \
+                     because versioning settings cannot be determined",
+                    bucket
+                )));
+            }
+            let versioning_status = bucket_config.versioning_status();
 
             if versioning_status.is_active() {
                 let mut version_mutations = Vec::new();
@@ -5237,6 +5704,45 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         })
     }
 
+    async fn update_object_retention(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        retention: &myfsio_common::object_lock::ObjectLockRetention,
+        bypass_governance: bool,
+    ) -> StorageResult<()> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.mutate_object_metadata_locked_sync(bucket, key, version_id, |metadata| {
+                myfsio_common::object_lock::ensure_retention_update_allowed(
+                    metadata,
+                    retention,
+                    bypass_governance,
+                )
+                .map_err(StorageError::ObjectLocked)?;
+                myfsio_common::object_lock::set_object_retention(metadata, retention)
+                    .map_err(StorageError::InvalidArgument)
+            })
+        })
+    }
+
+    async fn update_object_legal_hold(
+        &self,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+        enabled: bool,
+    ) -> StorageResult<()> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            self.mutate_object_metadata_locked_sync(bucket, key, version_id, |metadata| {
+                myfsio_common::object_lock::set_legal_hold(metadata, enabled);
+                Ok(())
+            })
+        })
+    }
+
     async fn list_objects(
         &self,
         bucket: &str,
@@ -5287,7 +5793,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         part_number: u32,
         stream: AsyncReadStream,
     ) -> StorageResult<String> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5373,7 +5879,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         src_version_id: Option<&str>,
         range: Option<(u64, u64)>,
     ) -> StorageResult<(String, DateTime<Utc>)> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5511,7 +6017,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         parts: &[PartInfo],
         options: crate::traits::PutCommitOptions,
     ) -> StorageResult<ObjectMeta> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5754,7 +6260,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn abort_multipart(&self, bucket: &str, upload_id: &str) -> StorageResult<()> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         if upload_dir.exists() {
             std::fs::remove_dir_all(&upload_dir).map_err(StorageError::Io)?;
         }
@@ -5762,7 +6268,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn list_parts(&self, bucket: &str, upload_id: &str) -> StorageResult<Vec<PartMeta>> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5798,6 +6304,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         &self,
         bucket: &str,
     ) -> StorageResult<Vec<MultipartUploadInfo>> {
+        Self::guard_bucket_name(bucket)?;
         let uploads_root = self.multipart_bucket_root(bucket);
         if !uploads_root.exists() {
             return Ok(Vec::new());
@@ -5844,7 +6351,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         upload_id: &str,
     ) -> StorageResult<HashMap<String, String>> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5869,7 +6376,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         upload_id: &str,
         part_number: u32,
     ) -> StorageResult<PathBuf> {
-        let upload_dir = self.multipart_bucket_root(bucket).join(upload_id);
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
         let manifest_path = upload_dir.join(MANIFEST_FILE);
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
@@ -5896,6 +6403,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn is_versioning_enabled(&self, bucket: &str) -> StorageResult<bool> {
+        Self::guard_bucket_name(bucket)?;
         Ok(self.read_bucket_config_sync(bucket).versioning_enabled)
     }
 
@@ -5915,6 +6423,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     }
 
     async fn get_versioning_status(&self, bucket: &str) -> StorageResult<VersioningStatus> {
+        Self::guard_bucket_name(bucket)?;
         Ok(self.read_bucket_config_sync(bucket).versioning_status())
     }
 
@@ -6134,6 +6643,425 @@ mod tests {
     async fn put_listing_object(backend: &FsStorageBackend, bucket: &str, key: &str, body: &[u8]) {
         let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body.to_vec()));
         backend.put_object(bucket, key, stream, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_multipart_rejects_traversal_upload_id() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("victim").await.unwrap();
+
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let sentinel = config_dir.join("iam.json");
+        std::fs::write(&sentinel, b"{}").unwrap();
+
+        let result = backend.abort_multipart("victim", "../../config").await;
+
+        assert!(result.is_err());
+        assert!(config_dir.exists());
+        assert!(sentinel.exists());
+    }
+
+    #[tokio::test]
+    async fn abort_multipart_accepts_generated_upload_id() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("uploads").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("uploads", "object.txt", None)
+            .await
+            .unwrap();
+
+        backend
+            .abort_multipart("uploads", &upload_id)
+            .await
+            .unwrap();
+
+        assert!(backend.list_parts("uploads", &upload_id).await.is_err());
+    }
+
+    fn block_object_destination(backend: &FsStorageBackend, bucket: &str, key: &str) {
+        let blocked = backend.bucket_path(bucket).join(key);
+        std::fs::create_dir_all(&blocked).unwrap();
+        let destination = blocked.join(KEY_DATA_MARKER_FILE);
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("occupant"), b"occupied").unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_commit_restores_metadata_and_keeps_archived_null_version() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-rollback").await.unwrap();
+        backend
+            .set_versioning_status("commit-rollback", VersioningStatus::Suspended)
+            .await
+            .unwrap();
+
+        block_object_destination(&backend, "commit-rollback", "blocked.bin");
+
+        let mut previous = HashMap::new();
+        previous.insert("__etag__".to_string(), "oldetag".to_string());
+        previous.insert("__size__".to_string(), "3".to_string());
+        previous.insert("__version_id__".to_string(), "null".to_string());
+        backend
+            .put_object_metadata("commit-rollback", "blocked.bin", &previous)
+            .await
+            .unwrap();
+
+        let version_dir = backend.version_dir("commit-rollback", "blocked.bin");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let null_manifest = version_dir.join("null.json");
+        let null_data = version_dir.join("null.bin");
+        std::fs::write(&null_data, b"old").unwrap();
+        std::fs::write(
+            &null_manifest,
+            serde_json::json!({
+                "version_id": "null",
+                "key": "blocked.bin",
+                "size": 3,
+                "archived_at": Utc::now().to_rfc3339(),
+                "etag": "oldetag",
+                "metadata": previous,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"replacement".to_vec()));
+        let result = backend
+            .put_object("commit-rollback", "blocked.bin", stream, None)
+            .await;
+        assert!(result.is_err(), "a failed rename must fail the commit");
+
+        let restored = backend
+            .get_object_metadata("commit-rollback", "blocked.bin")
+            .await
+            .unwrap();
+        assert_eq!(restored.get("__etag__"), Some(&"oldetag".to_string()));
+        assert_eq!(restored.get("__size__"), Some(&"3".to_string()));
+        assert!(
+            null_manifest.is_file() && null_data.is_file(),
+            "the archived null version must survive a failed commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_commit_before_rename_undoes_the_archived_version() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-archive").await.unwrap();
+        backend
+            .set_versioning_status("commit-archive", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "commit-archive", "obj.bin", b"v1").await;
+
+        let before = backend
+            .get_object_metadata("commit-archive", "obj.bin")
+            .await
+            .unwrap();
+        let missing_tmp = backend.tmp_dir().join("does-not-exist.tmp");
+        let result = backend.finalize_put_sync(
+            "commit-archive",
+            "obj.bin",
+            &missing_tmp,
+            "deadbeef".to_string(),
+            2,
+            None,
+            &crate::traits::PutCommitOptions::default(),
+        );
+        assert!(
+            result.is_err(),
+            "a missing staged file must fail the commit"
+        );
+
+        assert!(
+            backend
+                .list_object_versions("commit-archive", "obj.bin")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the archived version must be undone when the commit aborts before the rename"
+        );
+        let after = backend
+            .get_object_metadata("commit-archive", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        assert_eq!(after.get("__version_id__"), before.get("__version_id__"));
+
+        let (_, mut stream) = backend
+            .get_object("commit-archive", "obj.bin")
+            .await
+            .unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v1");
+    }
+
+    #[tokio::test]
+    async fn failed_commit_leaves_no_metadata_for_a_new_key() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-fresh").await.unwrap();
+        block_object_destination(&backend, "commit-fresh", "fresh.bin");
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        let result = backend
+            .put_object("commit-fresh", "fresh.bin", stream, None)
+            .await;
+        assert!(result.is_err(), "a failed rename must fail the commit");
+
+        let metadata = backend
+            .get_object_metadata("commit-fresh", "fresh.bin")
+            .await
+            .unwrap();
+        assert!(
+            metadata.is_empty(),
+            "a failed commit must not leave metadata describing bytes that never landed"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_object_retention_rejects_compliance_shortening() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("retention").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        backend
+            .put_object("retention", "locked.bin", stream, None)
+            .await
+            .unwrap();
+
+        let far = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(10),
+        };
+        backend
+            .update_object_retention("retention", "locked.bin", None, &far, false)
+            .await
+            .unwrap();
+
+        let nearer = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(1),
+        };
+        for bypass in [false, true] {
+            let err = backend
+                .update_object_retention("retention", "locked.bin", None, &nearer, bypass)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, StorageError::ObjectLocked(_)));
+        }
+
+        let further = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(20),
+        };
+        backend
+            .update_object_retention("retention", "locked.bin", None, &further, false)
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_metadata("retention", "locked.bin")
+            .await
+            .unwrap();
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, further.retain_until_date);
+    }
+
+    #[tokio::test]
+    async fn update_object_retention_extends_governance_without_bypass() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("governance").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        backend
+            .put_object("governance", "obj.bin", stream, None)
+            .await
+            .unwrap();
+
+        let initial = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(5),
+        };
+        backend
+            .update_object_retention("governance", "obj.bin", None, &initial, false)
+            .await
+            .unwrap();
+
+        let longer = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(9),
+        };
+        backend
+            .update_object_retention("governance", "obj.bin", None, &longer, false)
+            .await
+            .unwrap();
+
+        let shorter = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(1),
+        };
+        let err = backend
+            .update_object_retention("governance", "obj.bin", None, &shorter, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::ObjectLocked(_)));
+        backend
+            .update_object_retention("governance", "obj.bin", None, &shorter, true)
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_metadata("governance", "obj.bin")
+            .await
+            .unwrap();
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, shorter.retain_until_date);
+    }
+
+    #[tokio::test]
+    async fn update_object_legal_hold_preserves_retention() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("legalhold").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        backend
+            .put_object("legalhold", "obj.bin", stream, None)
+            .await
+            .unwrap();
+
+        let retention = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(3),
+        };
+        backend
+            .update_object_retention("legalhold", "obj.bin", None, &retention, false)
+            .await
+            .unwrap();
+        backend
+            .update_object_legal_hold("legalhold", "obj.bin", None, true)
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_metadata("legalhold", "obj.bin")
+            .await
+            .unwrap();
+        assert!(myfsio_common::object_lock::get_legal_hold(&metadata));
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, retention.retain_until_date);
+    }
+
+    #[tokio::test]
+    async fn update_object_retention_applies_to_archived_versions() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("versioned-lock").await.unwrap();
+        backend
+            .set_versioning_status("versioned-lock", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "versioned-lock", "obj.bin", b"v1").await;
+        put_listing_object(&backend, "versioned-lock", "obj.bin", b"v2").await;
+
+        let versions = backend
+            .list_object_versions("versioned-lock", "obj.bin")
+            .await
+            .unwrap();
+        let archived = versions
+            .iter()
+            .find(|version| !version.is_latest)
+            .expect("expected an archived version");
+
+        let retention = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::COMPLIANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(5),
+        };
+        backend
+            .update_object_retention(
+                "versioned-lock",
+                "obj.bin",
+                Some(&archived.version_id),
+                &retention,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let metadata = backend
+            .get_object_version_metadata("versioned-lock", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        let stored = myfsio_common::object_lock::get_object_retention(&metadata).unwrap();
+        assert_eq!(stored.retain_until_date, retention.retain_until_date);
+
+        let shorter = myfsio_common::object_lock::ObjectLockRetention {
+            mode: myfsio_common::object_lock::RetentionMode::GOVERNANCE,
+            retain_until_date: Utc::now() + chrono::Duration::days(1),
+        };
+        let err = backend
+            .update_object_retention(
+                "versioned-lock",
+                "obj.bin",
+                Some(&archived.version_id),
+                &shorter,
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::ObjectLocked(_)));
+    }
+
+    #[tokio::test]
+    async fn corrupt_bucket_config_is_unreadable_and_not_overwritten() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("corrupt-cfg").await.unwrap();
+
+        let config_path = backend.bucket_config_path("corrupt-cfg");
+        std::fs::write(&config_path, b"{ this is not json").unwrap();
+        backend.bucket_config_cache.clear();
+
+        let config = backend.read_bucket_config_sync("corrupt-cfg");
+        assert!(config.unreadable);
+        assert!(config.policy.is_none());
+
+        backend.bucket_config_cache.clear();
+        assert!(backend
+            .mutate_bucket_config("corrupt-cfg", |cfg| cfg.versioning_enabled = true)
+            .await
+            .is_err());
+
+        backend.bucket_config_cache.clear();
+        let mut edited = backend.read_bucket_config_sync("corrupt-cfg");
+        edited.versioning_enabled = true;
+        assert!(backend
+            .set_bucket_config("corrupt-cfg", &edited)
+            .await
+            .is_err());
+
+        backend.bucket_config_cache.clear();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        assert!(backend
+            .put_object("corrupt-cfg", "object.txt", stream, None)
+            .await
+            .is_err());
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "{ this is not json"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_segment_dir_ignores_traversal_segment_id() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("victim").await.unwrap();
+
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let sentinel = config_dir.join("iam.json");
+        std::fs::write(&sentinel, b"{}").unwrap();
+
+        backend.release_segment_dir("victim", "../../../config");
+
+        assert!(config_dir.exists());
+        assert!(sentinel.exists());
     }
 
     async fn complete_listing_multipart(
@@ -6832,6 +7760,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_integrity_quarantine_and_verified_install_are_guarded() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+        let original = b"known-good-content";
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(original.to_vec()));
+        backend
+            .put_object("test-bucket", "guarded.txt", data, None)
+            .await
+            .unwrap();
+        let stored_etag = backend
+            .get_object_metadata("test-bucket", "guarded.txt")
+            .await
+            .unwrap()["__etag__"]
+            .clone();
+        let live_path = backend
+            .validated_object_path("test-bucket", "guarded.txt")
+            .unwrap();
+        std::fs::write(&live_path, b"corrupted-content").unwrap();
+        let quarantine_relative = PathBuf::from(SYSTEM_ROOT)
+            .join("quarantine")
+            .join("test-bucket")
+            .join("test-run")
+            .join("guarded.txt");
+
+        let outcome = backend
+            .quarantine_corrupted_object(
+                "test-bucket",
+                "guarded.txt",
+                &stored_etag,
+                &quarantine_relative,
+                "checksum mismatch",
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, IntegrityQuarantineOutcome::Quarantined);
+        assert!(!live_path.exists());
+        assert!(dir.path().join(&quarantine_relative).is_file());
+        let poisoned = backend
+            .get_object_metadata("test-bucket", "guarded.txt")
+            .await
+            .unwrap();
+        assert!(metadata_is_corrupted(&poisoned));
+        assert_eq!(
+            poisoned.get(META_KEY_CORRUPTION_RETRY_COUNT),
+            Some(&"0".to_string())
+        );
+
+        let prepared = live_path.with_file_name("guarded.txt.healing-test");
+        std::fs::write(&prepared, original).unwrap();
+        assert!(backend
+            .install_healed_object_if_still_poisoned(
+                "test-bucket",
+                "guarded.txt",
+                &stored_etag,
+                &prepared,
+            )
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read(&live_path).unwrap(), original);
+        let healed = backend
+            .get_object_metadata("test-bucket", "guarded.txt")
+            .await
+            .unwrap();
+        assert!(!metadata_is_corrupted(&healed));
+    }
+
+    #[tokio::test]
+    async fn test_fresh_put_wins_race_with_poisoned_recovery() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+        let original = b"original";
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(original.to_vec()));
+        backend
+            .put_object("test-bucket", "raced.txt", data, None)
+            .await
+            .unwrap();
+        let stored_etag = backend
+            .get_object_metadata("test-bucket", "raced.txt")
+            .await
+            .unwrap()["__etag__"]
+            .clone();
+        let live_path = backend
+            .validated_object_path("test-bucket", "raced.txt")
+            .unwrap();
+        std::fs::write(&live_path, b"bad").unwrap();
+        let quarantine_relative = PathBuf::from(SYSTEM_ROOT)
+            .join("quarantine")
+            .join("test-bucket")
+            .join("race")
+            .join("raced.txt");
+        assert_eq!(
+            backend
+                .quarantine_corrupted_object(
+                    "test-bucket",
+                    "raced.txt",
+                    &stored_etag,
+                    &quarantine_relative,
+                    "checksum mismatch",
+                )
+                .await
+                .unwrap(),
+            IntegrityQuarantineOutcome::Quarantined
+        );
+
+        let fresh = b"fresh-write";
+        let fresh_stream: AsyncReadStream = Box::pin(std::io::Cursor::new(fresh.to_vec()));
+        backend
+            .put_object("test-bucket", "raced.txt", fresh_stream, None)
+            .await
+            .unwrap();
+        let prepared = live_path.with_file_name("raced.txt.healing-test");
+        std::fs::write(&prepared, original).unwrap();
+        assert!(!backend
+            .install_healed_object_if_still_poisoned(
+                "test-bucket",
+                "raced.txt",
+                &stored_etag,
+                &prepared,
+            )
+            .await
+            .unwrap());
+        assert_eq!(std::fs::read(&live_path).unwrap(), fresh);
+        assert!(!metadata_is_corrupted(
+            &backend
+                .get_object_metadata("test-bucket", "raced.txt")
+                .await
+                .unwrap()
+        ));
+    }
+
+    #[tokio::test]
     async fn test_delete_object_metadata_entry_removes_index_entry() {
         let (_dir, backend) = create_test_backend();
         backend.create_bucket("test-bucket").await.unwrap();
@@ -6860,6 +7919,59 @@ mod tests {
             "metadata entry must be gone, got: {:?}",
             stored
         );
+    }
+
+    #[tokio::test]
+    async fn test_conditional_phantom_delete_preserves_changed_or_fresh_object() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("test-bucket").await.unwrap();
+        let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"old".to_vec()));
+        backend
+            .put_object("test-bucket", "phantom.txt", data, None)
+            .await
+            .unwrap();
+        let old_etag = backend
+            .get_object_metadata("test-bucket", "phantom.txt")
+            .await
+            .unwrap()["__etag__"]
+            .clone();
+        let path = backend
+            .validated_object_path("test-bucket", "phantom.txt")
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(!backend
+            .delete_phantom_metadata_if_still_missing(
+                "test-bucket",
+                "phantom.txt",
+                Some("different-etag"),
+            )
+            .await
+            .unwrap());
+        assert_eq!(
+            backend
+                .get_object_metadata("test-bucket", "phantom.txt")
+                .await
+                .unwrap()["__etag__"],
+            old_etag
+        );
+
+        let fresh_stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"fresh".to_vec()));
+        backend
+            .put_object("test-bucket", "phantom.txt", fresh_stream, None)
+            .await
+            .unwrap();
+        assert!(
+            !backend
+                .delete_phantom_metadata_if_still_missing(
+                    "test-bucket",
+                    "phantom.txt",
+                    Some(&old_etag),
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"fresh");
     }
 
     #[test]

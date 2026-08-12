@@ -349,7 +349,7 @@ impl AppState {
         }
     }
 
-    pub async fn new_with_encryption(config: ServerConfig) -> Self {
+    pub async fn new_with_encryption(config: ServerConfig) -> Result<Self, String> {
         let mut state = Self::new(config.clone());
 
         let keys_dir = config.storage_root.join(".myfsio.sys").join("keys");
@@ -358,8 +358,11 @@ impl AppState {
             match KmsService::new(&keys_dir).await {
                 Ok(k) => Some(Arc::new(k)),
                 Err(e) => {
-                    tracing::error!("Failed to initialize KMS: {}", e);
-                    None
+                    return Err(format!(
+                        "KMS_ENABLED is set but KMS initialization failed: {}. Refusing to start, \
+                         because continuing would silently serve requests with KMS unavailable.",
+                        e
+                    ));
                 }
             }
         } else {
@@ -376,8 +379,12 @@ impl AppState {
                     },
                 ))),
                 Err(e) => {
-                    tracing::error!("Failed to initialize encryption: {}", e);
-                    None
+                    return Err(format!(
+                        "ENCRYPTION_ENABLED is set but encryption initialization failed: {}. \
+                         Refusing to start, because continuing would silently store objects \
+                         unencrypted.",
+                        e
+                    ));
                 }
             }
         } else {
@@ -386,7 +393,7 @@ impl AppState {
 
         state.encryption = encryption;
         state.kms = kms;
-        state
+        Ok(state)
     }
 }
 

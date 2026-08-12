@@ -42,6 +42,10 @@ pub struct SiteSyncStats {
     pub conflicts_resolved: u64,
     pub deletions_applied: u64,
     pub errors: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_error_at: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +139,11 @@ impl SiteSyncWorker {
         save_stats(&self.storage_root, &snapshot);
     }
 
+    fn record_failure(&self, bucket: &str, error: &str) {
+        let mut stats = self.bucket_stats.lock();
+        record_cycle_failure(&mut stats, bucket, error, now_secs());
+    }
+
     pub async fn run(self: Arc<Self>) {
         tracing::info!(
             "Site sync worker started (interval={}s)",
@@ -166,6 +175,8 @@ impl SiteSyncWorker {
                 }
                 Err(e) => {
                     tracing::error!("Site sync failed for bucket {}: {}", bucket, e);
+                    self.record_failure(&bucket, &e);
+                    mutated = true;
                 }
             }
         }
@@ -189,6 +200,8 @@ impl SiteSyncWorker {
             }
             Err(e) => {
                 tracing::error!("Site sync trigger failed for {}: {}", bucket, e);
+                self.record_failure(bucket, &e);
+                self.save_stats();
                 None
             }
         }
@@ -414,10 +427,7 @@ impl SiteSyncWorker {
             let resp = match req.send().await {
                 Ok(r) => r,
                 Err(err) => {
-                    if is_not_found_error(&err) {
-                        return Ok(result);
-                    }
-                    return Err(format!("{:?}", err));
+                    return Err(remote_list_error(bucket, &format!("{:?}", err)));
                 }
             };
             for obj in resp.contents() {
@@ -568,10 +578,108 @@ fn save_stats(storage_root: &std::path::Path, stats: &HashMap<String, SiteSyncSt
     }
 }
 
-fn is_not_found_error<E: std::fmt::Debug>(err: &aws_sdk_s3::error::SdkError<E>) -> bool {
-    let msg = format!("{:?}", err);
-    msg.contains("NoSuchBucket")
-        || msg.contains("code: Some(\"NotFound\")")
-        || msg.contains("code: Some(\"NoSuchBucket\")")
-        || msg.contains("status: 404")
+fn record_cycle_failure(
+    stats: &mut HashMap<String, SiteSyncStats>,
+    bucket: &str,
+    error: &str,
+    at: f64,
+) {
+    let entry = stats.entry(bucket.to_string()).or_default();
+    entry.errors = entry.errors.saturating_add(1);
+    entry.last_error = Some(error.to_string());
+    entry.last_error_at = Some(at);
+}
+
+fn is_not_found_error(debug: &str) -> bool {
+    debug.contains("NoSuchBucket")
+        || debug.contains("code: Some(\"NotFound\")")
+        || debug.contains("code: Some(\"NoSuchBucket\")")
+        || debug.contains("status: 404")
+}
+
+fn remote_list_error(bucket: &str, debug: &str) -> String {
+    if is_not_found_error(debug) {
+        format!(
+            "remote bucket '{}' not found (skipping sync cycle to protect local data)",
+            bucket
+        )
+    } else {
+        debug.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_remote_bucket_is_classified_as_not_found() {
+        assert!(is_not_found_error(
+            "ServiceError(ServiceError { source: NoSuchBucket(NoSuchBucket) })"
+        ));
+        assert!(is_not_found_error("code: Some(\"NotFound\")"));
+        assert!(is_not_found_error("status: 404"));
+        assert!(!is_not_found_error("status: 503, code: Some(\"SlowDown\")"));
+    }
+
+    #[test]
+    fn remote_list_error_names_the_missing_bucket() {
+        let msg = remote_list_error("photos", "code: Some(\"NoSuchBucket\")");
+        assert_eq!(
+            msg,
+            "remote bucket 'photos' not found (skipping sync cycle to protect local data)"
+        );
+    }
+
+    #[test]
+    fn remote_list_error_preserves_other_failures() {
+        let msg = remote_list_error("photos", "DispatchFailure(ConnectorError)");
+        assert_eq!(msg, "DispatchFailure(ConnectorError)");
+    }
+
+    #[test]
+    fn a_failed_cycle_increments_errors_and_records_the_reason() {
+        let mut stats: HashMap<String, SiteSyncStats> = HashMap::new();
+        record_cycle_failure(&mut stats, "photos", "list remote failed: boom", 100.0);
+        record_cycle_failure(&mut stats, "photos", "list remote failed: boom", 160.0);
+
+        let entry = stats.get("photos").unwrap();
+        assert_eq!(entry.errors, 2);
+        assert_eq!(
+            entry.last_error.as_deref(),
+            Some("list remote failed: boom")
+        );
+        assert_eq!(entry.last_error_at, Some(160.0));
+    }
+
+    #[test]
+    fn a_successful_cycle_clears_the_recorded_failure() {
+        let mut stats: HashMap<String, SiteSyncStats> = HashMap::new();
+        record_cycle_failure(&mut stats, "photos", "list remote failed: boom", 100.0);
+        stats.insert(
+            "photos".to_string(),
+            SiteSyncStats {
+                last_sync_at: Some(200.0),
+                objects_pulled: 3,
+                ..SiteSyncStats::default()
+            },
+        );
+
+        let entry = stats.get("photos").unwrap();
+        assert_eq!(entry.errors, 0);
+        assert!(entry.last_error.is_none());
+        assert!(entry.last_error_at.is_none());
+    }
+
+    #[test]
+    fn stats_persisted_before_the_error_fields_existed_still_load() {
+        let legacy = r#"{"last_sync_at":1.5,"objects_pulled":4,"objects_skipped":1,
+            "conflicts_resolved":0,"deletions_applied":2,"errors":0}"#;
+        let stats: SiteSyncStats = serde_json::from_str(legacy).unwrap();
+
+        assert_eq!(stats.objects_pulled, 4);
+        assert_eq!(stats.deletions_applied, 2);
+        assert!(stats.last_error.is_none());
+        assert!(stats.last_error_at.is_none());
+    }
 }

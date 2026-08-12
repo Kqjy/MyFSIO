@@ -1,16 +1,19 @@
+use md5::{Digest, Md5};
 use myfsio_common::constants::{
     BUCKET_META_DIR, BUCKET_VERSIONS_DIR, DIR_MARKER_FILE, INDEX_FILE, KEY_DATA_MARKER_FILE,
     SYSTEM_BUCKETS_DIR, SYSTEM_ROOT,
 };
 use myfsio_crypto::encryption::EncryptionMetadata;
 use myfsio_storage::fs_backend::{
-    is_multipart_etag, metadata_is_corrupted, FsStorageBackend, META_KEY_CORRUPTED,
-    META_KEY_CORRUPTED_AT, META_KEY_CORRUPTION_DETAIL, META_KEY_QUARANTINE_PATH,
-    SIDECAR_ENTRY_NAME_FIELD, SIDECAR_FILE_EXT, SIDECAR_FILE_PREFIX,
+    is_multipart_etag, metadata_is_corrupted, FsStorageBackend, IntegrityQuarantineOutcome,
+    META_KEY_CORRUPTED, META_KEY_CORRUPTION_DETAIL, META_KEY_CORRUPTION_LAST_RETRY_AT,
+    META_KEY_CORRUPTION_RETRY_COUNT, META_KEY_PART_SIZES, SIDECAR_ENTRY_NAME_FIELD,
+    SIDECAR_FILE_EXT, SIDECAR_FILE_PREFIX,
 };
 use myfsio_storage::traits::StorageEngine;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -64,14 +67,20 @@ fn cursor_path_for(storage_root: &Path) -> PathBuf {
         .join(CURSOR_FILE)
 }
 
-fn load_cursor(path: &Path) -> CorruptionCursor {
-    let Ok(s) = std::fs::read_to_string(path) else {
-        return CorruptionCursor::default();
+fn load_cursor(path: &Path) -> Result<CorruptionCursor, String> {
+    let s = match std::fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CorruptionCursor::default());
+        }
+        Err(error) => return Err(format!("read checksum cursor: {error}")),
     };
-    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&s) else {
-        return CorruptionCursor::default();
+    let Value::Object(map) = serde_json::from_str::<Value>(&s)
+        .map_err(|error| format!("parse checksum cursor: {error}"))?
+    else {
+        return Err("parse checksum cursor: expected a JSON object".to_string());
     };
-    CorruptionCursor {
+    Ok(CorruptionCursor {
         bucket: map
             .get("bucket")
             .and_then(|v| v.as_str())
@@ -82,18 +91,16 @@ fn load_cursor(path: &Path) -> CorruptionCursor {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-    }
+    })
 }
 
-fn save_cursor(path: &Path, cursor: &CorruptionCursor) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+fn save_cursor(path: &Path, cursor: &CorruptionCursor) -> Result<(), String> {
     let v = json!({
         "bucket": cursor.bucket,
         "after_key": cursor.after_key,
     });
-    let _ = std::fs::write(path, serde_json::to_string_pretty(&v).unwrap_or_default());
+    myfsio_common::fs_util::atomic_write_json(path, &v)
+        .map_err(|error| format!("persist checksum cursor: {error}"))
 }
 
 fn recently_modified(path: &Path, grace: std::time::Duration) -> bool {
@@ -142,6 +149,8 @@ pub struct IntegrityService {
     started_at: Arc<StdMutex<Option<Instant>>>,
     history: Arc<RwLock<Vec<Value>>>,
     history_path: PathBuf,
+    etag_cache_lock: Arc<StdMutex<()>>,
+    persistence_error: Arc<StdMutex<Option<String>>>,
 }
 
 struct RunGuard {
@@ -168,6 +177,7 @@ struct HealStats {
     verify_failed: u64,
     failed: u64,
     skipped: u64,
+    would_heal: u64,
 }
 
 impl HealStats {
@@ -181,6 +191,7 @@ impl HealStats {
             "verify_failed": self.verify_failed,
             "failed": self.failed,
             "skipped": self.skipped,
+            "would_heal": self.would_heal,
         })
     }
 }
@@ -194,6 +205,13 @@ struct ScanState {
     phantom_metadata: u64,
     stale_versions: u64,
     etag_cache_inconsistencies: u64,
+    poisoned_objects: u64,
+    checksummed_objects: u64,
+    multipart_objects_checked: u64,
+    multipart_objects_unverifiable: u64,
+    encrypted_objects_unverifiable: u64,
+    version_contents_unverifiable: u64,
+    invalid_metadata_keys: u64,
     issues: Vec<Value>,
     issue_counts: HashMap<String, usize>,
     errors: Vec<String>,
@@ -218,22 +236,41 @@ impl IntegrityService {
     pub fn new(
         storage: Arc<FsStorageBackend>,
         storage_root: &Path,
-        config: IntegrityConfig,
+        mut config: IntegrityConfig,
         peer_fetcher: Option<Arc<PeerFetcher>>,
     ) -> Self {
+        if !config.interval_hours.is_finite() || config.interval_hours <= 0.0 {
+            config.interval_hours = IntegrityConfig::default().interval_hours;
+        }
+        config.batch_size = config.batch_size.max(1);
+        config.heal_concurrency = config.heal_concurrency.clamp(1, 64);
+        config.quarantine_retention_days = config.quarantine_retention_days.max(1);
         let history_path = storage_root
             .join(SYSTEM_ROOT)
             .join("config")
             .join("integrity_history.json");
 
-        let history = if history_path.exists() {
-            std::fs::read_to_string(&history_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-                .and_then(|v| v.get("executions").and_then(|e| e.as_array().cloned()))
-                .unwrap_or_default()
+        let (history, persistence_error) = if history_path.exists() {
+            match std::fs::read_to_string(&history_path)
+                .map_err(|error| format!("read integrity history: {error}"))
+                .and_then(|contents| {
+                    serde_json::from_str::<Value>(&contents)
+                        .map_err(|error| format!("parse integrity history: {error}"))
+                })
+                .and_then(|value| {
+                    value
+                        .get("executions")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .ok_or_else(|| {
+                            "parse integrity history: missing executions array".to_string()
+                        })
+                }) {
+                Ok(history) => (history, None),
+                Err(error) => (Vec::new(), Some(error)),
+            }
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
 
         Self {
@@ -245,6 +282,8 @@ impl IntegrityService {
             started_at: Arc::new(StdMutex::new(None)),
             history: Arc::new(RwLock::new(history)),
             history_path,
+            etag_cache_lock: Arc::new(StdMutex::new(())),
+            persistence_error: Arc::new(StdMutex::new(persistence_error)),
         }
     }
 
@@ -255,6 +294,17 @@ impl IntegrityService {
                 .as_ref()
                 .map(|started| started.elapsed().as_secs_f64())
         });
+        let last_run = self.history.read().await.last().cloned();
+        let persistence_error = self
+            .persistence_error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone());
+        let last_run_total_issues = last_run
+            .as_ref()
+            .and_then(|run| run.get("result"))
+            .map(unresolved_issue_count)
+            .unwrap_or(0);
         json!({
             "enabled": true,
             "running": running,
@@ -266,6 +316,10 @@ impl IntegrityService {
             "dry_run": self.config.dry_run,
             "heal_concurrency": self.config.heal_concurrency,
             "peer_heal_available": self.peer_fetcher.is_some(),
+            "quarantine_retention_days": self.config.quarantine_retention_days,
+            "last_run": last_run,
+            "last_run_total_issues": last_run_total_issues,
+            "persistence_error": persistence_error,
         })
     }
 
@@ -337,7 +391,9 @@ impl IntegrityService {
             st
         });
 
-        let heal_stats = if auto_heal && !dry_run {
+        let heal_stats = if auto_heal && dry_run {
+            preview_heal_phase(&scan_state)
+        } else if auto_heal {
             self.run_heal_phase(&scan_state).await
         } else {
             BTreeMap::new()
@@ -362,7 +418,28 @@ impl IntegrityService {
                 history.drain(..excess);
             }
         }
-        self.save_history().await;
+        if let Err(error) = self.save_history().await {
+            tracing::error!("Failed to persist integrity history: {}", error);
+            if let Ok(mut last_error) = self.persistence_error.lock() {
+                *last_error = Some(error);
+            }
+        } else if let Ok(mut last_error) = self.persistence_error.lock() {
+            *last_error = None;
+        }
+
+        let total_issues = total_issue_count(&result_json);
+        let error_count = result_json
+            .get("errors")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        if total_issues > 0 || error_count > 0 {
+            tracing::warn!(
+                total_issues,
+                error_count,
+                "Integrity scan completed with findings"
+            );
+        }
 
         Ok(result_json)
     }
@@ -404,6 +481,7 @@ impl IntegrityService {
             let storage = self.storage.clone();
             let storage_root = self.storage_root.clone();
             let peer_fetcher = self.peer_fetcher.clone();
+            let etag_cache_lock = self.etag_cache_lock.clone();
 
             tasks.push(tokio::spawn(async move {
                 let _permit = permit;
@@ -415,6 +493,7 @@ impl IntegrityService {
                     &bucket,
                     &key,
                     &detail,
+                    &etag_cache_lock,
                 )
                 .await
             }));
@@ -438,16 +517,11 @@ impl IntegrityService {
         stats
     }
 
-    async fn save_history(&self) {
+    async fn save_history(&self) -> Result<(), String> {
         let history = self.history.read().await;
         let data = json!({ "executions": *history });
-        if let Some(parent) = self.history_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(
-            &self.history_path,
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        );
+        myfsio_common::fs_util::atomic_write_json(&self.history_path, &data)
+            .map_err(|error| error.to_string())
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -493,14 +567,16 @@ async fn heal_issue(
     bucket: &str,
     key: &str,
     detail: &str,
+    etag_cache_lock: &StdMutex<()>,
 ) -> HealReport {
     let status = match issue_type {
-        "corrupted_object" => {
-            heal_corrupted(storage, storage_root, peer_fetcher, bucket, key, detail).await
-        }
+        "corrupted_object" => heal_corrupted(storage, peer_fetcher, bucket, key, detail).await,
+        "poisoned_object" => recover_poisoned(storage, peer_fetcher, bucket, key).await,
         "stale_version" => heal_stale_version(storage_root, bucket, key).await,
-        "etag_cache_inconsistency" => heal_etag_cache(storage_root, bucket, key, detail).await,
-        "phantom_metadata" => heal_phantom_metadata(storage, bucket, key).await,
+        "etag_cache_inconsistency" => {
+            heal_etag_cache(storage_root, bucket, key, etag_cache_lock).await
+        }
+        "phantom_metadata" => heal_phantom_metadata(storage, bucket, key, detail).await,
         _ => HealStatus::Skipped,
     };
     HealReport {
@@ -511,172 +587,196 @@ async fn heal_issue(
 
 async fn heal_corrupted(
     storage: &FsStorageBackend,
-    storage_root: &Path,
     peer_fetcher: Option<&PeerFetcher>,
     bucket: &str,
     key: &str,
     detail: &str,
 ) -> HealStatus {
     let stored_etag = parse_stored_etag(detail);
-    let actual_etag = parse_actual_etag(detail);
-
-    let live_path = resolve_data_path(&storage_root.join(bucket), key);
+    if stored_etag.is_empty() {
+        return HealStatus::Skipped;
+    }
     let quarantine_rel = quarantine_relative_path(bucket, key);
-    let quarantine_full = storage_root.join(&quarantine_rel);
-
-    if let Some(parent) = quarantine_full.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::error!("Heal {}/{}: mkdir quarantine failed: {}", bucket, key, e);
+    match storage
+        .quarantine_corrupted_object(bucket, key, &stored_etag, &quarantine_rel, detail)
+        .await
+    {
+        Ok(IntegrityQuarantineOutcome::Quarantined) => {
+            tracing::warn!("Quarantined corrupted object {}/{}", bucket, key);
+        }
+        Ok(IntegrityQuarantineOutcome::Healthy | IntegrityQuarantineOutcome::Skipped) => {
+            return HealStatus::Skipped;
+        }
+        Err(error) => {
+            tracing::error!("Failed to quarantine {}/{}: {}", bucket, key, error);
             return HealStatus::Failed;
         }
     }
+    recover_poisoned(storage, peer_fetcher, bucket, key).await
+}
 
+async fn recover_poisoned(
+    storage: &FsStorageBackend,
+    peer_fetcher: Option<&PeerFetcher>,
+    bucket: &str,
+    key: &str,
+) -> HealStatus {
+    let live_path = match storage.validated_object_path(bucket, key) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!("Invalid poisoned object path {}/{}: {}", bucket, key, error);
+            return HealStatus::Failed;
+        }
+    };
+    let metadata = match storage.get_object_metadata(bucket, key).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::error!(
+                "Read poisoned metadata {}/{} failed: {}",
+                bucket,
+                key,
+                error
+            );
+            return HealStatus::Failed;
+        }
+    };
+    if !metadata_is_corrupted(&metadata) || live_path.exists() {
+        return HealStatus::Skipped;
+    }
+    let stored_etag = metadata.get("__etag__").cloned().unwrap_or_default();
+    if stored_etag.is_empty()
+        || is_multipart_etag(&stored_etag)
+        || EncryptionMetadata::is_encrypted(&metadata)
     {
-        let _guard = storage.lock_object_write(bucket, key);
-        if !live_path.exists() {
-            return HealStatus::Skipped;
-        }
-        let current = collect_all_metadata(storage_root, bucket);
-        let current_meta = current
-            .get(key)
-            .map(|info| entry_metadata_map(&info.entry))
-            .unwrap_or_default();
-        let current_stored = current_meta.get("__etag__").cloned().unwrap_or_default();
-        if current_stored.is_empty()
-            || metadata_is_corrupted(&current_meta)
-            || EncryptionMetadata::is_encrypted(&current_meta)
-            || is_multipart_etag(&current_stored)
+        return HealStatus::Skipped;
+    }
+    let Some(fetcher) = peer_fetcher else {
+        return HealStatus::Poisoned;
+    };
+
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let temp_path = live_path.with_file_name(format!(
+        "{}.healing.{}",
+        live_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "healing".to_string()),
+        nonce
+    ));
+    match fetcher
+        .fetch_for_heal(bucket, key, &stored_etag, &temp_path)
+        .await
+    {
+        HealOutcome::Healed { peer_etag, bytes } => match storage
+            .install_healed_object_if_still_poisoned(bucket, key, &stored_etag, &temp_path)
+            .await
         {
-            return HealStatus::Skipped;
-        }
-        match myfsio_crypto::hashing::md5_file(&live_path) {
-            Ok(current_actual) if current_actual == current_stored => {
+            Ok(true) => {
                 tracing::info!(
-                    "Heal {}/{}: object no longer mismatches under lock; skipping quarantine",
+                    "Healed {}/{} from peer (etag={}, bytes={})",
+                    bucket,
+                    key,
+                    peer_etag,
+                    bytes
+                );
+                HealStatus::Healed
+            }
+            Ok(false) => {
+                let _ = std::fs::remove_file(&temp_path);
+                tracing::info!(
+                    "Heal {}/{} lost a race to a fresh write; preserving the fresh object",
                     bucket,
                     key
                 );
-                return HealStatus::Skipped;
+                HealStatus::Skipped
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!(
-                    "Heal {}/{}: re-hash before quarantine failed: {}",
-                    bucket,
-                    key,
-                    e
-                );
-                return HealStatus::Failed;
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                tracing::error!("Install healed object {}/{} failed: {}", bucket, key, error);
+                HealStatus::Failed
             }
+        },
+        HealOutcome::PeerMismatch { stored, peer } => {
+            let _ = std::fs::remove_file(&temp_path);
+            let detail = format!("peer etag {peer} != stored {stored}");
+            record_recovery_failure(
+                storage,
+                bucket,
+                key,
+                &stored_etag,
+                &detail,
+                HealStatus::PeerMismatch,
+            )
+            .await
         }
-        if let Err(e) = std::fs::rename(&live_path, &quarantine_full) {
-            tracing::error!("Heal {}/{}: quarantine rename failed: {}", bucket, key, e);
-            return HealStatus::Failed;
+        HealOutcome::PeerUnavailable { error } => {
+            let _ = std::fs::remove_file(&temp_path);
+            let detail =
+                format!("peer unavailable while recovering stored_etag={stored_etag}: {error}");
+            record_recovery_failure(
+                storage,
+                bucket,
+                key,
+                &stored_etag,
+                &detail,
+                HealStatus::PeerUnavailable,
+            )
+            .await
         }
-    }
-
-    let quarantine_rel_str = quarantine_rel.to_string_lossy().replace('\\', "/");
-
-    if !stored_etag.is_empty() {
-        if let Some(fetcher) = peer_fetcher {
-            let nonce = uuid::Uuid::new_v4().simple().to_string();
-            let temp_path = live_path.with_file_name(format!(
-                "{}.healing.{}",
-                live_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "healing".to_string()),
-                nonce
-            ));
-            match fetcher
-                .fetch_for_heal(bucket, key, &stored_etag, &temp_path)
-                .await
-            {
-                HealOutcome::Healed { peer_etag, bytes } => {
-                    let swap_result = {
-                        let _guard = storage.lock_object_write(bucket, key);
-                        if live_path.exists() {
-                            let _ = std::fs::remove_file(&temp_path);
-                            tracing::info!(
-                                "Heal {}/{}: concurrent PUT raced; preserving fresh write",
-                                bucket,
-                                key
-                            );
-                            return HealStatus::Skipped;
-                        }
-                        atomic_swap(&temp_path, &live_path)
-                    };
-                    if let Err(e) = swap_result {
-                        tracing::error!(
-                            "Heal {}/{}: atomic swap failed: {} (restoring from quarantine)",
-                            bucket,
-                            key,
-                            e
-                        );
-                        let _guard = storage.lock_object_write(bucket, key);
-                        if !live_path.exists() {
-                            let _ = std::fs::rename(&quarantine_full, &live_path);
-                        }
-                        let _ = std::fs::remove_file(&temp_path);
-                        return HealStatus::Failed;
-                    }
-                    let _ = clear_poison_metadata(storage, bucket, key).await;
-                    tracing::info!(
-                        "Healed {}/{} from peer (etag={}, bytes={})",
-                        bucket,
-                        key,
-                        peer_etag,
-                        bytes
-                    );
-                    return HealStatus::Healed;
-                }
-                HealOutcome::PeerMismatch { stored, peer } => {
-                    let msg = format!("peer etag {} != stored {}", peer, stored);
-                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
-                    tracing::warn!("Heal {}/{}: peer mismatch ({}), poisoned", bucket, key, msg);
-                    return HealStatus::PeerMismatch;
-                }
-                HealOutcome::PeerUnavailable { error } => {
-                    tracing::warn!(
-                        "Heal {}/{}: peer unavailable ({}), poisoning",
-                        bucket,
-                        key,
-                        error
-                    );
-                    let msg = format!(
-                        "etag mismatch (stored={}, actual={}) — peer unavailable: {}",
-                        stored_etag, actual_etag, error
-                    );
-                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
-                    return HealStatus::PeerUnavailable;
-                }
-                HealOutcome::VerifyFailed { expected, actual } => {
-                    let msg = format!(
-                        "peer download verify failed: expected={} actual={}",
-                        expected, actual
-                    );
-                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
-                    tracing::warn!("Heal {}/{}: {}", bucket, key, msg);
-                    return HealStatus::VerifyFailed;
-                }
-                HealOutcome::NotConfigured => {
-                    let msg = format!(
-                        "etag mismatch (stored={}, actual={}); no peer configured",
-                        stored_etag, actual_etag
-                    );
-                    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
-                    return HealStatus::Poisoned;
-                }
-            }
+        HealOutcome::VerifyFailed { expected, actual } => {
+            let _ = std::fs::remove_file(&temp_path);
+            let detail = format!("peer verification failed: expected={expected} actual={actual}");
+            record_recovery_failure(
+                storage,
+                bucket,
+                key,
+                &stored_etag,
+                &detail,
+                HealStatus::VerifyFailed,
+            )
+            .await
+        }
+        HealOutcome::NotConfigured => {
+            let _ = std::fs::remove_file(&temp_path);
+            let detail =
+                format!("recovery pending: no peer configured for stored_etag={stored_etag}");
+            record_recovery_failure(
+                storage,
+                bucket,
+                key,
+                &stored_etag,
+                &detail,
+                HealStatus::Poisoned,
+            )
+            .await
         }
     }
+}
 
-    let msg = format!(
-        "etag mismatch (stored={}, actual={}); no peer fetcher",
-        stored_etag, actual_etag
-    );
-    let _ = poison_metadata(storage, bucket, key, &msg, &quarantine_rel_str).await;
-    HealStatus::Poisoned
+async fn record_recovery_failure(
+    storage: &FsStorageBackend,
+    bucket: &str,
+    key: &str,
+    expected_etag: &str,
+    detail: &str,
+    status: HealStatus,
+) -> HealStatus {
+    match storage
+        .record_poisoned_recovery_failure(bucket, key, expected_etag, detail)
+        .await
+    {
+        Ok(true) => status,
+        Ok(false) => HealStatus::Skipped,
+        Err(error) => {
+            tracing::error!(
+                "Record recovery failure {}/{} failed: {}",
+                bucket,
+                key,
+                error
+            );
+            HealStatus::Failed
+        }
+    }
 }
 
 async fn heal_stale_version(storage_root: &Path, bucket: &str, key: &str) -> HealStatus {
@@ -728,8 +828,11 @@ async fn heal_etag_cache(
     storage_root: &Path,
     bucket: &str,
     key: &str,
-    _detail: &str,
+    etag_cache_lock: &StdMutex<()>,
 ) -> HealStatus {
+    let Ok(_guard) = etag_cache_lock.lock() else {
+        return HealStatus::Failed;
+    };
     let etag_index_path = storage_root
         .join(SYSTEM_ROOT)
         .join(SYSTEM_BUCKETS_DIR)
@@ -760,10 +863,7 @@ async fn heal_etag_cache(
     }
 
     let json_obj: serde_json::Map<String, Value> = cache.into_iter().collect();
-    match std::fs::write(
-        &etag_index_path,
-        serde_json::to_string_pretty(&Value::Object(json_obj)).unwrap_or_default(),
-    ) {
+    match myfsio_common::fs_util::atomic_write_json(&etag_index_path, &Value::Object(json_obj)) {
         Ok(_) => HealStatus::Healed,
         Err(e) => {
             tracing::error!("etag-cache rewrite failed {}/{}: {}", bucket, key, e);
@@ -772,63 +872,31 @@ async fn heal_etag_cache(
     }
 }
 
-async fn heal_phantom_metadata(storage: &FsStorageBackend, bucket: &str, key: &str) -> HealStatus {
-    match storage.delete_object_metadata_entry(bucket, key).await {
-        Ok(_) => {
+async fn heal_phantom_metadata(
+    storage: &FsStorageBackend,
+    bucket: &str,
+    key: &str,
+    detail: &str,
+) -> HealStatus {
+    let expected_etag = parse_stored_etag(detail);
+    match storage
+        .delete_phantom_metadata_if_still_missing(
+            bucket,
+            key,
+            (!expected_etag.is_empty()).then_some(expected_etag.as_str()),
+        )
+        .await
+    {
+        Ok(true) => {
             tracing::info!("Dropped phantom metadata for {}/{}", bucket, key);
             HealStatus::Healed
         }
+        Ok(false) => HealStatus::Skipped,
         Err(e) => {
             tracing::error!("Failed to drop phantom metadata {}/{}: {}", bucket, key, e);
             HealStatus::Failed
         }
     }
-}
-
-async fn poison_metadata(
-    storage: &FsStorageBackend,
-    bucket: &str,
-    key: &str,
-    detail: &str,
-    quarantine_rel: &str,
-) -> Result<(), String> {
-    let mut meta = storage
-        .get_object_metadata(bucket, key)
-        .await
-        .unwrap_or_default();
-    meta.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
-    meta.insert(
-        META_KEY_CORRUPTED_AT.to_string(),
-        chrono::Utc::now().to_rfc3339(),
-    );
-    meta.insert(META_KEY_CORRUPTION_DETAIL.to_string(), detail.to_string());
-    meta.insert(
-        META_KEY_QUARANTINE_PATH.to_string(),
-        quarantine_rel.to_string(),
-    );
-    storage
-        .put_object_metadata(bucket, key, &meta)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-async fn clear_poison_metadata(
-    storage: &FsStorageBackend,
-    bucket: &str,
-    key: &str,
-) -> Result<(), String> {
-    let mut meta = storage
-        .get_object_metadata(bucket, key)
-        .await
-        .unwrap_or_default();
-    meta.remove(META_KEY_CORRUPTED);
-    meta.remove(META_KEY_CORRUPTED_AT);
-    meta.remove(META_KEY_CORRUPTION_DETAIL);
-    meta.remove(META_KEY_QUARANTINE_PATH);
-    storage
-        .put_object_metadata(bucket, key, &meta)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 fn quarantine_relative_path(bucket: &str, key: &str) -> PathBuf {
@@ -840,13 +908,6 @@ fn quarantine_relative_path(bucket: &str, key: &str) -> PathBuf {
         .join(key)
 }
 
-fn atomic_swap(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::rename(src, dst)
-}
-
 fn parse_stored_etag(detail: &str) -> String {
     detail
         .split_whitespace()
@@ -855,12 +916,55 @@ fn parse_stored_etag(detail: &str) -> String {
         .to_string()
 }
 
-fn parse_actual_etag(detail: &str) -> String {
-    detail
-        .split_whitespace()
-        .find_map(|s| s.strip_prefix("actual_etag="))
-        .unwrap_or("")
-        .to_string()
+fn preview_heal_phase(scan: &ScanState) -> BTreeMap<String, HealStats> {
+    let mut stats: BTreeMap<String, HealStats> = BTreeMap::new();
+    for issue in &scan.issues {
+        let issue_type = issue
+            .get("issue_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let entry = stats.entry(issue_type.to_string()).or_default();
+        entry.found += 1;
+        let detail = issue.get("detail").and_then(Value::as_str).unwrap_or("");
+        let supported_corruption = {
+            let etag = parse_stored_etag(detail);
+            !etag.is_empty() && !is_multipart_etag(&etag)
+        };
+        if matches!(
+            issue_type,
+            "stale_version" | "etag_cache_inconsistency" | "phantom_metadata"
+        ) || matches!(issue_type, "corrupted_object" | "poisoned_object") && supported_corruption
+        {
+            entry.would_heal += 1;
+        } else {
+            entry.skipped += 1;
+        }
+    }
+    stats
+}
+
+fn total_issue_count(result: &Value) -> u64 {
+    [
+        "corrupted_objects",
+        "orphaned_objects",
+        "phantom_metadata",
+        "stale_versions",
+        "etag_cache_inconsistencies",
+        "legacy_metadata_drifts",
+        "poisoned_objects",
+        "invalid_metadata_keys",
+    ]
+    .iter()
+    .map(|key| result.get(key).and_then(Value::as_u64).unwrap_or(0))
+    .sum()
+}
+
+fn unresolved_issue_count(result: &Value) -> u64 {
+    let healed = result
+        .get("issues_healed")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    total_issue_count(result).saturating_sub(healed)
 }
 
 fn build_result_json(
@@ -869,6 +973,7 @@ fn build_result_json(
     elapsed: f64,
 ) -> Value {
     let issues_healed: u64 = heal_stats.values().map(|s| s.healed).sum();
+    let issues_would_heal: u64 = heal_stats.values().map(|s| s.would_heal).sum();
     let heal_stats_json: serde_json::Map<String, Value> = heal_stats
         .iter()
         .map(|(k, v)| (k.clone(), v.to_value()))
@@ -882,7 +987,15 @@ fn build_result_json(
         "phantom_metadata": state.phantom_metadata,
         "stale_versions": state.stale_versions,
         "etag_cache_inconsistencies": state.etag_cache_inconsistencies,
+        "poisoned_objects": state.poisoned_objects,
+        "checksummed_objects": state.checksummed_objects,
+        "multipart_objects_checked": state.multipart_objects_checked,
+        "multipart_objects_unverifiable": state.multipart_objects_unverifiable,
+        "encrypted_objects_unverifiable": state.encrypted_objects_unverifiable,
+        "version_contents_unverifiable": state.version_contents_unverifiable,
+        "invalid_metadata_keys": state.invalid_metadata_keys,
         "issues_healed": issues_healed,
+        "issues_would_heal": issues_would_heal,
         "heal_stats": Value::Object(heal_stats_json),
         "issues": state.issues,
         "errors": state.errors,
@@ -918,7 +1031,13 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize, pacing_ms: u64) -> S
     }
 
     let cursor_path = cursor_path_for(storage_root);
-    let cursor = load_cursor(&cursor_path);
+    let cursor = match load_cursor(&cursor_path) {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            state.errors.push(error);
+            CorruptionCursor::default()
+        }
+    };
 
     let start_idx = buckets
         .iter()
@@ -944,6 +1063,7 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize, pacing_ms: u64) -> S
         last_offset_visited = Some(offset);
         let result = check_corrupted(
             &mut state,
+            storage_root,
             bucket,
             &bucket_path,
             &index_entries,
@@ -973,7 +1093,9 @@ fn scan_all_buckets(storage_root: &Path, batch_size: usize, pacing_ms: u64) -> S
         new_cursor = CorruptionCursor::default();
     }
 
-    save_cursor(&cursor_path, &new_cursor);
+    if let Err(error) = save_cursor(&cursor_path, &new_cursor) {
+        state.errors.push(error);
+    }
     state
 }
 
@@ -1164,15 +1286,20 @@ fn collect_index_entries(meta_root: &Path) -> HashMap<String, IndexEntryInfo> {
     out
 }
 
-fn resolve_data_path(bucket_path: &Path, full_key: &str) -> PathBuf {
+fn resolve_data_path(bucket_path: &Path, full_key: &str) -> Result<PathBuf, String> {
+    if let Some(error) =
+        myfsio_storage::validation::validate_object_key(full_key, usize::MAX, cfg!(windows), None)
+    {
+        return Err(error);
+    }
     if let Some(stripped) = full_key.strip_suffix('/') {
-        return bucket_path.join(stripped).join(DIR_MARKER_FILE);
+        return Ok(bucket_path.join(stripped).join(DIR_MARKER_FILE));
     }
     let direct = bucket_path.join(full_key);
     if direct.is_dir() {
-        direct.join(KEY_DATA_MARKER_FILE)
+        Ok(direct.join(KEY_DATA_MARKER_FILE))
     } else {
-        direct
+        Ok(direct)
     }
 }
 
@@ -1201,8 +1328,103 @@ struct CorruptionScanResult {
     finished_bucket: bool,
 }
 
+fn hash_exact_part<R: Read>(reader: &mut R, size: u64) -> std::io::Result<[u8; 16]> {
+    let mut hasher = Md5::new();
+    let mut remaining = size;
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = reader.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("multipart part ended with {remaining} bytes remaining"),
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn ensure_eof<R: Read>(reader: &mut R) -> std::io::Result<()> {
+    let mut extra = [0u8; 1];
+    if reader.read(&mut extra)? != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "multipart data contains bytes beyond the recorded part sizes",
+        ));
+    }
+    Ok(())
+}
+
+fn is_content_damage(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn part_size_manifest(metadata: &HashMap<String, String>) -> Option<Vec<u64>> {
+    metadata
+        .get(META_KEY_PART_SIZES)
+        .and_then(|raw| myfsio_storage::fs_backend::parse_part_sizes(raw))
+}
+
+fn multipart_etag(
+    storage_root: &Path,
+    bucket: &str,
+    object_path: &Path,
+    metadata: &HashMap<String, String>,
+) -> std::io::Result<String> {
+    let sizes = part_size_manifest(metadata).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "multipart object has no valid part-size manifest",
+        )
+    })?;
+    let mut composite = Md5::new();
+
+    if let Some(segment_id) = metadata.get(myfsio_storage::segments::META_KEY_SEGMENTS) {
+        if !myfsio_storage::validation::is_valid_multipart_id(segment_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "multipart object has an invalid segment identifier",
+            ));
+        }
+        let segment_dir = storage_root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(myfsio_storage::segments::SEGMENTS_DIR)
+            .join(segment_id);
+        for (ordinal, expected_size) in sizes.iter().copied().enumerate() {
+            let path =
+                segment_dir.join(myfsio_storage::segments::SegmentSet::seg_file_name(ordinal));
+            let mut file = std::fs::File::open(&path)?;
+            if file.metadata()?.len() != expected_size {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("segment {} has an unexpected size", path.display()),
+                ));
+            }
+            composite.update(hash_exact_part(&mut file, expected_size)?);
+            ensure_eof(&mut file)?;
+        }
+    } else {
+        let mut file = std::fs::File::open(object_path)?;
+        for expected_size in sizes.iter().copied() {
+            composite.update(hash_exact_part(&mut file, expected_size)?);
+        }
+        ensure_eof(&mut file)?;
+    }
+
+    Ok(format!("{:x}-{}", composite.finalize(), sizes.len()))
+}
+
 fn check_corrupted(
     state: &mut ScanState,
+    storage_root: &Path,
     bucket: &str,
     bucket_path: &Path,
     entries: &HashMap<String, IndexEntryInfo>,
@@ -1234,7 +1456,10 @@ fn check_corrupted(
         pacer.tick();
 
         let info = &entries[*full_key];
-        let object_path = resolve_data_path(bucket_path, full_key);
+        let object_path = match resolve_data_path(bucket_path, full_key) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
         if !object_path.is_file() {
             continue;
         }
@@ -1243,6 +1468,7 @@ fn check_corrupted(
             continue;
         }
         if EncryptionMetadata::is_encrypted(&meta_map) {
+            state.encrypted_objects_unverifiable += 1;
             continue;
         }
 
@@ -1250,25 +1476,50 @@ fn check_corrupted(
             continue;
         };
 
-        if is_multipart_etag(&stored) {
+        let is_multipart = is_multipart_etag(&stored);
+        if is_multipart && part_size_manifest(&meta_map).is_none() {
+            state.multipart_objects_unverifiable += 1;
             continue;
         }
 
-        match myfsio_crypto::hashing::md5_file(&object_path) {
-            Ok(actual) => {
-                if actual != stored {
-                    state.corrupted_objects += 1;
-                    state.push_issue(
-                        "corrupted_object",
-                        bucket,
-                        full_key,
-                        format!("stored_etag={} actual_etag={}", stored, actual),
-                    );
-                }
+        let actual = if is_multipart {
+            multipart_etag(storage_root, bucket, &object_path, &meta_map)
+        } else {
+            myfsio_crypto::hashing::md5_file(&object_path)
+        };
+        if let Err(e) = &actual {
+            if !is_content_damage(e) {
+                state
+                    .errors
+                    .push(format!("hash {}/{}: {}", bucket, full_key, e));
+                continue;
             }
-            Err(e) => state
-                .errors
-                .push(format!("hash {}/{}: {}", bucket, full_key, e)),
+        }
+
+        state.checksummed_objects += 1;
+        if is_multipart {
+            state.multipart_objects_checked += 1;
+        }
+        match actual {
+            Ok(actual) if actual == stored => {}
+            Ok(actual) => {
+                state.corrupted_objects += 1;
+                state.push_issue(
+                    "corrupted_object",
+                    bucket,
+                    full_key,
+                    format!("stored_etag={} actual_etag={}", stored, actual),
+                );
+            }
+            Err(e) => {
+                state.corrupted_objects += 1;
+                state.push_issue(
+                    "corrupted_object",
+                    bucket,
+                    full_key,
+                    format!("stored_etag={} checksum_error={}", stored, e),
+                );
+            }
         }
     }
     CorruptionScanResult {
@@ -1284,34 +1535,75 @@ fn check_phantom(
     entries: &HashMap<String, IndexEntryInfo>,
     pacer: &mut Pacer,
 ) {
-    let mut keys: Vec<&String> = entries.keys().collect();
-    keys.sort();
+    let mut ranked: Vec<(&String, Option<(u64, &str)>)> = entries
+        .iter()
+        .map(|(key, info)| (key, poisoned_retry_rank(&info.entry)))
+        .collect();
+    ranked.sort_by(
+        |(left, left_rank), (right, right_rank)| match (left_rank, right_rank) {
+            (Some(left_rank), Some(right_rank)) => left_rank
+                .cmp(right_rank)
+                .then_with(|| left.as_str().cmp(right.as_str())),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.as_str().cmp(right.as_str()),
+        },
+    );
 
-    for full_key in keys {
+    for (full_key, _) in ranked {
         pacer.tick();
         let info = &entries[full_key];
+        state.objects_scanned += 1;
+        let object_path = match resolve_data_path(bucket_path, full_key) {
+            Ok(path) => path,
+            Err(error) => {
+                state.invalid_metadata_keys += 1;
+                state.errors.push(format!(
+                    "invalid metadata key {}/{}: {}",
+                    bucket, full_key, error
+                ));
+                state.push_issue("invalid_metadata_key", bucket, full_key, error);
+                continue;
+            }
+        };
         let meta_map = entry_metadata_map(&info.entry);
         if metadata_is_corrupted(&meta_map) {
+            if !object_path.is_file() {
+                state.poisoned_objects += 1;
+                let stored = meta_map.get("__etag__").cloned().unwrap_or_default();
+                let detail = meta_map
+                    .get(META_KEY_CORRUPTION_DETAIL)
+                    .cloned()
+                    .unwrap_or_else(|| "quarantined object is awaiting recovery".to_string());
+                state.push_issue(
+                    "poisoned_object",
+                    bucket,
+                    full_key,
+                    format!("stored_etag={} {}", stored, detail),
+                );
+            }
             continue;
         }
-        state.objects_scanned += 1;
-        let object_path = resolve_data_path(bucket_path, full_key);
         if !object_path.is_file() {
             state.phantom_metadata += 1;
+            let stored = stored_etag(&info.entry).unwrap_or_default();
             state.push_issue(
                 "phantom_metadata",
                 bucket,
                 full_key,
-                "metadata entry without file on disk".to_string(),
+                format!("metadata entry without file on disk stored_etag={stored}"),
             );
         } else if let Some(seg_id) = meta_map.get(myfsio_storage::segments::META_KEY_SEGMENTS) {
-            let seg_dir = bucket_path.parent().map(|root| {
-                root.join(".myfsio.sys")
-                    .join("buckets")
-                    .join(bucket)
-                    .join(myfsio_storage::segments::SEGMENTS_DIR)
-                    .join(seg_id)
-            });
+            let seg_dir = bucket_path
+                .parent()
+                .filter(|_| myfsio_storage::validation::is_valid_multipart_id(seg_id))
+                .map(|root| {
+                    root.join(".myfsio.sys")
+                        .join("buckets")
+                        .join(bucket)
+                        .join(myfsio_storage::segments::SEGMENTS_DIR)
+                        .join(seg_id)
+                });
             let sizes = meta_map
                 .get("__part_sizes__")
                 .and_then(|raw| myfsio_storage::fs_backend::parse_part_sizes(raw));
@@ -1332,6 +1624,21 @@ fn check_phantom(
             }
         }
     }
+}
+
+fn poisoned_retry_rank(entry: &Value) -> Option<(u64, &str)> {
+    let metadata = entry.get("metadata")?.as_object()?;
+    let field = |name: &str| metadata.get(name).and_then(Value::as_str);
+    if !field(META_KEY_CORRUPTED).is_some_and(|value| value.eq_ignore_ascii_case("true")) {
+        return None;
+    }
+    let retries = field(META_KEY_CORRUPTION_RETRY_COUNT)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    Some((
+        retries,
+        field(META_KEY_CORRUPTION_LAST_RETRY_AT).unwrap_or(""),
+    ))
 }
 
 fn check_orphaned(
@@ -1472,6 +1779,11 @@ fn check_stale_versions(
             }
         }
 
+        state.version_contents_unverifiable += bin_stems
+            .keys()
+            .filter(|stem| json_stems.contains_key(*stem))
+            .count() as u64;
+
         stack.extend(subdirs);
     }
 }
@@ -1541,6 +1853,22 @@ mod tests {
 
     fn md5_hex(bytes: &[u8]) -> String {
         myfsio_crypto::hashing::md5_bytes(bytes)
+    }
+
+    fn multipart_fixture(parts: &[&[u8]]) -> (Vec<u8>, String, String) {
+        let mut body = Vec::new();
+        let mut digests = Vec::new();
+        let mut sizes = Vec::new();
+        for part in parts {
+            body.extend_from_slice(part);
+            digests.extend_from_slice(&Md5::digest(part));
+            sizes.push(part.len() as u64);
+        }
+        (
+            body,
+            format!("{:x}-{}", Md5::digest(&digests), parts.len()),
+            myfsio_storage::fs_backend::encode_part_sizes(&sizes),
+        )
     }
 
     fn write_index(meta_dir: &Path, entries: &[(&str, &str)]) {
@@ -1811,7 +2139,52 @@ mod tests {
     fn parse_etag_helpers() {
         let detail = "stored_etag=abc123 actual_etag=def456";
         assert_eq!(parse_stored_etag(detail), "abc123");
-        assert_eq!(parse_actual_etag(detail), "def456");
+    }
+
+    #[test]
+    fn heal_preview_reports_only_supported_actions() {
+        let mut state = ScanState::default();
+        state.push_issue(
+            "corrupted_object",
+            "bucket",
+            "single.bin",
+            "stored_etag=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa actual_etag=bbbb".to_string(),
+        );
+        state.push_issue(
+            "corrupted_object",
+            "bucket",
+            "multi.bin",
+            "stored_etag=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2 actual_etag=bbbb-2".to_string(),
+        );
+        state.push_issue(
+            "orphaned_object",
+            "bucket",
+            "orphan.bin",
+            "file exists without metadata".to_string(),
+        );
+
+        let preview = preview_heal_phase(&state);
+        assert_eq!(preview["corrupted_object"].found, 2);
+        assert_eq!(preview["corrupted_object"].would_heal, 1);
+        assert_eq!(preview["corrupted_object"].skipped, 1);
+        assert_eq!(preview["orphaned_object"].would_heal, 0);
+        assert_eq!(preview["orphaned_object"].skipped, 1);
+    }
+
+    #[test]
+    fn malformed_cursor_is_reported_in_scan_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cursor_path = cursor_path_for(tmp.path());
+        std::fs::create_dir_all(cursor_path.parent().unwrap()).unwrap();
+        std::fs::write(&cursor_path, b"not-json").unwrap();
+        std::fs::create_dir_all(tmp.path().join("bucket")).unwrap();
+
+        let state = scan_all_buckets(tmp.path(), 10, 0);
+        assert!(state
+            .errors
+            .iter()
+            .any(|error| error.contains("parse checksum cursor")));
+        assert!(load_cursor(&cursor_path).is_ok());
     }
 
     #[test]
@@ -1851,7 +2224,90 @@ mod tests {
             state.phantom_metadata, 0,
             "poisoned entries with quarantined files must not be reported as phantom metadata"
         );
+        assert_eq!(state.poisoned_objects, 1);
+        assert!(state
+            .issues
+            .iter()
+            .any(|issue| issue["issue_type"] == "poisoned_object"));
         assert_eq!(state.corrupted_objects, 0);
+    }
+
+    #[test]
+    fn invalid_metadata_key_cannot_escape_bucket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(root.join(bucket)).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&json!({
+                "../outside.bin": {
+                    "metadata": {"__etag__": "00000000000000000000000000000000"}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(state.invalid_metadata_keys, 1);
+        assert_eq!(state.corrupted_objects, 0);
+        assert_eq!(state.phantom_metadata, 0);
+        assert!(state
+            .errors
+            .iter()
+            .any(|error| error.contains("invalid metadata key")));
+    }
+
+    #[test]
+    fn poisoned_retry_order_prevents_failed_keys_from_starving_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(root.join(bucket)).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+        let mut entries = Map::new();
+        for index in 0..=MAX_ISSUES_PER_TYPE {
+            let retries = if index == 0 { "10" } else { "0" };
+            entries.insert(
+                format!("item-{index:03}.bin"),
+                json!({
+                    "metadata": {
+                        "__etag__": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "__corrupted__": "true",
+                        "__corruption_retry_count__": retries,
+                        "__corruption_last_retry_at__": if index == 0 { "later" } else { "earlier" },
+                    }
+                }),
+            );
+        }
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&Value::Object(entries)).unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        let retried_keys: Vec<&str> = state
+            .issues
+            .iter()
+            .filter(|issue| issue["issue_type"] == "poisoned_object")
+            .filter_map(|issue| issue["key"].as_str())
+            .collect();
+        assert_eq!(retried_keys.len(), MAX_ISSUES_PER_TYPE);
+        assert!(!retried_keys.contains(&"item-000.bin"));
+        assert!(retried_keys.contains(&"item-100.bin"));
     }
 
     #[test]
@@ -1867,23 +2323,162 @@ mod tests {
             .join(BUCKET_META_DIR);
         fs::create_dir_all(&bucket_path).unwrap();
 
-        fs::write(bucket_path.join("multi.bin"), b"healthy multipart body").unwrap();
-
-        write_index(
-            &meta_root,
-            &[("multi.bin", "deadbeefdeadbeefdeadbeefdeadbeef-3")],
-        );
+        let (body, etag, part_sizes) = multipart_fixture(&[b"healthy ", b"multipart ", b"body"]);
+        fs::write(bucket_path.join("multi.bin"), body).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&json!({
+                "multi.bin": {
+                    "metadata": {
+                        "__etag__": etag,
+                        "__part_sizes__": part_sizes,
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let state = scan_all_buckets(root, 10_000, 0);
         assert_eq!(
             state.corrupted_objects, 0,
-            "multipart-style ETags must not be checked against whole-body MD5"
+            "multipart objects must use their composite checksum"
         );
+        assert_eq!(state.multipart_objects_checked, 1);
+        assert_eq!(state.checksummed_objects, 1);
         assert!(
             state.errors.is_empty(),
             "unexpected errors: {:?}",
             state.errors
         );
+    }
+
+    #[test]
+    fn corrupted_multipart_object_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        let (mut body, etag, part_sizes) = multipart_fixture(&[b"first", b"second"]);
+        body[0] ^= 0xff;
+        fs::write(bucket_path.join("multi.bin"), body).unwrap();
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&json!({
+                "multi.bin": {
+                    "metadata": {
+                        "__etag__": etag,
+                        "__part_sizes__": part_sizes,
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(state.corrupted_objects, 1);
+        assert_eq!(state.multipart_objects_checked, 1);
+    }
+
+    #[test]
+    fn multipart_object_without_part_manifest_is_unverifiable_not_corrupted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        fs::write(
+            bucket_path.join("legacy.bin"),
+            b"body written by an older build",
+        )
+        .unwrap();
+        write_index(
+            &meta_root,
+            &[("legacy.bin", "deadbeefdeadbeefdeadbeefdeadbeef-3")],
+        );
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(
+            state.corrupted_objects, 0,
+            "a missing part-size manifest is not evidence of corruption"
+        );
+        assert_eq!(state.multipart_objects_unverifiable, 1);
+        assert_eq!(state.multipart_objects_checked, 0);
+        assert!(
+            state.errors.is_empty(),
+            "unexpected errors: {:?}",
+            state.errors
+        );
+    }
+
+    #[test]
+    fn truncated_multipart_data_is_reported_as_corruption() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let bucket = "testbucket";
+        let bucket_path = root.join(bucket);
+        let meta_root = root
+            .join(SYSTEM_ROOT)
+            .join(SYSTEM_BUCKETS_DIR)
+            .join(bucket)
+            .join(BUCKET_META_DIR);
+        fs::create_dir_all(&bucket_path).unwrap();
+        fs::create_dir_all(&meta_root).unwrap();
+
+        let (body, etag, part_sizes) = multipart_fixture(&[b"first", b"second"]);
+        fs::write(bucket_path.join("multi.bin"), &body[..body.len() - 2]).unwrap();
+        fs::write(
+            meta_root.join(INDEX_FILE),
+            serde_json::to_string(&json!({
+                "multi.bin": {
+                    "metadata": {
+                        "__etag__": etag,
+                        "__part_sizes__": part_sizes,
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(state.corrupted_objects, 1);
+        assert!(
+            state.errors.is_empty(),
+            "unexpected errors: {:?}",
+            state.errors
+        );
+    }
+
+    #[test]
+    fn healed_findings_are_not_reported_as_unresolved() {
+        let result = json!({
+            "phantom_metadata": 3,
+            "legacy_metadata_drifts": 2,
+            "issues_healed": 3,
+        });
+        assert_eq!(total_issue_count(&result), 5);
+        assert_eq!(unresolved_issue_count(&result), 2);
+
+        let fully_healed = json!({ "phantom_metadata": 3, "issues_healed": 3 });
+        assert_eq!(unresolved_issue_count(&fully_healed), 0);
     }
 
     fn write_object(root: &Path, bucket: &str, key: &str, bytes: &[u8]) -> String {
@@ -1923,17 +2518,17 @@ mod tests {
         );
 
         let _ = scan_all_buckets(root, 2, 0);
-        let cursor1 = load_cursor(&cursor_path_for(root));
+        let cursor1 = load_cursor(&cursor_path_for(root)).unwrap();
         assert_eq!(cursor1.bucket, "alpha");
         assert_eq!(cursor1.after_key, "b.txt");
 
         let _ = scan_all_buckets(root, 2, 0);
-        let cursor2 = load_cursor(&cursor_path_for(root));
+        let cursor2 = load_cursor(&cursor_path_for(root)).unwrap();
         assert_eq!(cursor2.bucket, "alpha");
         assert_eq!(cursor2.after_key, "d.txt");
 
         let _ = scan_all_buckets(root, 2, 0);
-        let cursor3 = load_cursor(&cursor_path_for(root));
+        let cursor3 = load_cursor(&cursor_path_for(root)).unwrap();
         assert_eq!(
             cursor3.bucket, "",
             "completing a full sweep should reset the cursor"
@@ -1949,12 +2544,12 @@ mod tests {
         seed_bucket_with_objects(root, "bravo", &["m.txt", "n.txt"]);
 
         let _ = scan_all_buckets(root, 3, 0);
-        let c1 = load_cursor(&cursor_path_for(root));
+        let c1 = load_cursor(&cursor_path_for(root)).unwrap();
         assert_eq!(c1.bucket, "bravo");
         assert_eq!(c1.after_key, "m.txt");
 
         let _ = scan_all_buckets(root, 3, 0);
-        let c2 = load_cursor(&cursor_path_for(root));
+        let c2 = load_cursor(&cursor_path_for(root)).unwrap();
         assert_eq!(c2.bucket, "", "second run should finish the sweep");
     }
 
@@ -1967,7 +2562,7 @@ mod tests {
             bucket: "ghost".to_string(),
             after_key: "zzz".to_string(),
         };
-        save_cursor(&cursor_path_for(root), &cursor);
+        save_cursor(&cursor_path_for(root), &cursor).unwrap();
 
         let state = scan_all_buckets(root, 100, 0);
         assert!(
@@ -1975,7 +2570,7 @@ mod tests {
             "unexpected errors: {:?}",
             state.errors
         );
-        let after = load_cursor(&cursor_path_for(root));
+        let after = load_cursor(&cursor_path_for(root)).unwrap();
         assert_eq!(
             after.bucket, "",
             "stale cursor should be reset after a complete sweep"
