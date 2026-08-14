@@ -3,6 +3,7 @@ pub mod embedded;
 pub mod handlers;
 pub mod middleware;
 pub mod s3_response;
+pub mod select_engine;
 pub mod services;
 pub mod session;
 pub mod state;

@@ -580,6 +580,7 @@ async fn read_object_bytes_for_zip(
     state: &AppState,
     bucket: &str,
     key: &str,
+    max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
     let all_meta = state
         .storage
@@ -592,33 +593,56 @@ async fn read_object_bytes_for_zip(
             .encryption
             .as_ref()
             .ok_or_else(|| "Encryption service is not available".to_string())?;
-        let obj_path = state
-            .storage
-            .get_object_path(bucket, key)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut stream = enc_svc
+        let (obj_path, materialized) =
+            if all_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS) {
+                let path = state
+                    .storage
+                    .materialize_object_to_tmp(bucket, key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (path.clone(), Some(path))
+            } else {
+                let path = state
+                    .storage
+                    .get_object_path(bucket, key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (path, None)
+            };
+        let result = match enc_svc
             .decrypt_object_stream(&obj_path, &enc_meta, None, None, false)
             .await
-            .map_err(|e| e.to_string())?;
-        let mut bytes = Vec::new();
-        stream
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(bytes);
+        {
+            Ok(stream) => read_capped(stream, max_bytes).await,
+            Err(e) => Err(e.to_string()),
+        };
+        if let Some(path) = materialized {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        return result;
     }
 
-    let (_meta, mut reader) = state
+    let (_meta, reader) = state
         .storage
         .get_object(bucket, key)
         .await
         .map_err(|e| e.to_string())?;
+    read_capped(reader, max_bytes).await
+}
+
+async fn read_capped<R>(reader: R, max_bytes: u64) -> Result<Vec<u8>, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut bytes = Vec::new();
-    reader
+    let mut limited = reader.take(max_bytes.saturating_add(1));
+    limited
         .read_to_end(&mut bytes)
         .await
         .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("Total download size exceeds 256 MB limit. Select fewer objects.".to_string());
+    }
     Ok(bytes)
 }
 
@@ -4304,7 +4328,9 @@ pub async fn bulk_download_objects(
         );
     }
 
+    let max_total_bytes = 256 * 1024 * 1024u64;
     let mut total_bytes = 0u64;
+    let mut bytes_read = 0u64;
     let mut archive_entries = Vec::new();
     for key in keys {
         if let Err(message) =
@@ -4312,24 +4338,25 @@ pub async fn bulk_download_objects(
         {
             return json_error(StatusCode::FORBIDDEN, format!("{}: {}", key, message));
         }
-        match state.storage.head_object(&bucket_name, &key).await {
-            Ok(meta) => {
-                total_bytes = total_bytes.saturating_add(meta.size);
-                match read_object_bytes_for_zip(&state, &bucket_name, &key).await {
-                    Ok(bytes) => archive_entries.push((key, bytes, meta.last_modified)),
-                    Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
-                }
-            }
+        let meta = match state.storage.head_object(&bucket_name, &key).await {
+            Ok(meta) => meta,
             Err(err) => return storage_json_error(err),
+        };
+        total_bytes = total_bytes.saturating_add(meta.size);
+        if total_bytes > max_total_bytes {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Total download size exceeds 256 MB limit. Select fewer objects.",
+            );
         }
-    }
-
-    let max_total_bytes = 256 * 1024 * 1024u64;
-    if total_bytes > max_total_bytes {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Total download size exceeds 256 MB limit. Select fewer objects.",
-        );
+        let remaining = max_total_bytes - bytes_read;
+        match read_object_bytes_for_zip(&state, &bucket_name, &key, remaining).await {
+            Ok(bytes) => {
+                bytes_read = bytes_read.saturating_add(bytes.len() as u64);
+                archive_entries.push((key, bytes, meta.last_modified))
+            }
+            Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
+        }
     }
 
     let zip_bytes = match build_zip_archive(archive_entries) {

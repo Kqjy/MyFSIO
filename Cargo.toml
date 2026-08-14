@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.8"
+version = "0.6.0"
 edition = "2021"
 
 [workspace.lints.clippy]
@@ -55,7 +55,9 @@ dashmap = "6"
 crc32fast = "1"
 crc-fast = "1.9"
 sha1 = "0.10"
-duckdb = { version = "1", features = ["bundled", "json"] }
+sqlparser = "0.62"
+csv = "1.4"
+parquet = { version = "59", default-features = false, features = ["snap", "brotli", "flate2-zlib-rs", "lz4", "zstd", "base64", "simdutf8", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
 aws-sdk-s3 = { version = "1", features = ["behavior-version-latest", "rt-tokio"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }

@@ -1,25 +1,25 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
 use bytes::Bytes;
 use crc32fast::Hasher;
-use duckdb::types::ValueRef;
-use duckdb::Connection;
-use futures::stream;
+use futures::{StreamExt, TryStreamExt};
 use myfsio_common::error::{S3Error, S3ErrorCode};
+use myfsio_crypto::encryption::EncryptionMetadata;
 use myfsio_storage::traits::StorageEngine;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::io::{StreamReader, SyncIoBridge};
 
+use crate::select_engine::input::{
+    CountingReader, CsvHeaderMode, CsvSource, JsonSource, ParquetSource, RecordSource,
+};
+use crate::select_engine::plan::SelectPlan;
+use crate::select_engine::{plan_query, run_select, OutputFormatCfg};
 use crate::state::AppState;
 
-#[cfg(target_os = "windows")]
-#[link(name = "Rstrtmgr")]
-extern "system" {}
-
-const CHUNK_SIZE: usize = 65_536;
+use super::object_read::{serve_object_data, snapshot_object_for_read, ObjectReadError};
 
 pub async fn post_select_object_content(
     state: &AppState,
@@ -42,14 +42,122 @@ pub async fn post_select_object_content(
         Err(err) => return s3_error_response(err),
     };
 
-    let stored_meta = state
-        .storage
-        .get_object_metadata(bucket, key)
-        .await
-        .unwrap_or_default();
-    let segmented = stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
+    let plan = match plan_query(&request.expression) {
+        Ok(plan) => plan,
+        Err(message) => {
+            return s3_error_response(S3Error::new(S3ErrorCode::InvalidRequest, message));
+        }
+    };
 
-    let (object_path, cleanup_path) = if segmented {
+    let output_cfg = match &request.output_format {
+        OutputFormat::Csv(cfg) => OutputFormatCfg::Csv {
+            field_delimiter: cfg.field_delimiter.clone(),
+            record_delimiter: cfg.record_delimiter.clone(),
+            quote: cfg.quote_character.clone(),
+            quote_always: cfg.quote_always,
+        },
+        OutputFormat::Json(cfg) => OutputFormatCfg::Json {
+            record_delimiter: cfg.record_delimiter.clone(),
+        },
+    };
+
+    match &request.input_format {
+        InputFormat::Parquet => run_parquet_select(state, bucket, key, plan, output_cfg).await,
+        InputFormat::Csv(_) | InputFormat::Json(_) => {
+            run_streaming_select(state, bucket, key, headers, request, plan, output_cfg).await
+        }
+    }
+}
+
+async fn run_streaming_select(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    headers: &HeaderMap,
+    request: SelectRequest,
+    plan: SelectPlan,
+    output_cfg: OutputFormatCfg,
+) -> Response {
+    let snapshot = match snapshot_object_for_read(state, bucket, key, None, None).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            return s3_error_response(S3Error::new(S3ErrorCode::NoSuchKey, "Object not found"));
+        }
+    };
+
+    let served = match serve_object_data(state, snapshot, None, headers).await {
+        Ok(served) => served,
+        Err(ObjectReadError::Rejected(response)) => return response,
+        Err(ObjectReadError::Storage(_)) => {
+            return s3_error_response(S3Error::new(S3ErrorCode::NoSuchKey, "Object not found"));
+        }
+        Err(ObjectReadError::RangeNotSatisfiable(_)) | Err(ObjectReadError::Internal(_)) => {
+            return s3_error_response(S3Error::new(
+                S3ErrorCode::InternalError,
+                "SelectObjectContent execution failed",
+            ));
+        }
+    };
+
+    let data_stream = served
+        .body
+        .into_data_stream()
+        .map_err(std::io::Error::other);
+    let reader = SyncIoBridge::new(StreamReader::new(data_stream));
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    tokio::task::spawn_blocking(move || {
+        let outcome = (|| -> Result<(u64, u64), String> {
+            let (counting, counter) = CountingReader::new(reader);
+            let input: Box<dyn std::io::Read + Send> = Box::new(counting);
+            let mut source: Box<dyn RecordSource> = match &request.input_format {
+                InputFormat::Csv(cfg) => Box::new(CsvSource::new(
+                    input,
+                    cfg.field_delimiter,
+                    cfg.quote_character,
+                    cfg.comment_character,
+                    CsvHeaderMode::from_file_header_info(&cfg.file_header_info),
+                )?),
+                InputFormat::Json(cfg) => {
+                    Box::new(JsonSource::new(input, cfg.json_type != "LINES"))
+                }
+                InputFormat::Parquet => unreachable!(),
+            };
+            let returned = run_and_emit(source.as_mut(), &plan, &output_cfg, &tx)?;
+            Ok((counter.load(Ordering::Relaxed), returned))
+        })();
+        finish_stream(&tx, outcome);
+    });
+
+    select_stream_response(rx)
+}
+
+async fn run_parquet_select(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    plan: SelectPlan,
+    output_cfg: OutputFormatCfg,
+) -> Response {
+    let meta = match state.storage.head_object(bucket, key).await {
+        Ok(meta) => meta,
+        Err(_) => {
+            return s3_error_response(S3Error::new(S3ErrorCode::NoSuchKey, "Object not found"));
+        }
+    };
+    if EncryptionMetadata::from_metadata(&meta.internal_metadata).is_some()
+        || super::mpu_is_sse_c(&meta.internal_metadata)
+    {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "SelectObjectContent with Parquet input is not supported on encrypted objects",
+        ));
+    }
+
+    let segmented = meta
+        .internal_metadata
+        .contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
+    let (object_path, cleanup) = if segmented {
         match state.storage.materialize_object_to_tmp(bucket, key).await {
             Ok(path) => (path.clone(), Some(path)),
             Err(_) => {
@@ -65,40 +173,57 @@ pub async fn post_select_object_content(
         }
     };
 
-    let join_res =
-        tokio::task::spawn_blocking(move || execute_select_query(object_path, request)).await;
-    if let Some(path) = cleanup_path {
-        let _ = tokio::fs::remove_file(&path).await;
-    }
-    let chunks = match join_res {
-        Ok(Ok(chunks)) => chunks,
-        Ok(Err(message)) => {
-            return s3_error_response(S3Error::new(S3ErrorCode::InvalidRequest, message));
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    tokio::task::spawn_blocking(move || {
+        let outcome = (|| -> Result<(u64, u64), String> {
+            let file = std::fs::File::open(&object_path)
+                .map_err(|e| format!("Failed opening object: {}", e))?;
+            let scanned = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let mut source = ParquetSource::new(file)?;
+            let returned = run_and_emit(&mut source, &plan, &output_cfg, &tx)?;
+            Ok((scanned, returned))
+        })();
+        if let Some(path) = cleanup {
+            let _ = std::fs::remove_file(&path);
         }
-        Err(_) => {
-            return s3_error_response(S3Error::new(
-                S3ErrorCode::InternalError,
-                "SelectObjectContent execution failed",
-            ));
-        }
+        finish_stream(&tx, outcome);
+    });
+
+    select_stream_response(rx)
+}
+
+fn run_and_emit(
+    source: &mut dyn RecordSource,
+    plan: &SelectPlan,
+    output_cfg: &OutputFormatCfg,
+    tx: &tokio::sync::mpsc::Sender<Bytes>,
+) -> Result<u64, String> {
+    let mut emit = |chunk: Vec<u8>| -> Result<(), String> {
+        tx.blocking_send(Bytes::from(encode_select_event("Records", &chunk)))
+            .map_err(|_| "client disconnected".to_string())
     };
+    run_select(source, plan, output_cfg, &mut emit, &|| tx.is_closed())
+}
 
-    let bytes_returned: usize = chunks.iter().map(|c| c.len()).sum();
-    let mut events: Vec<Bytes> = Vec::with_capacity(chunks.len() + 2);
-    for chunk in chunks {
-        events.push(Bytes::from(encode_select_event("Records", &chunk)));
+fn finish_stream(tx: &tokio::sync::mpsc::Sender<Bytes>, outcome: Result<(u64, u64), String>) {
+    match outcome {
+        Ok((scanned, returned)) => {
+            let stats = build_stats_xml(scanned as usize, returned as usize);
+            let _ = tx.blocking_send(Bytes::from(encode_select_event("Stats", stats.as_bytes())));
+            let _ = tx.blocking_send(Bytes::from(encode_select_event("End", b"")));
+        }
+        Err(message) => {
+            let _ = tx.blocking_send(Bytes::from(encode_select_error_event(
+                "InvalidRequest",
+                &message,
+            )));
+        }
     }
+}
 
-    let stats_payload = build_stats_xml(0, bytes_returned);
-    events.push(Bytes::from(encode_select_event(
-        "Stats",
-        stats_payload.as_bytes(),
-    )));
-    events.push(Bytes::from(encode_select_event("End", b"")));
-
-    let stream = stream::iter(events.into_iter().map(Ok::<Bytes, std::io::Error>));
+fn select_stream_response(rx: tokio::sync::mpsc::Receiver<Bytes>) -> Response {
+    let stream = ReceiverStream::new(rx).map(Ok::<Bytes, std::convert::Infallible>);
     let body = Body::from_stream(stream);
-
     let mut response = (StatusCode::OK, body).into_response();
     response.headers_mut().insert(
         HeaderName::from_static("content-type"),
@@ -128,8 +253,9 @@ enum InputFormat {
 #[derive(Clone)]
 struct CsvInputConfig {
     file_header_info: String,
-    field_delimiter: String,
-    quote_character: String,
+    field_delimiter: u8,
+    quote_character: u8,
+    comment_character: Option<u8>,
 }
 
 #[derive(Clone)]
@@ -148,6 +274,7 @@ struct CsvOutputConfig {
     field_delimiter: String,
     record_delimiter: String,
     quote_character: String,
+    quote_always: bool,
 }
 
 #[derive(Clone)]
@@ -203,25 +330,99 @@ fn parse_select_request(payload: &[u8]) -> Result<SelectRequest, S3Error> {
     })
 }
 
+fn invalid_request(message: String) -> S3Error {
+    S3Error::new(S3ErrorCode::InvalidRequest, message)
+}
+
+fn single_ascii_char(
+    node: &roxmltree::Node<'_, '_>,
+    name: &str,
+    default_byte: u8,
+) -> Result<u8, S3Error> {
+    match child_text(node, name) {
+        None => Ok(default_byte),
+        Some(value) => {
+            let mut chars = value.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if c.is_ascii() => Ok(c as u8),
+                _ => Err(invalid_request(format!(
+                    "{} must be a single ASCII character",
+                    name
+                ))),
+            }
+        }
+    }
+}
+
+fn require_no_compression(node: &roxmltree::Node<'_, '_>) -> Result<(), S3Error> {
+    match child_text(node, "CompressionType") {
+        None => Ok(()),
+        Some(value) if value.eq_ignore_ascii_case("NONE") => Ok(()),
+        Some(value) => Err(invalid_request(format!(
+            "CompressionType {} is not supported",
+            value
+        ))),
+    }
+}
+
 fn parse_input_format(node: &roxmltree::Node<'_, '_>) -> Result<InputFormat, S3Error> {
+    require_no_compression(node)?;
+
     if let Some(csv_node) = child(node, "CSV") {
+        let file_header_info = child_text(&csv_node, "FileHeaderInfo")
+            .unwrap_or_else(|| "NONE".to_string())
+            .to_ascii_uppercase();
+        if !matches!(file_header_info.as_str(), "USE" | "IGNORE" | "NONE") {
+            return Err(invalid_request(
+                "FileHeaderInfo must be USE, IGNORE, or NONE".to_string(),
+            ));
+        }
+        let field_delimiter = single_ascii_char(&csv_node, "FieldDelimiter", b',')?;
+        let quote_character = single_ascii_char(&csv_node, "QuoteCharacter", b'"')?;
+        let comment_character = match child_text(&csv_node, "Comments") {
+            None => None,
+            Some(_) => Some(single_ascii_char(&csv_node, "Comments", b'#')?),
+        };
+        if let Some(value) = child_text(&csv_node, "RecordDelimiter") {
+            if value != "\n" && value != "\r\n" {
+                return Err(invalid_request(
+                    "Input CSV RecordDelimiter must be \\n or \\r\\n".to_string(),
+                ));
+            }
+        }
+        if let Some(value) = child_text(&csv_node, "QuoteEscapeCharacter") {
+            if value.len() != 1 || value.as_bytes()[0] != quote_character {
+                return Err(invalid_request(
+                    "QuoteEscapeCharacter other than the quote character is not supported"
+                        .to_string(),
+                ));
+            }
+        }
+        if let Some(value) = child_text(&csv_node, "AllowQuotedRecordDelimiter") {
+            if !value.eq_ignore_ascii_case("true") && !value.eq_ignore_ascii_case("false") {
+                return Err(invalid_request(
+                    "AllowQuotedRecordDelimiter must be TRUE or FALSE".to_string(),
+                ));
+            }
+        }
         return Ok(InputFormat::Csv(CsvInputConfig {
-            file_header_info: child_text(&csv_node, "FileHeaderInfo")
-                .unwrap_or_else(|| "NONE".to_string())
-                .to_ascii_uppercase(),
-            field_delimiter: child_text(&csv_node, "FieldDelimiter")
-                .unwrap_or_else(|| ",".to_string()),
-            quote_character: child_text(&csv_node, "QuoteCharacter")
-                .unwrap_or_else(|| "\"".to_string()),
+            file_header_info,
+            field_delimiter,
+            quote_character,
+            comment_character,
         }));
     }
 
     if let Some(json_node) = child(node, "JSON") {
-        return Ok(InputFormat::Json(JsonInputConfig {
-            json_type: child_text(&json_node, "Type")
-                .unwrap_or_else(|| "DOCUMENT".to_string())
-                .to_ascii_uppercase(),
-        }));
+        let json_type = child_text(&json_node, "Type")
+            .unwrap_or_else(|| "DOCUMENT".to_string())
+            .to_ascii_uppercase();
+        if !matches!(json_type.as_str(), "DOCUMENT" | "LINES") {
+            return Err(invalid_request(
+                "JSON Type must be DOCUMENT or LINES".to_string(),
+            ));
+        }
+        return Ok(InputFormat::Json(JsonInputConfig { json_type }));
     }
 
     if child(node, "Parquet").is_some() {
@@ -236,13 +437,32 @@ fn parse_input_format(node: &roxmltree::Node<'_, '_>) -> Result<InputFormat, S3E
 
 fn parse_output_format(node: &roxmltree::Node<'_, '_>) -> Result<OutputFormat, S3Error> {
     if let Some(csv_node) = child(node, "CSV") {
+        let field_delimiter = single_ascii_char(&csv_node, "FieldDelimiter", b',')?;
+        let quote_character = single_ascii_char(&csv_node, "QuoteCharacter", b'"')?;
+        if let Some(value) = child_text(&csv_node, "QuoteEscapeCharacter") {
+            if value.len() != 1 || value.as_bytes()[0] != quote_character {
+                return Err(invalid_request(
+                    "QuoteEscapeCharacter other than the quote character is not supported"
+                        .to_string(),
+                ));
+            }
+        }
+        let quote_always = match child_text(&csv_node, "QuoteFields") {
+            None => false,
+            Some(value) if value.eq_ignore_ascii_case("ASNEEDED") => false,
+            Some(value) if value.eq_ignore_ascii_case("ALWAYS") => true,
+            Some(_) => {
+                return Err(invalid_request(
+                    "QuoteFields must be ALWAYS or ASNEEDED".to_string(),
+                ));
+            }
+        };
         return Ok(OutputFormat::Csv(CsvOutputConfig {
-            field_delimiter: child_text(&csv_node, "FieldDelimiter")
-                .unwrap_or_else(|| ",".to_string()),
+            field_delimiter: (field_delimiter as char).to_string(),
             record_delimiter: child_text(&csv_node, "RecordDelimiter")
                 .unwrap_or_else(|| "\n".to_string()),
-            quote_character: child_text(&csv_node, "QuoteCharacter")
-                .unwrap_or_else(|| "\"".to_string()),
+            quote_character: (quote_character as char).to_string(),
+            quote_always,
         }));
     }
 
@@ -271,462 +491,6 @@ fn child_text(node: &roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
     child(node, name)
         .and_then(|n| n.text())
         .map(|s| s.to_string())
-}
-
-fn execute_select_query(path: PathBuf, request: SelectRequest) -> Result<Vec<Vec<u8>>, String> {
-    if let Some(token) = find_disallowed_token(&request.expression) {
-        return Err(format!(
-            "Disallowed function or statement in expression: {}",
-            token
-        ));
-    }
-
-    let conn =
-        Connection::open_in_memory().map_err(|e| format!("DuckDB connection error: {}", e))?;
-
-    conn.execute_batch(
-        "SET autoinstall_known_extensions=false; \
-         SET autoload_known_extensions=false;",
-    )
-    .map_err(|e| format!("DuckDB lockdown failed: {}", e))?;
-
-    load_input_table(&conn, &path, &request.input_format)?;
-
-    conn.execute_batch(
-        "SET memory_limit='256MB'; \
-         SET max_memory='256MB'; \
-         SET enable_external_access=false; \
-         SET lock_configuration=true;",
-    )
-    .map_err(|e| format!("DuckDB lockdown failed: {}", e))?;
-
-    let expression = request
-        .expression
-        .replace("s3object", "data")
-        .replace("S3Object", "data");
-
-    let mut stmt = conn
-        .prepare(&expression)
-        .map_err(|e| format!("SQL execution error: {}", e))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("SQL execution error: {}", e))?;
-    let stmt_ref = rows
-        .as_ref()
-        .ok_or_else(|| "SQL execution error: statement metadata unavailable".to_string())?;
-    let col_count = stmt_ref.column_count();
-    let mut columns: Vec<String> = Vec::with_capacity(col_count);
-    for i in 0..col_count {
-        let name = stmt_ref
-            .column_name(i)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|_| format!("_{}", i));
-        columns.push(name);
-    }
-
-    match request.output_format {
-        OutputFormat::Csv(cfg) => collect_csv_chunks(&mut rows, col_count, cfg),
-        OutputFormat::Json(cfg) => collect_json_chunks(&mut rows, col_count, &columns, cfg),
-    }
-}
-
-fn load_input_table(conn: &Connection, path: &Path, input: &InputFormat) -> Result<(), String> {
-    let path_str = path.to_string_lossy().replace('\\', "/");
-    match input {
-        InputFormat::Csv(cfg) => {
-            let header = cfg.file_header_info == "USE" || cfg.file_header_info == "IGNORE";
-            let delimiter = normalize_single_char(&cfg.field_delimiter, ',');
-            let quote = normalize_single_char(&cfg.quote_character, '"');
-
-            let sql = format!(
-                "CREATE TABLE data AS SELECT * FROM read_csv('{}', header={}, delim='{}', quote='{}')",
-                sql_escape(&path_str),
-                if header { "true" } else { "false" },
-                sql_escape(&delimiter),
-                sql_escape(&quote)
-            );
-            conn.execute_batch(&sql)
-                .map_err(|e| format!("Failed loading CSV data: {}", e))?;
-        }
-        InputFormat::Json(cfg) => {
-            conn.execute_batch("LOAD json;")
-                .map_err(|e| format!("Failed loading JSON extension: {}", e))?;
-            let format = if cfg.json_type == "LINES" {
-                "newline_delimited"
-            } else {
-                "array"
-            };
-            let sql = format!(
-                "CREATE TABLE data AS SELECT * FROM read_json_auto('{}', format='{}')",
-                sql_escape(&path_str),
-                format
-            );
-            conn.execute_batch(&sql)
-                .map_err(|e| format!("Failed loading JSON data: {}", e))?;
-        }
-        InputFormat::Parquet => {
-            let sql = format!(
-                "CREATE TABLE data AS SELECT * FROM read_parquet('{}')",
-                sql_escape(&path_str)
-            );
-            conn.execute_batch(&sql)
-                .map_err(|e| format!("Failed loading Parquet data: {}", e))?;
-        }
-    }
-    Ok(())
-}
-
-fn sql_escape(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn find_disallowed_token(expression: &str) -> Option<&'static str> {
-    const BANNED_FUNCTIONS: &[&str] = &[
-        "read_csv",
-        "read_csv_auto",
-        "read_json",
-        "read_json_auto",
-        "read_json_objects",
-        "read_ndjson",
-        "read_ndjson_auto",
-        "read_ndjson_objects",
-        "read_parquet",
-        "parquet_scan",
-        "read_blob",
-        "read_text",
-        "sniff_csv",
-        "parquet_schema",
-        "parquet_metadata",
-        "parquet_file_metadata",
-        "parquet_kv_metadata",
-        "from_substrait",
-        "from_substrait_json",
-        "copy_from_database",
-        "copy_to_database",
-        "duckdb_extensions",
-        "load_extension",
-        "install_extension",
-        "load_aws_credentials",
-    ];
-    const BANNED_LEADING_KEYWORDS: &[&str] = &[
-        "copy", "attach", "detach", "install", "load", "pragma", "set", "export", "import",
-    ];
-
-    #[derive(Clone)]
-    struct Tok {
-        pos: usize,
-        end: usize,
-        text: String,
-        followed_by_paren: bool,
-    }
-
-    let mut tokens: Vec<Tok> = Vec::new();
-    let mut buf = String::new();
-    let mut start = 0usize;
-    let bytes = expression.as_bytes();
-    let mut i = 0usize;
-
-    let push_token = |tokens: &mut Vec<Tok>, buf: &mut String, start: usize, end: usize| {
-        if buf.is_empty() {
-            return;
-        }
-        tokens.push(Tok {
-            pos: start,
-            end,
-            text: std::mem::take(buf),
-            followed_by_paren: false,
-        });
-    };
-
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if c == '\'' {
-            push_token(&mut tokens, &mut buf, start, i);
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] as char == '\'' {
-                    if i + 1 < bytes.len() && bytes[i + 1] as char == '\'' {
-                        i += 2;
-                        continue;
-                    }
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-        if c == '"' {
-            push_token(&mut tokens, &mut buf, start, i);
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] as char == '"' {
-                    i += 1;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-        if c == '-' && i + 1 < bytes.len() && bytes[i + 1] as char == '-' {
-            push_token(&mut tokens, &mut buf, start, i);
-            while i < bytes.len() && bytes[i] as char != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == '/' && i + 1 < bytes.len() && bytes[i + 1] as char == '*' {
-            push_token(&mut tokens, &mut buf, start, i);
-            i += 2;
-            while i + 1 < bytes.len() {
-                if bytes[i] as char == '*' && bytes[i + 1] as char == '/' {
-                    i += 2;
-                    break;
-                }
-                i += 1;
-            }
-            continue;
-        }
-        if c.is_ascii_alphanumeric() || c == '_' {
-            if buf.is_empty() {
-                start = i;
-            }
-            buf.push(c.to_ascii_lowercase());
-        } else if !buf.is_empty() {
-            push_token(&mut tokens, &mut buf, start, i);
-        }
-        i += 1;
-    }
-    if !buf.is_empty() {
-        let end = bytes.len();
-        push_token(&mut tokens, &mut buf, start, end);
-    }
-
-    for tok in tokens.iter_mut() {
-        let mut j = tok.end;
-        while j < bytes.len() {
-            let c = bytes[j] as char;
-            if c.is_whitespace() {
-                j += 1;
-                continue;
-            }
-            if c == '-' && j + 1 < bytes.len() && bytes[j + 1] as char == '-' {
-                while j < bytes.len() && bytes[j] as char != '\n' {
-                    j += 1;
-                }
-                continue;
-            }
-            if c == '/' && j + 1 < bytes.len() && bytes[j + 1] as char == '*' {
-                j += 2;
-                while j + 1 < bytes.len() {
-                    if bytes[j] as char == '*' && bytes[j + 1] as char == '/' {
-                        j += 2;
-                        break;
-                    }
-                    j += 1;
-                }
-                continue;
-            }
-            tok.followed_by_paren = c == '(';
-            break;
-        }
-    }
-
-    for tok in &tokens {
-        if !tok.followed_by_paren {
-            continue;
-        }
-        for banned in BANNED_FUNCTIONS {
-            if tok.text == *banned {
-                return Some(banned);
-            }
-        }
-    }
-
-    let mut at_statement_start = true;
-    let mut last_end = 0usize;
-    for tok in &tokens {
-        let between = &expression[last_end..tok.pos];
-        if between.contains(';') {
-            at_statement_start = true;
-        }
-        if at_statement_start {
-            if !tok.followed_by_paren {
-                for kw in BANNED_LEADING_KEYWORDS {
-                    if tok.text == *kw {
-                        return Some(match *kw {
-                            "copy" => "COPY",
-                            "attach" => "ATTACH",
-                            "detach" => "DETACH",
-                            "install" => "INSTALL",
-                            "load" => "LOAD",
-                            "pragma" => "PRAGMA",
-                            "set" => "SET",
-                            "export" => "EXPORT",
-                            "import" => "IMPORT",
-                            _ => unreachable!(),
-                        });
-                    }
-                }
-            }
-            at_statement_start = false;
-        }
-        last_end = tok.end;
-    }
-
-    None
-}
-
-fn normalize_single_char(value: &str, default_char: char) -> String {
-    value.chars().next().unwrap_or(default_char).to_string()
-}
-
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
-
-fn collect_csv_chunks(
-    rows: &mut duckdb::Rows<'_>,
-    col_count: usize,
-    cfg: CsvOutputConfig,
-) -> Result<Vec<Vec<u8>>, String> {
-    let delimiter = cfg.field_delimiter;
-    let record_delimiter = cfg.record_delimiter;
-    let quote = cfg.quote_character;
-
-    let mut chunks: Vec<Vec<u8>> = Vec::new();
-    let mut buffer = String::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("SQL execution error: {}", e))?
-    {
-        let mut fields: Vec<String> = Vec::with_capacity(col_count);
-        for i in 0..col_count {
-            let value = row
-                .get_ref(i)
-                .map_err(|e| format!("SQL execution error: {}", e))?;
-            if matches!(value, ValueRef::Null) {
-                fields.push(String::new());
-                continue;
-            }
-
-            let mut text = value_ref_to_string(value);
-            if text.contains(&delimiter)
-                || text.contains(&quote)
-                || text.contains(&record_delimiter)
-            {
-                text = text.replace(&quote, &(quote.clone() + &quote));
-                text = format!("{}{}{}", quote, text, quote);
-            }
-            fields.push(text);
-        }
-        buffer.push_str(&fields.join(&delimiter));
-        buffer.push_str(&record_delimiter);
-
-        while buffer.len() >= CHUNK_SIZE {
-            let split_at = floor_char_boundary(&buffer, CHUNK_SIZE);
-            let rest = buffer.split_off(split_at);
-            chunks.push(buffer.into_bytes());
-            buffer = rest;
-        }
-    }
-
-    if !buffer.is_empty() {
-        chunks.push(buffer.into_bytes());
-    }
-    Ok(chunks)
-}
-
-fn collect_json_chunks(
-    rows: &mut duckdb::Rows<'_>,
-    col_count: usize,
-    columns: &[String],
-    cfg: JsonOutputConfig,
-) -> Result<Vec<Vec<u8>>, String> {
-    let record_delimiter = cfg.record_delimiter;
-    let mut chunks: Vec<Vec<u8>> = Vec::new();
-    let mut buffer = String::new();
-
-    while let Some(row) = rows
-        .next()
-        .map_err(|e| format!("SQL execution error: {}", e))?
-    {
-        let mut record: HashMap<String, serde_json::Value> = HashMap::with_capacity(col_count);
-        for i in 0..col_count {
-            let value = row
-                .get_ref(i)
-                .map_err(|e| format!("SQL execution error: {}", e))?;
-            let key = columns.get(i).cloned().unwrap_or_else(|| format!("_{}", i));
-            record.insert(key, value_ref_to_json(value));
-        }
-        let line = serde_json::to_string(&record)
-            .map_err(|e| format!("JSON output encoding failed: {}", e))?;
-        buffer.push_str(&line);
-        buffer.push_str(&record_delimiter);
-
-        while buffer.len() >= CHUNK_SIZE {
-            let split_at = floor_char_boundary(&buffer, CHUNK_SIZE);
-            let rest = buffer.split_off(split_at);
-            chunks.push(buffer.into_bytes());
-            buffer = rest;
-        }
-    }
-
-    if !buffer.is_empty() {
-        chunks.push(buffer.into_bytes());
-    }
-    Ok(chunks)
-}
-
-fn value_ref_to_string(value: ValueRef<'_>) -> String {
-    match value {
-        ValueRef::Null => String::new(),
-        ValueRef::Boolean(v) => v.to_string(),
-        ValueRef::TinyInt(v) => v.to_string(),
-        ValueRef::SmallInt(v) => v.to_string(),
-        ValueRef::Int(v) => v.to_string(),
-        ValueRef::BigInt(v) => v.to_string(),
-        ValueRef::UTinyInt(v) => v.to_string(),
-        ValueRef::USmallInt(v) => v.to_string(),
-        ValueRef::UInt(v) => v.to_string(),
-        ValueRef::UBigInt(v) => v.to_string(),
-        ValueRef::Float(v) => v.to_string(),
-        ValueRef::Double(v) => v.to_string(),
-        ValueRef::Decimal(v) => v.to_string(),
-        ValueRef::Text(v) => String::from_utf8_lossy(v).into_owned(),
-        ValueRef::Blob(v) => base64::engine::general_purpose::STANDARD.encode(v),
-        _ => format!("{:?}", value),
-    }
-}
-
-fn value_ref_to_json(value: ValueRef<'_>) -> serde_json::Value {
-    match value {
-        ValueRef::Null => serde_json::Value::Null,
-        ValueRef::Boolean(v) => serde_json::Value::Bool(v),
-        ValueRef::TinyInt(v) => serde_json::json!(v),
-        ValueRef::SmallInt(v) => serde_json::json!(v),
-        ValueRef::Int(v) => serde_json::json!(v),
-        ValueRef::BigInt(v) => serde_json::json!(v),
-        ValueRef::UTinyInt(v) => serde_json::json!(v),
-        ValueRef::USmallInt(v) => serde_json::json!(v),
-        ValueRef::UInt(v) => serde_json::json!(v),
-        ValueRef::UBigInt(v) => serde_json::json!(v),
-        ValueRef::Float(v) => serde_json::json!(v),
-        ValueRef::Double(v) => serde_json::json!(v),
-        ValueRef::Decimal(v) => serde_json::Value::String(v.to_string()),
-        ValueRef::Text(v) => serde_json::Value::String(String::from_utf8_lossy(v).into_owned()),
-        ValueRef::Blob(v) => {
-            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(v))
-        }
-        _ => serde_json::Value::String(format!("{:?}", value)),
-    }
 }
 
 fn require_xml_content_type(headers: &HeaderMap) -> Option<Response> {
@@ -773,7 +537,33 @@ fn encode_select_event(event_type: &str, payload: &[u8]) -> Vec<u8> {
         headers.extend(encode_select_header(":content-type", "text/xml"));
     }
     headers.extend(encode_select_header(":message-type", "event"));
+    encode_event_message(headers, payload)
+}
 
+fn encode_select_error_event(code: &str, message: &str) -> Vec<u8> {
+    let mut headers = Vec::new();
+    headers.extend(encode_select_header(":error-code", code));
+    headers.extend(encode_select_header(
+        ":error-message",
+        truncate_header_value(message),
+    ));
+    headers.extend(encode_select_header(":message-type", "error"));
+    encode_event_message(headers, b"")
+}
+
+fn truncate_header_value(value: &str) -> &str {
+    const MAX: usize = 512;
+    if value.len() <= MAX {
+        return value;
+    }
+    let mut end = MAX;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn encode_event_message(headers: Vec<u8>, payload: &[u8]) -> Vec<u8> {
     let headers_len = headers.len() as u32;
     let total_len = 4 + 4 + 4 + headers.len() + payload.len() + 4;
 
@@ -795,7 +585,11 @@ fn encode_select_event(event_type: &str, payload: &[u8]) -> Vec<u8> {
 
 fn encode_select_header(name: &str, value: &str) -> Vec<u8> {
     let name_bytes = name.as_bytes();
-    let value_bytes = value.as_bytes();
+    let mut boundary = value.len().min(usize::from(u16::MAX));
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let value_bytes = &value.as_bytes()[..boundary];
     let mut header = Vec::with_capacity(1 + name_bytes.len() + 1 + 2 + value_bytes.len());
     header.push(name_bytes.len() as u8);
     header.extend(name_bytes);
@@ -812,63 +606,45 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
-mod select_denylist_tests {
-    use super::find_disallowed_token;
+mod event_frame_tests {
+    use super::{encode_select_error_event, encode_select_event};
 
-    #[test]
-    fn allows_plain_select() {
-        assert!(find_disallowed_token("SELECT * FROM s3object").is_none());
-        assert!(find_disallowed_token("SELECT a, b FROM data WHERE c > 1").is_none());
-        assert!(find_disallowed_token("SELECT load FROM data").is_none());
-        assert!(find_disallowed_token("SELECT copy_count FROM data").is_none());
+    fn assert_frame_consistent(frame: &[u8]) {
+        let total = u32::from_be_bytes(frame[0..4].try_into().unwrap()) as usize;
+        let header_len = u32::from_be_bytes(frame[4..8].try_into().unwrap()) as usize;
+        assert_eq!(total, frame.len(), "declared total length must match");
+        let mut i = 12;
+        let end = 12 + header_len;
+        while i < end {
+            let name_len = frame[i] as usize;
+            i += 1 + name_len;
+            assert_eq!(frame[i], 7, "header value type must be string");
+            i += 1;
+            let value_len = u16::from_be_bytes(frame[i..i + 2].try_into().unwrap()) as usize;
+            i += 2 + value_len;
+        }
+        assert_eq!(i, end, "headers must end exactly at declared length");
     }
 
     #[test]
-    fn allows_columns_named_like_banned_functions() {
-        assert!(find_disallowed_token("SELECT read_csv FROM s3object").is_none());
-        assert!(find_disallowed_token("SELECT read_parquet, read_json FROM data").is_none());
-        assert!(find_disallowed_token("SELECT s.read_blob FROM data s").is_none());
-        assert!(find_disallowed_token("SELECT read_csv AS x FROM data").is_none());
+    fn huge_error_message_still_encodes_a_valid_frame() {
+        let message = "x".repeat(5 * 1024 * 1024);
+        let frame = encode_select_error_event("InvalidRequest", &message);
+        assert_frame_consistent(&frame);
+        assert!(frame.len() < 2048, "error frame should be small");
     }
 
     #[test]
-    fn allows_keywords_used_as_columns() {
-        assert!(find_disallowed_token("SELECT copy, attach FROM data").is_none());
-        assert!(find_disallowed_token("SELECT load AS l FROM data").is_none());
+    fn multibyte_error_message_truncates_on_char_boundary() {
+        let message = "é".repeat(100_000);
+        let frame = encode_select_error_event("InvalidRequest", &message);
+        assert_frame_consistent(&frame);
     }
 
     #[test]
-    fn rejects_file_functions() {
-        assert!(find_disallowed_token("SELECT * FROM read_csv_auto('/etc/passwd')").is_some());
-        assert!(find_disallowed_token("select * from read_parquet('x')").is_some());
-        assert!(find_disallowed_token("SELECT read_blob('/etc/hosts')").is_some());
-        assert!(find_disallowed_token("SELECT read_csv ('x')").is_some());
-        assert!(find_disallowed_token("SELECT read_csv\n('x')").is_some());
-    }
-
-    #[test]
-    fn rejects_leading_statements() {
-        assert!(find_disallowed_token("ATTACH 'x.db'").is_some());
-        assert!(find_disallowed_token("INSTALL httpfs").is_some());
-        assert!(find_disallowed_token("LOAD httpfs").is_some());
-        assert!(find_disallowed_token("COPY data TO 'x'").is_some());
-    }
-
-    #[test]
-    fn rejects_chained_statements() {
-        assert!(find_disallowed_token("SELECT 1; ATTACH 'x.db'").is_some());
-        assert!(find_disallowed_token("SELECT 1;\nLOAD httpfs").is_some());
-    }
-
-    #[test]
-    fn ignores_string_literals() {
-        assert!(find_disallowed_token("SELECT 'read_csv' FROM data").is_none());
-        assert!(find_disallowed_token("SELECT 'ATTACH abc' AS x FROM data").is_none());
-    }
-
-    #[test]
-    fn ignores_comments() {
-        assert!(find_disallowed_token("SELECT * FROM data -- read_csv").is_none());
-        assert!(find_disallowed_token("SELECT * /* read_parquet */ FROM data").is_none());
+    fn records_and_control_frames_are_consistent() {
+        assert_frame_consistent(&encode_select_event("Records", b"hello,world\n"));
+        assert_frame_consistent(&encode_select_event("Stats", b"<Stats></Stats>"));
+        assert_frame_consistent(&encode_select_event("End", b""));
     }
 }

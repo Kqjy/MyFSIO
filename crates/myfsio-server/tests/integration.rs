@@ -6087,6 +6087,335 @@ async fn test_select_object_content_rejects_non_xml_content_type() {
 }
 
 #[tokio::test]
+async fn test_select_object_content_aggregates_and_real_bytes_scanned() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-agg", Body::empty()))
+        .await
+        .unwrap();
+
+    let csv_body = "name,age\nalice,30\nbob,40\ncarol,25\n";
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-agg/people.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(csv_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT COUNT(*) AS c, SUM(age) AS total FROM S3Object</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><JSON /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-agg/people.csv?select&select-type=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_select_events(&body);
+
+    let mut records = String::new();
+    let mut stats = String::new();
+    for (name, payload) in &events {
+        if name == "Records" {
+            records.push_str(&String::from_utf8_lossy(payload));
+        } else if name == "Stats" {
+            stats = String::from_utf8_lossy(payload).into_owned();
+        }
+    }
+    let row: serde_json::Value = serde_json::from_str(records.trim()).unwrap();
+    assert_eq!(row["c"], serde_json::json!(3));
+    assert_eq!(row["total"], serde_json::json!(95));
+    assert!(
+        stats.contains(&format!("<BytesScanned>{}</BytesScanned>", csv_body.len())),
+        "stats should report real bytes scanned: {}",
+        stats
+    );
+    assert!(events.iter().any(|(name, _)| name == "End"));
+}
+
+#[tokio::test]
+async fn test_select_object_content_json_lines_input_with_limit() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-jsonl", Body::empty()))
+        .await
+        .unwrap();
+
+    let jsonl = "{\"id\":1,\"tag\":\"keep\"}\n{\"id\":2,\"tag\":\"drop\"}\n{\"id\":3,\"tag\":\"keep\"}\n{\"id\":4,\"tag\":\"keep\"}\n";
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-jsonl/rows.jsonl")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(jsonl))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT id FROM S3Object WHERE tag = 'keep' LIMIT 2</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><JSON><Type>LINES</Type></JSON></InputSerialization>
+  <OutputSerialization><JSON /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-jsonl/rows.jsonl?select&select-type=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_select_events(&body);
+    let mut records = String::new();
+    for (name, payload) in &events {
+        if name == "Records" {
+            records.push_str(&String::from_utf8_lossy(payload));
+        }
+    }
+    assert_eq!(records, "{\"id\":1}\n{\"id\":3}\n");
+}
+
+#[tokio::test]
+async fn test_select_object_content_rejects_invalid_sql_upfront() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-badsql", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-badsql/file.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("a,b\n1,2\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for expression in [
+        "DROP TABLE S3Object",
+        "SELECT * FROM S3Object ORDER BY a",
+        "SELECT a FROM S3Object GROUP BY a",
+        "SELECT * FROM read_csv_auto('/etc/passwd')",
+        "SELECT 1; SELECT 2",
+    ] {
+        let select_xml = format!(
+            r#"
+<SelectObjectContentRequest>
+  <Expression>{}</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><CSV /></OutputSerialization>
+</SelectObjectContentRequest>
+"#,
+            expression
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sel-badsql/file.csv?select")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header("content-type", "application/xml")
+                    .body(Body::from(select_xml))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject: {}",
+            expression
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_select_object_content_rejects_invalid_serialization_options() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-badser", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-badser/file.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("a,b\n1,2\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for (input_xml, output_xml) in [
+        (
+            "<CSV><FileHeaderInfo>BOGUS</FileHeaderInfo></CSV>",
+            "<CSV />",
+        ),
+        ("<JSON><Type>XML</Type></JSON>", "<JSON />"),
+        (
+            "<CompressionType>GZIP</CompressionType><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV>",
+            "<CSV />",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo><FieldDelimiter>ab</FieldDelimiter></CSV>",
+            "<CSV />",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo><RecordDelimiter>;</RecordDelimiter></CSV>",
+            "<CSV />",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV>",
+            "<CSV><QuoteFields>SOMETIMES</QuoteFields></CSV>",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo><QuoteEscapeCharacter>\\</QuoteEscapeCharacter></CSV>",
+            "<CSV />",
+        ),
+    ] {
+        let select_xml = format!(
+            r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT * FROM S3Object</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization>{}</InputSerialization>
+  <OutputSerialization>{}</OutputSerialization>
+</SelectObjectContentRequest>
+"#,
+            input_xml, output_xml
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sel-badser/file.csv?select")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header("content-type", "application/xml")
+                    .body(Body::from(select_xml))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject input={} output={}",
+            input_xml,
+            output_xml
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_select_object_content_csv_output_from_csv_input() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-csvout", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-csvout/data.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("city,pop\naustin,42\n\"a,b\",7\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT city, pop FROM S3Object</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><CSV /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-csvout/data.csv?select&select-type=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_select_events(&body);
+    let mut records = String::new();
+    for (name, payload) in &events {
+        if name == "Records" {
+            records.push_str(&String::from_utf8_lossy(payload));
+        }
+    }
+    assert_eq!(records, "austin,42\n\"a,b\",7\n");
+}
+
+#[tokio::test]
 async fn test_static_website_serves_configured_error_document() {
     let (app, _tmp) = test_website_app(Some("404.html")).await;
 
@@ -6582,6 +6911,274 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         .expect("encryption initialization should succeed");
     let app = myfsio_server::create_router(state);
     (app, tmp)
+}
+
+async fn test_app_encrypted_small_parts() -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{ "bucket": "*", "actions": ["*"], "prefix": "*" }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        iam_config_path: iam_path.join("iam.json"),
+        encryption_enabled: true,
+        ui_enabled: false,
+        multipart_min_part_size: 1,
+        multipart_object_layout: "segments".to_string(),
+        allow_legacy_header_auth: true,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
+    let app = myfsio_server::create_router(state);
+    (app, tmp)
+}
+
+#[tokio::test]
+async fn test_sse_multipart_never_uses_segments_layout() {
+    let (app, tmp) = test_app_encrypted_small_parts().await;
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/enc-mpu", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/enc-mpu/big.bin?uploads")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-server-side-encryption", "AES256")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .and_then(|s| s.split("</UploadId>").next())
+        .expect("upload id")
+        .to_string();
+
+    let part_a = "A".repeat(4096);
+    let part_b = "B".repeat(4096);
+    let mut etags = Vec::new();
+    for (n, data) in [(1, &part_a), (2, &part_b)] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!(
+                        "/enc-mpu/big.bin?partNumber={}&uploadId={}",
+                        n, upload_id
+                    ))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from(data.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        etags.push(
+            resp.headers()
+                .get("etag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        etags[0], etags[1]
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/enc-mpu/big.bin?uploadId={}", upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(complete))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let meta_dir = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("enc-mpu")
+        .join("meta");
+    let mut sidecar_text = String::new();
+    for entry in std::fs::read_dir(&meta_dir).unwrap().flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
+            sidecar_text.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+        }
+    }
+    assert!(
+        sidecar_text.contains("encryption") || sidecar_text.contains("__enc"),
+        "object should carry encryption metadata: {}",
+        sidecar_text
+    );
+    assert!(
+        !sidecar_text.contains("__segments__"),
+        "an encrypted multipart object must never use the segments layout, because \
+         the encrypted read paths (ui_api zip download, complete_multipart SSE) resolve \
+         the object by its direct file path: {}",
+        sidecar_text
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/enc-mpu/big.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), 8192);
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        format!("{}{}", part_a, part_b)
+    );
+
+    let plain_upload_id = {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/enc-mpu/plain.bin?uploads")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        body.split("<UploadId>")
+            .nth(1)
+            .and_then(|s| s.split("</UploadId>").next())
+            .expect("upload id")
+            .to_string()
+    };
+    let mut plain_etags = Vec::new();
+    for (n, data) in [(1, &part_a), (2, &part_b)] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!(
+                        "/enc-mpu/plain.bin?partNumber={}&uploadId={}",
+                        n, plain_upload_id
+                    ))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from(data.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        plain_etags.push(
+            resp.headers()
+                .get("etag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        plain_etags[0], plain_etags[1]
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/enc-mpu/plain.bin?uploadId={}", plain_upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(complete))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut plain_sidecar = String::new();
+    for entry in std::fs::read_dir(&meta_dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json")
+            && path.to_string_lossy().contains("plain.bin")
+        {
+            plain_sidecar.push_str(&std::fs::read_to_string(&path).unwrap());
+        }
+    }
+    assert!(
+        plain_sidecar.contains("__segments__"),
+        "control: an unencrypted multipart object of this size must use the segments \
+         layout, otherwise the assertion above is vacuous: {}",
+        plain_sidecar
+    );
 }
 
 #[tokio::test]

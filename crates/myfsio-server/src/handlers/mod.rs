@@ -728,6 +728,10 @@ impl BucketSubresource {
     }
 }
 
+fn decode_query_key(raw: &str) -> String {
+    percent_decode_str(raw).decode_utf8_lossy().into_owned()
+}
+
 pub fn parse_bucket_subresource(
     query: Option<&str>,
 ) -> Result<Option<BucketSubresource>, Vec<&'static str>> {
@@ -740,13 +744,14 @@ pub fn parse_bucket_subresource(
 
     let mut found: Vec<BucketSubresource> = Vec::new();
     for part in q.split('&').filter(|p| !p.is_empty()) {
-        let key = part.split('=').next().unwrap_or("");
-        if key.is_empty() {
+        let raw_key = part.split('=').next().unwrap_or("");
+        if raw_key.is_empty() {
             continue;
         }
+        let key = decode_query_key(raw_key);
         if let Some((_, subresource)) = BUCKET_SUBRESOURCE_SELECTORS
             .iter()
-            .find(|(name, _)| *name == key)
+            .find(|(name, _)| *name == key.as_str())
         {
             if !found.contains(subresource) {
                 found.push(*subresource);
@@ -876,13 +881,14 @@ pub fn parse_object_subresource(
 
     let mut found: Vec<ObjectSubresource> = Vec::new();
     for part in q.split('&').filter(|p| !p.is_empty()) {
-        let key = part.split('=').next().unwrap_or("");
-        if key.is_empty() {
+        let raw_key = part.split('=').next().unwrap_or("");
+        if raw_key.is_empty() {
             continue;
         }
+        let key = decode_query_key(raw_key);
         if let Some((_, subresource)) = OBJECT_SUBRESOURCE_SELECTORS
             .iter()
-            .find(|(name, _)| *name == key)
+            .find(|(name, _)| *name == key.as_str())
         {
             if !found.contains(subresource) {
                 found.push(*subresource);
@@ -929,15 +935,15 @@ fn unsupported_bucket_subresource(query: Option<&str>) -> Option<String> {
         return None;
     }
     for part in q.split('&').filter(|p| !p.is_empty()) {
-        let key = part.split('=').next().unwrap_or("");
-        if key.is_empty() {
+        let raw_key = part.split('=').next().unwrap_or("");
+        if raw_key.is_empty() {
             continue;
         }
-        let key_owned = key.to_string();
+        let key_owned = decode_query_key(raw_key);
         let lower = key_owned.to_ascii_lowercase();
         let known = BUCKET_SUBRESOURCE_SELECTORS
             .iter()
-            .any(|(name, _)| *name == key)
+            .any(|(name, _)| *name == key_owned.as_str())
             || SUPPORTED_BUCKET_LIST_PARAMS
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(&key_owned))

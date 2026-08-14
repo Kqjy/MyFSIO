@@ -42,7 +42,9 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
-duckdb = { workspace = true }
+sqlparser = { workspace = true }
+csv = { workspace = true }
+parquet = { workspace = true }
 roxmltree = "0.20"
 parking_lot = { workspace = true }
 lru = { workspace = true }
