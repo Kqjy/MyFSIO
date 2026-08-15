@@ -7355,6 +7355,274 @@ mod tests {
         assert_eq!(body, expected);
     }
 
+    fn storm_keys() -> Vec<String> {
+        (0..40)
+            .map(|i| match i % 3 {
+                0 => format!("a/k{:02}", i),
+                1 => format!("a/b/k{:02}", i),
+                _ => format!("c/k{:02}", i),
+            })
+            .collect()
+    }
+
+    fn storm_rng_next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 16
+    }
+
+    async fn audit_storm_bucket(backend: &FsStorageBackend, bucket: &str) {
+        let params = myfsio_common::types::ListParams {
+            max_keys: 1000,
+            ..Default::default()
+        };
+        let listed = backend.list_objects(bucket, &params).await.unwrap();
+        assert!(!listed.is_truncated, "audit listing must not be truncated");
+        let indexed: Vec<(String, Option<String>, u64)> = listed
+            .objects
+            .iter()
+            .map(|o| (o.key.clone(), o.etag.clone(), o.size))
+            .collect();
+
+        backend.invalidate_all_listing_indexes_sync().unwrap();
+        let rebuilt = backend.list_objects(bucket, &params).await.unwrap();
+        let walked: Vec<(String, Option<String>, u64)> = rebuilt
+            .objects
+            .iter()
+            .map(|o| (o.key.clone(), o.etag.clone(), o.size))
+            .collect();
+        assert_eq!(
+            indexed, walked,
+            "the incremental listing index must match a from-scratch rebuild"
+        );
+
+        for obj in &listed.objects {
+            let (sidecar_path, _) = backend.sidecar_file_for_key(bucket, &obj.key);
+            assert!(
+                sidecar_path.is_file(),
+                "listed object {} must have a metadata sidecar",
+                obj.key
+            );
+            let (meta, mut stream) = backend
+                .get_object(bucket, &obj.key)
+                .await
+                .unwrap_or_else(|e| panic!("listed object {} must be readable: {}", obj.key, e));
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body).await.unwrap();
+            assert_eq!(
+                body.len() as u64,
+                obj.size,
+                "size mismatch between listing and data for {}",
+                obj.key
+            );
+            let mut hasher = Md5::new();
+            hasher.update(&body);
+            let body_md5 = format!("{:x}", hasher.finalize());
+            if let Some(ref etag) = meta.etag {
+                if !etag.contains('-') {
+                    assert_eq!(
+                        etag, &body_md5,
+                        "etag must match content md5 for {}",
+                        obj.key
+                    );
+                }
+            }
+        }
+
+        let listed_keys: std::collections::HashSet<String> =
+            listed.objects.iter().map(|o| o.key.clone()).collect();
+        let bucket_root = backend.bucket_path(bucket);
+        let mut stack = vec![bucket_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                let ft = entry.file_type().unwrap();
+                if ft.is_dir() {
+                    stack.push(path);
+                } else if ft.is_file() {
+                    let rel = path
+                        .strip_prefix(&bucket_root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    assert!(
+                        listed_keys.contains(&rel),
+                        "data file {} on disk is not listed (orphan)",
+                        rel
+                    );
+                }
+            }
+        }
+
+        for entry in std::fs::read_dir(backend.tmp_dir()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !name.ends_with(".sidecar-stage") && !name.ends_with(".tmp"),
+                "temp file {} must not survive the storm",
+                name
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_put_delete_list_storm_preserves_invariants() {
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("storm").await.unwrap();
+
+        const WORKERS: usize = 16;
+        const OPS: usize = 250;
+        let keys = std::sync::Arc::new(storm_keys());
+
+        let mut handles = Vec::new();
+        for worker in 0..WORKERS {
+            let backend = backend.clone();
+            let keys = keys.clone();
+            handles.push(tokio::spawn(async move {
+                let mut rng: u64 = 0x9E3779B97F4A7C15u64.wrapping_mul(worker as u64 + 1);
+                for op in 0..OPS {
+                    let roll = storm_rng_next(&mut rng);
+                    let key = &keys[(roll % keys.len() as u64) as usize];
+                    match (roll >> 8) % 10 {
+                        0..=5 => {
+                            let body = format!("w{worker}-o{op}-{key}").into_bytes();
+                            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+                            backend
+                                .put_object("storm", key, stream, None)
+                                .await
+                                .unwrap();
+                        }
+                        6 | 7 => {
+                            backend.delete_object("storm", key).await.unwrap();
+                        }
+                        8 => {
+                            let params = myfsio_common::types::ListParams {
+                                prefix: Some("a/".to_string()),
+                                max_keys: 1000,
+                                ..Default::default()
+                            };
+                            backend.list_objects("storm", &params).await.unwrap();
+                        }
+                        _ => match backend.get_object("storm", key).await {
+                            Ok((_, mut stream)) => {
+                                let mut body = Vec::new();
+                                stream.read_to_end(&mut body).await.unwrap();
+                            }
+                            Err(StorageError::ObjectNotFound { .. }) => {}
+                            Err(e) => panic!("unexpected get error under load: {e}"),
+                        },
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        audit_storm_bucket(&backend, "storm").await;
+
+        let stats = backend.bucket_stats("storm").await.unwrap();
+        let params = myfsio_common::types::ListParams {
+            max_keys: 1000,
+            ..Default::default()
+        };
+        let listed = backend.list_objects("storm", &params).await.unwrap();
+        assert_eq!(
+            stats.objects,
+            listed.objects.len() as u64,
+            "bucket stats object count must match the listing"
+        );
+        assert_eq!(
+            stats.bytes,
+            listed.objects.iter().map(|o| o.size).sum::<u64>(),
+            "bucket stats byte count must match the listing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_versioned_storm_preserves_invariants() {
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("storm-ver").await.unwrap();
+        backend
+            .set_versioning_status("storm-ver", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        const WORKERS: usize = 12;
+        const OPS: usize = 120;
+        let keys: std::sync::Arc<Vec<String>> =
+            std::sync::Arc::new((0..12).map(|i| format!("v/k{:02}", i)).collect());
+
+        let mut handles = Vec::new();
+        for worker in 0..WORKERS {
+            let backend = backend.clone();
+            let keys = keys.clone();
+            handles.push(tokio::spawn(async move {
+                let mut rng: u64 = 0xD1B54A32D192ED03u64.wrapping_mul(worker as u64 + 1);
+                for op in 0..OPS {
+                    let roll = storm_rng_next(&mut rng);
+                    let key = &keys[(roll % keys.len() as u64) as usize];
+                    match (roll >> 8) % 10 {
+                        0..=4 => {
+                            let body = format!("vw{worker}-o{op}-{key}").into_bytes();
+                            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+                            backend
+                                .put_object("storm-ver", key, stream, None)
+                                .await
+                                .unwrap();
+                        }
+                        5 | 6 => {
+                            backend.delete_object("storm-ver", key).await.unwrap();
+                        }
+                        7 => {
+                            backend
+                                .list_object_versions("storm-ver", key)
+                                .await
+                                .unwrap();
+                        }
+                        _ => match backend.get_object("storm-ver", key).await {
+                            Ok((_, mut stream)) => {
+                                let mut body = Vec::new();
+                                stream.read_to_end(&mut body).await.unwrap();
+                            }
+                            Err(StorageError::ObjectNotFound { .. }) => {}
+                            Err(StorageError::DeleteMarker { .. }) => {}
+                            Err(e) => panic!("unexpected get error under load: {e}"),
+                        },
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        audit_storm_bucket(&backend, "storm-ver").await;
+
+        for key in keys.iter() {
+            let versions = backend
+                .list_object_versions("storm-ver", key)
+                .await
+                .unwrap();
+            let mut seen = std::collections::HashSet::new();
+            for version in &versions {
+                assert!(
+                    seen.insert(version.version_id.clone()),
+                    "duplicate version id {} for {}",
+                    version.version_id,
+                    key
+                );
+            }
+            assert!(
+                versions.iter().filter(|v| v.is_latest).count() <= 1,
+                "at most one version of {} may be latest",
+                key
+            );
+        }
+    }
+
     #[tokio::test]
     async fn partially_moved_mpu_parts_are_recovered_on_complete() {
         let (_dir, backend) = create_test_backend();
