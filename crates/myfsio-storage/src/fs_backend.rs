@@ -6176,6 +6176,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             && !metadata.contains_key(MULTIPART_PENDING_SSE_C_KEY)
             && !metadata.contains_key(MPU_SSE_C_MARKER);
         let segment_dir = self.segments_bucket_root(bucket).join(upload_id);
+        let segment_dir_after = segment_dir.clone();
         let segment_id = upload_id.to_string();
         let upload_lock =
             self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
@@ -6187,16 +6188,22 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let mut total_size: u64 = 0;
                 let mut part_sizes: Vec<u64> = Vec::with_capacity(part_infos.len());
 
-                for part_info in &part_infos {
+                for (ordinal, part_info) in part_infos.iter().enumerate() {
                     let part_file =
                         upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
-                    if !part_file.exists() {
+                    let seg_file =
+                        segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                    let source_file = if part_file.exists() {
+                        part_file
+                    } else if segments_allowed && seg_file.is_file() {
+                        seg_file
+                    } else {
                         return Err(StorageError::InvalidObjectKey(format!(
                             "Part {} not found",
                             part_info.part_number
                         )));
-                    }
-                    let file_size = std::fs::metadata(&part_file)
+                    };
+                    let file_size = std::fs::metadata(&source_file)
                         .map_err(StorageError::Io)?
                         .len();
                     let manifest_entry = manifest_parts.get(&part_info.part_number.to_string());
@@ -6212,7 +6219,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         }
                         _ => {
                             let reader =
-                                std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                                std::fs::File::open(&source_file).map_err(StorageError::Io)?;
                             let mut reader = std::io::BufReader::with_capacity(chunk_size, reader);
                             let mut part_hasher = Md5::new();
                             let mut buf = vec![0u8; chunk_size];
@@ -6256,6 +6263,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         match std::fs::rename(&part_file, &seg_file) {
                             Ok(()) => moved.push((seg_file, part_file)),
                             Err(e) => {
+                                if seg_file.is_file() && !part_file.exists() {
+                                    continue;
+                                }
                                 move_err = Some(e);
                                 break;
                             }
@@ -6287,10 +6297,19 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
                 let mut out_file =
                     std::fs::File::create(&tmp_path_owned).map_err(StorageError::Io)?;
-                for (part_info, expected) in part_infos.iter().zip(&part_sizes) {
+                for (ordinal, (part_info, expected)) in
+                    part_infos.iter().zip(&part_sizes).enumerate()
+                {
                     let part_file =
                         upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
-                    let mut src = std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                    let seg_file =
+                        segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                    let source_file = if part_file.exists() {
+                        part_file
+                    } else {
+                        seg_file
+                    };
+                    let mut src = std::fs::File::open(&source_file).map_err(StorageError::Io)?;
                     let copied =
                         std::io::copy(&mut src, &mut out_file).map_err(StorageError::Io)?;
                     if copied != *expected {
@@ -6353,6 +6372,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         match result {
             Ok(obj) => {
                 let _ = std::fs::remove_dir_all(&upload_dir);
+                if segmented_as.is_none() {
+                    let _ = std::fs::remove_dir_all(&segment_dir_after);
+                }
                 Ok(obj)
             }
             Err(e) => {
@@ -7251,7 +7273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn crash_before_segments_mpu_finalize_consumes_the_parts() {
+    async fn crash_before_segments_mpu_finalize_is_recovered_on_retry() {
         let _fp = failpoint_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = std::sync::Arc::new(backend);
@@ -7306,15 +7328,88 @@ mod tests {
         let segment_dir = backend.segments_bucket_root("fp-mpu-s").join(&upload_id);
         assert!(
             segment_dir.is_dir(),
-            "the moved parts remain as an orphaned segment dir for the GC segment sweep"
+            "the moved parts survive as the segment set"
         );
-        assert!(
-            backend
-                .complete_multipart("fp-mpu-s", &upload_id, &parts)
-                .await
-                .is_err(),
-            "known gap: the segments path consumes its parts, so retrying the complete fails"
+
+        let obj = backend
+            .complete_multipart("fp-mpu-s", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(
+            obj.size, 6144,
+            "retrying the complete must recover the already-moved parts"
         );
+        let meta = backend
+            .get_object_metadata("fp-mpu-s", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            meta.get(crate::segments::META_KEY_SEGMENTS),
+            Some(&upload_id)
+        );
+        let (_, mut stream) = backend.get_object("fp-mpu-s", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        let mut expected = vec![b'A'; 3072];
+        expected.extend_from_slice(&vec![b'B'; 3072]);
+        assert_eq!(body, expected);
+    }
+
+    #[tokio::test]
+    async fn partially_moved_mpu_parts_are_recovered_on_complete() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("fp-mpu-p").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("fp-mpu-p", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 3072]));
+        backend
+            .upload_part("fp-mpu-p", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 3072]));
+        backend
+            .upload_part("fp-mpu-p", &upload_id, 2, part2)
+            .await
+            .unwrap();
+
+        let upload_dir = backend
+            .multipart_upload_dir("fp-mpu-p", &upload_id)
+            .unwrap();
+        let segment_dir = backend.segments_bucket_root("fp-mpu-p").join(&upload_id);
+        std::fs::create_dir_all(&segment_dir).unwrap();
+        std::fs::rename(
+            upload_dir.join("part-00001.part"),
+            segment_dir.join(crate::segments::SegmentSet::seg_file_name(0)),
+        )
+        .unwrap();
+
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+        let obj = backend
+            .complete_multipart("fp-mpu-p", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(
+            obj.size, 6144,
+            "a complete interrupted mid-move must succeed with mixed part sources"
+        );
+        let (_, mut stream) = backend.get_object("fp-mpu-p", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        let mut expected = vec![b'A'; 3072];
+        expected.extend_from_slice(&vec![b'B'; 3072]);
+        assert_eq!(body, expected);
     }
 
     #[tokio::test]
