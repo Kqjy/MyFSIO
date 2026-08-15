@@ -827,6 +827,28 @@ fn migrate_metadata_to_sidecars(config: &ServerConfig) {
             ..FsStorageBackendConfig::default()
         },
     );
+
+    let preflight = backend.preflight_meta_migration();
+    println!(
+        "Preflight: {} index files, {} entries",
+        preflight.index_files, preflight.entries
+    );
+    if !preflight.corrupt.is_empty() || !preflight.collisions.is_empty() {
+        println!();
+        println!("Preflight found problems; NOTHING has been modified.");
+        for issue in preflight.corrupt.iter().chain(preflight.collisions.iter()) {
+            println!("  - {}", issue);
+        }
+        println!();
+        println!("Repair or remove the files above, then re-run --migrate-meta.");
+        std::process::exit(1);
+    }
+    if preflight.index_files == 0 {
+        println!("Nothing to migrate.");
+        return;
+    }
+    println!();
+
     let report = backend.migrate_meta_indexes_to_sidecars();
 
     println!("Index files migrated : {}", report.index_files_migrated);
@@ -850,11 +872,14 @@ fn migrate_metadata_to_sidecars(config: &ServerConfig) {
     println!("- Object metadata now lives in per-object sidecar files");
     println!("  (.__myfsio_meta__*.json) under .myfsio.sys/buckets/<bucket>/meta/.");
     println!("- Older myfsio-server binaries CANNOT read sidecar metadata.");
-    println!("  Do not downgrade this deployment after migrating; there is no");
-    println!("  rollback tool.");
-    println!("- Cleanly migrated _index.json files were removed. Corrupt or");
-    println!("  partially migrated indexes were left in place (see failures");
-    println!("  above) and keep serving reads until fixed.");
+    println!("  Do not downgrade this deployment after migrating.");
+    println!("- Cleanly migrated _index.json files were renamed to");
+    println!("  _index.json.migrated as a rollback backup: to roll back,");
+    println!("  delete the new .__myfsio_meta__*.json sidecars and rename the");
+    println!("  backups to _index.json. Delete the backups once you are");
+    println!("  satisfied with the migration. Corrupt or partially migrated");
+    println!("  indexes were left in place (see failures above) and keep");
+    println!("  serving reads until fixed.");
     println!("- Re-running this command is safe; already-migrated entries are");
     println!("  skipped.");
     println!("============================================================");

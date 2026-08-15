@@ -318,6 +318,14 @@ struct ShallowCacheEntry {
 const OBJECT_LOCK_STRIPES: usize = 2048;
 
 #[derive(Debug, Default)]
+pub struct MetaMigrationPreflight {
+    pub index_files: usize,
+    pub entries: usize,
+    pub corrupt: Vec<String>,
+    pub collisions: Vec<String>,
+}
+
+#[derive(Debug, Default)]
 pub struct MetaMigrationReport {
     pub index_files_migrated: usize,
     pub index_files_failed: usize,
@@ -1896,6 +1904,89 @@ impl FsStorageBackend {
         }
     }
 
+    pub fn preflight_meta_migration(&self) -> MetaMigrationPreflight {
+        let mut preflight = MetaMigrationPreflight::default();
+        let buckets_root = self.system_buckets_root();
+        let Ok(buckets) = std::fs::read_dir(&buckets_root) else {
+            return preflight;
+        };
+        for bucket_entry in buckets.flatten() {
+            let meta_root = bucket_entry.path().join(BUCKET_META_DIR);
+            if !meta_root.is_dir() {
+                continue;
+            }
+            let mut stack = vec![meta_root];
+            while let Some(dir) = stack.pop() {
+                let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                    preflight
+                        .corrupt
+                        .push(format!("unreadable directory {}", dir.display()));
+                    continue;
+                };
+                let mut index_path = None;
+                for dirent in read_dir.flatten() {
+                    let path = dirent.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if dirent.file_name() == INDEX_FILE {
+                        index_path = Some(path);
+                    }
+                }
+                let Some(index_path) = index_path else {
+                    continue;
+                };
+                preflight.index_files += 1;
+                let index: HashMap<String, Value> = match std::fs::read_to_string(&index_path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
+                {
+                    Ok(index) => index,
+                    Err(err) => {
+                        preflight
+                            .corrupt
+                            .push(format!("{}: {}", index_path.display(), err));
+                        continue;
+                    }
+                };
+                let mut names_in_dir: HashMap<String, String> = HashMap::new();
+                for entry_name in index.keys() {
+                    preflight.entries += 1;
+                    let sidecar_name = Self::sidecar_file_name(entry_name);
+                    if let Some(previous) =
+                        names_in_dir.insert(sidecar_name.clone(), entry_name.clone())
+                    {
+                        preflight.collisions.push(format!(
+                            "{}: entries '{}' and '{}' both map to sidecar {}",
+                            index_path.display(),
+                            previous,
+                            entry_name,
+                            sidecar_name
+                        ));
+                    }
+                    let sidecar_path = dir.join(&sidecar_name);
+                    if sidecar_path.exists() {
+                        let matches = std::fs::read_to_string(&sidecar_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<HashMap<String, Value>>(&s).ok())
+                            .and_then(|existing| {
+                                Self::sidecar_entry_name_from_file(&sidecar_name, &existing)
+                            })
+                            .is_some_and(|name| name == *entry_name);
+                        if !matches {
+                            preflight.collisions.push(format!(
+                                "{}: existing sidecar {} does not belong to entry '{}'",
+                                index_path.display(),
+                                sidecar_name,
+                                entry_name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        preflight
+    }
+
     pub fn migrate_meta_indexes_to_sidecars(&self) -> MetaMigrationReport {
         let mut report = MetaMigrationReport::default();
         let buckets_root = self.system_buckets_root();
@@ -2012,6 +2103,17 @@ impl FsStorageBackend {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            #[cfg(any(test, feature = "failpoints"))]
+            if let Err(err) = crate::failpoints::hit(&self.root, "migrate:sidecar-write") {
+                all_ok = false;
+                report.failures.push(format!(
+                    "{}: failed writing sidecar for {}: {}",
+                    index_path.display(),
+                    entry_name,
+                    err
+                ));
+                continue;
+            }
             match self.write_sidecar_file(&sidecar_path, entry_name, &entry_map) {
                 Ok(()) => report.entries_written += 1,
                 Err(err) => {
@@ -2027,12 +2129,16 @@ impl FsStorageBackend {
         }
         if all_ok {
             Self::fsync_dir_best_effort(dir);
-            match std::fs::remove_file(index_path) {
-                Ok(()) => report.index_files_migrated += 1,
+            let backup_path = index_path.with_file_name(format!("{}.migrated", INDEX_FILE));
+            match std::fs::rename(index_path, &backup_path) {
+                Ok(()) => {
+                    Self::fsync_dir_best_effort(dir);
+                    report.index_files_migrated += 1;
+                }
                 Err(err) => {
                     report.index_files_failed += 1;
                     report.failures.push(format!(
-                        "{}: sidecars written but index removal failed: {}",
+                        "{}: sidecars written but moving the index aside failed: {}",
                         index_path.display(),
                         err
                     ));
@@ -11834,6 +11940,12 @@ mod tests {
         assert!(root_index.is_file());
         assert!(sub_index.is_file());
 
+        let preflight = index_backend.preflight_meta_migration();
+        assert_eq!(preflight.index_files, 2);
+        assert_eq!(preflight.entries, 3);
+        assert!(preflight.corrupt.is_empty());
+        assert!(preflight.collisions.is_empty());
+
         let report = index_backend.migrate_meta_indexes_to_sidecars();
         assert_eq!(report.index_files_migrated, 2);
         assert_eq!(report.index_files_failed, 0);
@@ -11841,6 +11953,15 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(!root_index.exists());
         assert!(!sub_index.exists());
+        assert!(
+            root_index
+                .with_file_name(format!("{}.migrated", INDEX_FILE))
+                .is_file(),
+            "the migrated index must be kept as a rollback backup"
+        );
+        assert!(sub_index
+            .with_file_name(format!("{}.migrated", INDEX_FILE))
+            .is_file());
 
         let sidecar_backend = FsStorageBackend::new(dir.path().to_path_buf());
         for key in ["a.txt", "sub/b.txt", "sub/c.txt"] {
@@ -11869,9 +11990,137 @@ mod tests {
         std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
         std::fs::write(&index_path, b"][").unwrap();
 
+        let preflight = backend.preflight_meta_migration();
+        assert_eq!(preflight.corrupt.len(), 1, "{:?}", preflight.corrupt);
+        assert!(index_path.is_file(), "preflight must not modify anything");
+
         let report = backend.migrate_meta_indexes_to_sidecars();
         assert_eq!(report.index_files_failed, 1);
         assert!(index_path.is_file(), "corrupt index must be preserved");
+    }
+
+    fn index_layout_backend() -> (tempfile::TempDir, FsStorageBackend) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig {
+                metadata_layout: MetadataLayout::Index,
+                ..FsStorageBackendConfig::default()
+            },
+        );
+        (dir, backend)
+    }
+
+    #[tokio::test]
+    async fn migration_interrupted_by_crash_is_resumable() {
+        let _fp = failpoint_test_guard();
+        let (dir, index_backend) = index_layout_backend();
+        index_backend.create_bucket("mig-crash").await.unwrap();
+        let keys = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        for key in keys {
+            let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"m".to_vec()));
+            index_backend
+                .put_object("mig-crash", key, data, None)
+                .await
+                .unwrap();
+        }
+        let index_path = index_backend.bucket_meta_root("mig-crash").join(INDEX_FILE);
+        assert!(index_path.is_file());
+
+        crate::failpoints::set(
+            &index_backend.root,
+            "migrate:sidecar-write",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crash_backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig {
+                metadata_layout: MetadataLayout::Sidecar,
+                ..FsStorageBackendConfig::default()
+            },
+        );
+        let join =
+            tokio::task::spawn_blocking(move || crash_backend.migrate_meta_indexes_to_sidecars())
+                .await;
+        crate::failpoints::clear(&index_backend.root, "migrate:sidecar-write");
+        assert!(
+            join.unwrap_err().is_panic(),
+            "the failpoint must simulate a crash"
+        );
+        assert!(
+            index_path.is_file(),
+            "a crash mid-migration must leave the index in place"
+        );
+
+        for key in keys {
+            let stored = index_backend
+                .get_object_metadata("mig-crash", key)
+                .await
+                .unwrap();
+            assert!(
+                stored.contains_key("__etag__"),
+                "metadata for {} must stay readable after an interrupted migration",
+                key
+            );
+        }
+
+        let resume_backend = FsStorageBackend::new(dir.path().to_path_buf());
+        let report = resume_backend.migrate_meta_indexes_to_sidecars();
+        assert_eq!(report.index_files_migrated, 1);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!index_path.is_file());
+        assert!(index_path
+            .with_file_name(format!("{}.migrated", INDEX_FILE))
+            .is_file());
+        for key in keys {
+            let stored = resume_backend
+                .get_object_metadata("mig-crash", key)
+                .await
+                .unwrap();
+            assert!(stored.contains_key("__etag__"));
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_write_failures_keep_the_index_serving() {
+        let _fp = failpoint_test_guard();
+        let (_dir, index_backend) = index_layout_backend();
+        index_backend.create_bucket("mig-fail").await.unwrap();
+        for key in ["x.txt", "y.txt"] {
+            let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"m".to_vec()));
+            index_backend
+                .put_object("mig-fail", key, data, None)
+                .await
+                .unwrap();
+        }
+        let index_path = index_backend.bucket_meta_root("mig-fail").join(INDEX_FILE);
+
+        crate::failpoints::set(
+            &index_backend.root,
+            "migrate:sidecar-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::Other),
+        );
+        let report = index_backend.migrate_meta_indexes_to_sidecars();
+        crate::failpoints::clear(&index_backend.root, "migrate:sidecar-write");
+        assert_eq!(report.index_files_migrated, 0);
+        assert_eq!(report.index_files_failed, 1);
+        assert!(!report.failures.is_empty());
+        assert!(
+            index_path.is_file(),
+            "write failures must leave the index serving reads"
+        );
+
+        for key in ["x.txt", "y.txt"] {
+            let stored = index_backend
+                .get_object_metadata("mig-fail", key)
+                .await
+                .unwrap();
+            assert!(stored.contains_key("__etag__"));
+        }
+
+        let retry = index_backend.migrate_meta_indexes_to_sidecars();
+        assert_eq!(retry.index_files_migrated, 1);
+        assert!(retry.failures.is_empty(), "{:?}", retry.failures);
     }
 
     #[tokio::test]
