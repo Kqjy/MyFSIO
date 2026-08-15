@@ -2106,6 +2106,8 @@ impl FsStorageBackend {
         key: &str,
         metadata: &HashMap<String, String>,
     ) -> std::io::Result<PathBuf> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "put:stage-sidecar")?;
         let (_, entry_name) = self.sidecar_file_for_key(bucket_name, key);
         let meta_value = serde_json::to_value(metadata).map_err(std::io::Error::other)?;
         let mut entry = serde_json::Map::new();
@@ -4761,6 +4763,11 @@ impl FsStorageBackend {
                 let staged = self
                     .stage_live_metadata_sync(bucket_name, key, &internal_meta)
                     .map_err(abort_commit)?;
+                #[cfg(any(test, feature = "failpoints"))]
+                if let Err(err) = crate::failpoints::hit(&self.root, "put:before-data-rename") {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err(abort_commit(err));
+                }
                 if let Err(err) = std::fs::rename(tmp_path, &destination) {
                     let _ = std::fs::remove_file(&staged);
                     return Err(abort_commit(err));
@@ -4771,6 +4778,11 @@ impl FsStorageBackend {
                         let _ = std::fs::remove_file(&staged);
                         return Err(StorageError::Io(err));
                     }
+                }
+                #[cfg(any(test, feature = "failpoints"))]
+                if let Err(err) = crate::failpoints::hit(&self.root, "put:before-publish-sidecar") {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err(StorageError::Io(err));
                 }
                 if let Err(err) = self.publish_staged_metadata_sync(bucket_name, key, &staged) {
                     let _ = std::fs::remove_file(&staged);
@@ -6952,6 +6964,167 @@ mod tests {
         assert!(
             strays.is_empty(),
             "no staged sidecar files may remain after a successful put"
+        );
+    }
+
+    fn failpoint_test_guard() -> impl Drop {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        struct Guard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                crate::failpoints::clear_all();
+            }
+        }
+        Guard(
+            LOCK.get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn staged_sidecar_count(backend: &FsStorageBackend) -> usize {
+        std::fs::read_dir(backend.tmp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".sidecar-stage"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn injected_error_during_sidecar_stage_aborts_the_put_cleanly() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("fp-stage").await.unwrap();
+        put_listing_object(&backend, "fp-stage", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-stage", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:stage-sidecar",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::Other),
+        );
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+        let result = backend
+            .put_object("fp-stage", "obj.bin", stream, None)
+            .await;
+        crate::failpoints::clear(&backend.root, "put:stage-sidecar");
+        assert!(result.is_err(), "a failed sidecar stage must fail the put");
+
+        let after = backend
+            .get_object_metadata("fp-stage", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        let (_, mut stream) = backend.get_object("fp-stage", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v1");
+        assert_eq!(staged_sidecar_count(&backend), 0);
+    }
+
+    #[tokio::test]
+    async fn crash_before_data_rename_leaves_the_old_object_intact() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-crash1").await.unwrap();
+        put_listing_object(&backend, "fp-crash1", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-crash1", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:before-data-rename",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+            crashed
+                .put_object("fp-crash1", "obj.bin", stream, None)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:before-data-rename");
+        assert!(
+            join.unwrap_err().is_panic(),
+            "the failpoint must simulate a crash"
+        );
+
+        let after = backend
+            .get_object_metadata("fp-crash1", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        let (_, mut stream) = backend.get_object("fp-crash1", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(
+            body, b"v1",
+            "a crash before the data rename must not change the object"
+        );
+    }
+
+    #[tokio::test]
+    async fn crash_before_sidecar_publish_leaves_new_data_with_stale_metadata() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-crash2").await.unwrap();
+        put_listing_object(&backend, "fp-crash2", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-crash2", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:before-publish-sidecar",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+            crashed
+                .put_object("fp-crash2", "obj.bin", stream, None)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:before-publish-sidecar");
+        assert!(
+            join.unwrap_err().is_panic(),
+            "the failpoint must simulate a crash"
+        );
+
+        let after = backend
+            .get_object_metadata("fp-crash2", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            after.get("__etag__"),
+            before.get("__etag__"),
+            "the previous sidecar must still be authoritative"
+        );
+        let (_, mut stream) = backend.get_object("fp-crash2", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(
+            body, b"v2",
+            "the committed data rename survives the crash; the torn state is new data \
+             under the previous metadata, detectable as an etag mismatch"
+        );
+        assert_eq!(
+            staged_sidecar_count(&backend),
+            1,
+            "the staged sidecar must remain for the GC tmp sweep"
         );
     }
 
