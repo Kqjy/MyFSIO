@@ -2207,6 +2207,7 @@ pub async fn metrics_dashboard(
         &storage_refreshed_at_display,
     );
     ctx.insert("has_issues", &has_issues);
+    ctx.insert("display_timezone", &state.config.display_timezone);
     ctx.insert(
         "summary",
         &json!({

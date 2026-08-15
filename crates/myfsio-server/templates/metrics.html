@@ -546,8 +546,28 @@
 <script src="{{ url_for(endpoint="static", filename="js/vendor/chart.umd.min.js") }}"></script>
 <script src="{{ url_for(endpoint="static", filename="js/metrics.js") }}"></script>
 <script>
+var _displayTimezone = {{ display_timezone | json_island | safe }};
+
 function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatEventTimestamp(ts) {
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return { date: '—', time: '', full: '' };
+  var dateOpts = { month: 'short', day: '2-digit', timeZone: _displayTimezone };
+  var timeOpts = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: _displayTimezone };
+  var fullOpts = { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: _displayTimezone, timeZoneName: 'short' };
+  try {
+    return {
+      date: d.toLocaleDateString('en-US', dateOpts),
+      time: d.toLocaleTimeString('en-US', timeOpts),
+      full: d.toLocaleString('en-US', fullOpts)
+    };
+  } catch (e) {
+    var iso = d.toISOString();
+    return { date: iso.slice(0, 10), time: iso.slice(11, 19) + 'Z', full: iso };
+  }
 }
 
 function formatUptime(seconds) {
@@ -1257,8 +1277,9 @@ function bootstrapOperationsSection() {
     recentErrorsBody.innerHTML = errors.slice(0, 50).map(function(err) {
       var bucketKey = err.bucket ? err.bucket + (err.key ? '/' + err.key : '') : '\u2014';
       var requestId = err.request_id || '\u2014';
+      var when = formatEventTimestamp(err.timestamp);
       return '<tr>' +
-        '<td class="ps-3 small text-muted text-nowrap">' + esc(formatTime(err.timestamp)) + '</td>' +
+        '<td class="ps-3 small text-muted text-nowrap" title="' + esc(when.full) + '">' + esc(when.date) + '<div class="small">' + esc(when.time) + '</div></td>' +
         '<td><code class="small text-danger">' + esc(err.code) + '</code><div><span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;">' + esc(err.source || '') + '</span></div></td>' +
         '<td><span class="badge bg-light text-dark border">' + esc(err.method) + '</span></td>' +
         '<td class="text-break" style="max-width: 320px;" title="' + esc(bucketKey) + '"><code class="small">' + esc(bucketKey) + '</code></td>' +
