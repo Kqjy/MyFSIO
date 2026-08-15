@@ -2553,6 +2553,84 @@ mod tests {
         assert_eq!(c2.bucket, "", "second run should finish the sweep");
     }
 
+    #[tokio::test]
+    async fn bit_rot_is_detected_quarantined_and_reads_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let backend = FsStorageBackend::new(root.to_path_buf());
+        backend.create_bucket("rot").await.unwrap();
+        let pristine = b"pristine object content";
+        let stream: myfsio_storage::traits::AsyncReadStream =
+            Box::pin(std::io::Cursor::new(pristine.to_vec()));
+        backend
+            .put_object("rot", "victim.txt", stream, None)
+            .await
+            .unwrap();
+
+        let rotten = b"rotted!! object content";
+        assert_eq!(pristine.len(), rotten.len());
+        fs::write(root.join("rot").join("victim.txt"), rotten).unwrap();
+
+        let (meta, mut body_stream) = backend.get_object("rot", "victim.txt").await.unwrap();
+        let mut served = Vec::new();
+        use tokio::io::AsyncReadExt;
+        body_stream.read_to_end(&mut served).await.unwrap();
+        assert_eq!(
+            served, rotten,
+            "before a scan, rotten bytes are served (the documented gap)"
+        );
+        let stored_etag = meta.etag.clone().unwrap();
+
+        let state = scan_all_buckets(root, 10_000, 0);
+        assert_eq!(state.corrupted_objects, 1, "the scan must detect the flip");
+        let issue = state
+            .issues
+            .iter()
+            .find(|i| i.get("issue_type").and_then(|v| v.as_str()) == Some("corrupted_object"))
+            .expect("a corrupted_object issue must be reported");
+        let detail = issue.get("detail").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            parse_stored_etag(detail),
+            stored_etag,
+            "the issue detail must carry the stored etag for healing"
+        );
+
+        let status = heal_corrupted(&backend, None, "rot", "victim.txt", detail).await;
+        assert!(
+            !matches!(status, HealStatus::Skipped),
+            "healing a genuinely corrupted object must not be skipped"
+        );
+
+        match backend.get_object("rot", "victim.txt").await {
+            Err(myfsio_storage::error::StorageError::ObjectCorrupted { .. }) => {}
+            other => panic!(
+                "a quarantined object must fail closed, got {:?}",
+                other.map(|(m, _)| m.key)
+            ),
+        }
+
+        let quarantine_root = root.join(SYSTEM_ROOT).join(QUARANTINE_DIR);
+        let mut found_rotten_copy = false;
+        let mut stack = vec![quarantine_root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if fs::read(&path).map(|b| b == rotten).unwrap_or(false) {
+                    found_rotten_copy = true;
+                }
+            }
+        }
+        assert!(
+            found_rotten_copy,
+            "the corrupted bytes must be preserved in quarantine for forensics"
+        );
+    }
+
     #[test]
     fn cursor_falls_back_when_recorded_bucket_is_gone() {
         let tmp = tempfile::tempdir().unwrap();
