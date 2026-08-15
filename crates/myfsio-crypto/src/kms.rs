@@ -223,12 +223,10 @@ impl KmsService {
         let key = keys
             .iter()
             .find(|k| k.key_id == key_id || k.arn == key_id)
-            .ok_or_else(|| CryptoError::EncryptionFailed("KMS key not found".to_string()))?;
+            .ok_or_else(|| CryptoError::KmsKeyNotFound(key_id.to_string()))?;
 
         if !key.enabled {
-            return Err(CryptoError::EncryptionFailed(
-                "KMS key is disabled".to_string(),
-            ));
+            return Err(CryptoError::KmsKeyDisabled(key_id.to_string()));
         }
 
         let master = self.master_key.read().await;

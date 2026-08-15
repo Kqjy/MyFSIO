@@ -113,7 +113,13 @@ where
         xml_escape(&acl.owner),
         xml_escape(&owner_display),
     );
-    for grant in &acl.grants {
+    let (group_grants, user_grants): (Vec<_>, Vec<_>) = acl.grants.iter().partition(|g| {
+        matches!(
+            g.grantee.as_str(),
+            GRANTEE_ALL_USERS | GRANTEE_AUTHENTICATED_USERS
+        )
+    });
+    for grant in group_grants.into_iter().chain(user_grants) {
         xml.push_str("<Grant>");
         match grant.grantee.as_str() {
             GRANTEE_ALL_USERS => {

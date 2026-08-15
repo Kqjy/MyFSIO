@@ -539,12 +539,31 @@ pub async fn create_bucket(
     }
 
     match state.storage.create_bucket(&bucket).await {
-        Ok(()) => (
-            StatusCode::OK,
-            [("location", format!("/{}", bucket).as_str())],
-            "",
-        )
-            .into_response(),
+        Ok(()) => {
+            let lock_requested = headers
+                .get("x-amz-bucket-object-lock-enabled")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            if lock_requested {
+                if let Err(e) = state
+                    .storage
+                    .set_versioning_status(&bucket, myfsio_common::types::VersioningStatus::Enabled)
+                    .await
+                {
+                    return storage_err_response(e);
+                }
+                let lock_response = config::set_object_lock_enabled_default(&state, &bucket).await;
+                if !lock_response.status().is_success() {
+                    return lock_response;
+                }
+            }
+            (
+                StatusCode::OK,
+                [("location", format!("/{}", bucket).as_str())],
+                "",
+            )
+                .into_response()
+        }
         Err(e) => storage_err_response(e),
     }
 }
@@ -2059,6 +2078,63 @@ fn validate_sse_request(state: &AppState, headers: &HeaderMap) -> Result<(), Res
     Ok(())
 }
 
+fn encryption_failure_response(err: myfsio_crypto::aes_gcm::CryptoError) -> Response {
+    match err {
+        myfsio_crypto::aes_gcm::CryptoError::Io(io_err) => {
+            storage_err_response(myfsio_storage::error::StorageError::Io(io_err))
+        }
+        myfsio_crypto::aes_gcm::CryptoError::KmsKeyNotFound(kid) => config::custom_xml_error(
+            StatusCode::BAD_REQUEST,
+            "KMS.NotFoundException",
+            &format!("KMS key '{}' does not exist", kid),
+        ),
+        myfsio_crypto::aes_gcm::CryptoError::KmsKeyDisabled(kid) => config::custom_xml_error(
+            StatusCode::BAD_REQUEST,
+            "KMS.DisabledException",
+            &format!("KMS key '{}' is disabled", kid),
+        ),
+        other => s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            format!("Encryption failed: {}", other),
+        )),
+    }
+}
+
+async fn validate_kms_key_usable(
+    state: &AppState,
+    ctx: Option<&myfsio_crypto::encryption::EncryptionContext>,
+) -> Result<(), Response> {
+    let Some(ctx) = ctx else {
+        return Ok(());
+    };
+    if ctx.algorithm != myfsio_crypto::encryption::SseAlgorithm::AwsKms {
+        return Ok(());
+    }
+    let Some(ref kid) = ctx.kms_key_id else {
+        return Ok(());
+    };
+    let Some(kms) = state.kms.as_ref() else {
+        return Err(config::custom_xml_error(
+            StatusCode::BAD_REQUEST,
+            "KMS.NotFoundException",
+            "KMS is not available on this server",
+        ));
+    };
+    match kms.get_key(kid).await {
+        None => Err(config::custom_xml_error(
+            StatusCode::BAD_REQUEST,
+            "KMS.NotFoundException",
+            &format!("KMS key '{}' does not exist", kid),
+        )),
+        Some(key) if !key.enabled => Err(config::custom_xml_error(
+            StatusCode::BAD_REQUEST,
+            "KMS.DisabledException",
+            &format!("KMS key '{}' is disabled", kid),
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 fn apply_stored_response_headers(headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
     for (_, metadata_key, response_header) in internal_header_pairs() {
         if let Some(value) = metadata
@@ -2079,6 +2155,15 @@ fn apply_stored_response_headers(headers: &mut HeaderMap, metadata: &HashMap<Str
         .and_then(|value| value.parse().ok())
     {
         headers.insert("x-amz-replication-status", value);
+    }
+}
+
+fn apply_stored_kms_key_header(headers: &mut HeaderMap, metadata: &HashMap<String, String>) {
+    if let Some(kid) = metadata
+        .get("x-amz-encryption-key-id")
+        .and_then(|v| v.parse().ok())
+    {
+        headers.insert("x-amz-server-side-encryption-aws-kms-key-id", kid);
     }
 }
 
@@ -2547,6 +2632,9 @@ pub async fn put_object(
         Ok(c) => c,
         Err(resp) => return resp,
     };
+    if let Err(response) = validate_kms_key_usable(&state, resolved_enc_ctx.as_ref()).await {
+        return response;
+    }
 
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
@@ -2641,15 +2729,7 @@ pub async fn put_object(
             Ok(outcome) => outcome,
             Err(err) => {
                 let _ = tokio::fs::remove_file(&prepared).await;
-                return match err {
-                    myfsio_crypto::aes_gcm::CryptoError::Io(io_err) => {
-                        storage_err_response(myfsio_storage::error::StorageError::Io(io_err))
-                    }
-                    other => s3_error_response(S3Error::new(
-                        S3ErrorCode::InternalError,
-                        format!("Encryption failed: {}", other),
-                    )),
-                };
+                return encryption_failure_response(err);
             }
         };
         let enc_size = match tokio::fs::metadata(&prepared).await {
@@ -2931,6 +3011,7 @@ pub async fn get_object(
     if let Some(alg) = enc_header {
         resp_headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
     }
+    apply_stored_kms_key_header(&mut resp_headers, &meta.internal_metadata);
     apply_stored_response_headers(&mut resp_headers, &meta.internal_metadata);
     if checksum_mode_enabled(&headers) {
         apply_stored_checksum_headers(&mut resp_headers, &meta.internal_metadata);
@@ -3195,6 +3276,11 @@ pub async fn head_object(
                 if let Ok(alg) = enc_info.algorithm.as_str().parse() {
                     headers.insert("x-amz-server-side-encryption", alg);
                 }
+                if let Some(ref kid) = enc_info.kms_key_id {
+                    if let Ok(value) = kid.parse() {
+                        headers.insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+                    }
+                }
             }
             apply_stored_response_headers(&mut headers, &meta.internal_metadata);
             if checksum_requested {
@@ -3369,6 +3455,11 @@ fn build_part_response_headers(
         if let Ok(alg) = enc_info.algorithm.as_str().parse() {
             headers.insert("x-amz-server-side-encryption", alg);
         }
+        if let Some(ref kid) = enc_info.kms_key_id {
+            if let Ok(value) = kid.parse() {
+                headers.insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+            }
+        }
     }
     apply_stored_response_headers(&mut headers, &meta.internal_metadata);
     if let Some(ref requested_version) = query.version_id {
@@ -3520,6 +3611,9 @@ async fn initiate_multipart_handler(
         Ok(ctx) => ctx,
         Err(resp) => return resp,
     };
+    if let Err(response) = validate_kms_key_usable(state, resolved_enc_ctx.as_ref()).await {
+        return response;
+    }
     if let Some(ref ctx) = resolved_enc_ctx {
         if ctx.algorithm == myfsio_crypto::encryption::SseAlgorithm::CustomerProvided {
             let Some(ck) = ctx.customer_key.as_ref() else {
@@ -3649,6 +3743,19 @@ async fn read_pending_multipart_sse(
     ))
 }
 
+fn apply_pending_mpu_sse_headers(headers: &mut HeaderMap, pending: &HashMap<String, String>) {
+    if let Some(alg) = pending.get(MULTIPART_PENDING_SSE_ALG) {
+        if let Ok(value) = alg.parse() {
+            headers.insert("x-amz-server-side-encryption", value);
+        }
+        if let Some(kid) = pending.get(MULTIPART_PENDING_SSE_KMS_KEY) {
+            if let Ok(value) = kid.parse() {
+                headers.insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+            }
+        }
+    }
+}
+
 async fn upload_part_handler_with_chunking(
     state: &AppState,
     bucket: &str,
@@ -3725,6 +3832,7 @@ async fn upload_part_handler_with_chunking(
         Ok(etag) => {
             let mut headers = HeaderMap::new();
             headers.insert("etag", format!("\"{}\"", etag).parse().unwrap());
+            apply_pending_mpu_sse_headers(&mut headers, &pending);
             (StatusCode::OK, headers).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -4044,7 +4152,7 @@ async fn upload_part_copy_handler(
     range_header: Option<&str>,
     headers: &HeaderMap,
 ) -> Response {
-    match state
+    let pending = match state
         .storage
         .get_multipart_metadata(dst_bucket, upload_id)
         .await
@@ -4056,9 +4164,10 @@ async fn upload_part_copy_handler(
                     "UploadPartCopy is not supported for SSE-C multipart uploads; upload the part bytes directly with UploadPart instead",
                 ));
             }
+            pending
         }
         Err(e) => return storage_err_response(e),
-    }
+    };
 
     let (src_bucket, src_key, src_version_id) = match parse_copy_source(copy_source) {
         Ok(parts) => parts,
@@ -4112,7 +4221,10 @@ async fn upload_part_copy_handler(
         Ok((etag, last_modified)) => {
             let lm = myfsio_xml::response::format_s3_datetime(&last_modified);
             let xml = myfsio_xml::response::copy_part_result_xml(&etag, &lm);
-            (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert("content-type", "application/xml".parse().unwrap());
+            apply_pending_mpu_sse_headers(&mut resp_headers, &pending);
+            (StatusCode::OK, resp_headers, xml).into_response()
         }
         Err(e) => storage_err_response(e),
     }
@@ -4395,10 +4507,7 @@ async fn complete_multipart_handler(
                     Err(e) => {
                         let _ = tokio::fs::remove_file(&enc_tmp).await;
                         let _ = state.storage.delete_object(bucket, key).await;
-                        return s3_error_response(S3Error::new(
-                            S3ErrorCode::InternalError,
-                            format!("Encryption failed during multipart complete: {}", e),
-                        ));
+                        return encryption_failure_response(e);
                     }
                 }
             }
@@ -5123,10 +5232,7 @@ async fn copy_object_handler(
             Err(e) => {
                 let _ = tokio::fs::remove_file(&plaintext_path).await;
                 let _ = tokio::fs::remove_file(&enc_tmp).await;
-                return s3_error_response(S3Error::new(
-                    S3ErrorCode::InternalError,
-                    format!("Destination encryption failed: {}", e),
-                ));
+                return encryption_failure_response(e);
             }
         };
         let _ = tokio::fs::remove_file(&plaintext_path).await;
@@ -5537,6 +5643,7 @@ fn partial_content_headers(
     if let Some(alg) = enc_header {
         headers.insert("x-amz-server-side-encryption", alg.parse().unwrap());
     }
+    apply_stored_kms_key_header(&mut headers, &meta.internal_metadata);
     apply_stored_response_headers(&mut headers, &meta.internal_metadata);
     if start == 0 && end + 1 == plaintext_size && checksum_mode_enabled(request_headers) {
         apply_stored_checksum_headers(&mut headers, &meta.internal_metadata);
