@@ -118,14 +118,6 @@ window.ConnectionsManagement = (function() {
     });
   }
 
-  function updateConnectionCount() {
-    var countBadge = document.querySelector('.badge.bg-primary.bg-opacity-10.text-primary.fs-6');
-    if (countBadge) {
-      var remaining = document.querySelectorAll('tr[data-connection-id]').length;
-      countBadge.textContent = remaining + ' connection' + (remaining !== 1 ? 's' : '');
-    }
-  }
-
   function createConnectionRowHtml(conn) {
     var ak = conn.access_key || '';
     var maskedKey = ak.length > 12 ? ak.slice(0, 8) + '...' + ak.slice(-4) : ak;
@@ -135,14 +127,19 @@ window.ConnectionsManagement = (function() {
       '<span class="connection-status" data-status="checking" title="Checking...">' +
       '<span class="spinner-border spinner-border-sm text-muted" role="status" style="width: 12px; height: 12px;"></span>' +
       '</span></td>' +
-      '<td><div class="d-flex align-items-center gap-2">' +
-      '<div class="connection-icon"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">' +
+      '<td><div class="d-flex align-items-start gap-2">' +
+      '<div class="connection-icon flex-shrink-0"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">' +
       '<path d="M4.406 3.342A5.53 5.53 0 0 1 8 2c2.69 0 4.923 2 5.166 4.579C14.758 6.804 16 8.137 16 9.773 16 11.569 14.502 13 12.687 13H3.781C1.708 13 0 11.366 0 9.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/></svg></div>' +
+      '<div style="min-width: 0; overflow-wrap: anywhere;">' +
       '<span class="fw-medium">' + window.UICore.escapeHtml(conn.name) + '</span>' +
+      '<div class="text-muted small conn-endpoint" title="' + window.UICore.escapeHtml(conn.endpoint_url) + '">' + window.UICore.escapeHtml(conn.endpoint_url) + '</div>' +
+      '<div class="d-xl-none d-flex flex-wrap align-items-center gap-2 mt-1">' +
+      '<span class="badge bg-primary bg-opacity-10 text-primary conn-region">' + window.UICore.escapeHtml(conn.region) + '</span>' +
+      '<code class="small conn-access-key">' + window.UICore.escapeHtml(maskedKey) + '</code>' +
+      '</div></div>' +
       '</div></td>' +
-      '<td><span class="text-muted small text-truncate d-inline-block" style="max-width: 200px;" title="' + window.UICore.escapeHtml(conn.endpoint_url) + '">' + window.UICore.escapeHtml(conn.endpoint_url) + '</span></td>' +
-      '<td><span class="badge bg-primary bg-opacity-10 text-primary">' + window.UICore.escapeHtml(conn.region) + '</span></td>' +
-      '<td><code class="small">' + window.UICore.escapeHtml(maskedKey) + '</code></td>' +
+      '<td class="d-none d-xl-table-cell"><span class="badge bg-primary bg-opacity-10 text-primary conn-region">' + window.UICore.escapeHtml(conn.region) + '</span></td>' +
+      '<td class="d-none d-xl-table-cell"><code class="small conn-access-key">' + window.UICore.escapeHtml(maskedKey) + '</code></td>' +
       '<td class="text-end"><div class="btn-group btn-group-sm" role="group">' +
       '<button type="button" class="btn btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editConnectionModal" ' +
       'data-id="' + window.UICore.escapeHtml(conn.id) + '" data-name="' + window.UICore.escapeHtml(conn.name) + '" ' +
@@ -238,11 +235,12 @@ window.ConnectionsManagement = (function() {
               if (emptyState) {
                 var cardBody = emptyState.closest('.card-body');
                 if (cardBody) {
-                  cardBody.innerHTML = '<div class="table-responsive"><table class="table table-hover align-middle mb-0">' +
+                  cardBody.innerHTML = '<div class="table-responsive"><table class="table table-fluid table-hover align-middle mb-0">' +
                     '<thead class="table-light"><tr>' +
                     '<th scope="col" style="width: 50px;">Status</th>' +
-                    '<th scope="col">Name</th><th scope="col">Endpoint</th>' +
-                    '<th scope="col">Region</th><th scope="col">Access Key</th>' +
+                    '<th scope="col">Name</th>' +
+                    '<th scope="col" class="d-none d-xl-table-cell">Region</th>' +
+                    '<th scope="col" class="d-none d-xl-table-cell">Access Key</th>' +
                     '<th scope="col" class="text-end">Actions</th></tr></thead>' +
                     '<tbody></tbody></table></div>';
                 }
@@ -257,7 +255,6 @@ window.ConnectionsManagement = (function() {
                   checkConnectionHealth(data.connection.id, statusEl);
                 }
               }
-              updateConnectionCount();
             } else {
               location.reload();
             }
@@ -282,19 +279,21 @@ window.ConnectionsManagement = (function() {
               var nameCell = row.querySelector('.fw-medium');
               if (nameCell) nameCell.textContent = data.connection.name;
 
-              var endpointCell = row.querySelector('.text-truncate');
-              if (endpointCell) {
+              row.querySelectorAll('.conn-endpoint').forEach(function(endpointCell) {
                 endpointCell.textContent = data.connection.endpoint_url;
                 endpointCell.title = data.connection.endpoint_url;
-              }
+              });
 
-              var regionBadge = row.querySelector('.badge.bg-primary');
-              if (regionBadge) regionBadge.textContent = data.connection.region;
+              row.querySelectorAll('.conn-region').forEach(function(regionBadge) {
+                regionBadge.textContent = data.connection.region;
+              });
 
-              var accessCode = row.querySelector('code.small');
-              if (accessCode && data.connection.access_key) {
+              if (data.connection.access_key) {
                 var ak = data.connection.access_key;
-                accessCode.textContent = ak.length > 12 ? ak.slice(0, 8) + '...' + ak.slice(-4) : ak;
+                var masked = ak.length > 12 ? ak.slice(0, 8) + '...' + ak.slice(-4) : ak;
+                row.querySelectorAll('.conn-access-key').forEach(function(accessCode) {
+                  accessCode.textContent = masked;
+                });
               }
 
               var editBtn = row.querySelector('[data-bs-target="#editConnectionModal"]');
@@ -340,8 +339,6 @@ window.ConnectionsManagement = (function() {
             if (row) {
               row.remove();
             }
-
-            updateConnectionCount();
 
             if (document.querySelectorAll('tr[data-connection-id]').length === 0) {
               location.reload();
