@@ -2100,6 +2100,70 @@ impl FsStorageBackend {
         Ok(())
     }
 
+    fn stage_live_metadata_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        metadata: &HashMap<String, String>,
+    ) -> std::io::Result<PathBuf> {
+        let (_, entry_name) = self.sidecar_file_for_key(bucket_name, key);
+        let meta_value = serde_json::to_value(metadata).map_err(std::io::Error::other)?;
+        let mut entry = serde_json::Map::new();
+        entry.insert("metadata".to_string(), meta_value);
+        entry.insert(
+            SIDECAR_ENTRY_NAME_FIELD.to_string(),
+            Value::String(entry_name),
+        );
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir)?;
+        let staged_path = tmp_dir.join(format!("{}.sidecar-stage", Uuid::new_v4()));
+        let write_result = (|| -> std::io::Result<()> {
+            let file = std::fs::File::create(&staged_path)?;
+            let mut writer = std::io::BufWriter::new(file);
+            serde_json::to_writer(&mut writer, &Value::Object(entry))
+                .map_err(std::io::Error::other)?;
+            let file = writer.into_inner()?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        match write_result {
+            Ok(()) => Ok(staged_path),
+            Err(err) => {
+                let _ = std::fs::remove_file(&staged_path);
+                Err(err)
+            }
+        }
+    }
+
+    fn publish_staged_metadata_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        staged_path: &Path,
+    ) -> std::io::Result<()> {
+        let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, key);
+        if let Some(parent) = sidecar_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        {
+            let lock = self.get_meta_index_lock(&sidecar_path.to_string_lossy());
+            let _guard = lock.lock();
+            std::fs::rename(staged_path, &sidecar_path)?;
+            if let Some(parent) = sidecar_path.parent() {
+                Self::fsync_dir(parent)?;
+            }
+        }
+        let old_meta = self
+            .bucket_meta_root(bucket_name)
+            .join(format!("{}.meta.json", key));
+        if old_meta.exists() {
+            let _ = std::fs::remove_file(&old_meta);
+        }
+        let cache_key = (bucket_name.to_string(), key.to_string());
+        self.meta_read_cache.lock().pop(&cache_key);
+        Ok(())
+    }
+
     fn write_live_metadata_entry_sync(
         &self,
         bucket_name: &str,
@@ -4692,12 +4756,43 @@ impl FsStorageBackend {
             internal_meta.insert("__version_id__".to_string(), vid.clone());
         }
 
-        self.write_metadata_sync(bucket_name, key, &internal_meta)
-            .map_err(abort_commit)?;
-
-        std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
-        if let Some(parent) = destination.parent() {
-            Self::fsync_dir(parent).map_err(StorageError::Io)?;
+        match self.metadata_layout {
+            MetadataLayout::Sidecar => {
+                let staged = self
+                    .stage_live_metadata_sync(bucket_name, key, &internal_meta)
+                    .map_err(abort_commit)?;
+                if let Err(err) = std::fs::rename(tmp_path, &destination) {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err(abort_commit(err));
+                }
+                if let Some(parent) = destination.parent() {
+                    if let Err(err) = Self::fsync_dir(parent) {
+                        let _ = self.publish_staged_metadata_sync(bucket_name, key, &staged);
+                        let _ = std::fs::remove_file(&staged);
+                        return Err(StorageError::Io(err));
+                    }
+                }
+                if let Err(err) = self.publish_staged_metadata_sync(bucket_name, key, &staged) {
+                    let _ = std::fs::remove_file(&staged);
+                    tracing::error!(
+                        bucket = bucket_name,
+                        key = key,
+                        error = %err,
+                        "object data was committed but publishing its metadata sidecar failed; \
+                         the object will serve stale or default metadata until it is overwritten \
+                         or repaired"
+                    );
+                    return Err(StorageError::Io(err));
+                }
+            }
+            MetadataLayout::Index => {
+                self.write_metadata_sync(bucket_name, key, &internal_meta)
+                    .map_err(abort_commit)?;
+                std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
+                if let Some(parent) = destination.parent() {
+                    Self::fsync_dir(parent).map_err(StorageError::Io)?;
+                }
+            }
         }
 
         if matches!(versioning_status, VersioningStatus::Suspended) {
@@ -6795,6 +6890,69 @@ mod tests {
         let mut body = Vec::new();
         stream.read_to_end(&mut body).await.unwrap();
         assert_eq!(body, b"v1");
+    }
+
+    #[tokio::test]
+    async fn metadata_publish_is_the_commit_point_for_puts() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-order").await.unwrap();
+        put_listing_object(&backend, "commit-order", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("commit-order", "obj.bin")
+            .await
+            .unwrap();
+
+        let mut new_meta = HashMap::new();
+        new_meta.insert("__etag__".to_string(), "newetag".to_string());
+        new_meta.insert("__size__".to_string(), "2".to_string());
+        let staged = backend
+            .stage_live_metadata_sync("commit-order", "obj.bin", &new_meta)
+            .unwrap();
+
+        let next_tmp = backend.tmp_dir().join("next.tmp");
+        std::fs::write(&next_tmp, b"v2").unwrap();
+        let destination = backend.object_live_path("commit-order", "obj.bin");
+        std::fs::rename(&next_tmp, &destination).unwrap();
+
+        let mid = backend
+            .get_object_metadata("commit-order", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            mid.get("__etag__"),
+            before.get("__etag__"),
+            "readers must keep seeing the previous metadata until the sidecar is published"
+        );
+
+        backend
+            .publish_staged_metadata_sync("commit-order", "obj.bin", &staged)
+            .unwrap();
+        let after = backend
+            .get_object_metadata("commit-order", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), Some(&"newetag".to_string()));
+        assert!(!staged.exists());
+    }
+
+    #[tokio::test]
+    async fn successful_put_leaves_no_staged_sidecar_files() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("stage-clean").await.unwrap();
+        put_listing_object(&backend, "stage-clean", "obj.bin", b"data").await;
+
+        let (sidecar_path, _) = backend.sidecar_file_for_key("stage-clean", "obj.bin");
+        assert!(sidecar_path.is_file(), "the sidecar must be published");
+
+        let strays: Vec<_> = std::fs::read_dir(backend.tmp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".sidecar-stage"))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "no staged sidecar files may remain after a successful put"
+        );
     }
 
     #[tokio::test]

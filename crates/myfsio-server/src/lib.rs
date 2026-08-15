@@ -1,5 +1,6 @@
 pub mod config;
 pub mod embedded;
+pub mod format_marker;
 pub mod handlers;
 pub mod middleware;
 pub mod s3_response;

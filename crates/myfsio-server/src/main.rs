@@ -94,6 +94,22 @@ async fn main() {
 
     myfsio_server::handlers::ui_api::init_server_start_time();
 
+    let active_format = myfsio_server::format_marker::ActiveFormat {
+        metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
+            &config.metadata_layout,
+        ),
+        multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
+            &config.multipart_object_layout,
+        ),
+        listing_index_enabled: config.listing_index_enabled,
+    };
+    if let Err(err) =
+        myfsio_server::format_marker::enforce_format_marker(&config.storage_root, &active_format)
+    {
+        tracing::error!("{}", err);
+        std::process::exit(1);
+    }
+
     ensure_iam_bootstrap(&config);
     let (unclean_shutdown_marker, previous_shutdown_unclean) =
         match initialize_unclean_shutdown_marker(&config.storage_root) {
