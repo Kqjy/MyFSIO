@@ -5353,7 +5353,7 @@ async fn delete_objects_handler(
         .await;
 
     let mut deleted: Vec<myfsio_xml::response::DeletedEntry> = Vec::new();
-    let mut errors: Vec<(String, String, String)> = Vec::new();
+    let mut errors: Vec<(String, Option<String>, String, String)> = Vec::new();
     for (key, requested_vid, result) in results {
         match result {
             Ok(outcome) => {
@@ -5384,7 +5384,7 @@ async fn delete_objects_handler(
                 });
             }
             Err((code, message)) => {
-                errors.push((key, code, message));
+                errors.push((key, requested_vid, code, message));
             }
         }
     }

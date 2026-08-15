@@ -663,7 +663,7 @@ pub struct DeletedEntry {
 
 pub fn delete_result_xml(
     deleted: &[DeletedEntry],
-    errors: &[(String, String, String)],
+    errors: &[(String, Option<String>, String, String)],
     quiet: bool,
 ) -> String {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
@@ -696,11 +696,14 @@ pub fn delete_result_xml(
         }
     }
 
-    for (key, code, message) in errors {
+    for (key, version_id, code, message) in errors {
         writer
             .write_event(Event::Start(BytesStart::new("Error")))
             .unwrap();
         write_text_element(&mut writer, "Key", key);
+        if let Some(vid) = version_id {
+            write_text_element(&mut writer, "VersionId", vid);
+        }
         write_text_element(&mut writer, "Code", code);
         write_text_element(&mut writer, "Message", message);
         writer
