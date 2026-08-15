@@ -6,6 +6,9 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+failpoints = ["myfsio-storage/failpoints"]
+
 [dependencies]
 myfsio-common = { path = "../myfsio-common" }
 myfsio-auth = { path = "../myfsio-auth" }

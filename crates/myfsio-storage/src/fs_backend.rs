@@ -2889,6 +2889,9 @@ impl FsStorageBackend {
         };
 
         let data_path = version_dir.join(format!("{}.bin", version_id));
+        if data_path.exists() {
+            Self::safe_unlink(&data_path)?;
+        }
         let source_meta = source.metadata()?;
 
         let stub_header = if metadata.contains_key(crate::segments::META_KEY_SEGMENTS) {
@@ -4728,6 +4731,9 @@ impl FsStorageBackend {
             StorageError::Io(e)
         };
 
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "put:after-archive").map_err(abort_commit)?;
+
         let file_meta = std::fs::metadata(tmp_path).map_err(abort_commit)?;
         let mtime = file_meta
             .modified()
@@ -5472,6 +5478,10 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 self.release_segment_dir(bucket, seg_id);
             }
             Self::safe_unlink(&path).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            if let Err(err) = crate::failpoints::hit(&self.root, "delete:before-meta-remove") {
+                return Err(StorageError::Io(err));
+            }
             self.delete_metadata_sync(bucket, key)
                 .map_err(StorageError::Io)?;
 
@@ -6320,6 +6330,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             );
         }
 
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(err) = crate::failpoints::hit(&self.root, "mpu:before-finalize") {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(StorageError::Io(err));
+        }
         let result = run_blocking(|| {
             let quota_lock = self.quota_lock_if_configured(bucket);
             let _quota_guard = quota_lock.as_ref().map(|lock| lock.lock());
@@ -7125,6 +7140,246 @@ mod tests {
             staged_sidecar_count(&backend),
             1,
             "the staged sidecar must remain for the GC tmp sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn crash_mid_delete_leaves_a_detectable_ghost() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-del").await.unwrap();
+        put_listing_object(&backend, "fp-del", "obj.bin", b"v1").await;
+
+        crate::failpoints::set(
+            &backend.root,
+            "delete:before-meta-remove",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join =
+            tokio::spawn(async move { crashed.delete_object("fp-del", "obj.bin").await }).await;
+        crate::failpoints::clear(&backend.root, "delete:before-meta-remove");
+        assert!(join.unwrap_err().is_panic());
+
+        let meta = backend
+            .get_object_metadata("fp-del", "obj.bin")
+            .await
+            .unwrap();
+        assert!(
+            meta.contains_key("__etag__"),
+            "the sidecar must survive so the half-deleted object fails loudly"
+        );
+        assert!(
+            backend.get_object("fp-del", "obj.bin").await.is_err(),
+            "the data is gone; the ghost must error on read, not serve garbage"
+        );
+
+        backend.delete_object("fp-del", "obj.bin").await.unwrap();
+        let cleaned = backend.get_object_metadata("fp-del", "obj.bin").await;
+        assert!(
+            cleaned.map(|m| !m.contains_key("__etag__")).unwrap_or(true),
+            "a repeated delete must clear the ghost's sidecar"
+        );
+    }
+
+    #[tokio::test]
+    async fn crash_before_concat_mpu_finalize_is_retryable() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-mpu-c").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("fp-mpu-c", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 1024]));
+        backend
+            .upload_part("fp-mpu-c", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 512]));
+        backend
+            .upload_part("fp-mpu-c", &upload_id, 2, part2)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:before-finalize",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let crashed_upload = upload_id.clone();
+        let crashed_parts = parts.clone();
+        let join = tokio::spawn(async move {
+            crashed
+                .complete_multipart("fp-mpu-c", &crashed_upload, &crashed_parts)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "mpu:before-finalize");
+        assert!(join.unwrap_err().is_panic());
+        assert!(
+            backend.get_object("fp-mpu-c", "obj.bin").await.is_err(),
+            "no object may be visible after a crash before the commit"
+        );
+
+        let obj = backend
+            .complete_multipart("fp-mpu-c", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(
+            obj.size, 1536,
+            "the concat path keeps its parts; retrying the complete must succeed"
+        );
+        let (_, mut stream) = backend.get_object("fp-mpu-c", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body.len(), 1536);
+    }
+
+    #[tokio::test]
+    async fn crash_before_segments_mpu_finalize_consumes_the_parts() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-mpu-s").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("fp-mpu-s", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 3072]));
+        backend
+            .upload_part("fp-mpu-s", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 3072]));
+        backend
+            .upload_part("fp-mpu-s", &upload_id, 2, part2)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:before-finalize",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let crashed_upload = upload_id.clone();
+        let crashed_parts = parts.clone();
+        let join = tokio::spawn(async move {
+            crashed
+                .complete_multipart("fp-mpu-s", &crashed_upload, &crashed_parts)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "mpu:before-finalize");
+        assert!(join.unwrap_err().is_panic());
+
+        assert!(
+            backend.get_object("fp-mpu-s", "obj.bin").await.is_err(),
+            "no object may be visible after a crash before the commit"
+        );
+        let segment_dir = backend.segments_bucket_root("fp-mpu-s").join(&upload_id);
+        assert!(
+            segment_dir.is_dir(),
+            "the moved parts remain as an orphaned segment dir for the GC segment sweep"
+        );
+        assert!(
+            backend
+                .complete_multipart("fp-mpu-s", &upload_id, &parts)
+                .await
+                .is_err(),
+            "known gap: the segments path consumes its parts, so retrying the complete fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn crash_after_version_archival_preserves_the_live_object() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-arch").await.unwrap();
+        backend
+            .set_versioning_status("fp-arch", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "fp-arch", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-arch", "obj.bin")
+            .await
+            .unwrap();
+        let original_vid = before.get("__version_id__").cloned().unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:after-archive",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+            crashed.put_object("fp-arch", "obj.bin", stream, None).await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:after-archive");
+        assert!(join.unwrap_err().is_panic());
+
+        let after = backend
+            .get_object_metadata("fp-arch", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__version_id__"), Some(&original_vid));
+        let (_, mut stream) = backend.get_object("fp-arch", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v1");
+        for version in backend
+            .list_object_versions("fp-arch", "obj.bin")
+            .await
+            .unwrap()
+        {
+            assert_eq!(
+                version.version_id, original_vid,
+                "a crash after archival must not surface a version id that was never committed"
+            );
+        }
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v3".to_vec()));
+        let committed = backend
+            .put_object("fp-arch", "obj.bin", stream, None)
+            .await
+            .unwrap();
+        assert_ne!(committed.version_id.as_deref(), Some(original_vid.as_str()));
+        let (_, mut stream) = backend.get_object("fp-arch", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(
+            body, b"v3",
+            "the next put after the crash must commit normally"
         );
     }
 

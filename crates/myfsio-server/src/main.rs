@@ -94,6 +94,15 @@ async fn main() {
 
     myfsio_server::handlers::ui_api::init_server_start_time();
 
+    #[cfg(feature = "failpoints")]
+    if let Ok(spec) = std::env::var("MYFSIO_FAILPOINTS") {
+        tracing::warn!(
+            "failpoints armed from MYFSIO_FAILPOINTS ({}); this build is for crash testing only",
+            spec
+        );
+        myfsio_storage::failpoints::arm_from_spec(&spec);
+    }
+
     let active_format = myfsio_server::format_marker::ActiveFormat {
         metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
             &config.metadata_layout,
