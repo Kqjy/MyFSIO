@@ -467,25 +467,14 @@ impl SiteSyncWorker {
     fn resolve_conflict(&self, local: &ObjectMeta, remote: &RemoteObjectMeta) -> &'static str {
         let local_ts = local.last_modified.timestamp() as f64
             + local.last_modified.timestamp_subsec_nanos() as f64 / 1_000_000_000.0;
-        let remote_ts = remote.last_modified;
-
-        if (remote_ts - local_ts).abs() < self.clock_skew_tolerance {
-            let local_etag = local.etag.clone().unwrap_or_default();
-            let local_etag_trim = local_etag.trim_matches('"');
-            if remote.etag == local_etag_trim {
-                return "skip";
-            }
-            if remote.etag.as_str() > local_etag_trim {
-                return "pull";
-            }
-            return "keep";
-        }
-
-        if remote_ts > local_ts {
-            "pull"
-        } else {
-            "keep"
-        }
+        let local_etag = local.etag.clone().unwrap_or_default();
+        resolve_conflict_decision(
+            local_ts,
+            local_etag.trim_matches('"'),
+            remote.last_modified,
+            &remote.etag,
+            self.clock_skew_tolerance,
+        )
     }
 
     async fn pull_object(
@@ -540,6 +529,29 @@ impl SiteSyncWorker {
         if let Ok(text) = serde_json::to_string_pretty(state) {
             let _ = std::fs::write(&path, text);
         }
+    }
+}
+
+fn resolve_conflict_decision(
+    local_ts: f64,
+    local_etag: &str,
+    remote_ts: f64,
+    remote_etag: &str,
+    clock_skew_tolerance: f64,
+) -> &'static str {
+    if (remote_ts - local_ts).abs() < clock_skew_tolerance {
+        if remote_etag == local_etag {
+            return "skip";
+        }
+        if remote_etag > local_etag {
+            return "pull";
+        }
+        return "keep";
+    }
+    if remote_ts > local_ts {
+        "pull"
+    } else {
+        "keep"
     }
 }
 
@@ -611,6 +623,70 @@ fn remote_list_error(bucket: &str, debug: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflict_resolution_is_last_writer_wins_outside_the_skew_window() {
+        assert_eq!(
+            resolve_conflict_decision(100.0, "aaa", 200.0, "bbb", 1.0),
+            "pull"
+        );
+        assert_eq!(
+            resolve_conflict_decision(200.0, "aaa", 100.0, "bbb", 1.0),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn identical_etags_inside_the_skew_window_are_skipped() {
+        assert_eq!(
+            resolve_conflict_decision(100.0, "same", 100.5, "same", 1.0),
+            "skip"
+        );
+    }
+
+    #[test]
+    fn differing_etags_inside_the_skew_window_use_the_lexical_tiebreaker() {
+        assert_eq!(
+            resolve_conflict_decision(100.0, "aaa", 100.5, "bbb", 1.0),
+            "pull"
+        );
+        assert_eq!(
+            resolve_conflict_decision(100.0, "bbb", 100.5, "aaa", 1.0),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn conflict_resolution_converges_from_both_sides() {
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> 16
+        };
+        for _ in 0..2000 {
+            let ts_a = 1000.0 + (next() % 100) as f64 / 10.0;
+            let ts_b = 1000.0 + (next() % 100) as f64 / 10.0;
+            let etag_a = format!("{:08x}", next() as u32);
+            let etag_b = format!("{:08x}", next() as u32);
+            let tolerance = 1.0;
+
+            let a_decision = resolve_conflict_decision(ts_a, &etag_a, ts_b, &etag_b, tolerance);
+            let b_decision = resolve_conflict_decision(ts_b, &etag_b, ts_a, &etag_a, tolerance);
+
+            if etag_a == etag_b && (ts_a - ts_b).abs() < tolerance {
+                assert_eq!(a_decision, "skip");
+                assert_eq!(b_decision, "skip");
+                continue;
+            }
+            assert!(
+                (a_decision == "pull") ^ (b_decision == "pull"),
+                "exactly one site must pull for convergence: \
+                 a=({ts_a},{etag_a})->{a_decision} b=({ts_b},{etag_b})->{b_decision}"
+            );
+        }
+    }
 
     #[test]
     fn missing_remote_bucket_is_classified_as_not_found() {
