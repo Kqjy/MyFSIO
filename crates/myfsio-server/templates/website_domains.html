@@ -8,16 +8,12 @@
     <p class="text-uppercase text-muted small mb-1">Website Hosting</p>
     <h1 class="h3 mb-1 d-flex align-items-center gap-2">
       <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-        <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
+        <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+        <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
       </svg>
       Domain Mappings
     </h1>
     <p class="text-muted mb-0 mt-1">Map custom domains to buckets for static website hosting.</p>
-  </div>
-  <div class="d-none d-md-block">
-    <span class="badge bg-primary bg-opacity-10 text-primary fs-6 px-3 py-2">
-      {{ mappings|length }} mapping{% if mappings|length != 1 %}s{% else %}{% endif %}
-    </span>
   </div>
 </div>
 
@@ -34,93 +30,24 @@
 {% endif %}
 
 <div class="row g-4">
-  <div class="col-lg-4 col-md-5">
-    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-        <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-            <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
-          </svg>
-          Add Domain Mapping
-        </h5>
-        <p class="text-muted small mb-0">Point a custom domain to a bucket</p>
-      </div>
-      <div class="card-body px-4 pb-4">
-        {% if not website_hosting_enabled %}
-        <div class="text-center py-4 text-muted">
-          <p class="mb-1">Website hosting is disabled.</p>
-          <p class="small mb-0">Set <code>WEBSITE_HOSTING_ENABLED=true</code> to add domain mappings.</p>
-        </div>
-        {% else %}
-        <form method="POST" action="{{ url_for(endpoint="ui.create_website_domain") }}" id="createDomainForm">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
-          <div class="mb-3">
-            <label for="domain" class="form-label fw-medium">Domain</label>
-            <input type="text" class="form-control" id="domain" name="domain" required
-                   placeholder="www.example.com"
-                   pattern="^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
-                   title="Enter a valid hostname (e.g. www.example.com). Do not include http:// or trailing slashes.">
-            <div class="form-text">Hostname only &mdash; no <code>http://</code> prefix or trailing slash.</div>
-          </div>
-          <div id="domainPreview" class="alert alert-light border small py-2 px-3 mb-3 d-none">
-            <span class="text-muted">Will be accessible at:</span>
-            <code id="domainPreviewUrl" class="ms-1"></code>
-          </div>
-          <div class="mb-3">
-            <label for="bucket" class="form-label fw-medium">Bucket</label>
-            {% if buckets %}
-            <select class="form-select" id="bucket" name="bucket" required>
-              <option value="" selected disabled>Select a bucket</option>
-              {% for b in buckets %}
-              <option value="{{ b }}">{{ b }}</option>
-              {% endfor %}
-            </select>
-            {% else %}
-            <input type="text" class="form-control" id="bucket" name="bucket" required placeholder="my-site-bucket">
-            {% endif %}
-            <div class="form-text">The bucket must have website hosting enabled.</div>
-          </div>
-          <div class="d-grid">
-            <button type="submit" class="btn btn-primary" id="addMappingBtn">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
-              </svg>
-              Add Mapping
-            </button>
-          </div>
-        </form>
-        {% endif %}
-      </div>
-    </div>
-
-    <div class="card shadow-sm border-0 mt-4" style="border-radius: 1rem;">
-      <div class="card-body px-4 py-3">
-        <h6 class="fw-semibold mb-2 d-flex align-items-center gap-2">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
-          </svg>
-          How it works
-        </h6>
-        <ol class="small text-muted mb-0 ps-3">
-          <li class="mb-1">Enable website hosting on a bucket (Properties tab)</li>
-          <li class="mb-1">Create a domain mapping here</li>
-          <li>Point your DNS (A/CNAME) to this server</li>
-        </ol>
-      </div>
-    </div>
-  </div>
-
   <div class="col-lg-8 col-md-7">
     <div class="card shadow-sm border-0" style="border-radius: 1rem;">
       <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
         <div class="d-flex justify-content-between align-items-center mb-1">
           <h5 class="fw-semibold d-flex align-items-center gap-2 mb-0">
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-              <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
-              <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
+              <path fill-rule="evenodd" d="M5 11.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zm-3 1a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm0 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/>
             </svg>
             Active Mappings
           </h5>
+          {% if mappings %}
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="btnCheckAllDns" title="Resolve every mapped domain and compare it against this server">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+              <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09z"/>
+            </svg>
+            Check DNS
+          </button>
+          {% endif %}
         </div>
         <p class="text-muted small mb-0">Domains currently serving website content</p>
         {% if mappings|length > 3 %}
@@ -134,14 +61,14 @@
         </div>
         {% endif %}
       </div>
-      <div class="card-body px-4 pb-4">
+      <div class="card-body px-3 px-md-4 pb-4">
         {% if mappings %}
         <div class="table-responsive">
-          <table class="table table-hover align-middle mb-0" id="domainTable">
+          <table class="table table-fluid table-hover align-middle mb-0" id="domainTable">
             <thead class="table-light">
               <tr>
                 <th scope="col">Domain</th>
-                <th scope="col">Bucket</th>
+                <th scope="col" class="d-none d-sm-table-cell">Bucket</th>
                 <th scope="col" class="text-end">Actions</th>
               </tr>
             </thead>
@@ -149,17 +76,28 @@
               {% for m in mappings %}
               <tr data-domain="{{ m.domain }}" data-bucket="{{ m.bucket }}">
                 <td>
-                  <div class="d-flex align-items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-success flex-shrink-0" viewBox="0 0 16 16">
-                      <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
-                    </svg>
-                    <div>
+                  <div class="d-flex align-items-start gap-2">
+                    <button type="button" class="btn btn-link p-0 border-0 lh-1 mt-1 flex-shrink-0 dns-check-btn"
+                            data-domain="{{ m.domain }}"
+                            title="DNS not checked yet — click to check">
+                      <span class="dns-status-icon text-muted">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                          <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+                          <path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/>
+                        </svg>
+                      </span>
+                    </button>
+                    <div class="text-break" style="min-width: 0; max-width: 24rem;">
                       <code class="fw-medium">{{ m.domain }}</code>
                       <div class="text-muted small">http://{{ m.domain }}</div>
+                      <div class="d-sm-none mt-1">
+                        <span class="badge bg-primary bg-opacity-10 text-primary">{{ m.bucket }}</span>
+                      </div>
+                      <div class="small mt-1 d-none dns-status-text" style="overflow-wrap: anywhere;"></div>
                     </div>
                   </div>
                 </td>
-                <td><span class="badge bg-primary bg-opacity-10 text-primary">{{ m.bucket }}</span></td>
+                <td class="d-none d-sm-table-cell"><span class="badge bg-primary bg-opacity-10 text-primary">{{ m.bucket }}</span></td>
                 <td class="text-end">
                   <div class="btn-group btn-group-sm" role="group">
                     <button type="button" class="btn btn-outline-secondary"
@@ -197,13 +135,98 @@
         <div class="empty-state text-center py-5">
           <div class="empty-state-icon mx-auto mb-3">
             <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-              <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5zM5.145 12c.138.386.295.744.468 1.068.552 1.035 1.218 1.65 1.887 1.855V12H5.145zm.182 2.472a6.696 6.696 0 0 1-.597-.933A9.268 9.268 0 0 1 4.09 12H2.255a7.024 7.024 0 0 0 3.072 2.472zM3.82 11a13.652 13.652 0 0 1-.312-2.5h-2.49c.062.89.291 1.733.656 2.5H3.82zm6.853 3.472A7.024 7.024 0 0 0 13.745 12H11.91a9.27 9.27 0 0 1-.64 1.539 6.688 6.688 0 0 1-.597.933zM8.5 12v2.923c.67-.204 1.335-.82 1.887-1.855.173-.324.33-.682.468-1.068H8.5zm3.68-1h2.146c.365-.767.594-1.61.656-2.5h-2.49a13.65 13.65 0 0 1-.312 2.5zm2.802-3.5a6.959 6.959 0 0 0-.656-2.5H12.18c.174.782.282 1.623.312 2.5h2.49zM11.27 2.461c.247.464.462.98.64 1.539h1.835a7.024 7.024 0 0 0-3.072-2.472c.218.284.418.598.597.933zM10.855 4a7.966 7.966 0 0 0-.468-1.068C9.835 1.897 9.17 1.282 8.5 1.077V4h2.355z"/>
+              <path d="M4.715 6.542 3.343 7.914a3 3 0 1 0 4.243 4.243l1.828-1.829A3 3 0 0 0 8.586 5.5L8 6.086a1.002 1.002 0 0 0-.154.199 2 2 0 0 1 .861 3.337L6.88 11.45a2 2 0 1 1-2.83-2.83l.793-.792a4.018 4.018 0 0 1-.128-1.287z"/>
+              <path d="M6.586 4.672A3 3 0 0 0 7.414 9.5l.775-.776a2 2 0 0 1-.896-3.346L9.12 3.55a2 2 0 1 1 2.83 2.83l-.793.792c.112.42.155.855.128 1.287l1.372-1.372a3 3 0 1 0-4.243-4.243L6.586 4.672z"/>
             </svg>
           </div>
           <h5 class="fw-semibold mb-2">No domain mappings yet</h5>
           <p class="text-muted mb-0">Add your first domain mapping to serve a bucket as a static website.</p>
         </div>
         {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4 col-md-5">
+    <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+      <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
+        <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
+            <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+          </svg>
+          Add Domain Mapping
+        </h5>
+        <p class="text-muted small mb-0">Point a custom domain to a bucket</p>
+      </div>
+      <div class="card-body px-4 pb-4">
+        {% if not website_hosting_enabled %}
+        <div class="text-center py-4 text-muted">
+          <p class="mb-1">Website hosting is disabled.</p>
+          <p class="small mb-0">Set <code>WEBSITE_HOSTING_ENABLED=true</code> to add domain mappings.</p>
+        </div>
+        {% else %}
+        <form method="POST" action="{{ url_for(endpoint="ui.create_website_domain") }}" id="createDomainForm">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
+          <div class="mb-3">
+            <label for="domain" class="form-label fw-medium">Domain</label>
+            <input type="text" class="form-control" id="domain" name="domain" required
+                   placeholder="www.example.com"
+                   pattern="^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
+                   title="Enter a valid hostname (e.g. www.example.com). Do not include http:// or trailing slashes."
+                   {% if not buckets %}disabled{% endif %}>
+            <div class="form-text">Hostname only &mdash; no <code>http://</code> prefix or trailing slash.</div>
+          </div>
+          <div id="domainPreview" class="alert alert-light border small py-2 px-3 mb-3 d-none">
+            <span class="text-muted">Will be accessible at:</span>
+            <code id="domainPreviewUrl" class="ms-1"></code>
+          </div>
+          <div class="mb-3">
+            <label for="bucket" class="form-label fw-medium">Bucket</label>
+            {% if buckets %}
+            <select class="form-select" id="bucket" name="bucket" required>
+              <option value="" selected disabled>Select a bucket</option>
+              {% for b in buckets %}
+              <option value="{{ b }}">{{ b }}</option>
+              {% endfor %}
+            </select>
+            <div class="form-text">Only buckets with website hosting enabled are listed.</div>
+            {% else %}
+            <div class="alert alert-warning small py-2 px-3 mb-0">
+              {% if has_any_buckets %}
+              No bucket has website hosting enabled yet. Turn it on from a bucket's <strong>Properties</strong> tab, then map a domain here.
+              {% else %}
+              There are no buckets yet. Create one, enable website hosting on its <strong>Properties</strong> tab, then map a domain here.
+              {% endif %}
+            </div>
+            {% endif %}
+          </div>
+          <div class="d-grid">
+            <button type="submit" class="btn btn-primary" id="addMappingBtn" {% if not buckets %}disabled{% endif %}>
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+              </svg>
+              Add Mapping
+            </button>
+          </div>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card shadow-sm border-0 mt-4" style="border-radius: 1rem;">
+      <div class="card-body px-4 py-3">
+        <h6 class="fw-semibold mb-2 d-flex align-items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.47l-.451-.081.082-.381 2.29-.287zM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+          </svg>
+          How it works
+        </h6>
+        <ol class="small text-muted mb-0 ps-3">
+          <li class="mb-1">Enable website hosting on a bucket (Properties tab)</li>
+          <li class="mb-1">Create a domain mapping here</li>
+          <li class="mb-1">Point your DNS (A/CNAME) to this server</li>
+          <li>Use <strong>Check DNS</strong> to confirm the domain resolves here (port {{ website_port }})</li>
+        </ol>
       </div>
     </div>
   </div>
@@ -236,14 +259,17 @@
               <option value="{{ b }}">{{ b }}</option>
               {% endfor %}
             </select>
+            <div class="form-text">Only buckets with website hosting enabled are listed.</div>
             {% else %}
-            <input type="text" class="form-control" id="editBucket" name="bucket" required>
+            <div class="alert alert-warning small py-2 px-3 mb-0">
+              No bucket has website hosting enabled. Turn it on from a bucket's <strong>Properties</strong> tab before reassigning this domain.
+            </div>
             {% endif %}
           </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-primary">
+          <button type="submit" class="btn btn-primary" {% if not buckets %}disabled{% endif %}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
               <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
             </svg>
@@ -344,19 +370,19 @@
       var bucket = btn.getAttribute('data-bucket');
       document.getElementById('editDomainName').value = domain;
       var editBucket = document.getElementById('editBucket');
-      if (editBucket.tagName === 'SELECT') {
+      if (editBucket && editBucket.tagName === 'SELECT') {
         var stale = editBucket.querySelector('option[data-missing-bucket]');
         if (stale) stale.remove();
         editBucket.value = bucket;
         if (editBucket.value !== bucket) {
           var opt = document.createElement('option');
           opt.value = bucket;
-          opt.textContent = bucket + ' (bucket no longer exists)';
+          opt.textContent = bucket + ' (unavailable — no website hosting)';
           opt.setAttribute('data-missing-bucket', '');
           editBucket.appendChild(opt);
           editBucket.value = bucket;
         }
-      } else {
+      } else if (editBucket) {
         editBucket.value = bucket;
       }
       document.getElementById('editDomainForm').action = '{{ url_for(endpoint="ui.update_website_domain", domain="__DOMAIN__") }}'.replace('__DOMAIN__', encodeURIComponent(domain));
@@ -372,6 +398,88 @@
       document.getElementById('deleteDomainName').textContent = domain;
       document.getElementById('deleteBucketName').textContent = bucket;
       document.getElementById('deleteDomainForm').action = '{{ url_for(endpoint="ui.delete_website_domain", domain="__DOMAIN__") }}'.replace('__DOMAIN__', encodeURIComponent(domain));
+    });
+  }
+
+  var DNS_CHECK_URL = '{{ url_for(endpoint="ui.website_domain_dns_check", domain="__DOMAIN__") }}';
+  var DNS_ICONS = {
+    unknown: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/></svg>',
+    ok: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/></svg>',
+    warning: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>',
+    error: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/></svg>'
+  };
+  var DNS_TONES = {
+    unknown: 'text-muted',
+    ok: 'text-success',
+    warning: 'text-warning',
+    error: 'text-danger'
+  };
+
+  function setDnsState(row, state, message, detail) {
+    var icon = row.querySelector('.dns-status-icon');
+    var text = row.querySelector('.dns-status-text');
+    var button = row.querySelector('.dns-check-btn');
+    if (icon) {
+      icon.className = 'dns-status-icon ' + (DNS_TONES[state] || 'text-muted');
+      icon.innerHTML = DNS_ICONS[state] || DNS_ICONS.unknown;
+    }
+    if (button) {
+      button.setAttribute('title', detail || message || 'Check DNS for this domain');
+    }
+    if (text) {
+      if (message) {
+        text.className = 'small mt-1 dns-status-text ' + (DNS_TONES[state] || 'text-muted');
+        text.textContent = message;
+      } else {
+        text.className = 'small mt-1 d-none dns-status-text';
+        text.textContent = '';
+      }
+    }
+  }
+
+  function checkDns(row) {
+    var domain = row.getAttribute('data-domain') || '';
+    if (!domain) return Promise.resolve();
+    var icon = row.querySelector('.dns-status-icon');
+    if (icon) {
+      icon.className = 'dns-status-icon text-muted';
+      icon.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>';
+    }
+    var text = row.querySelector('.dns-status-text');
+    if (text) {
+      text.className = 'small mt-1 text-muted dns-status-text';
+      text.textContent = 'Checking DNS...';
+    }
+    return fetch(DNS_CHECK_URL.replace('__DOMAIN__', encodeURIComponent(domain)), {
+      headers: { 'Accept': 'application/json' },
+      credentials: 'same-origin'
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        setDnsState(row, data.status || 'error', data.message || 'DNS check returned no result.', data.detail);
+      })
+      .catch(function () {
+        setDnsState(row, 'error', 'DNS check request failed.');
+      });
+  }
+
+  document.querySelectorAll('.dns-check-btn').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var row = button.closest('tr');
+      if (row) checkDns(row);
+    });
+  });
+
+  var checkAllBtn = document.getElementById('btnCheckAllDns');
+  if (checkAllBtn) {
+    checkAllBtn.addEventListener('click', function () {
+      var rows = Array.prototype.slice.call(document.querySelectorAll('#domainTable tbody tr'))
+        .filter(function (row) { return row.style.display !== 'none'; });
+      if (!rows.length) return;
+      checkAllBtn.disabled = true;
+      Promise.all(rows.map(checkDns)).then(function () {
+        checkAllBtn.disabled = false;
+      });
     });
   }
 

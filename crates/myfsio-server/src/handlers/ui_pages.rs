@@ -151,6 +151,10 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
             "ui.delete_website_domain",
             "/ui/website-domains/{domain}/delete",
         ),
+        (
+            "ui.website_domain_dns_check",
+            "/ui/website-domains/{domain}/dns-check",
+        ),
         ("ui.docs_page", "/ui/docs"),
     ]);
 }
@@ -2447,12 +2451,18 @@ pub async fn website_domains_dashboard(
     Extension(session): Extension<SessionHandle>,
 ) -> Response {
     let mut ctx = page_context(&state, &session, "ui.website_domains_dashboard");
-    let buckets: Vec<String> = state
+    let all_buckets: Vec<String> = state
         .storage
         .list_buckets()
         .await
         .map(|list| list.into_iter().map(|b| b.name).collect())
         .unwrap_or_default();
+    let mut buckets: Vec<String> = Vec::new();
+    for name in &all_buckets {
+        if bucket_website_hosting_enabled(&state, name).await {
+            buckets.push(name.clone());
+        }
+    }
     let mappings = state
         .website_domains
         .as_ref()
@@ -2475,11 +2485,22 @@ pub async fn website_domains_dashboard(
     ctx.insert("domains", &mappings);
     ctx.insert("mappings", &mappings);
     ctx.insert("buckets", &buckets);
+    ctx.insert("has_any_buckets", &!all_buckets.is_empty());
     ctx.insert(
         "website_hosting_enabled",
         &state.config.website_hosting_enabled,
     );
+    ctx.insert("website_port", &state.config.bind_addr.port());
     render(&state, "website_domains.html", &ctx)
+}
+
+async fn bucket_website_hosting_enabled(state: &AppState, bucket: &str) -> bool {
+    state
+        .storage
+        .get_bucket_config(bucket)
+        .await
+        .map(|cfg| cfg.website.is_some())
+        .unwrap_or(false)
 }
 
 pub async fn replication_wizard(
@@ -3692,6 +3713,10 @@ pub async fn create_website_domain(
             return Redirect::to("/ui/website-domains").into_response();
         }
     }
+    if !bucket_website_hosting_enabled(&state, &bucket).await {
+        session.write(|s| s.push_flash("danger", website_hosting_required_message(&bucket)));
+        return Redirect::to("/ui/website-domains").into_response();
+    }
     store.set_mapping(&domain, &bucket);
     session.write(|s| {
         s.push_flash(
@@ -3700,6 +3725,13 @@ pub async fn create_website_domain(
         )
     });
     Redirect::to("/ui/website-domains").into_response()
+}
+
+fn website_hosting_required_message(bucket: &str) -> String {
+    format!(
+        "Bucket '{}' does not have website hosting enabled. Enable it on the bucket's Properties tab first.",
+        bucket
+    )
 }
 
 pub async fn update_website_domain(
@@ -3722,6 +3754,10 @@ pub async fn update_website_domain(
                 .write(|s| s.push_flash("danger", format!("Bucket '{}' does not exist.", bucket)));
             return Redirect::to("/ui/website-domains").into_response();
         }
+    }
+    if !bucket_website_hosting_enabled(&state, &bucket).await {
+        session.write(|s| s.push_flash("danger", website_hosting_required_message(&bucket)));
+        return Redirect::to("/ui/website-domains").into_response();
     }
     if store.get_bucket(&domain).is_none() {
         session.write(|s| s.push_flash("danger", format!("Domain '{}' was not found.", domain)));
@@ -3750,6 +3786,142 @@ pub async fn delete_website_domain(
         session.write(|s| s.push_flash("danger", format!("Domain '{}' was not found.", domain)));
     }
     Redirect::to("/ui/website-domains").into_response()
+}
+
+pub async fn website_domain_dns_check(
+    State(state): State<AppState>,
+    Path(domain): Path<String>,
+) -> Response {
+    let domain = crate::services::website_domains::normalize_domain(&domain);
+    if !crate::services::website_domains::is_valid_domain(&domain) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "domain": domain,
+                "status": "error",
+                "addresses": Vec::<String>::new(),
+                "message": "Enter a valid domain name.",
+            })),
+        )
+            .into_response();
+    }
+
+    let port = state.config.bind_addr.port();
+    let resolved = match resolve_host_addresses(&domain).await {
+        Ok(addrs) => addrs,
+        Err(message) => {
+            return axum::Json(json!({
+                "domain": domain,
+                "status": "error",
+                "addresses": Vec::<String>::new(),
+                "message": message,
+            }))
+            .into_response();
+        }
+    };
+    if resolved.is_empty() {
+        return axum::Json(json!({
+            "domain": domain,
+            "status": "error",
+            "addresses": Vec::<String>::new(),
+            "message": "No A or AAAA records were returned for this domain.",
+        }))
+        .into_response();
+    }
+
+    let local = local_server_addresses(state.config.bind_addr);
+    let status = dns_status(&resolved, &local);
+    let rendered: Vec<String> = resolved.iter().map(|ip| ip.to_string()).collect();
+    let listed = summarize_addresses(&rendered);
+    let message = if status == "ok" {
+        format!("Resolves here ({}), port {}.", listed, port)
+    } else {
+        format!(
+            "Resolves to {} — not an address of this server. Still correct behind NAT, a proxy, or a CDN.",
+            listed
+        )
+    };
+
+    axum::Json(json!({
+        "domain": domain,
+        "status": status,
+        "addresses": rendered,
+        "port": port,
+        "message": message,
+        "detail": format!("{} resolves to {}", domain, rendered.join(", ")),
+    }))
+    .into_response()
+}
+
+fn summarize_addresses(addresses: &[String]) -> String {
+    const MAX_SHOWN: usize = 2;
+    let listed = addresses
+        .iter()
+        .take(MAX_SHOWN)
+        .cloned()
+        .collect::<Vec<String>>()
+        .join(", ");
+    if addresses.len() > MAX_SHOWN {
+        format!("{} +{} more", listed, addresses.len() - MAX_SHOWN)
+    } else {
+        listed
+    }
+}
+
+async fn resolve_host_addresses(domain: &str) -> Result<Vec<std::net::IpAddr>, String> {
+    let target = format!("{}:80", domain);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::lookup_host(target),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => {
+            let mut ips: Vec<std::net::IpAddr> = Vec::new();
+            for addr in addrs {
+                if !ips.contains(&addr.ip()) {
+                    ips.push(addr.ip());
+                }
+            }
+            Ok(ips)
+        }
+        Ok(Err(e)) => Err(format!("DNS lookup failed: {}", e)),
+        Err(_) => Err("DNS lookup timed out after 5 seconds.".to_string()),
+    }
+}
+
+fn local_server_addresses(bind_addr: std::net::SocketAddr) -> Vec<std::net::IpAddr> {
+    let mut addrs: Vec<std::net::IpAddr> = Vec::new();
+    let mut push = |ip: std::net::IpAddr| {
+        if !ip.is_unspecified() && !addrs.contains(&ip) {
+            addrs.push(ip);
+        }
+    };
+    push(bind_addr.ip());
+    for (bind, probe) in [
+        ("0.0.0.0:0", "198.51.100.1:80"),
+        ("[::]:0", "[2001:db8::1]:80"),
+    ] {
+        if let Ok(socket) = std::net::UdpSocket::bind(bind) {
+            if socket.connect(probe).is_ok() {
+                if let Ok(local) = socket.local_addr() {
+                    push(local.ip());
+                }
+            }
+        }
+    }
+    addrs
+}
+
+fn dns_status(resolved: &[std::net::IpAddr], local: &[std::net::IpAddr]) -> &'static str {
+    if resolved
+        .iter()
+        .any(|ip| ip.is_loopback() || local.contains(ip))
+    {
+        "ok"
+    } else {
+        "warning"
+    }
 }
 
 pub async fn update_bucket_quota(
@@ -4028,6 +4200,81 @@ pub async fn update_bucket_website(
             axum::Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod website_domain_dns_tests {
+    use super::{dns_status, local_server_addresses};
+    use std::net::{IpAddr, SocketAddr};
+
+    fn ip(value: &str) -> IpAddr {
+        value.parse().expect("ip")
+    }
+
+    #[test]
+    fn matching_local_address_is_ok() {
+        assert_eq!(
+            dns_status(&[ip("203.0.113.10")], &[ip("203.0.113.10")]),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn loopback_counts_as_this_server() {
+        assert_eq!(dns_status(&[ip("127.0.0.1")], &[]), "ok");
+        assert_eq!(dns_status(&[ip("::1")], &[]), "ok");
+    }
+
+    #[test]
+    fn foreign_address_is_a_warning_not_a_failure() {
+        assert_eq!(
+            dns_status(&[ip("198.51.100.7")], &[ip("203.0.113.10")]),
+            "warning"
+        );
+    }
+
+    #[test]
+    fn any_matching_address_wins() {
+        assert_eq!(
+            dns_status(
+                &[ip("198.51.100.7"), ip("203.0.113.10")],
+                &[ip("203.0.113.10")]
+            ),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn address_summary_caps_the_listed_answers() {
+        let all = vec![
+            "104.20.23.154".to_string(),
+            "172.66.147.243".to_string(),
+            "2606:4700:10::ac42:93f3".to_string(),
+            "2606:4700:10::6814:179a".to_string(),
+        ];
+        assert_eq!(
+            super::summarize_addresses(&all),
+            "104.20.23.154, 172.66.147.243 +2 more"
+        );
+        assert_eq!(
+            super::summarize_addresses(&all[..2]),
+            "104.20.23.154, 172.66.147.243"
+        );
+        assert_eq!(super::summarize_addresses(&[]), "");
+    }
+
+    #[test]
+    fn unspecified_bind_address_is_not_advertised_as_local() {
+        let addrs = local_server_addresses("0.0.0.0:5000".parse::<SocketAddr>().expect("addr"));
+        assert!(!addrs.contains(&ip("0.0.0.0")));
+    }
+
+    #[test]
+    fn explicit_bind_address_is_local() {
+        let addrs =
+            local_server_addresses("203.0.113.10:5000".parse::<SocketAddr>().expect("addr"));
+        assert!(addrs.contains(&ip("203.0.113.10")));
     }
 }
 

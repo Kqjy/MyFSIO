@@ -301,6 +301,10 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/website-domains/{domain}/delete",
             post(ui_pages::delete_website_domain),
         )
+        .route(
+            "/ui/website-domains/{domain}/dns-check",
+            get(ui_pages::website_domain_dns_check),
+        )
         .route("/ui/replication/new", get(ui_pages::replication_wizard))
         .route(
             "/ui/replication/create",

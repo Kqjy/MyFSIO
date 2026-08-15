@@ -98,6 +98,15 @@ html {
 	white-space: normal;
 	min-width: 200px;
 }
+
+.table-responsive table.table-fluid {
+	min-width: 0;
+}
+
+.table-responsive table.table-fluid th,
+.table-responsive table.table-fluid td {
+	white-space: normal;
+}
 code { font-size: 0.85rem; }
 
 code {

@@ -150,6 +150,7 @@ fn render_iam() {
 fn render_metrics() {
     let mut ctx = base_ctx();
     ctx.insert("metrics_enabled", &false);
+    ctx.insert("display_timezone", &"UTC");
     ctx.insert("metrics_history_enabled", &false);
     ctx.insert("operation_metrics_enabled", &false);
     ctx.insert("metrics_storage_refresh_minutes", &30u64);
@@ -307,14 +308,39 @@ fn render_website_domains() {
     let mut ctx = base_ctx();
     ctx.insert("mappings", &Vec::<Value>::new());
     ctx.insert("buckets", &Vec::<String>::new());
+    ctx.insert("has_any_buckets", &true);
     ctx.insert("website_hosting_enabled", &true);
-    render_or_panic("website_domains.html", &ctx);
+    ctx.insert("website_port", &5000u16);
+    let rendered = render_to_string_or_panic("website_domains.html", &ctx);
+    assert!(rendered.contains("No bucket has website hosting enabled yet"));
+    assert!(!rendered.contains("id=\"btnCheckAllDns\""));
+
     let mut disabled_ctx = base_ctx();
     disabled_ctx.insert("mappings", &Vec::<Value>::new());
     disabled_ctx.insert("buckets", &Vec::<String>::new());
+    disabled_ctx.insert("has_any_buckets", &false);
     disabled_ctx.insert("website_hosting_enabled", &false);
+    disabled_ctx.insert("website_port", &5000u16);
     let rendered = render_to_string_or_panic("website_domains.html", &disabled_ctx);
     assert!(rendered.contains("WEBSITE_HOSTING_ENABLED"));
+}
+
+#[test]
+fn render_website_domains_with_mappings() {
+    let mut ctx = base_ctx();
+    ctx.insert(
+        "mappings",
+        &json!([{"domain": "www.example.com", "bucket": "site-bucket"}]),
+    );
+    ctx.insert("buckets", &vec!["site-bucket".to_string()]);
+    ctx.insert("has_any_buckets", &true);
+    ctx.insert("website_hosting_enabled", &true);
+    ctx.insert("website_port", &5000u16);
+    let rendered = render_to_string_or_panic("website_domains.html", &ctx);
+    assert!(rendered.contains("id=\"btnCheckAllDns\""));
+    assert!(rendered.contains("class=\"dns-status-icon text-muted\""));
+    assert!(rendered.contains("/ui/website-domains/__DOMAIN__/dns-check"));
+    assert!(rendered.contains("Only buckets with website hosting enabled are listed."));
 }
 
 #[test]
