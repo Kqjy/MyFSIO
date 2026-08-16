@@ -1641,21 +1641,31 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
         let conn_clone = conn.clone();
         let client_ref = &client;
         peer_futures.push(async move {
-            let value = match conn_clone {
-                Some(c) => client_ref.fetch_cluster_overview(&c.endpoint_url, &c).await,
-                None => Err("no connection configured".to_string()),
+            let outcome = match conn_clone {
+                Some(c) => {
+                    client_ref
+                        .fetch_admin_status(
+                            &c.endpoint_url,
+                            "/myfsio/admin/cluster/overview?local_only=1",
+                            &c,
+                        )
+                        .await
+                }
+                None => crate::services::peer_admin::PeerAdminStatus::Unreachable(
+                    "no connection configured".to_string(),
+                ),
             };
-            (peer, value)
+            (peer, outcome.into_result())
         });
     }
 
     let results = futures::future::join_all(peer_futures).await;
     for (peer, result) in results {
-        let (overview, online, error) = match result {
+        let (overview, online, failure) = match result {
             Ok(value) => (value, true, None),
-            Err(err) => (json!({}), false, Some(err)),
+            Err(failure) => (json!({}), false, Some(failure)),
         };
-        let mut card = decorate_site(overview, online, !online, error);
+        let mut card = decorate_site(overview, online, !online, failure);
         if card.get("site_id").and_then(|v| v.as_str()).is_none() {
             card["site_id"] = json!(peer.site_id.clone());
         }
@@ -1676,16 +1686,27 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
     sites
 }
 
-fn decorate_site(mut value: Value, online: bool, stale: bool, error: Option<String>) -> Value {
+fn decorate_site(
+    mut value: Value,
+    online: bool,
+    stale: bool,
+    failure: Option<crate::services::peer_admin::PeerFailure>,
+) -> Value {
     if !value.is_object() {
         value = json!({});
     }
     value["online"] = json!(online);
     value["stale"] = json!(stale);
-    value["error"] = match error {
-        Some(e) => json!(e),
-        None => Value::Null,
-    };
+    match failure {
+        Some(f) => {
+            value["error"] = json!(f.message());
+            value["error_info"] = serde_json::to_value(&f).unwrap_or(Value::Null);
+        }
+        None => {
+            value["error"] = Value::Null;
+            value["error_info"] = Value::Null;
+        }
+    }
     value
 }
 

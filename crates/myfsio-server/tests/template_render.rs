@@ -278,6 +278,24 @@ fn render_cluster_with_sites() {
             "registered_region": "us-west-2",
             "registered_priority": 100,
             "error": "request failed: timeout"
+        },
+        {
+            "site_id": "peer-2",
+            "display_name": "Peer Two",
+            "endpoint": "https://peer2.example.com",
+            "online": false,
+            "stale": true,
+            "is_local": false,
+            "error": "cloudflare answered 403 Forbidden before the request reached the peer's admin API.",
+            "error_info": {
+                "kind": "unauthorized",
+                "status": 403,
+                "title": "Blocked before reaching the peer",
+                "summary": "cloudflare answered 403 Forbidden before the request reached the peer's admin API.",
+                "detail": null,
+                "source": "cloudflare",
+                "hint": "Allow /myfsio/admin/cluster/* through the proxy or WAF in front of this peer."
+            }
         }
     ]);
     ctx.insert("cluster_sites", &sites);
@@ -301,6 +319,19 @@ fn render_cluster_with_sites() {
     );
     assert!(rendered.contains("1.0 MiB"), "{}", rendered);
     assert!(rendered.contains("95.4 MiB"), "{}", rendered);
+    assert!(
+        rendered.contains("Blocked before reaching the peer"),
+        "structured peer error title must render"
+    );
+    assert!(rendered.contains("HTTP 403"), "status chip must render");
+    assert!(
+        rendered.contains("via cloudflare"),
+        "source chip must render"
+    );
+    assert!(
+        rendered.contains("Peer unreachable"),
+        "sites without error_info must fall back to a generic title"
+    );
 }
 
 #[test]

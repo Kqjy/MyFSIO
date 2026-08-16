@@ -15,7 +15,7 @@
     <p class="text-muted mb-0 mt-1">Live view across this site and every registered peer.</p>
   </div>
   <div class="d-flex align-items-center gap-2">
-    <span class="badge bg-success bg-opacity-10 text-success fs-6 px-3 py-2" id="cluster-online-badge">
+    <span class="badge fs-6 px-3 py-2 {% if cluster_online_count == cluster_total_count %}bg-success bg-opacity-10 text-success{% elif cluster_online_count == 0 %}bg-danger bg-opacity-10 text-danger{% else %}bg-warning bg-opacity-10 text-warning{% endif %}" id="cluster-online-badge">
       {{ cluster_online_count }} / {{ cluster_total_count }} online
     </span>
     <span class="text-muted small d-none d-md-inline" id="cluster-updated-at" title="Last refresh">just now</span>
@@ -96,32 +96,35 @@
 <div class="row g-4" id="cluster-sites-row">
   {% for site in cluster_sites %}
   <div class="col-xl-6">
-    <div class="card shadow-sm border-0 h-100 site-card" data-site-id="{{ site.site_id }}" style="border-radius: 1rem;">
+    <div class="card shadow-sm border-0 h-100 site-card {% if not site.online %}is-offline{% endif %}" data-site-id="{{ site.site_id }}" style="border-radius: 1rem;">
       <div class="card-body p-4">
-        <div class="d-flex align-items-start justify-content-between mb-3">
-          <div class="flex-grow-1 min-w-0">
-            <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
-              <span class="badge bg-success bg-opacity-10 text-success site-status-online {% if not site.online %}d-none{% endif %}">
-                <span class="d-inline-block rounded-circle bg-success me-1" style="width:6px;height:6px;"></span>online
-              </span>
-              <span class="badge bg-danger bg-opacity-10 text-danger site-status-offline {% if site.online %}d-none{% endif %}">
-                <span class="d-inline-block rounded-circle bg-danger me-1" style="width:6px;height:6px;"></span>offline
-              </span>
-              <span class="badge bg-warning bg-opacity-10 text-warning site-status-stale {% if not site.stale %}d-none{% endif %}" title="Could not reach peer">stale</span>
-              {% if site.is_local %}
-              <span class="badge bg-primary bg-opacity-10 text-primary">this site</span>
-              {% endif %}
-            </div>
-            <h5 class="fw-semibold mb-0 text-truncate">
-              {% if site.display_name and site.display_name != "" %}{{ site.display_name }}{% else %}{{ site.site_id }}{% endif %}
-            </h5>
-            <div class="text-muted small">
-              <span class="font-monospace">{{ site.site_id }}</span>
-              {% if site.region %} · {{ site.region }}{% elif site.registered_region %} · {{ site.registered_region }}{% endif %}
-            </div>
+        <div class="mb-3">
+          <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+            <span class="badge bg-success bg-opacity-10 text-success site-status-online {% if not site.online %}d-none{% endif %}">
+              <span class="d-inline-block rounded-circle bg-success me-1" style="width:6px;height:6px;"></span>online
+            </span>
+            <span class="badge bg-danger bg-opacity-10 text-danger site-status-offline {% if site.online %}d-none{% endif %}">
+              <span class="d-inline-block rounded-circle bg-danger me-1" style="width:6px;height:6px;"></span>offline
+            </span>
+            <span class="badge bg-warning bg-opacity-10 text-warning site-status-stale {% if not site.stale %}d-none{% endif %}" title="Last poll did not reach this peer">stale</span>
+            {% if site.is_local %}
+            <span class="badge bg-primary bg-opacity-10 text-primary">this site</span>
+            {% endif %}
+          </div>
+          <h5 class="fw-semibold mb-0 text-truncate">
+            {% if site.display_name and site.display_name != "" %}{{ site.display_name }}{% else %}{{ site.site_id }}{% endif %}
+          </h5>
+          <div class="text-muted small text-truncate">
+            <span class="font-monospace">{{ site.site_id }}</span>
+            {% if site.region %} · {{ site.region }}{% elif site.registered_region %} · {{ site.registered_region }}{% endif %}
           </div>
           {% if site.endpoint %}
-          <code class="small text-muted text-end ms-2" style="word-break:break-all;">{{ site.endpoint }}</code>
+          <div class="text-muted small d-flex align-items-center gap-1 mt-1 min-w-0">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16" style="flex-shrink:0;">
+              <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855-.143.268-.276.56-.395.872.705.157 1.472.257 2.282.287V1.077zM4.249 3.539c.142-.384.304-.744.481-1.078a6.7 6.7 0 0 1 .597-.933A7.01 7.01 0 0 0 3.051 3.05c.362.184.763.349 1.198.49zM3.509 7.5c.036-1.07.188-2.087.436-3.008a9.124 9.124 0 0 1-1.565-.667A6.964 6.964 0 0 0 1.018 7.5h2.49zm1.4-2.741a12.344 12.344 0 0 0-.4 2.741H7.5V5.091c-.91-.03-1.783-.145-2.591-.332zM8.5 5.09V7.5h2.99a12.342 12.342 0 0 0-.399-2.741c-.808.187-1.681.301-2.591.332zM4.51 8.5c.035.987.176 1.914.399 2.741A13.612 13.612 0 0 1 7.5 10.91V8.5H4.51zm3.99 0v2.409c.91.03 1.783.145 2.591.332.223-.827.364-1.754.4-2.741H8.5zm-3.282 3.696c.12.312.252.604.395.872.552 1.035 1.218 1.65 1.887 1.855V11.91c-.81.03-1.577.13-2.282.287zm.11 2.276a6.696 6.696 0 0 1-.598-.933 8.853 8.853 0 0 1-.481-1.079 8.38 8.38 0 0 0-1.198.49 7.01 7.01 0 0 0 2.276 1.522zm-1.383-2.964A13.36 13.36 0 0 1 3.508 8.5h-2.49a6.963 6.963 0 0 0 1.362 3.675c.47-.258.995-.482 1.565-.667zm6.728 2.964a7.009 7.009 0 0 0 2.275-1.521 8.376 8.376 0 0 0-1.197-.49 8.853 8.853 0 0 1-.482 1.078 6.688 6.688 0 0 1-.596.933zM8.5 11.909v3.014c.67-.204 1.335-.82 1.887-1.855.143-.268.276-.56.395-.872A12.63 12.63 0 0 0 8.5 11.91zm3.555-.401c.57.185 1.095.409 1.565.667A6.963 6.963 0 0 0 14.982 8.5h-2.49a13.36 13.36 0 0 1-.437 3.008zM14.982 7.5a6.963 6.963 0 0 0-1.362-3.675c-.47.258-.995.482-1.565.667.248.92.4 1.938.437 3.008h2.49zM11.27 2.461c.177.334.339.694.482 1.078a8.368 8.368 0 0 0 1.197-.49 7.01 7.01 0 0 0-2.275-1.52c.218.283.418.597.596.932zm-.488 1.343a7.765 7.765 0 0 0-.395-.872C9.835 1.897 9.17 1.282 8.5 1.077V4.09c.81-.03 1.577-.13 2.282-.287z"/>
+            </svg>
+            <span class="font-monospace text-truncate">{{ site.endpoint }}</span>
+          </div>
           {% endif %}
         </div>
 
@@ -217,11 +220,54 @@
         </div>
 
         <div class="site-offline-content {% if site.online %}d-none{% endif %}">
-          <div class="alert alert-light border-0 mb-0 py-2 px-3 small">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1 text-warning" viewBox="0 0 16 16">
-              <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-            </svg>
-            <span class="site-offline-message">{% if site.error %}{{ site.error }}{% else %}Peer unreachable.{% endif %}</span>
+          <div class="row g-3 mb-3 site-metrics-placeholder">
+            <div class="col-4">
+              <div class="text-uppercase text-muted small mb-1">Buckets</div>
+              <div class="h4 mb-0 text-body-tertiary">—</div>
+            </div>
+            <div class="col-4">
+              <div class="text-uppercase text-muted small mb-1">Objects</div>
+              <div class="h4 mb-0 text-body-tertiary">—</div>
+            </div>
+            <div class="col-4">
+              <div class="text-uppercase text-muted small mb-1">Size</div>
+              <div class="h4 mb-0 text-body-tertiary">—</div>
+            </div>
+          </div>
+
+          <div class="peer-error">
+            <div class="d-flex align-items-start gap-3">
+              <span class="peer-error-icon {% if site.error_info.kind | default(value="") == "not_configured" %}tone-secondary{% elif site.error_info.kind | default(value="") == "unauthorized" or site.error_info.kind | default(value="") == "http" %}tone-warning{% else %}tone-danger{% endif %}">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                </svg>
+              </span>
+              <div class="flex-grow-1 min-w-0">
+                <div class="d-flex align-items-center gap-2 flex-wrap mb-1">
+                  <span class="fw-semibold peer-error-title">{{ site.error_info.title | default(value="Peer unreachable") }}</span>
+                  <span class="badge rounded-pill bg-secondary bg-opacity-10 text-body-secondary font-monospace peer-error-status{% if site.error_info.status | default(value=0) == 0 %} d-none{% endif %}">HTTP {{ site.error_info.status | default(value="") }}</span>
+                  <span class="badge rounded-pill bg-secondary bg-opacity-10 text-body-secondary peer-error-source{% if site.error_info.source | default(value="") == "" %} d-none{% endif %}">via {{ site.error_info.source | default(value="") }}</span>
+                </div>
+                <p class="small text-muted mb-0 peer-error-summary">{{ site.error_info.summary | default(value="The peer could not be reached.") }}</p>
+
+                <div class="peer-error-hint small mt-2 d-flex align-items-start gap-2{% if site.error_info.hint | default(value="") == "" %} d-none{% endif %}">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" viewBox="0 0 16 16" style="flex-shrink:0;margin-top:2px;">
+                    <path d="M2 6a6 6 0 1 1 10.174 4.31c-.203.196-.359.4-.453.619l-.762 1.769A.5.5 0 0 1 10.5 13a.5.5 0 0 1 0 1 .5.5 0 0 1 0 1l-.224.447a1 1 0 0 1-.894.553H6.618a1 1 0 0 1-.894-.553L5.5 15a.5.5 0 0 1 0-1 .5.5 0 0 1 0-1 .5.5 0 0 1-.46-.302l-.761-1.77a1.964 1.964 0 0 0-.453-.618A5.984 5.984 0 0 1 2 6z"/>
+                  </svg>
+                  <span class="peer-error-hint-text">{{ site.error_info.hint | default(value="") }}</span>
+                </div>
+
+                <details class="peer-error-details mt-2{% if site.error_info.detail | default(value="") == "" %} d-none{% endif %}">
+                  <summary class="small text-muted">Response detail</summary>
+                  <div class="peer-error-detail-text font-monospace small mt-2">{{ site.error_info.detail | default(value="") }}</div>
+                </details>
+              </div>
+            </div>
+          </div>
+
+          <div class="d-flex align-items-center gap-2 mt-3">
+            <button type="button" class="btn btn-outline-secondary btn-sm site-retry-btn">Retry now</button>
+            <a href="{{ url_for(endpoint='ui.sites_dashboard') }}" class="btn btn-link btn-sm text-decoration-none px-1">Site settings →</a>
           </div>
         </div>
       </div>
@@ -453,9 +499,62 @@
                 if (c) c.textContent = errCount;
             }
         } else {
-            var msg = card.querySelector(".site-offline-message");
-            if (msg) msg.textContent = site.error || "Peer unreachable.";
+            renderPeerError(card, site);
         }
+        card.classList.toggle("is-offline", !online);
+    }
+
+    var ERROR_TONES = {
+        not_configured: "tone-secondary",
+        unauthorized: "tone-warning",
+        http: "tone-warning",
+    };
+
+    function renderPeerError(card, site) {
+        var info = site.error_info || {};
+        var setText = function (sel, text) {
+            var el = card.querySelector(sel);
+            if (el) el.textContent = text;
+        };
+        var setShown = function (sel, shown) {
+            var el = card.querySelector(sel);
+            if (el) el.classList.toggle("d-none", !shown);
+        };
+        setText(".peer-error-title", info.title || "Peer unreachable");
+        setText(".peer-error-summary", info.summary || site.error || "The peer could not be reached.");
+
+        var status = info.status;
+        setShown(".peer-error-status", !!status);
+        if (status) setText(".peer-error-status", "HTTP " + status);
+
+        var source = info.source || "";
+        setShown(".peer-error-source", !!source);
+        if (source) setText(".peer-error-source", "via " + source);
+
+        var hint = info.hint || "";
+        setShown(".peer-error-hint", !!hint);
+        if (hint) setText(".peer-error-hint-text", hint);
+
+        var detail = info.detail || "";
+        setShown(".peer-error-details", !!detail);
+        if (detail) setText(".peer-error-detail-text", detail);
+
+        var icon = card.querySelector(".peer-error-icon");
+        if (icon) {
+            icon.classList.remove("tone-secondary", "tone-warning", "tone-danger");
+            icon.classList.add(ERROR_TONES[info.kind] || "tone-danger");
+        }
+    }
+
+    function setOnlineBadge(online, total) {
+        var badge = document.getElementById("cluster-online-badge");
+        if (!badge) return;
+        badge.textContent = online + " / " + total + " online";
+        badge.classList.remove(
+            "bg-success", "text-success", "bg-warning", "text-warning", "bg-danger", "text-danger"
+        );
+        var tone = online === total ? "success" : (online === 0 ? "danger" : "warning");
+        badge.classList.add("bg-" + tone, "text-" + tone);
     }
 
     var pageReloading = false;
@@ -489,8 +588,7 @@
                     sizeEl.setAttribute("data-bytes", String(totals.size_bytes || 0));
                     sizeEl.textContent = fmtBytes(totals.size_bytes || 0);
                 }
-                var onlineBadge = document.getElementById("cluster-online-badge");
-                if (onlineBadge) onlineBadge.textContent = (totals.online_count || 0) + " / " + (totals.total_count || 0) + " online";
+                setOnlineBadge(totals.online_count || 0, totals.total_count || 0);
 
                 var sawNewSite = false;
                 (data.sites || []).forEach(function (site) {
@@ -545,10 +643,53 @@
     if (refreshBtn) {
         refreshBtn.addEventListener("click", function () { poll(true); });
     }
+
+    document.addEventListener("click", function (event) {
+        var btn = event.target.closest ? event.target.closest(".site-retry-btn") : null;
+        if (!btn) return;
+        btn.disabled = true;
+        poll(true).finally(function () { btn.disabled = false; });
+    });
 })();
 </script>
 <style>
 @keyframes cluster-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { animation: cluster-spin 0.8s linear infinite; transform-origin: 50% 50%; }
+
+.site-card { transition: box-shadow 0.15s ease-in-out; }
+.site-card.is-offline { box-shadow: inset 0 0 0 1px rgba(var(--bs-danger-rgb), 0.25), 0 .125rem .25rem rgba(0,0,0,.06) !important; }
+
+.peer-error {
+  background: var(--myfsio-body-bg);
+  border: 1px solid var(--myfsio-card-border);
+  border-radius: 0.75rem;
+  padding: 0.875rem 1rem;
+}
+.peer-error-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 0.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.peer-error-icon.tone-danger { background: rgba(var(--bs-danger-rgb), 0.12); color: var(--bs-danger); }
+.peer-error-icon.tone-warning { background: rgba(var(--bs-warning-rgb), 0.15); color: var(--bs-warning-text-emphasis, #997404); }
+.peer-error-icon.tone-secondary { background: rgba(var(--bs-secondary-rgb), 0.12); color: var(--myfsio-muted); }
+.peer-error-hint { color: var(--myfsio-muted); }
+.peer-error-details > summary { cursor: pointer; }
+.peer-error-details > summary:hover { color: var(--myfsio-text) !important; }
+.peer-error-detail-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--myfsio-card-bg);
+  border: 1px solid var(--myfsio-card-border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  max-height: 9rem;
+  overflow-y: auto;
+  color: var(--myfsio-muted);
+}
 </style>
 {% endblock %}
