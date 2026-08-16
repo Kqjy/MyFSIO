@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Sign In{% endblock %}
 {% block content %}
-<div class="row align-items-center justify-content-center min-vh-75 g-5">
-  <div class="col-lg-5 d-none d-lg-block">
+<div class="login-shell">
+<div class="row align-items-center justify-content-center g-5 login-layout">
+  <div class="col-lg-6 d-none d-lg-block">
     <div class="text-center mb-4">
       <div class="position-relative d-inline-block mb-4">
         <div class="login-hero-icon">
@@ -33,8 +34,8 @@
     </div>
   </div>
   <div class="col-lg-5 col-md-8 col-sm-10">
-    <div class="card shadow-lg login-card position-relative">
-      <div class="card-body p-4 p-md-5">
+    <div class="card shadow-lg login-card">
+      <div class="card-body login-card-body">
         <div class="text-center mb-4 d-lg-none">
           <img src="{{ url_for(endpoint="static", filename="images/MyFSIO.png") }}" alt="MyFSIO" width="48" height="48" class="mb-3 rounded-3">
           <h2 class="h4 fw-bold">MyFSIO</h2>
@@ -79,9 +80,28 @@
     </div>
   </div>
 </div>
+</div>
 
 <style>
-.min-vh-75 { min-height: 75vh; }
+.login-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - 4rem);
+}
+.login-layout {
+  width: 100%;
+  max-width: 1140px;
+  margin: 0 auto;
+}
+.login-card-body {
+  padding: 1.75rem;
+}
+@media (min-width: 768px) {
+  .login-card-body {
+    padding: 2.5rem;
+  }
+}
 .login-hero-icon {
   width: 120px;
   height: 120px;
