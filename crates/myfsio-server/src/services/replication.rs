@@ -621,6 +621,13 @@ struct ReplicationWork {
     ledger_identity: LedgerKey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationTriggerOutcome {
+    NotApplicable,
+    Enqueued,
+    Failed,
+}
+
 pub struct ReplicationManager {
     storage: Arc<FsStorageBackend>,
     connections: Arc<ConnectionStore>,
@@ -1235,10 +1242,10 @@ impl ReplicationManager {
         key: String,
         action: String,
         generation: Option<String>,
-    ) {
+    ) -> ReplicationTriggerOutcome {
         let rule = match self.get_rule(&bucket) {
             Some(r) if r.enabled => r,
-            _ => return,
+            _ => return ReplicationTriggerOutcome::NotApplicable,
         };
         let connection = match self.connections.get(&rule.target_connection_id) {
             Some(c) => c,
@@ -1249,7 +1256,7 @@ impl ReplicationManager {
                     key,
                     rule.target_connection_id
                 );
-                return;
+                return ReplicationTriggerOutcome::Failed;
             }
         };
         let kind = match action.as_str() {
@@ -1261,7 +1268,7 @@ impl ReplicationManager {
             .prepare_ledger_entry(&bucket, &key, &rule, kind, generation)
             .await
         else {
-            return;
+            return ReplicationTriggerOutcome::Failed;
         };
         if kind != ReplicationOpKind::Put {
             self.failures.record_queued_delete(&bucket, &key);
@@ -1275,6 +1282,7 @@ impl ReplicationManager {
             run: None,
             ledger_identity: entry.identity,
         });
+        ReplicationTriggerOutcome::Enqueued
     }
 
     async fn prepare_ledger_entry(

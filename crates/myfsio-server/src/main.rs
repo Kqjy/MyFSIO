@@ -164,6 +164,50 @@ async fn main() {
         config.ui_enabled
     );
 
+    let recovery = {
+        let recovery_backend = myfsio_server::state::build_storage_backend(&config);
+        let recovery = match recovery_backend.recover_staged_commits_sync() {
+            Ok(recovery) => {
+                if !recovery.published.is_empty() || recovery.discarded > 0 || recovery.poisoned > 0
+                {
+                    tracing::warn!(
+                        published = recovery.published.len(),
+                        discarded = recovery.discarded,
+                        poisoned = recovery.poisoned,
+                        "Reconciled staged object commits before starting background workers"
+                    );
+                }
+                recovery
+            }
+            Err(err) => {
+                tracing::error!(
+                    "Failed to reconcile staged object commits: {}. Refusing to serve: objects \
+                     may expose data from an interrupted commit under stale metadata. Inspect \
+                     or remove the offending file under .myfsio.sys/tmp and start the server \
+                     again.",
+                    err
+                );
+                std::process::exit(1);
+            }
+        };
+        if previous_shutdown_unclean {
+            match recovery_backend.invalidate_all_listing_indexes_sync() {
+                Ok(count) => tracing::warn!(
+                    "Previous shutdown was unclean; discarded listing indexes for {} buckets",
+                    count
+                ),
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to invalidate listing indexes after unclean shutdown: {}",
+                        err
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        recovery
+    };
+
     let state = if config.encryption_enabled || config.kms_enabled {
         match AppState::new_with_encryption(config.clone()).await {
             Ok(state) => state,
@@ -175,18 +219,40 @@ async fn main() {
     } else {
         AppState::new(config.clone())
     };
-    if previous_shutdown_unclean {
-        match state.storage.invalidate_all_listing_indexes_sync() {
-            Ok(count) => tracing::warn!(
-                "Previous shutdown was unclean; discarded listing indexes for {} buckets",
-                count
-            ),
-            Err(err) => {
+    for commit in recovery.published {
+        use myfsio_server::services::replication::ReplicationTriggerOutcome;
+        let outcome = state
+            .replication
+            .clone()
+            .trigger(
+                commit.bucket.clone(),
+                commit.key.clone(),
+                "write".to_string(),
+                None,
+            )
+            .await;
+        match outcome {
+            ReplicationTriggerOutcome::NotApplicable | ReplicationTriggerOutcome::Enqueued => {
+                if let Err(err) = state
+                    .storage
+                    .finish_recovered_commit_sync(&commit.staged_path)
+                {
+                    tracing::warn!(
+                        bucket = commit.bucket,
+                        key = commit.key,
+                        error = %err,
+                        "could not remove a completed commit intent; the next startup will \
+                         reprocess it harmlessly"
+                    );
+                }
+            }
+            ReplicationTriggerOutcome::Failed => {
                 tracing::error!(
-                    "Failed to invalidate listing indexes after unclean shutdown: {}",
-                    err
+                    bucket = commit.bucket,
+                    key = commit.key,
+                    "the recovered commit could not be recorded in the replication ledger; \
+                     its intent is retained so the next startup retries the enqueue"
                 );
-                std::process::exit(1);
             }
         }
     }

@@ -66,27 +66,31 @@ pub struct RelayIdempotencyEntry {
     pub request_fingerprint: String,
 }
 
+pub fn build_storage_backend(config: &ServerConfig) -> Arc<FsStorageBackend> {
+    Arc::new(FsStorageBackend::new_with_config(
+        config.storage_root.clone(),
+        FsStorageBackendConfig {
+            object_key_max_length_bytes: config.object_key_max_length_bytes,
+            object_cache_max_size: config.object_cache_max_size,
+            bucket_config_cache_ttl: Duration::from_secs_f64(
+                config.bucket_config_cache_ttl_seconds,
+            ),
+            stream_chunk_size: config.stream_chunk_size,
+            multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
+                &config.multipart_object_layout,
+            ),
+            metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
+                &config.metadata_layout,
+            ),
+            listing_index_enabled: config.listing_index_enabled,
+            ..FsStorageBackendConfig::default()
+        },
+    ))
+}
+
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
-        let storage = Arc::new(FsStorageBackend::new_with_config(
-            config.storage_root.clone(),
-            FsStorageBackendConfig {
-                object_key_max_length_bytes: config.object_key_max_length_bytes,
-                object_cache_max_size: config.object_cache_max_size,
-                bucket_config_cache_ttl: Duration::from_secs_f64(
-                    config.bucket_config_cache_ttl_seconds,
-                ),
-                stream_chunk_size: config.stream_chunk_size,
-                multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
-                    &config.multipart_object_layout,
-                ),
-                metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
-                    &config.metadata_layout,
-                ),
-                listing_index_enabled: config.listing_index_enabled,
-                ..FsStorageBackendConfig::default()
-            },
-        ));
+        let storage = build_storage_backend(&config);
         let iam = Arc::new(IamService::new_with_secret(
             config.iam_config_path.clone(),
             config.secret_key.clone(),

@@ -171,6 +171,19 @@ async fn killing_the_server_mid_put_commit_preserves_the_invariants() {
         "a kill before the data rename must leave the old object untouched across restart"
     );
     assert_eq!(etag, etag_v1);
+    let staged_leftovers = std::fs::read_dir(root.join(".myfsio.sys").join("tmp"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".sidecar-stage"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        staged_leftovers, 0,
+        "commit recovery must discard the staged sidecar of a commit whose data \
+         never renamed into place"
+    );
     server.kill();
 
     let mut server = spawn_server(root, Some("put:before-publish-sidecar=abort"));
@@ -191,11 +204,24 @@ async fn killing_the_server_mid_put_commit_preserves_the_invariants() {
     assert!(status.is_success());
     assert_eq!(
         body, b"vvvv3333",
-        "a kill after the data rename commits the data; the stale sidecar is the documented torn state"
+        "a kill after the data rename commits the data"
     );
-    assert_eq!(
+    assert_ne!(
         etag, etag_v1,
-        "the previous sidecar stays authoritative until overwritten"
+        "startup commit recovery must publish the staged sidecar so the metadata \
+         describes the committed bytes"
+    );
+    let staged_leftovers = std::fs::read_dir(root.join(".myfsio.sys").join("tmp"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".sidecar-stage"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        staged_leftovers, 0,
+        "commit recovery must consume the staged sidecar"
     );
 
     let resp = put_object(&client, &server, b"vvvv4444").await.unwrap();
@@ -206,6 +232,6 @@ async fn killing_the_server_mid_put_commit_preserves_the_invariants() {
     let (status, etag, body) = get_object(&client, &server).await;
     assert!(status.is_success());
     assert_eq!(body, b"vvvv4444");
-    assert_ne!(etag, etag_v1, "the overwrite must repair the torn metadata");
+    assert_ne!(etag, etag_v1);
     server.kill();
 }

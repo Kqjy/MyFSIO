@@ -213,6 +213,13 @@ impl GcService {
             match std::fs::read_dir(&tmp_dir) {
                 Ok(entries) => {
                     for entry in entries.flatten() {
+                        if entry
+                            .file_name()
+                            .to_string_lossy()
+                            .ends_with(".sidecar-stage")
+                        {
+                            continue;
+                        }
                         if let Ok(metadata) = entry.metadata() {
                             if let Ok(modified) = metadata.modified() {
                                 if let Ok(age) = now.duration_since(modified) {
@@ -768,6 +775,36 @@ mod tests {
 
         assert_eq!(result["temp_files_deleted"], 1);
         assert!(file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn temp_sweep_never_deletes_commit_intents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_dir = tmp.path().join(".myfsio.sys").join("tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let stale_tmp = tmp_dir.join("stale.tmp");
+        std::fs::write(&stale_tmp, b"temporary").unwrap();
+        let intent = tmp_dir.join("retained.sidecar-stage");
+        std::fs::write(&intent, b"{}").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let service = Arc::new(GcService::new(
+            tmp.path().to_path_buf(),
+            GcConfig {
+                temp_file_max_age_hours: 0.0,
+                dry_run: false,
+                ..GcConfig::default()
+            },
+        ));
+
+        let result = service.run_now(false).await.unwrap();
+
+        assert_eq!(result["temp_files_deleted"], 1);
+        assert!(!stale_tmp.exists());
+        assert!(
+            intent.exists(),
+            "commit intents are recovery records owned by startup reconciliation, never GC"
+        );
     }
 
     fn write_segment_fixture(root: &std::path::Path, bucket: &str, segment_id: &str) -> PathBuf {

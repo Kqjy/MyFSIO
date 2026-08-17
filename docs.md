@@ -457,7 +457,7 @@ Existing deployments need no migration: the server reads sidecars first, then `_
 myfsio-server --migrate-meta
 ```
 
-Run it with the server stopped. It walks every bucket's `meta/` tree, writes one sidecar per index entry (skipping entries that already have a valid sidecar), and deletes each `_index.json` only after all of its entries were written successfully. Corrupt indexes and unreadable sidecars are reported and left in place. Re-running is safe.
+Run it with the server stopped. It first runs a preflight scan of every `_index.json` (counting entries and reporting corrupt indexes or sidecar-name collisions) and aborts without changing anything if problems are found. It then walks every bucket's `meta/` tree and writes one sidecar per index entry, skipping entries that already have a valid sidecar. Once every entry of an index has a good sidecar, that `_index.json` is renamed to `_index.json.migrated` as a rollback backup — nothing is deleted. To roll back, delete the new sidecars and rename the backups back; delete the `.migrated` backups once satisfied. Corrupt indexes and unreadable sidecars are reported and left in place. Re-running is safe and resumes where an interrupted run stopped.
 
 **Warning:** once metadata exists in sidecar form — via `--migrate-meta` or simply by writing objects with a `METADATA_LAYOUT=sidecar` (default) server — older `myfsio-server` binaries cannot read that metadata. There is no rollback tool; do not downgrade past this feature after migrating. Setting `METADATA_LAYOUT=index` restores legacy-format *writes* for new objects but does not convert existing sidecars back.
 
@@ -466,6 +466,10 @@ A corrupt `_index.json` or sidecar now **fails closed**: affected objects return
 ### Durability model
 
 MyFSIO has an explicit durability deviation from Amazon S3 compatibility. PUT object file contents are fsynced before MyFSIO acknowledges the request. Namespace durability for the rename and directory entry remains platform-dependent. On Windows, directory fsync is a no-op, so the namespace portion of that durability sequence does not receive the same guarantee as it does on platforms that support directory fsync.
+
+A completed multipart upload in the default `segments` layout receives the same treatment: every part file is fsynced when it is uploaded, and the complete fsyncs the segment files' directory entries, the new segment directory's own entry, and the sparse stub before acknowledging. A failed fsync fails the CompleteMultipartUpload (which remains retryable) rather than acknowledging an upload whose namespace entries may not survive power loss.
+
+A PUT, CopyObject, or CompleteMultipartUpload that fails mid-commit (a crash between the data rename and the metadata publication) is reconciled at the next startup. Each commit stages its metadata sidecar to `.myfsio.sys/tmp/` before the data rename — the staged file and its directory entry are both fsynced, and the record carries the destination bucket and key plus the data file's exact nanosecond timestamp as a filesystem identity — so a staged sidecar that survives a crash is a durable record of the interrupted commit. A runtime failure after the data rename likewise retains the record, and additionally marks the object corrupted on the spot so the running process fails reads closed instead of serving the new bytes under the old metadata (if even that marking fails, the server exits rather than violate old-or-new atomicity). Garbage collection never touches these records; only recovery removes them. At every startup, before any background worker runs, the server scans the records: when the live data verifiably belongs to the interrupted commit (a nanosecond identity that distinguishes it from the previously published write, the recorded size, plus segment-stub verification for multipart objects), the staged sidecar is published, the commit's remaining bookkeeping is replayed (archived null-version purge, replaced-segment release, delete-marker clearing), and the object is enqueued for replication through the durable pending ledger so replication targets converge — the record is removed only after the ledger entry is confirmed, so a repeat crash or a failed enqueue simply retries at the next boot. Otherwise the record is discarded and the previously published state remains authoritative. When an overwrite's old and new states record identical sizes and timestamps (possible on filesystems with coarse timestamp granularity), recovery hashes the live data to attribute it — but only for unencrypted, non-multipart objects whose ETags are digests of the stored bytes; anything it cannot attribute is marked corrupted so reads fail closed until the object is overwritten or repaired, rather than serving bytes under metadata that may not describe them. If the staged records themselves cannot be examined (an unreadable file, a failed stat, a failed publish), the server refuses to start rather than serving objects in an unknown state. In every case the interrupted request itself was reported as failed to the client.
 
 An acknowledged DELETE that is still within the filesystem journal-commit window can be affected by a hard crash such as power loss or a kernel panic. This limitation does not apply to an ordinary process restart. After a hard crash, one of three states can remain:
 
@@ -662,15 +666,20 @@ If either listener task ends on its own — a listener error or a panic — the 
 Recommended update flow:
 
 1. Stop the running service.
-2. Back up `data/.myfsio.sys/config/`.
-3. Build or download the new Rust binary.
-4. Run `myfsio-server --check-config` against the target environment.
-5. Start the service and verify `/myfsio/health`.
+2. Back up `data/.myfsio.sys/config/` (credentials, policies, connections, the format marker).
+3. If you may need to roll back across a release that changes the on-disk layout (`METADATA_LAYOUT`, `MULTIPART_OBJECT_LAYOUT` — see `format.json`), also back up `data/.myfsio.sys/buckets/` or take a full `data/` backup. Older binaries cannot read sidecar metadata or segments-layout objects, and there is no in-place downgrade: rolling back a layout change means restoring the pre-upgrade backup.
+4. Build or download the new Rust binary.
+5. Run `myfsio-server --check-config` against the target environment.
+6. Start the service and verify `/myfsio/health`.
 
-Example backup:
+Example backups:
 
 ```bash
 cp -r data/.myfsio.sys/config config-backup
+```
+
+```bash
+cp -r data data-backup
 ```
 
 Health check:
