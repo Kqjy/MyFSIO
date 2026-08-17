@@ -220,7 +220,7 @@ use myfsio_auth::sigv4::{
 use crate::stores::connections::RemoteConnection;
 
 pub struct PeerAdminClient {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
     allow_internal_endpoints: bool,
 }
 
@@ -458,12 +458,23 @@ impl PeerAdminClient {
         allow_internal_endpoints: bool,
     ) -> Self {
         let resolver: Arc<SafeResolver> = Arc::new(SafeResolver::new(allow_internal_endpoints));
-        let client = reqwest::Client::builder()
+        let client = match reqwest::Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(read_timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .dns_resolver(resolver)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to build the peer admin HTTP client; peer admin and relay requests \
+                     will be refused because the SSRF-filtering resolver is unavailable"
+                );
+                None
+            }
+        };
         Self {
             client,
             allow_internal_endpoints,
@@ -557,13 +568,21 @@ impl PeerAdminClient {
         );
 
         Ok(self
-            .client
+            .http_client()?
             .get(&url)
             .header("host", &host_with_port)
             .header("x-amz-content-sha256", &payload_hash)
             .header("x-amz-date", &amz_date)
             .header("x-myfsio-nonce", &nonce)
             .header("authorization", &authorization))
+    }
+
+    fn http_client(&self) -> Result<&reqwest::Client, String> {
+        self.client.as_ref().ok_or_else(|| {
+            "peer admin HTTP client unavailable: the SSRF-filtering resolver could not be \
+             initialized at startup"
+                .to_string()
+        })
     }
 
     async fn guard_endpoint(&self, endpoint: &str) -> Result<(), String> {
@@ -821,7 +840,7 @@ impl PeerAdminClient {
             other => return Err(format!("unsupported method: {}", other)),
         };
 
-        let mut req = self.client.request(req_method, &url);
+        let mut req = self.http_client()?.request(req_method, &url);
         for (k, v) in &header_pairs {
             req = req.header(k, v);
         }

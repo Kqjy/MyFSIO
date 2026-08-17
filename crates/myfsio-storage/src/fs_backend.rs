@@ -15,7 +15,7 @@ use md5::{Digest, Md5};
 use parking_lot::Condvar;
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{mpsc, Arc};
@@ -194,6 +194,12 @@ pub fn metadata_is_corrupted(meta: &HashMap<String, String>) -> bool {
     meta.get(META_KEY_CORRUPTED)
         .map(|v| v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+pub fn metadata_has_pending_sse(meta: &HashMap<String, String>) -> bool {
+    meta.contains_key(MULTIPART_PENDING_SSE_ALG)
+        || meta.contains_key(MULTIPART_PENDING_SSE_KMS_KEY)
+        || meta.contains_key(MULTIPART_PENDING_SSE_C_KEY)
 }
 
 pub fn metadata_corruption_detail(meta: &HashMap<String, String>) -> String {
@@ -655,6 +661,35 @@ pub struct FsStorageBackend {
     stats_full_walks: std::sync::atomic::AtomicUsize,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ManifestPart {
+    etag: String,
+    size: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct MultipartManifest {
+    object_key: String,
+    metadata: HashMap<String, String>,
+    parts: BTreeMap<u32, ManifestPart>,
+}
+
+impl MultipartManifest {
+    fn read_sync(manifest_path: &Path) -> StorageResult<Self> {
+        let content = std::fs::read_to_string(manifest_path).map_err(StorageError::Io)?;
+        serde_json::from_str(&content).map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "multipart manifest {} is malformed and cannot be trusted for completion: {}",
+                    manifest_path.display(),
+                    e
+                ),
+            ))
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FsStorageBackendConfig {
     pub object_key_max_length_bytes: usize,
@@ -945,6 +980,16 @@ impl FsStorageBackend {
                 bucket: bucket.to_string(),
                 key: key.to_string(),
                 detail: metadata_corruption_detail(&stored_meta),
+            });
+        }
+        if metadata_has_pending_sse(&stored_meta) {
+            return Err(StorageError::ObjectCorrupted {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+                detail: "server-side encryption was requested for this multipart upload but \
+                         never finalized; the stored bytes cannot be served safely because \
+                         their encryption state is unknown"
+                    .to_string(),
             });
         }
         let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
@@ -2944,32 +2989,34 @@ impl FsStorageBackend {
         Ok(config)
     }
 
-    fn check_bucket_contents_sync(&self, bucket_path: &Path) -> (bool, bool, bool) {
+    fn check_bucket_contents_sync(
+        &self,
+        bucket_path: &Path,
+    ) -> std::io::Result<(bool, bool, bool)> {
         let bucket_name = bucket_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let has_objects = Self::dir_has_files(bucket_path, Some(INTERNAL_FOLDERS));
-        let has_versions = Self::dir_has_files(&self.bucket_versions_root(&bucket_name), None)
-            || Self::dir_has_files(&self.legacy_versions_root(&bucket_name), None);
-        let has_multipart = Self::dir_has_files(&self.multipart_bucket_root(&bucket_name), None)
-            || Self::dir_has_files(&self.legacy_multipart_root(&bucket_name), None);
+        let has_objects = Self::dir_has_files(bucket_path, Some(INTERNAL_FOLDERS))?;
+        let has_versions = Self::dir_has_files(&self.bucket_versions_root(&bucket_name), None)?
+            || Self::dir_has_files(&self.legacy_versions_root(&bucket_name), None)?;
+        let has_multipart = Self::dir_has_files(&self.multipart_bucket_root(&bucket_name), None)?
+            || Self::dir_has_files(&self.legacy_multipart_root(&bucket_name), None)?;
 
-        (has_objects, has_versions, has_multipart)
+        Ok((has_objects, has_versions, has_multipart))
     }
 
-    fn dir_has_files(dir: &Path, skip_dirs: Option<&[&str]>) -> bool {
-        if !dir.exists() {
-            return false;
-        }
+    fn dir_has_files(dir: &Path, skip_dirs: Option<&[&str]>) -> std::io::Result<bool> {
         let mut stack = vec![dir.to_path_buf()];
         while let Some(current) = stack.pop() {
             let entries = match std::fs::read_dir(&current) {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
             };
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = entry?;
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 if current == dir {
@@ -2981,22 +3028,25 @@ impl FsStorageBackend {
                 }
                 let ft = match entry.file_type() {
                     Ok(ft) => ft,
-                    Err(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
                 };
                 if ft.is_file() {
-                    return true;
+                    return Ok(true);
                 }
                 if ft.is_dir() {
                     stack.push(entry.path());
                 }
             }
         }
-        false
+        Ok(false)
     }
 
-    fn remove_tree(path: &Path) {
-        if path.exists() {
-            let _ = std::fs::remove_dir_all(path);
+    fn remove_tree(path: &Path) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
         }
     }
 
@@ -4661,6 +4711,29 @@ impl FsStorageBackend {
         })
     }
 
+    pub async fn poison_object_if_version_matches(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected_version_id: Option<&str>,
+        detail: &str,
+    ) -> StorageResult<bool> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            let current = self.read_metadata_sync(bucket, key);
+            if current.is_empty() {
+                return Ok(false);
+            }
+            let current_version = current.get("__version_id__").map(String::as_str);
+            if current_version != expected_version_id {
+                return Ok(false);
+            }
+            self.poison_object_metadata_sync(bucket, key, detail)
+                .map_err(StorageError::Io)?;
+            Ok(true)
+        })
+    }
+
     fn handle_torn_runtime_commit(&self, bucket: &str, key: &str, staged: &Path, cause: &str) {
         let detail = format!(
             "interrupted commit: metadata publication failed after the data rename ({})",
@@ -5556,8 +5629,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
     async fn delete_bucket(&self, name: &str) -> StorageResult<()> {
         let bucket_path = self.require_bucket(name)?;
-        let (has_objects, has_versions, has_multipart) =
-            self.check_bucket_contents_sync(&bucket_path);
+        let (has_objects, has_versions, has_multipart) = self
+            .check_bucket_contents_sync(&bucket_path)
+            .map_err(StorageError::Io)?;
         if has_objects {
             return Err(StorageError::BucketNotEmpty(name.to_string()));
         }
@@ -5575,9 +5649,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let rebuild_lock = self.get_list_rebuild_lock(name);
         let _rebuild_guard = rebuild_lock.lock();
         self.discard_listing_index_locked_sync(name);
-        Self::remove_tree(&bucket_path);
-        Self::remove_tree(&self.system_bucket_root(name));
-        Self::remove_tree(&self.multipart_bucket_root(name));
+        Self::remove_tree(&bucket_path).map_err(StorageError::Io)?;
+        Self::remove_tree(&self.system_bucket_root(name)).map_err(StorageError::Io)?;
+        Self::remove_tree(&self.multipart_bucket_root(name)).map_err(StorageError::Io)?;
 
         self.bucket_config_cache.remove(name);
         self.invalidate_bucket_caches(name);
@@ -6596,16 +6670,24 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let mut manifest: Value =
             serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
 
-        if let Some(parts) = manifest.get_mut("parts").and_then(|p| p.as_object_mut()) {
-            parts.insert(
-                part_number.to_string(),
-                serde_json::json!({
-                    "etag": etag,
-                    "size": part_size,
-                    "filename": format!("part-{:05}.part", part_number),
-                }),
-            );
-        }
+        let Some(parts) = manifest.get_mut("parts").and_then(|p| p.as_object_mut()) else {
+            return Err(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "multipart manifest for upload {} has no usable parts map; refusing to \
+                     publish part {} without recording it",
+                    upload_id, part_number
+                ),
+            )));
+        };
+        parts.insert(
+            part_number.to_string(),
+            serde_json::json!({
+                "etag": etag,
+                "size": part_size,
+                "filename": format!("part-{:05}.part", part_number),
+            }),
+        );
 
         Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
 
@@ -6737,16 +6819,24 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let mut manifest: Value =
             serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
 
-        if let Some(parts) = manifest.get_mut("parts").and_then(|p| p.as_object_mut()) {
-            parts.insert(
-                part_number.to_string(),
-                serde_json::json!({
-                    "etag": etag,
-                    "size": length,
-                    "filename": format!("part-{:05}.part", part_number),
-                }),
-            );
-        }
+        let Some(parts) = manifest.get_mut("parts").and_then(|p| p.as_object_mut()) else {
+            return Err(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "multipart manifest for upload {} has no usable parts map; refusing to \
+                     publish part {} without recording it",
+                    upload_id, part_number
+                ),
+            )));
+        };
+        parts.insert(
+            part_number.to_string(),
+            serde_json::json!({
+                "etag": etag,
+                "size": length,
+                "filename": format!("part-{:05}.part", part_number),
+            }),
+        );
 
         Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
 
@@ -6766,20 +6856,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let manifest: Value =
-            serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
-
-        let object_key = manifest
-            .get("object_key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| StorageError::Internal("Missing object_key in manifest".to_string()))?
-            .to_string();
-
-        let metadata: HashMap<String, String> = manifest
-            .get("metadata")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let manifest = MultipartManifest::read_sync(&manifest_path)?;
+        let object_key = manifest.object_key.clone();
+        let metadata: HashMap<String, String> = manifest.metadata.clone();
 
         let tmp_dir = self.tmp_dir();
         std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
@@ -6789,11 +6868,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let part_infos: Vec<PartInfo> = parts.to_vec();
         let upload_dir_owned = upload_dir.clone();
         let tmp_path_owned = tmp_path.clone();
-        let manifest_parts = manifest
-            .get("parts")
-            .and_then(|p| p.as_object())
-            .cloned()
-            .unwrap_or_default();
+        let manifest_parts = manifest.parts.clone();
 
         let segments_allowed = self.multipart_layout == MultipartLayout::Segments
             && part_infos.len() >= 2
@@ -6834,13 +6909,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     let file_size = std::fs::metadata(&source_file)
                         .map_err(StorageError::Io)?
                         .len();
-                    let manifest_entry = manifest_parts.get(&part_info.part_number.to_string());
-                    let manifest_etag = manifest_entry
-                        .and_then(|e| e.get("etag"))
-                        .and_then(|v| v.as_str());
-                    let manifest_size = manifest_entry
-                        .and_then(|e| e.get("size"))
-                        .and_then(|v| v.as_u64());
+                    let manifest_entry = manifest_parts.get(&part_info.part_number);
+                    let manifest_etag = manifest_entry.map(|e| e.etag.as_str());
+                    let manifest_size = manifest_entry.map(|e| e.size);
                     match (manifest_etag.and_then(parse_md5_hex), manifest_size) {
                         (Some(digest), Some(size)) if size == file_size => {
                             md5_digest_concat.extend_from_slice(&digest);
@@ -7065,29 +7136,19 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let manifest: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
+        let manifest = MultipartManifest::read_sync(&manifest_path)?;
 
-        let mut parts = Vec::new();
-        if let Some(Value::Object(parts_map)) = manifest.get("parts") {
-            for (num_str, info) in parts_map {
-                let part_number: u32 = num_str.parse().unwrap_or(0);
-                let etag = info
-                    .get("etag")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let size = info.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                parts.push(PartMeta {
-                    part_number,
-                    etag,
-                    size,
-                    last_modified: None,
-                });
-            }
-        }
+        let parts = manifest
+            .parts
+            .into_iter()
+            .map(|(part_number, info)| PartMeta {
+                part_number,
+                etag: info.etag,
+                size: info.size,
+                last_modified: None,
+            })
+            .collect();
 
-        parts.sort_by_key(|p| p.part_number);
         Ok(parts)
     }
 
@@ -7147,18 +7208,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
-        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let manifest: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
-        let metadata = manifest
-            .get("metadata")
-            .and_then(Value::as_object)
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect::<HashMap<String, String>>()
-            })
-            .unwrap_or_default();
-        Ok(metadata)
+        let manifest = MultipartManifest::read_sync(&manifest_path)?;
+        Ok(manifest.metadata)
     }
 
     async fn get_multipart_part_path(

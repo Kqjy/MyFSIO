@@ -4242,6 +4242,20 @@ fn parse_copy_source_range(value: &str) -> Option<(u64, u64)> {
     Some((start, end))
 }
 
+#[cfg(feature = "failpoints")]
+fn mpu_failpoint(state: &AppState, name: &str) -> Result<(), myfsio_storage::error::StorageError> {
+    myfsio_storage::failpoints::hit(&state.config.storage_root, name)
+        .map_err(myfsio_storage::error::StorageError::Io)
+}
+
+#[cfg(not(feature = "failpoints"))]
+fn mpu_failpoint(
+    _state: &AppState,
+    _name: &str,
+) -> Result<(), myfsio_storage::error::StorageError> {
+    Ok(())
+}
+
 async fn complete_multipart_handler(
     state: &AppState,
     bucket: &str,
@@ -4444,6 +4458,9 @@ async fn complete_multipart_handler(
                 );
                 return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
             };
+            if let Err(e) = mpu_failpoint(state, "mpu:after-publish") {
+                return storage_err_response(e);
+            }
             apply_pending_multipart_tagging(state, bucket, key).await;
 
             let pending_sse = read_pending_multipart_sse(state, bucket, key).await;
@@ -4474,6 +4491,9 @@ async fn complete_multipart_handler(
                                 e,
                             ));
                         }
+                        if let Err(e) = mpu_failpoint(state, "mpu:after-ciphertext-rename") {
+                            return storage_err_response(e);
+                        }
                         let enc_size = tokio::fs::metadata(&obj_path)
                             .await
                             .map(|m| m.len())
@@ -4497,10 +4517,61 @@ async fn complete_multipart_handler(
                         if let Some(ref ck) = enc_ctx.customer_key {
                             enc_metadata.insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
                         }
-                        let _ = state
-                            .storage
-                            .put_object_metadata(bucket, key, &enc_metadata)
-                            .await;
+                        let metadata_write = match mpu_failpoint(state, "mpu:sse-metadata-write") {
+                            Err(e) => Err(e),
+                            Ok(()) => {
+                                state
+                                    .storage
+                                    .put_object_metadata(bucket, key, &enc_metadata)
+                                    .await
+                            }
+                        };
+                        if let Err(e) = metadata_write {
+                            let detail = format!(
+                                "multipart SSE finalization published ciphertext but could not \
+                                 persist its encryption metadata: {}",
+                                e
+                            );
+                            match state
+                                .storage
+                                .poison_object_if_version_matches(
+                                    bucket,
+                                    key,
+                                    meta.version_id.as_deref(),
+                                    &detail,
+                                )
+                                .await
+                            {
+                                Ok(true) => tracing::error!(
+                                    bucket = bucket,
+                                    key = key,
+                                    version_id = ?meta.version_id,
+                                    error = %e,
+                                    "multipart SSE finalization left undecryptable ciphertext; \
+                                     the object is marked corrupted so reads fail closed"
+                                ),
+                                Ok(false) => tracing::error!(
+                                    bucket = bucket,
+                                    key = key,
+                                    version_id = ?meta.version_id,
+                                    error = %e,
+                                    "multipart SSE finalization could not persist encryption \
+                                     metadata; the object was already replaced by a later write \
+                                     and was left untouched"
+                                ),
+                                Err(poison_err) => tracing::error!(
+                                    bucket = bucket,
+                                    key = key,
+                                    version_id = ?meta.version_id,
+                                    error = %e,
+                                    poison_error = %poison_err,
+                                    "multipart SSE finalization left undecryptable ciphertext \
+                                     that could not be marked corrupted; the object must be \
+                                     deleted or re-uploaded manually"
+                                ),
+                            }
+                            return storage_err_response(e);
+                        }
                         sse_alg_response = Some(enc_ctx.algorithm.as_str().to_string());
                         sse_kms_id_response = enc_ctx.kms_key_id.clone();
                     }
@@ -5256,12 +5327,16 @@ async fn copy_object_handler(
 
     let copy_result = state
         .storage
-        .put_object_with_etag_override(
+        .put_object_with_commit(
             dst_bucket,
             dst_key,
             reader,
             Some(publish_metadata),
-            plaintext_etag_override,
+            myfsio_storage::traits::PutCommitOptions {
+                etag_override: plaintext_etag_override,
+                conditions: Default::default(),
+                bypass_governance,
+            },
         )
         .await;
 

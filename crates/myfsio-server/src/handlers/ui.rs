@@ -98,26 +98,18 @@ fn is_allowed_redirect(target: &str, allowed_hosts: &[String]) -> bool {
     if target == "/ui" || target.starts_with("/ui/") {
         return true;
     }
-    let Some(rest) = target
-        .strip_prefix("https://")
-        .or_else(|| target.strip_prefix("http://"))
-    else {
+    let Ok(parsed) = url::Url::parse(target) else {
         return false;
     };
-    let host = rest
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .split('@')
-        .next_back()
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
     allowed_hosts
         .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(&host))
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
 }
 
 pub async fn logout(Extension(session): Extension<SessionHandle>) -> Response {
@@ -409,4 +401,76 @@ fn constant_time_eq_str(a: &str, b: &str) -> bool {
         return false;
     }
     subtle::ConstantTimeEq::ct_eq(a.as_bytes(), b.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_redirect;
+
+    fn allowed() -> Vec<String> {
+        vec!["allowed.example".to_string()]
+    }
+
+    #[test]
+    fn accepts_local_ui_paths() {
+        assert!(is_allowed_redirect("/ui", &allowed()));
+        assert!(is_allowed_redirect("/ui/buckets", &allowed()));
+    }
+
+    #[test]
+    fn rejects_other_local_paths_and_schemeless_targets() {
+        assert!(!is_allowed_redirect("/login", &allowed()));
+        assert!(!is_allowed_redirect("//allowed.example/x", &allowed()));
+        assert!(!is_allowed_redirect("allowed.example", &allowed()));
+    }
+
+    #[test]
+    fn accepts_allowlisted_host() {
+        assert!(is_allowed_redirect(
+            "https://allowed.example/ui",
+            &allowed()
+        ));
+        assert!(is_allowed_redirect(
+            "https://ALLOWED.example:8443/ui",
+            &allowed()
+        ));
+    }
+
+    #[test]
+    fn rejects_host_not_on_allowlist() {
+        assert!(!is_allowed_redirect("https://evil.example/ui", &allowed()));
+    }
+
+    #[test]
+    fn rejects_query_and_fragment_smuggled_authority() {
+        assert!(!is_allowed_redirect(
+            "https://evil.example?@allowed.example",
+            &allowed()
+        ));
+        assert!(!is_allowed_redirect(
+            "https://evil.example#@allowed.example",
+            &allowed()
+        ));
+        assert!(!is_allowed_redirect(
+            "https://evil.example/?@allowed.example",
+            &allowed()
+        ));
+    }
+
+    #[test]
+    fn rejects_userinfo_smuggled_authority() {
+        assert!(!is_allowed_redirect(
+            "https://allowed.example@evil.example/ui",
+            &allowed()
+        ));
+    }
+
+    #[test]
+    fn rejects_non_http_schemes() {
+        assert!(!is_allowed_redirect(
+            "javascript:alert(1)//allowed.example",
+            &allowed()
+        ));
+        assert!(!is_allowed_redirect("file://allowed.example/", &allowed()));
+    }
 }
