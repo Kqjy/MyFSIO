@@ -30,7 +30,36 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/buckets",
             get(ui_pages::buckets_overview).post(ui_pages::create_bucket),
         )
+        .route("/ui/buckets/create", post(ui_pages::create_bucket))
         .route("/ui/buckets/{bucket_name}", get(ui_pages::bucket_detail))
+        .route(
+            "/ui/buckets/{bucket_name}/delete",
+            post(ui_pages::delete_bucket),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/replication",
+            post(ui_pages::update_bucket_replication),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/versioning",
+            post(ui_pages::update_bucket_versioning),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/quota",
+            post(ui_pages::update_bucket_quota),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/encryption",
+            post(ui_pages::update_bucket_encryption),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/policy",
+            post(ui_pages::update_bucket_policy),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/website",
+            post(ui_pages::update_bucket_website),
+        )
         .route(
             "/ui/buckets/{bucket_name}/upload",
             post(ui_api::upload_object),
@@ -310,35 +339,6 @@ pub fn create_ui_router(state: state::AppState) -> Router {
         .route(
             "/ui/replication/create",
             post(ui_pages::create_peer_replication_rules_from_query),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/replication",
-            post(ui_pages::update_bucket_replication),
-        )
-        .route("/ui/buckets/create", post(ui_pages::create_bucket))
-        .route(
-            "/ui/buckets/{bucket_name}/delete",
-            post(ui_pages::delete_bucket),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/versioning",
-            post(ui_pages::update_bucket_versioning),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/quota",
-            post(ui_pages::update_bucket_quota),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/encryption",
-            post(ui_pages::update_bucket_encryption),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/policy",
-            post(ui_pages::update_bucket_policy),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/website",
-            post(ui_pages::update_bucket_website),
         )
         .route(
             "/ui/sites/peers/{site_id}/replication-rules",

@@ -641,6 +641,41 @@ impl IamService {
         false
     }
 
+    pub fn authorize_any_bucket(&self, principal: &Principal, action: &str) -> bool {
+        self.reload_if_needed();
+
+        if principal.is_admin {
+            return true;
+        }
+
+        let normalized_action = action.trim().to_ascii_lowercase();
+
+        let state = self.state.read();
+        let user = match state.user_records.get(&principal.user_id) {
+            Some(u) => u,
+            None => return false,
+        };
+
+        if !user.enabled {
+            return false;
+        }
+
+        if let Some(ref expires_at) = user.expires_at {
+            match expires_at.parse::<DateTime<Utc>>() {
+                Ok(exp) => {
+                    if Utc::now() > exp {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+
+        user.policies
+            .iter()
+            .any(|policy| action_matches(&policy.actions, &normalized_action))
+    }
+
     pub fn export_config(&self, mask_secrets: bool) -> serde_json::Value {
         self.reload_if_needed();
         let state = self.state.read();

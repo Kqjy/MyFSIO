@@ -385,6 +385,11 @@ pub async fn buckets_overview(
 
     let principal = crate::handlers::ui::current_principal(&state, &session);
     let is_admin = principal.as_ref().map(|p| p.is_admin).unwrap_or(false);
+    let can_create_bucket = principal
+        .as_ref()
+        .map(|p| state.iam.authorize_any_bucket(p, "create_bucket"))
+        .unwrap_or(false);
+    ctx.insert("can_create_bucket", &can_create_bucket);
 
     let buckets = match state.storage.list_buckets().await {
         Ok(list) => list,
@@ -475,6 +480,19 @@ pub async fn bucket_detail(
 
     let mut ctx = page_context(&state, &session, "ui.bucket_detail");
     ctx.insert("request_args", &request_args);
+    let can_delete_bucket = match crate::handlers::ui::current_principal(&state, &session) {
+        Some(principal) => crate::middleware::ui_authorize(
+            &state,
+            &principal,
+            &bucket_name,
+            "delete_bucket",
+            None,
+        )
+        .await
+        .is_ok(),
+        None => false,
+    };
+    ctx.insert("can_delete_bucket", &can_delete_bucket);
     let bucket_meta = state
         .storage
         .list_buckets()
@@ -652,17 +670,37 @@ pub async fn bucket_detail(
             .map(|conn| conn.name.clone())
             .unwrap_or_default(),
     );
-    let viewer_is_admin = crate::handlers::ui::current_principal(&state, &session)
-        .map(|p| p.is_admin)
-        .unwrap_or(false);
+    let viewer_principal = crate::handlers::ui::current_principal(&state, &session);
+    let viewer_can = |action: &'static str| {
+        let state = &state;
+        let bucket_name = &bucket_name;
+        let principal = viewer_principal.as_ref();
+        async move {
+            match principal {
+                Some(principal) => {
+                    crate::middleware::ui_authorize(state, principal, bucket_name, action, None)
+                        .await
+                        .is_ok()
+                }
+                None => false,
+            }
+        }
+    };
+    let can_manage_replication = viewer_can("replication").await;
     ctx.insert("default_policy", &default_policy);
-    ctx.insert("can_manage_cors", &viewer_is_admin);
-    ctx.insert("can_manage_lifecycle", &viewer_is_admin);
-    ctx.insert("can_manage_quota", &viewer_is_admin);
-    ctx.insert("can_manage_versioning", &viewer_is_admin);
-    ctx.insert("can_manage_website", &viewer_is_admin);
-    ctx.insert("can_edit_policy", &viewer_is_admin);
-    ctx.insert("is_replication_admin", &viewer_is_admin);
+    ctx.insert("can_manage_cors", &viewer_can("cors").await);
+    ctx.insert("can_manage_lifecycle", &viewer_can("lifecycle").await);
+    ctx.insert("can_manage_quota", &viewer_can("quota").await);
+    ctx.insert("can_manage_versioning", &viewer_can("versioning").await);
+    ctx.insert("can_manage_website", &viewer_can("website").await);
+    ctx.insert("can_edit_policy", &viewer_can("policy").await);
+    ctx.insert("can_manage_acl", &viewer_can("share").await);
+    ctx.insert(
+        "can_manage_encryption",
+        &(viewer_can("encryption").await && state.config.encryption_enabled),
+    );
+    ctx.insert("can_manage_replication", &can_manage_replication);
+    ctx.insert("is_replication_admin", &can_manage_replication);
     ctx.insert("lifecycle_enabled", &state.config.lifecycle_enabled);
     ctx.insert("site_sync_enabled", &state.config.site_sync_enabled);
     ctx.insert(
@@ -2882,15 +2920,56 @@ pub struct CreateBucketForm {
     pub csrf_token: String,
 }
 
+async fn ensure_bucket_action(
+    state: &AppState,
+    session: &SessionHandle,
+    wants_json: bool,
+    bucket_name: &str,
+    action: &str,
+) -> Option<Response> {
+    let principal = match crate::handlers::ui::current_principal(state, session) {
+        Some(p) => p,
+        None => {
+            let message = "Sign in to continue.".to_string();
+            if wants_json {
+                return Some(
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        axum::Json(json!({ "error": message })),
+                    )
+                        .into_response(),
+                );
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Some(Redirect::to("/login").into_response());
+        }
+    };
+    if crate::middleware::ui_authorize(state, &principal, bucket_name, action, None)
+        .await
+        .is_ok()
+    {
+        return None;
+    }
+    let message = format!("Requires the '{}' IAM permission.", action);
+    if wants_json {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response(),
+        );
+    }
+    session.write(|s| s.push_flash("danger", message));
+    Some(Redirect::to("/ui/buckets").into_response())
+}
+
 pub async fn create_bucket(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
-        return resp;
-    }
     let wants_json = wants_json(&headers);
     let form = match parse_form_any(&headers, body).await {
         Ok(fields) => CreateBucketForm {
@@ -2922,6 +3001,12 @@ pub async fn create_bucket(
         }
         session.write(|s| s.push_flash("danger", message));
         return Redirect::to("/ui/buckets").into_response();
+    }
+
+    if let Some(resp) =
+        ensure_bucket_action(&state, &session, wants_json, &bucket_name, "create_bucket").await
+    {
+        return resp;
     }
 
     match state.storage.create_bucket(&bucket_name).await {
@@ -2961,8 +3046,14 @@ pub struct UpdateBucketVersioningForm {
 
 pub async fn delete_bucket(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Some(resp) =
+        ensure_bucket_action(&state, &session, true, &bucket_name, "delete_bucket").await
+    {
+        return resp;
+    }
     match state.storage.delete_bucket(&bucket_name).await {
         Ok(()) => axum::Json(json!({
             "ok": true,
@@ -2979,9 +3070,15 @@ pub async fn delete_bucket(
 
 pub async fn update_bucket_versioning(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketVersioningForm>,
 ) -> Response {
+    if let Some(resp) =
+        ensure_bucket_action(&state, &session, true, &bucket_name, "versioning").await
+    {
+        return resp;
+    }
     let enabled = form.state.eq_ignore_ascii_case("enable");
     match state.storage.set_versioning(&bucket_name, enabled).await {
         Ok(()) => axum::Json(json!({
@@ -3044,6 +3141,11 @@ pub async fn update_bucket_replication(
     Form(form): Form<UpdateBucketReplicationForm>,
 ) -> Response {
     let wants_json = wants_json(&headers);
+    if let Some(resp) =
+        ensure_bucket_action(&state, &session, wants_json, &bucket_name, "replication").await
+    {
+        return resp;
+    }
 
     let respond = |ok: bool, status: StatusCode, message: String, extra: Value| -> Response {
         if wants_json {
@@ -3947,9 +4049,13 @@ fn dns_status(resolved: &[std::net::IpAddr], local: &[std::net::IpAddr]) -> &'st
 
 pub async fn update_bucket_quota(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketQuotaForm>,
 ) -> Response {
+    if let Some(resp) = ensure_bucket_action(&state, &session, true, &bucket_name, "quota").await {
+        return resp;
+    }
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -4000,9 +4106,15 @@ pub struct UpdateBucketEncryptionForm {
 
 pub async fn update_bucket_encryption(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketEncryptionForm>,
 ) -> Response {
+    if let Some(resp) =
+        ensure_bucket_action(&state, &session, true, &bucket_name, "encryption").await
+    {
+        return resp;
+    }
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -4075,6 +4187,11 @@ pub async fn update_bucket_policy(
     axum::extract::Form(form): axum::extract::Form<UpdateBucketPolicyForm>,
 ) -> Response {
     let wants_json = wants_json(&headers);
+    if let Some(resp) =
+        ensure_bucket_action(&state, &session, wants_json, &bucket_name, "policy").await
+    {
+        return resp;
+    }
     let redirect_url = format!("/ui/buckets/{}?tab=permissions", bucket_name);
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
@@ -4175,9 +4292,14 @@ pub struct UpdateBucketWebsiteForm {
 
 pub async fn update_bucket_website(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketWebsiteForm>,
 ) -> Response {
+    if let Some(resp) = ensure_bucket_action(&state, &session, true, &bucket_name, "website").await
+    {
+        return resp;
+    }
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
         Err(e) => {

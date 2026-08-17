@@ -3130,10 +3130,9 @@ pub async fn update_bucket_acl(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "share", None).await {
         return resp;
     }
     let payload: BucketAclPayload = match parse_json_body(body).await {
@@ -3191,10 +3190,9 @@ pub async fn update_bucket_cors(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "cors", None).await {
         return resp;
     }
     let payload: BucketCorsPayload = match parse_json_body(body).await {
@@ -3246,10 +3244,10 @@ pub async fn update_bucket_lifecycle(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "lifecycle", None).await
+    {
         return resp;
     }
     let payload: BucketLifecyclePayload = match parse_json_body(body).await {

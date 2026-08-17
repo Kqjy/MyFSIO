@@ -807,3 +807,54 @@ For a route-level view, inspect:
 
 - `crates/myfsio-server/src/lib.rs`
 - `crates/myfsio-server/src/handlers/`
+
+## 16. IAM Policy Reference
+
+IAM users and their policies live in the file named by `IAM_CONFIG` (default `.myfsio.sys/config/iam.json`) and are managed from the UI at `/ui/iam` or the `/myfsio/admin/iam/...` API. Each user carries a list of policy statements; every statement grants (never denies) a set of actions on a bucket scope:
+
+```json
+{
+  "bucket": "my-bucket",
+  "prefix": "reports/*",
+  "actions": ["list", "read", "write"]
+}
+```
+
+- `bucket` — an exact bucket name, or `"*"` for every bucket. Partial wildcards (`my-*`) are not supported.
+- `prefix` — object-key scope for object-level actions. Empty or `"*"` means all keys; anything else is a leading-prefix match (a trailing `*` is allowed and ignored, so `reports/` and `reports/*` are equivalent). The prefix does not constrain bucket-level actions.
+- `actions` — the action names below, `"*"` for everything, or a namespace wildcard such as `iam:*` / `system:*`.
+
+Authorization is default-deny: a request is allowed if the user is enabled, not expired, and **any** statement matches the bucket, the action, and (for object operations) the key. Grants from a bucket policy or ACL are evaluated in addition to IAM — an explicit bucket-policy `Deny` always wins.
+
+### Admin
+
+A user is an **admin** exactly when one statement is `{"bucket": "*", "actions": ["*"]}` with an unrestricted prefix (`"*"` or empty). Admins skip all further authorization and are the only principals who can use the management-only UI/admin surfaces: IAM administration, connections, sites and peer credentials, website domains, replication wizards, metrics settings, and the audit log. A policy that merely lists every named action is *not* an admin policy — it grants exactly those actions and nothing else.
+
+### Data actions
+
+| Action | Grants |
+|--------|--------|
+| `list` | Bucket listings (`GET /<bucket>`, ListObjectsV2, `?versions`, `?uploads`, `?location`) and seeing the bucket in the UI |
+| `read` | `GET`/`HEAD` object, `?attributes`, S3 Select, presigned downloads |
+| `write` | `PUT`/`POST` object, multipart uploads, copy destinations, object tagging/ACL writes |
+| `delete` | `DELETE` object and per-key authorization inside `POST /<bucket>?delete` |
+| `create_bucket` | `PUT /<bucket>` and the UI Create Bucket action |
+| `delete_bucket` | `DELETE /<bucket>` and the UI Delete Bucket action |
+| `bypass_governance` | Honoring `x-amz-bypass-governance-retention` on the bucket/key |
+
+### Bucket configuration actions
+
+Each bucket subresource requires its own action: `share` (ACLs, `?acl`), `policy` (`?policy`, `?policyStatus`), `replication`, `lifecycle`, `cors`, `versioning`, `tagging`, `encryption`, `quota`, `object_lock` (incl. `?retention` and `?legal-hold`), `notification`, `logging`, `website`, `ownership_controls` (`?ownershipControls`), and `public_access_block` (`?publicAccessBlock`).
+
+### Namespaced actions
+
+- `iam:<op>` — delegated IAM reads/maintenance on the admin API: `iam:list_users`, `iam:get_user`, `iam:get_policy`, `iam:create_key`, `iam:delete_key`, `iam:disable_user`. `iam:*` grants the namespace.
+- `system:<op>` — maintenance endpoints and their UI buttons: `system:gc_read`, `system:gc_run`, `system:integrity_read`, `system:integrity_run`. `system:*` grants the namespace.
+
+Namespaced and system-level actions are evaluated without a bucket, so they must appear in a statement whose `bucket` is `"*"` (statement prefix is ignored for them).
+
+### Web UI parity
+
+The UI enforces the same actions as the S3 API for bucket-scoped operations: creating and deleting buckets (`create_bucket` / `delete_bucket`) and every bucket-configuration card on the bucket detail page — versioning, encryption (still requires `ENCRYPTION_ENABLED`), quota, website, bucket policy, ACLs (`share`), CORS, lifecycle, and the replication tab (`replication`). The corresponding buttons, forms, and tabs are hidden or shown read-only when the permission is absent, and the endpoints themselves return `403` with the missing action named. Earlier releases required full admin for all of these UI surfaces even when the IAM policy granted the actions; the S3 API honored the policy all along.
+
+Server-wide management surfaces remain admin-only regardless of policy actions: IAM administration pages, saved connections, sites and peer credentials, website-domain mappings, metrics settings, the replication wizard, and the audit log.
