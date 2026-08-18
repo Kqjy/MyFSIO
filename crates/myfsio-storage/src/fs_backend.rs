@@ -796,6 +796,10 @@ impl FsStorageBackend {
         insensitive
     }
 
+    pub fn case_insensitive_fs(&self) -> bool {
+        self.case_insensitive_fs
+    }
+
     fn verify_disk_casing(&self, expected: &Path) -> StorageResult<bool> {
         if !self.case_insensitive_fs {
             return Ok(true);
@@ -8168,6 +8172,19 @@ mod tests {
         (dir, backend)
     }
 
+    fn filesystem_stress_test_guard() -> impl Drop {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        struct Guard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+        impl Drop for Guard {
+            fn drop(&mut self) {}
+        }
+        Guard(
+            LOCK.get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
     #[test]
     fn disk_casing_verification_fails_closed_outside_root() {
         let (dir, mut backend) = create_test_backend();
@@ -10539,6 +10556,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_put_delete_list_storm_preserves_invariants() {
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = std::sync::Arc::new(backend);
         backend.create_bucket("storm").await.unwrap();
@@ -10614,6 +10632,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn concurrent_versioned_storm_preserves_invariants() {
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = std::sync::Arc::new(backend);
         backend.create_bucket("storm-ver").await.unwrap();
@@ -14353,6 +14372,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (dir, backend) = create_test_backend();
         let root = dir.path().to_path_buf();
         let backend = StdArc::new(backend);
@@ -14439,6 +14459,7 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tokio::io::AsyncReadExt;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("snap-bkt").await.unwrap();
@@ -14511,6 +14532,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("range-bkt").await.unwrap();
@@ -14595,6 +14617,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("mp-bkt").await.unwrap();
@@ -14685,6 +14708,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("contend").await.unwrap();
@@ -14746,6 +14770,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("race-bucket").await.unwrap();

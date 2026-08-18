@@ -2008,6 +2008,13 @@ fn insert_standard_object_metadata(
         metadata.insert("__storage_class__".to_string(), upper);
     }
 
+    insert_object_lock_metadata(headers, metadata)
+}
+
+fn insert_object_lock_metadata(
+    headers: &HeaderMap,
+    metadata: &mut HashMap<String, String>,
+) -> Result<(), Response> {
     if let Some(value) = headers
         .get("x-amz-object-lock-legal-hold")
         .and_then(|v| v.to_str().ok())
@@ -5098,6 +5105,11 @@ async fn copy_object_handler(
     {
         return response;
     }
+    let mut requested_object_lock_metadata = HashMap::new();
+    if let Err(response) = insert_object_lock_metadata(headers, &mut requested_object_lock_metadata)
+    {
+        return response;
+    }
 
     let (src_bucket, src_key, src_version_id) = match parse_copy_source(copy_source) {
         Ok(parts) => parts,
@@ -5365,6 +5377,7 @@ async fn copy_object_handler(
     strip_storage_managed_keys(&mut dst_metadata);
     dst_metadata.remove(myfsio_storage::segments::META_KEY_SEGMENTS);
     dst_metadata.remove("__part_sizes__");
+    dst_metadata.extend(requested_object_lock_metadata);
     object_lock::apply_default_retention(state, dst_bucket, &mut dst_metadata).await;
 
     let (publish_path, publish_metadata, plaintext_etag_override) = if let Some(enc_ctx) =
@@ -6807,17 +6820,37 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn post_form_error(err: multer::Error) -> S3Error {
     match err {
-        multer::Error::FieldSizeExceeded { limit, .. } => S3Error::new(
-            S3ErrorCode::MaxMessageLengthExceeded,
-            format!(
-                "Your request was too big; a form field other than the file may not exceed {} bytes",
-                limit
-            ),
-        ),
+        multer::Error::FieldSizeExceeded { limit, .. } => post_form_field_limit_error(limit),
         other => S3Error::new(
             S3ErrorCode::MalformedXML,
             format!("Malformed multipart: {}", other),
         ),
+    }
+}
+
+fn post_form_field_limit_error(limit: u64) -> S3Error {
+    S3Error::new(
+        S3ErrorCode::MaxMessageLengthExceeded,
+        format!(
+            "Your request was too big; a form field other than the file may not exceed {} bytes",
+            limit
+        ),
+    )
+}
+
+async fn read_post_form_text(field: &mut multer::Field<'_>) -> Result<String, S3Error> {
+    let mut bytes = bytes::BytesMut::new();
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len().saturating_add(chunk.len()) > POST_FORM_FIELD_LIMIT as usize {
+                    return Err(post_form_field_limit_error(POST_FORM_FIELD_LIMIT));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(error) => return Err(post_form_error(error)),
+        }
     }
 }
 
@@ -6851,11 +6884,8 @@ async fn post_object_form_handler(
     let stream = http_body_util::BodyStream::new(body)
         .map_ok(|frame| frame.into_data().unwrap_or_default())
         .map_err(std::io::Error::other);
-    let constraints = multer::Constraints::new().size_limit(
-        multer::SizeLimit::new()
-            .per_field(POST_FORM_FIELD_LIMIT)
-            .for_field("file", u64::MAX),
-    );
+    let constraints =
+        multer::Constraints::new().size_limit(multer::SizeLimit::new().per_field(u64::MAX));
     let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
 
     enum PostFormEvent {
@@ -6911,7 +6941,7 @@ async fn post_object_form_handler(
                 }
                 return;
             } else if !name.is_empty() {
-                match field.text().await {
+                match read_post_form_text(&mut field).await {
                     Ok(value) => {
                         if event_tx
                             .send(Ok(PostFormEvent::Text { name, value }))
@@ -6922,7 +6952,7 @@ async fn post_object_form_handler(
                         }
                     }
                     Err(e) => {
-                        let _ = event_tx.send(Err(post_form_error(e))).await;
+                        let _ = event_tx.send(Err(e)).await;
                         return;
                     }
                 }

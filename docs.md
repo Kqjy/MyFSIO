@@ -127,7 +127,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew for regular SigV4 |
 | `STRICT_STREAMING_SIGV4` | `true` | Validate streaming SigV4 chunk chains, the final zero-length chunk, and signed trailers. `false` accepts invalid chunk signatures as a compatibility escape hatch but still verifies checksum trailers |
 | `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter time skew enforced for peer-credential SigV4 requests |
-| `PEER_NONCE_CACHE_SIZE` | `10000` | Capacity of the in-memory replay-detection LRU for peer requests |
+| `PEER_NONCE_CACHE_SIZE` | `10000` | Capacity of the in-memory fast-path replay cache for peer requests; the durable nonce set remains authoritative |
 | `ALLOW_LEGACY_HEADER_AUTH` | `false` | When `true`, accepts the legacy `x-access-key`/`x-secret-key` header pair. Default is off; SigV4 is preferred. Peer credentials are SigV4-only regardless of this flag |
 | `PEER_REQUIRE_HTTPS` | `false` | When `true`, peer endpoint registration rejects non-`https://` URLs. The server logs a startup warning if any registered peer uses `http://` and this flag is unset |
 | `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling `/myfsio/admin/peer/*` (inbound relay) and `/myfsio/admin/relay/*` (outbound dispatch). Same value required on every node. When unset, Phase 3 federation is disabled |
@@ -327,9 +327,9 @@ List with `GET /myfsio/admin/peer-credentials`; revoke with `DELETE /myfsio/admi
 
 #### Replay protection
 
-Peer SigV4 requests are subject to a **60-second** clock-skew window (`PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS`) and an in-memory `(access_key, signature)` LRU dedupe (`PEER_NONCE_CACHE_SIZE`). To prevent same-second false-positives, the server's outbound `peer_admin` client adds a unique signed `x-myfsio-nonce` header to every request, so two simultaneous overview pulls produce distinct signatures.
+Peer SigV4 requests are subject to a **60-second** clock-skew window (`PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS`). Accepted `(access_key, signature)` nonces are persisted under `.myfsio.sys/config/peer_request_nonces.json`, atomically replaced and fsynced before the request proceeds, and pruned to that window. The in-memory LRU (`PEER_NONCE_CACHE_SIZE`) is only a fast path, so restart and cache-eviction floods do not reopen the local replay window. To prevent same-second false-positives, the server's outbound `peer_admin` client adds a unique signed `x-myfsio-nonce` header to every request, so two simultaneous overview pulls produce distinct signatures.
 
-Because the dedupe LRU is in memory, it is empty after a restart, which would otherwise reopen a replay window for any peer request captured within the skew tolerance. To narrow that window, a peer request whose `X-Amz-Date` predates this process's start time is rejected with `AccessDenied` regardless of the LRU state, so a request captured before a restart cannot be replayed against the fresh process. This mitigates but does not fully eliminate restart replay: a request signed by a peer whose clock runs ahead of this server can carry a timestamp later than the new boot time, and if the server restarts within the skew tolerance such a capture could still be accepted once. Fully closing the window requires persisting nonce state across restarts, which is not yet implemented. The check is also per-process and shares no nonce state across replicas; the relay model already targets one node per action, so cross-node dedupe is not required for correctness.
+Replay protection is node-local; replicas do not share nonce state, so the same signed request can still be replayed once against different nodes that share peer credentials.
 
 #### Migrating existing deployments
 

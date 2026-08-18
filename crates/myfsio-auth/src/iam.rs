@@ -3,7 +3,8 @@ use myfsio_common::types::{Principal, PrincipalKind};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
@@ -189,6 +190,7 @@ pub struct IamService {
     state: Arc<RwLock<IamState>>,
     check_interval: std::time::Duration,
     fernet_key: Option<String>,
+    case_insensitive_fs: bool,
     mutation_lock: Mutex<()>,
 }
 
@@ -198,6 +200,14 @@ impl IamService {
     }
 
     pub fn new_with_secret(config_path: PathBuf, secret_key: Option<String>) -> Self {
+        Self::new_with_filesystem(config_path, secret_key, false)
+    }
+
+    pub fn new_with_filesystem(
+        config_path: PathBuf,
+        secret_key: Option<String>,
+        case_insensitive_fs: bool,
+    ) -> Self {
         let fernet_key = secret_key.map(|s| crate::fernet::derive_fernet_key(&s));
         let service = Self {
             config_path,
@@ -211,6 +221,7 @@ impl IamService {
             })),
             check_interval: std::time::Duration::from_secs(2),
             fernet_key,
+            case_insensitive_fs,
             mutation_lock: Mutex::new(()),
         };
         service.reload();
@@ -223,6 +234,17 @@ impl IamService {
             return;
         }
         let _guard = self.mutation_lock.lock();
+        let _file_guard = match self.acquire_file_lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to lock IAM config {} for plaintext migration: {}",
+                    self.config_path.display(),
+                    e
+                );
+                return;
+            }
+        };
         let content = match std::fs::read_to_string(&self.config_path) {
             Ok(c) => c,
             Err(_) => return,
@@ -591,6 +613,7 @@ impl IamService {
         principal: &Principal,
         bucket_name: Option<&str>,
         action: &str,
+        requested_s3_action: Option<&str>,
         object_key: Option<&str>,
     ) -> bool {
         self.reload_if_needed();
@@ -623,25 +646,33 @@ impl IamService {
             }
         }
 
+        let mut allowed = false;
         for policy in &user.policies {
             if !bucket_matches(&policy.bucket, &normalized_bucket) {
                 continue;
             }
-            if !action_matches(&policy.actions, &normalized_action) {
+            if !action_matches(&policy.actions, &normalized_action, requested_s3_action) {
                 continue;
             }
             if let Some(key) = object_key {
-                if !prefix_matches(&policy.prefix, key) {
-                    continue;
+                match prefix_match(&policy.prefix, key, self.case_insensitive_fs) {
+                    PrefixMatch::Exact => {}
+                    PrefixMatch::CaseAlias => return false,
+                    PrefixMatch::Miss => continue,
                 }
             }
-            return true;
+            allowed = true;
         }
 
-        false
+        allowed
     }
 
-    pub fn authorize_any_bucket(&self, principal: &Principal, action: &str) -> bool {
+    pub fn authorize_any_bucket(
+        &self,
+        principal: &Principal,
+        action: &str,
+        requested_s3_action: Option<&str>,
+    ) -> bool {
         self.reload_if_needed();
 
         if principal.is_admin {
@@ -673,7 +704,7 @@ impl IamService {
 
         user.policies
             .iter()
-            .any(|policy| action_matches(&policy.actions, &normalized_action))
+            .any(|policy| action_matches(&policy.actions, &normalized_action, requested_s3_action))
     }
 
     pub fn export_config(&self, mask_secrets: bool) -> serde_json::Value {
@@ -914,11 +945,47 @@ impl IamService {
         Ok(())
     }
 
+    fn lock_path(config_path: &Path) -> PathBuf {
+        let name = config_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "iam.json".to_string());
+        config_path.with_file_name(format!("{}.lock", name))
+    }
+
+    fn acquire_file_lock(&self) -> Result<File, String> {
+        if let Some(parent) = self
+            .config_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Failed to create IAM config directory {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+        let lock_path = Self::lock_path(&self.config_path);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| format!("Failed to open IAM lock {}: {}", lock_path.display(), e))?;
+        file.lock()
+            .map_err(|e| format!("Failed to lock IAM config {}: {}", lock_path.display(), e))?;
+        Ok(file)
+    }
+
     fn mutate_config<R>(
         &self,
         f: impl FnOnce(&mut IamConfig) -> Result<R, String>,
     ) -> Result<R, String> {
         let _guard = self.mutation_lock.lock();
+        let _file_guard = self.acquire_file_lock()?;
         let mut config = self.load_config()?;
         let result = f(&mut config)?;
         self.save_config(&config)?;
@@ -927,6 +994,7 @@ impl IamService {
 
     pub fn bootstrap_admin(&self, access_key: &str, secret_key: &str) -> Result<(), String> {
         let _guard = self.mutation_lock.lock();
+        let _file_guard = self.acquire_file_lock()?;
         let config = IamConfig {
             version: 2,
             users: vec![IamUser {
@@ -949,6 +1017,60 @@ impl IamService {
             }],
         };
         self.save_config(&config)
+    }
+
+    pub fn reset_admin(
+        &self,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<Option<PathBuf>, String> {
+        let _guard = self.mutation_lock.lock();
+        let _file_guard = self.acquire_file_lock()?;
+        let backup = if self.config_path.exists() {
+            let backup = self
+                .config_path
+                .with_extension(format!("bak-{}", chrono::Utc::now().timestamp()));
+            std::fs::rename(&self.config_path, &backup).map_err(|e| {
+                format!(
+                    "Failed to back up existing IAM config {}: {}",
+                    self.config_path.display(),
+                    e
+                )
+            })?;
+            if let Err(e) = myfsio_common::fs_util::restrict_secret_permissions(&backup) {
+                tracing::debug!(
+                    "Failed to restrict permissions on IAM backup {}: {}",
+                    backup.display(),
+                    e
+                );
+            }
+            Some(backup)
+        } else {
+            None
+        };
+        let config = IamConfig {
+            version: 2,
+            users: vec![IamUser {
+                user_id: format!("u-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]),
+                display_name: "Local Admin".to_string(),
+                enabled: true,
+                expires_at: None,
+                access_keys: vec![AccessKey {
+                    access_key: access_key.to_string(),
+                    secret_key: secret_key.to_string(),
+                    status: "active".to_string(),
+                    created_at: Some(chrono::Utc::now().to_rfc3339()),
+                }],
+                policies: vec![IamPolicy {
+                    bucket: "*".to_string(),
+                    actions: vec!["*".to_string()],
+                    prefix: "*".to_string(),
+                }],
+                peer_site_id: None,
+            }],
+        };
+        self.save_config(&config)?;
+        Ok(backup)
     }
 
     pub fn create_user(
@@ -1120,32 +1242,48 @@ fn bucket_matches(policy_bucket: &str, bucket: &str) -> bool {
     pb == "*" || pb == bucket
 }
 
-fn action_matches(policy_actions: &[String], action: &str) -> bool {
-    for policy_action in policy_actions {
-        let pa = policy_action.trim().to_ascii_lowercase();
-        if pa == "*" || pa == action {
-            return true;
-        }
-        if let Some(namespace) = pa.strip_suffix(":*") {
-            if !namespace.is_empty()
-                && action.len() > namespace.len() + 1
-                && action.starts_with(namespace)
-                && action.as_bytes()[namespace.len()] == b':'
-            {
-                return true;
+fn action_matches(
+    policy_actions: &[String],
+    action: &str,
+    requested_s3_action: Option<&str>,
+) -> bool {
+    policy_actions.iter().any(|policy_action| {
+        let normalized = policy_action.trim().to_ascii_lowercase();
+        if requested_s3_action.is_none() {
+            if let Some(namespace) = normalized.strip_suffix(":*") {
+                if !namespace.is_empty()
+                    && action.len() > namespace.len() + 1
+                    && action.starts_with(namespace)
+                    && action.as_bytes()[namespace.len()] == b':'
+                {
+                    return true;
+                }
             }
         }
-    }
-    false
+        crate::s3_action::action_matches(policy_action, action, requested_s3_action)
+    })
 }
 
-fn prefix_matches(policy_prefix: &str, object_key: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrefixMatch {
+    Exact,
+    CaseAlias,
+    Miss,
+}
+
+fn prefix_match(policy_prefix: &str, object_key: &str, case_insensitive_fs: bool) -> PrefixMatch {
     let p = policy_prefix.trim();
     if p.is_empty() || p == "*" {
-        return true;
+        return PrefixMatch::Exact;
     }
     let base = p.trim_end_matches('*');
-    object_key.starts_with(base)
+    if object_key.starts_with(base) {
+        return PrefixMatch::Exact;
+    }
+    if case_insensitive_fs && object_key.to_lowercase().starts_with(&base.to_lowercase()) {
+        return PrefixMatch::CaseAlias;
+    }
+    PrefixMatch::Miss
 }
 
 #[cfg(test)]
@@ -1159,27 +1297,49 @@ mod tests {
 
     #[test]
     fn action_matches_namespace_wildcard() {
-        assert!(action_matches(&actions(&["iam:*"]), "iam:create_user"));
-        assert!(action_matches(&actions(&["system:*"]), "system:gc_run"));
-        assert!(action_matches(&actions(&["*"]), "system:gc_run"));
+        assert!(action_matches(
+            &actions(&["iam:*"]),
+            "iam:create_user",
+            None
+        ));
+        assert!(action_matches(
+            &actions(&["system:*"]),
+            "system:gc_run",
+            None
+        ));
+        assert!(action_matches(&actions(&["*"]), "system:gc_run", None));
         assert!(action_matches(
             &actions(&["system:gc_run"]),
-            "system:gc_run"
+            "system:gc_run",
+            None
         ));
 
-        assert!(!action_matches(&actions(&["sys:*"]), "system:gc_run"));
-        assert!(!action_matches(&actions(&["system:*"]), "system"));
-        assert!(!action_matches(&actions(&["system:*"]), "systemgc_run"));
-        assert!(!action_matches(&actions(&[":*"]), "system:gc_run"));
-        assert!(!action_matches(&actions(&["s3:*"]), "system:gc_run"));
-        assert!(!action_matches(&actions(&["iam:*"]), "system:gc_run"));
-        assert!(!action_matches(&actions(&["system:*"]), "system:"));
+        assert!(!action_matches(&actions(&["sys:*"]), "system:gc_run", None));
+        assert!(!action_matches(&actions(&["system:*"]), "system", None));
+        assert!(!action_matches(
+            &actions(&["system:*"]),
+            "systemgc_run",
+            None
+        ));
+        assert!(!action_matches(&actions(&[":*"]), "system:gc_run", None));
+        assert!(!action_matches(&actions(&["s3:*"]), "system:gc_run", None));
+        assert!(!action_matches(&actions(&["iam:*"]), "system:gc_run", None));
+        assert!(!action_matches(&actions(&["system:*"]), "system:", None));
 
-        assert!(action_matches(&actions(&["SYSTEM:*"]), "system:gc_run"));
-        assert!(action_matches(&actions(&[" system:* "]), "system:gc_run"));
+        assert!(action_matches(
+            &actions(&["SYSTEM:*"]),
+            "system:gc_run",
+            None
+        ));
+        assert!(action_matches(
+            &actions(&[" system:* "]),
+            "system:gc_run",
+            None
+        ));
         assert!(!action_matches(
             &actions(&["system:gc_run"]),
-            "system:gc_read"
+            "system:gc_read",
+            None
         ));
     }
 
@@ -1213,15 +1373,19 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_mutations_all_persist() {
+    fn concurrent_mutations_from_separate_services_all_persist() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_iam_file(dir.path(), &test_iam_json());
-        let svc = Arc::new(IamService::new(path.clone()));
+        let services: Vec<_> = (0..8)
+            .map(|_| Arc::new(IamService::new(path.clone())))
+            .collect();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
 
         let mut handles = Vec::new();
-        for i in 0..8 {
-            let svc = Arc::clone(&svc);
+        for (i, svc) in services.into_iter().enumerate() {
+            let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
+                barrier.wait();
                 svc.create_user(&format!("concurrent-{}", i), None, None, None, None)
                     .unwrap();
             }));
@@ -1252,11 +1416,15 @@ mod tests {
         svc.create_user("temp-check", None, None, None, None)
             .unwrap();
 
-        let names: Vec<String> = std::fs::read_dir(dir.path())
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names, vec!["iam.json".to_string()]);
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["iam.json".to_string(), "iam.json.lock".to_string()]
+        );
 
         let content = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1505,10 +1673,176 @@ mod tests {
         let svc = IamService::new(tmp.path().to_path_buf());
         let principal = svc.get_principal("READER_KEY").unwrap();
 
-        assert!(svc.authorize(&principal, Some("docs"), "read", Some("reports/2026.csv"),));
-        assert!(!svc.authorize(&principal, Some("docs"), "write", Some("reports/2026.csv"),));
-        assert!(!svc.authorize(&principal, Some("docs"), "read", Some("private/2026.csv"),));
-        assert!(!svc.authorize(&principal, Some("other"), "read", Some("reports/2026.csv"),));
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            None,
+            Some("reports/2026.csv"),
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "write",
+            None,
+            Some("reports/2026.csv"),
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            None,
+            Some("private/2026.csv"),
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("other"),
+            "read",
+            None,
+            Some("reports/2026.csv"),
+        ));
+    }
+
+    fn action_policy_json(actions: &[&str], policies: Option<serde_json::Value>) -> String {
+        let policies = policies.unwrap_or_else(|| {
+            serde_json::json!([{
+                "bucket": "docs",
+                "actions": actions,
+                "prefix": "*"
+            }])
+        });
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-action",
+                "display_name": "action-user",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": "ACTION_KEY",
+                    "secret_key": "action-secret",
+                    "status": "active"
+                }],
+                "policies": policies
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn exact_s3_actions_do_not_expand_to_their_coarse_class() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(action_policy_json(&["s3:GetObjectTagging"], None).as_bytes())
+            .unwrap();
+        tmp.flush().unwrap();
+        let svc = IamService::new(tmp.path().to_path_buf());
+        let principal = svc.get_principal("ACTION_KEY").unwrap();
+
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObjectTagging"),
+            Some("item")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("item")
+        ));
+    }
+
+    #[test]
+    fn coarse_wildcard_and_alias_actions_keep_expected_scope() {
+        for actions in [vec!["read"], vec!["s3:Get*"]] {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(action_policy_json(&actions, None).as_bytes())
+                .unwrap();
+            tmp.flush().unwrap();
+            let svc = IamService::new(tmp.path().to_path_buf());
+            let principal = svc.get_principal("ACTION_KEY").unwrap();
+            assert!(svc.authorize(
+                &principal,
+                Some("docs"),
+                "read",
+                Some("s3:GetObject"),
+                Some("item")
+            ));
+            assert!(svc.authorize(
+                &principal,
+                Some("docs"),
+                "read",
+                Some("s3:GetObjectTagging"),
+                Some("item")
+            ));
+        }
+
+        for alias in [
+            "s3:HeadObject",
+            "s3:GetObjectVersion",
+            "s3:CopyObject",
+            "s3:UploadPart",
+            "s3:CompleteMultipartUpload",
+        ] {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            tmp.write_all(action_policy_json(&[alias], None).as_bytes())
+                .unwrap();
+            tmp.flush().unwrap();
+            let svc = IamService::new(tmp.path().to_path_buf());
+            let principal = svc.get_principal("ACTION_KEY").unwrap();
+            let (action, requested) = if alias.contains("Object") && !alias.contains("Copy") {
+                ("read", "s3:GetObject")
+            } else {
+                ("write", "s3:PutObject")
+            };
+            assert!(svc.authorize(
+                &principal,
+                Some("docs"),
+                action,
+                Some(requested),
+                Some("item")
+            ));
+        }
+    }
+
+    #[test]
+    fn case_aliased_prefix_is_a_hard_deny_only_on_insensitive_filesystems() {
+        let policies = serde_json::json!([
+            {"bucket": "docs", "actions": ["read"], "prefix": "docs/"},
+            {"bucket": "docs", "actions": ["read"], "prefix": "*"}
+        ]);
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(action_policy_json(&[], Some(policies)).as_bytes())
+            .unwrap();
+        tmp.flush().unwrap();
+
+        let insensitive = IamService::new_with_filesystem(tmp.path().to_path_buf(), None, true);
+        let principal = insensitive.get_principal("ACTION_KEY").unwrap();
+        assert!(insensitive.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("docs/item")
+        ));
+        assert!(!insensitive.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("Docs/item")
+        ));
+
+        let sensitive = IamService::new_with_filesystem(tmp.path().to_path_buf(), None, false);
+        let principal = sensitive.get_principal("ACTION_KEY").unwrap();
+        assert!(sensitive.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("Docs/item")
+        ));
     }
 
     fn wildcard_prefix_user_json(prefix: &str) -> String {
@@ -1544,15 +1878,34 @@ mod tests {
         let principal = svc.get_principal("SCOPED_KEY").unwrap();
         assert!(!principal.is_admin);
 
-        assert!(svc.authorize(&principal, Some("docs"), "delete", Some("data/report.csv")));
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "delete",
+            None,
+            Some("data/report.csv")
+        ));
         assert!(svc.authorize(
             &principal,
             Some("other"),
             "write",
+            None,
             Some("data/nested/x.bin")
         ));
-        assert!(!svc.authorize(&principal, Some("docs"), "read", Some("private/report.csv")));
-        assert!(!svc.authorize(&principal, Some("docs"), "delete", Some("home/report.csv")));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            None,
+            Some("private/report.csv")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "delete",
+            None,
+            Some("home/report.csv")
+        ));
     }
 
     #[test]
@@ -1565,7 +1918,13 @@ mod tests {
         let svc = IamService::new(tmp.path().to_path_buf());
         let principal = svc.get_principal("SCOPED_KEY").unwrap();
         assert!(principal.is_admin);
-        assert!(svc.authorize(&principal, Some("docs"), "read", Some("private/report.csv")));
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            None,
+            Some("private/report.csv")
+        ));
 
         let mut empty = tempfile::NamedTempFile::new().unwrap();
         empty

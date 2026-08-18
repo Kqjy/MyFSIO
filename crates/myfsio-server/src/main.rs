@@ -743,18 +743,7 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         return;
     }
 
-    let access_key = std::env::var("ADMIN_ACCESS_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
-    let env_secret_key = std::env::var("ADMIN_SECRET_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let secret_from_env = env_secret_key.is_some();
-    let secret_key =
-        env_secret_key.unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
+    let (access_key, secret_key, secret_from_env) = admin_credentials();
 
     if let Some(parent) = iam_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -778,6 +767,35 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         return;
     }
 
+    print_admin_credentials(iam_path, &access_key, &secret_key, secret_from_env);
+    tracing::info!(
+        "Admin credentials initialized; access key written to {}",
+        iam_path.display()
+    );
+}
+
+fn admin_credentials() -> (String, String, bool) {
+    let access_key = std::env::var("ADMIN_ACCESS_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
+    let env_secret_key = std::env::var("ADMIN_SECRET_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let secret_from_env = env_secret_key.is_some();
+    let secret_key =
+        env_secret_key.unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
+    (access_key, secret_key, secret_from_env)
+}
+
+fn print_admin_credentials(
+    iam_path: &std::path::Path,
+    access_key: &str,
+    secret_key: &str,
+    secret_from_env: bool,
+) {
     println!("============================================================");
     println!("MYFSIO - ADMIN CREDENTIALS INITIALIZED");
     println!("============================================================");
@@ -789,10 +807,6 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
     }
     println!("Saved to: {}", iam_path.display());
     println!("============================================================");
-    tracing::info!(
-        "Admin credentials initialized; access key written to {}",
-        iam_path.display()
-    );
 }
 
 fn migrate_peer_credentials(config: &ServerConfig) {
@@ -1035,30 +1049,29 @@ fn reset_admin_credentials(config: &ServerConfig) {
         }
     }
 
-    if config.iam_config_path.exists() {
-        let backup = config
-            .iam_config_path
-            .with_extension(format!("bak-{}", chrono::Utc::now().timestamp()));
-        if let Err(err) = std::fs::rename(&config.iam_config_path, &backup) {
-            eprintln!(
-                "Failed to back up existing IAM config {}: {}",
-                config.iam_config_path.display(),
-                err
-            );
+    let (access_key, secret_key, secret_from_env) = admin_credentials();
+    let iam = myfsio_auth::iam::IamService::new_with_secret(
+        config.iam_config_path.clone(),
+        config.secret_key.clone(),
+    );
+    let backup = match iam.reset_admin(&access_key, &secret_key) {
+        Ok(backup) => backup,
+        Err(err) => {
+            eprintln!("Failed to reset admin credentials: {}", err);
             std::process::exit(1);
         }
-        if let Err(err) = myfsio_common::fs_util::restrict_secret_permissions(&backup) {
-            tracing::debug!(
-                "Failed to restrict permissions on IAM backup {}: {}",
-                backup.display(),
-                err
-            );
-        }
+    };
+    if let Some(backup) = backup {
         println!("Backed up existing IAM config to {}", backup.display());
         prune_iam_backups(&config.iam_config_path, 5);
     }
 
-    ensure_iam_bootstrap(config);
+    print_admin_credentials(
+        &config.iam_config_path,
+        &access_key,
+        &secret_key,
+        secret_from_env,
+    );
     println!("Admin credentials reset.");
 }
 

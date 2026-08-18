@@ -387,7 +387,11 @@ pub async fn buckets_overview(
     let is_admin = principal.as_ref().map(|p| p.is_admin).unwrap_or(false);
     let can_create_bucket = principal
         .as_ref()
-        .map(|p| state.iam.authorize_any_bucket(p, "create_bucket"))
+        .map(|p| {
+            state
+                .iam
+                .authorize_any_bucket(p, "create_bucket", Some("s3:CreateBucket"))
+        })
         .unwrap_or(false);
     ctx.insert("can_create_bucket", &can_create_bucket);
 
@@ -481,11 +485,16 @@ pub async fn bucket_detail(
     let mut ctx = page_context(&state, &session, "ui.bucket_detail");
     ctx.insert("request_args", &request_args);
     let can_delete_bucket = match crate::handlers::ui::current_principal(&state, &session) {
-        Some(principal) => {
-            crate::middleware::ui_authorize(&state, &principal, &bucket_name, "delete_bucket", None)
-                .await
-                .is_ok()
-        }
+        Some(principal) => crate::middleware::ui_authorize(
+            &state,
+            &principal,
+            &bucket_name,
+            "delete_bucket",
+            Some("s3:DeleteBucket"),
+            None,
+        )
+        .await
+        .is_ok(),
         None => false,
     };
     ctx.insert("can_delete_bucket", &can_delete_bucket);
@@ -667,33 +676,60 @@ pub async fn bucket_detail(
             .unwrap_or_default(),
     );
     let viewer_principal = crate::handlers::ui::current_principal(&state, &session);
-    let viewer_can = |action: &'static str| {
+    let viewer_can = |action: &'static str, s3_action: &'static str| {
         let state = &state;
         let bucket_name = &bucket_name;
         let principal = viewer_principal.as_ref();
         async move {
             match principal {
-                Some(principal) => {
-                    crate::middleware::ui_authorize(state, principal, bucket_name, action, None)
-                        .await
-                        .is_ok()
-                }
+                Some(principal) => crate::middleware::ui_authorize(
+                    state,
+                    principal,
+                    bucket_name,
+                    action,
+                    Some(s3_action),
+                    None,
+                )
+                .await
+                .is_ok(),
                 None => false,
             }
         }
     };
-    let can_manage_replication = viewer_can("replication").await;
+    let can_manage_replication = viewer_can("replication", "s3:PutReplicationConfiguration").await;
     ctx.insert("default_policy", &default_policy);
-    ctx.insert("can_manage_cors", &viewer_can("cors").await);
-    ctx.insert("can_manage_lifecycle", &viewer_can("lifecycle").await);
-    ctx.insert("can_manage_quota", &viewer_can("quota").await);
-    ctx.insert("can_manage_versioning", &viewer_can("versioning").await);
-    ctx.insert("can_manage_website", &viewer_can("website").await);
-    ctx.insert("can_edit_policy", &viewer_can("policy").await);
-    ctx.insert("can_manage_acl", &viewer_can("share").await);
+    ctx.insert(
+        "can_manage_cors",
+        &viewer_can("cors", "s3:PutBucketCORS").await,
+    );
+    ctx.insert(
+        "can_manage_lifecycle",
+        &viewer_can("lifecycle", "s3:PutLifecycleConfiguration").await,
+    );
+    ctx.insert(
+        "can_manage_quota",
+        &viewer_can("quota", "s3:PutBucketQuota").await,
+    );
+    ctx.insert(
+        "can_manage_versioning",
+        &viewer_can("versioning", "s3:PutBucketVersioning").await,
+    );
+    ctx.insert(
+        "can_manage_website",
+        &viewer_can("website", "s3:PutBucketWebsite").await,
+    );
+    ctx.insert(
+        "can_edit_policy",
+        &viewer_can("policy", "s3:PutBucketPolicy").await,
+    );
+    ctx.insert(
+        "can_manage_acl",
+        &viewer_can("share", "s3:PutBucketAcl").await,
+    );
     ctx.insert(
         "can_manage_encryption",
-        &(viewer_can("encryption").await && state.config.encryption_enabled),
+        &(viewer_can("encryption", "s3:PutEncryptionConfiguration").await
+            && state.config.encryption_enabled),
     );
     ctx.insert("can_manage_replication", &can_manage_replication);
     ctx.insert("is_replication_admin", &can_manage_replication);
@@ -2922,6 +2958,7 @@ async fn ensure_bucket_action(
     wants_json: bool,
     bucket_name: &str,
     action: &str,
+    s3_action: &str,
 ) -> Option<Response> {
     let principal = match crate::handlers::ui::current_principal(state, session) {
         Some(p) => p,
@@ -2940,9 +2977,16 @@ async fn ensure_bucket_action(
             return Some(Redirect::to("/login").into_response());
         }
     };
-    if crate::middleware::ui_authorize(state, &principal, bucket_name, action, None)
-        .await
-        .is_ok()
+    if crate::middleware::ui_authorize(
+        state,
+        &principal,
+        bucket_name,
+        action,
+        Some(s3_action),
+        None,
+    )
+    .await
+    .is_ok()
     {
         return None;
     }
@@ -2999,8 +3043,15 @@ pub async fn create_bucket(
         return Redirect::to("/ui/buckets").into_response();
     }
 
-    if let Some(resp) =
-        ensure_bucket_action(&state, &session, wants_json, &bucket_name, "create_bucket").await
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        wants_json,
+        &bucket_name,
+        "create_bucket",
+        "s3:CreateBucket",
+    )
+    .await
     {
         return resp;
     }
@@ -3045,8 +3096,15 @@ pub async fn delete_bucket(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    if let Some(resp) =
-        ensure_bucket_action(&state, &session, true, &bucket_name, "delete_bucket").await
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "delete_bucket",
+        "s3:DeleteBucket",
+    )
+    .await
     {
         return resp;
     }
@@ -3070,8 +3128,15 @@ pub async fn update_bucket_versioning(
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketVersioningForm>,
 ) -> Response {
-    if let Some(resp) =
-        ensure_bucket_action(&state, &session, true, &bucket_name, "versioning").await
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "versioning",
+        "s3:PutBucketVersioning",
+    )
+    .await
     {
         return resp;
     }
@@ -3137,8 +3202,15 @@ pub async fn update_bucket_replication(
     Form(form): Form<UpdateBucketReplicationForm>,
 ) -> Response {
     let wants_json = wants_json(&headers);
-    if let Some(resp) =
-        ensure_bucket_action(&state, &session, wants_json, &bucket_name, "replication").await
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        wants_json,
+        &bucket_name,
+        "replication",
+        "s3:PutReplicationConfiguration",
+    )
+    .await
     {
         return resp;
     }
@@ -4049,7 +4121,16 @@ pub async fn update_bucket_quota(
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketQuotaForm>,
 ) -> Response {
-    if let Some(resp) = ensure_bucket_action(&state, &session, true, &bucket_name, "quota").await {
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "quota",
+        "s3:PutBucketQuota",
+    )
+    .await
+    {
         return resp;
     }
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
@@ -4106,8 +4187,15 @@ pub async fn update_bucket_encryption(
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketEncryptionForm>,
 ) -> Response {
-    if let Some(resp) =
-        ensure_bucket_action(&state, &session, true, &bucket_name, "encryption").await
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "encryption",
+        "s3:PutEncryptionConfiguration",
+    )
+    .await
     {
         return resp;
     }
@@ -4183,8 +4271,15 @@ pub async fn update_bucket_policy(
     axum::extract::Form(form): axum::extract::Form<UpdateBucketPolicyForm>,
 ) -> Response {
     let wants_json = wants_json(&headers);
-    if let Some(resp) =
-        ensure_bucket_action(&state, &session, wants_json, &bucket_name, "policy").await
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        wants_json,
+        &bucket_name,
+        "policy",
+        "s3:PutBucketPolicy",
+    )
+    .await
     {
         return resp;
     }
@@ -4292,7 +4387,15 @@ pub async fn update_bucket_website(
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketWebsiteForm>,
 ) -> Response {
-    if let Some(resp) = ensure_bucket_action(&state, &session, true, &bucket_name, "website").await
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "website",
+        "s3:PutBucketWebsite",
+    )
+    .await
     {
         return resp;
     }

@@ -50,7 +50,7 @@ fn require_admin(principal: &Principal) -> Option<Response> {
 }
 
 fn require_iam_action(state: &AppState, principal: &Principal, action: &str) -> Option<Response> {
-    if !state.iam.authorize(principal, None, action, None) {
+    if !state.iam.authorize(principal, None, action, None, None) {
         return Some(json_error(
             "AccessDenied",
             &format!("Requires {} permission", action),

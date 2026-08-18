@@ -185,28 +185,6 @@ impl SiteSyncWorker {
         }
     }
 
-    pub async fn trigger_sync(&self, bucket: &str) -> Option<SiteSyncStats> {
-        let rule = self.replication.get_rule(bucket)?;
-        if rule.mode != MODE_BIDIRECTIONAL || !rule.enabled {
-            return None;
-        }
-        match self.sync_bucket(&rule).await {
-            Ok(stats) => {
-                self.bucket_stats
-                    .lock()
-                    .insert(bucket.to_string(), stats.clone());
-                self.save_stats();
-                Some(stats)
-            }
-            Err(e) => {
-                tracing::error!("Site sync trigger failed for {}: {}", bucket, e);
-                self.record_failure(bucket, &e);
-                self.save_stats();
-                None
-            }
-        }
-    }
-
     async fn sync_bucket(&self, rule: &ReplicationRule) -> Result<SiteSyncStats, String> {
         let mut stats = SiteSyncStats::default();
         let connection = self

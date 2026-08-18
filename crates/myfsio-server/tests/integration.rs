@@ -5838,6 +5838,89 @@ async fn test_narrow_policy_action_does_not_grant_whole_class() {
 }
 
 #[tokio::test]
+async fn test_iam_exact_action_reaches_middleware_without_coarse_expansion() {
+    const NARROW_ACCESS_KEY: &str = "AKIANARROWACTION0000";
+    const NARROW_SECRET_KEY: &str = "narrow-action-secret-key";
+    let (app, _tmp) = test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            {
+                "user_id": "u-narrow",
+                "display_name": "narrow",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": NARROW_ACCESS_KEY,
+                    "secret_key": NARROW_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "iam-narrow",
+                    "actions": ["s3:GetObjectTagging"],
+                    "prefix": "*"
+                }]
+            }
+        ]
+    }));
+
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(Method::PUT, "/iam-narrow", Body::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/iam-narrow/item",
+                Body::from("payload")
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let narrow_request = |uri: &'static str| {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("x-access-key", NARROW_ACCESS_KEY)
+            .header("x-secret-key", NARROW_SECRET_KEY)
+            .body(Body::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(narrow_request("/iam-narrow/item?tagging"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.oneshot(narrow_request("/iam-narrow/item"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn test_multi_delete_authorizes_each_object_resource() {
     let (app, _tmp) = test_app();
 
@@ -11483,6 +11566,97 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
     );
 }
 
+#[tokio::test]
+async fn test_peer_signature_replay_is_rejected_after_app_state_restart() {
+    const PEER_ACCESS_KEY: &str = "AKIADURABLEPEER00000";
+    const PEER_SECRET_KEY: &str = "durable-peer-secret-key";
+    let tmp = tempfile::tempdir().unwrap();
+    let iam_dir = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_dir).unwrap();
+    let iam_path = iam_dir.join("iam.json");
+    std::fs::write(
+        &iam_path,
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-durable-peer",
+                "display_name": "durable-peer",
+                "enabled": true,
+                "peer_site_id": "peer-site",
+                "access_keys": [{
+                    "access_key": PEER_ACCESS_KEY,
+                    "secret_key": PEER_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": []
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        iam_config_path: iam_path,
+        region: "us-east-1".to_string(),
+        peer_sigv4_timestamp_tolerance_secs: 60,
+        replication_healer_enabled: false,
+        ui_enabled: false,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let request_time = chrono::Utc::now() + chrono::Duration::seconds(30);
+    let amz_date = request_time.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = request_time.format("%Y%m%d").to_string();
+    let path = "/myfsio/admin/cluster/overview";
+    let payload_hash = myfsio_auth::sigv4::sha256_hex(b"");
+    let canonical_headers = format!(
+        "host:localhost\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        payload_hash, amz_date
+    );
+    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let canonical_request = format!(
+        "GET\n{}\n\n{}\n{}\n{}",
+        path, canonical_headers, signed_headers, payload_hash
+    );
+    let scope = format!("{}/us-east-1/s3/aws4_request", date_stamp);
+    let string_to_sign =
+        myfsio_auth::sigv4::build_string_to_sign(&amz_date, &scope, &canonical_request);
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(PEER_SECRET_KEY, &date_stamp, "us-east-1", "s3");
+    let signature = myfsio_auth::sigv4::compute_signature(&signing_key, &string_to_sign);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+        PEER_ACCESS_KEY, scope, signed_headers, signature
+    );
+    let request = || {
+        Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .header("host", "localhost")
+            .header("x-amz-content-sha256", payload_hash.clone())
+            .header("x-amz-date", amz_date.clone())
+            .header("authorization", authorization.clone())
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let first_state = myfsio_server::state::AppState::new(config.clone());
+    let first = myfsio_server::create_router(first_state)
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let restarted_state = myfsio_server::state::AppState::new(config);
+    assert!(request_time >= restarted_state.boot_time_utc);
+    let replay = myfsio_server::create_router(restarted_state)
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+}
+
 async fn test_app_sse_c() -> (axum::Router, tempfile::TempDir) {
     test_app_sse_c_with_min(1).await
 }
@@ -12988,6 +13162,80 @@ async fn test_explicit_lock_headers_override_bucket_default() {
 }
 
 #[tokio::test]
+async fn test_copy_object_lock_headers_override_bucket_default() {
+    let (app, _tmp) = test_app();
+    for bucket in ["copy-lock-source", "copy-lock-destination"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/{}", bucket),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+    }
+    enable_versioning(&app, "copy-lock-destination").await;
+    assert_eq!(
+        put_object_lock_config(&app, "copy-lock-destination", DEFAULT_LOCK_XML).await,
+        StatusCode::OK
+    );
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/copy-lock-source/source.txt",
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-lock-destination/copied.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-copy-source", "/copy-lock-source/source.txt")
+                .header("x-amz-object-lock-legal-hold", "ON")
+                .header("x-amz-object-lock-mode", "COMPLIANCE")
+                .header(
+                    "x-amz-object-lock-retain-until-date",
+                    "2099-01-01T00:00:00Z",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (status, body) = object_retention_body(&app, "copy-lock-destination", "copied.txt").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<Mode>COMPLIANCE</Mode>") && body.contains("2099-01-01"),
+        "copy request retention must win over the bucket default, got {}",
+        body
+    );
+
+    let response = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/copy-lock-destination/copied.txt?legal-hold",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(
+        body.contains("<Status>ON</Status>"),
+        "copy request legal hold must be stored, got {}",
+        body
+    );
+}
+
+#[tokio::test]
 async fn test_multipart_complete_inherits_bucket_default_retention() {
     let (app, _tmp) = test_app();
     app.clone()
@@ -13843,7 +14091,7 @@ async fn test_post_form_rejects_oversized_non_file_field() {
 }
 
 #[tokio::test]
-async fn test_post_form_accepts_a_large_file_field() {
+async fn test_post_form_accepts_a_large_file_field_with_any_ascii_casing() {
     let (app, _tmp) = test_app();
 
     app.clone()
@@ -13851,46 +14099,52 @@ async fn test_post_form_accepts_a_large_file_field() {
         .await
         .unwrap();
 
-    let boundary = "----FileOkBoundary";
-    let fields = post_form_auth_fields("large.bin");
     let payload = vec![3u8; 3 * 1024 * 1024];
-    let body = multipart_form_body(boundary, &fields, Some(("file", &payload)));
+    for (field_name, key, boundary) in [
+        ("file", "lowercase.bin", "----LowercaseFileBoundary"),
+        ("File", "uppercase.bin", "----UppercaseFileBoundary"),
+    ] {
+        let fields = post_form_auth_fields(key);
+        let body = multipart_form_body(boundary, &fields, Some((field_name, &payload)));
 
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/form-file-ok")
-                .header("x-access-key", TEST_ACCESS_KEY)
-                .header("x-secret-key", TEST_SECRET_KEY)
-                .header(
-                    "content-type",
-                    format!("multipart/form-data; boundary={}", boundary),
-                )
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/form-file-ok")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(
-        resp.status().is_success(),
-        "a file field well over the per-field text cap must still upload, got {}",
-        resp.status()
-    );
+        assert!(
+            resp.status().is_success(),
+            "a {} field over the text cap must upload, got {}",
+            field_name,
+            resp.status()
+        );
 
-    let resp = app
-        .oneshot(signed_request(
-            Method::GET,
-            "/form-file-ok/large.bin",
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(bytes.len(), payload.len());
+        let resp = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/form-file-ok/{}", key),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.len(), payload.len());
+    }
 }
 
 #[tokio::test]

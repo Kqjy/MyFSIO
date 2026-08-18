@@ -103,6 +103,7 @@ async fn ensure_ui_authorized(
     session: &SessionHandle,
     bucket: &str,
     action: &str,
+    s3_action: Option<&str>,
     object_key: Option<&str>,
 ) -> Result<(), Response> {
     let access_key = match session.read(|s| s.user_id.clone()) {
@@ -120,7 +121,9 @@ async fn ensure_ui_authorized(
             ));
         }
     };
-    match crate::middleware::ui_authorize(state, &principal, bucket, action, object_key).await {
+    match crate::middleware::ui_authorize(state, &principal, bucket, action, s3_action, object_key)
+        .await
+    {
         Ok(()) => Ok(()),
         Err(message) => Err(json_error(StatusCode::FORBIDDEN, message)),
     }
@@ -137,7 +140,7 @@ pub(crate) async fn ui_has_system_action(
     let Some(principal) = state.iam.get_principal(&access_key) else {
         return false;
     };
-    state.iam.authorize(&principal, None, action, None)
+    state.iam.authorize(&principal, None, action, None, None)
 }
 
 async fn ensure_ui_system_action(
@@ -157,7 +160,7 @@ async fn ensure_ui_system_action(
             "Your session is no longer valid.",
         ));
     };
-    if state.iam.authorize(&principal, None, action, None) {
+    if state.iam.authorize(&principal, None, action, None, None) {
         return Ok(());
     }
     Err(json_error(
@@ -220,9 +223,10 @@ async fn ensure_ui_authorized_for_upload(
     session: &SessionHandle,
     bucket: &str,
     upload_id: &str,
+    s3_action: &str,
 ) -> Result<String, Response> {
     let key = resolve_multipart_upload_key(state, bucket, upload_id).await?;
-    ensure_ui_authorized(state, session, bucket, "write", Some(&key)).await?;
+    ensure_ui_authorized(state, session, bucket, "write", Some(s3_action), Some(&key)).await?;
     Ok(key)
 }
 
@@ -266,7 +270,13 @@ async fn authorize_bulk_key_for(
         .iam
         .get_principal(&access_key)
         .ok_or_else(|| "Your session is no longer valid.".to_string())?;
-    crate::middleware::ui_authorize(state, &principal, bucket, action, Some(key)).await
+    let s3_action = match action {
+        "read" => Some("s3:GetObject"),
+        "write" => Some("s3:PutObject"),
+        "delete" => Some("s3:DeleteObject"),
+        _ => None,
+    };
+    crate::middleware::ui_authorize(state, &principal, bucket, action, s3_action, Some(key)).await
 }
 
 async fn check_object_lock_for_bulk(
@@ -2783,8 +2793,15 @@ pub async fn upload_object(
         Err(response) => return response,
     };
 
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "write",
+        Some("s3:PutObject"),
+        Some(&key),
+    )
+    .await
     {
         return resp;
     }
@@ -2878,8 +2895,15 @@ pub async fn initiate_multipart_upload(
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
     }
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(object_key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "write",
+        Some("s3:CreateMultipartUpload"),
+        Some(object_key),
+    )
+    .await
     {
         return resp;
     }
@@ -2914,7 +2938,8 @@ pub async fn upload_multipart_part(
     body: Body,
 ) -> Response {
     if let Err(resp) =
-        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id, "s3:UploadPart")
+            .await
     {
         return resp;
     }
@@ -3009,11 +3034,18 @@ pub async fn complete_multipart_upload(
     Path((bucket_name, upload_id)): Path<(String, String)>,
     body: Body,
 ) -> Response {
-    let upload_key =
-        match ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await {
-            Ok(key) => key,
-            Err(resp) => return resp,
-        };
+    let upload_key = match ensure_ui_authorized_for_upload(
+        &state,
+        &session,
+        &bucket_name,
+        &upload_id,
+        "s3:CompleteMultipartUpload",
+    )
+    .await
+    {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
     let payload: CompleteMultipartPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -3068,8 +3100,14 @@ pub async fn abort_multipart_upload(
     Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
 ) -> Response {
-    if let Err(resp) =
-        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+    if let Err(resp) = ensure_ui_authorized_for_upload(
+        &state,
+        &session,
+        &bucket_name,
+        &upload_id,
+        "s3:AbortMultipartUpload",
+    )
+    .await
     {
         return resp;
     }
@@ -3095,7 +3133,16 @@ pub async fn bucket_acl(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetBucketAcl"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     match get_bucket_config_json(&state, &bucket_name).await {
@@ -3120,7 +3167,16 @@ pub async fn update_bucket_acl(
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "share", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "share",
+        Some("s3:PutBucketAcl"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let payload: BucketAclPayload = match parse_json_body(body).await {
@@ -3159,7 +3215,16 @@ pub async fn bucket_cors(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetBucketCORS"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     match get_bucket_config_json(&state, &bucket_name).await {
@@ -3180,7 +3245,16 @@ pub async fn update_bucket_cors(
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "cors", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "cors",
+        Some("s3:PutBucketCORS"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let payload: BucketCorsPayload = match parse_json_body(body).await {
@@ -3213,7 +3287,16 @@ pub async fn bucket_lifecycle(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetLifecycleConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     match get_bucket_config_json(&state, &bucket_name).await {
@@ -3234,7 +3317,15 @@ pub async fn update_bucket_lifecycle(
     Path(bucket_name): Path<String>,
     body: Body,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "lifecycle", None).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "lifecycle",
+        Some("s3:PutLifecycleConfiguration"),
+        None,
+    )
+    .await
     {
         return resp;
     }
@@ -3628,11 +3719,27 @@ async fn copy_object_json(
         );
     }
 
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "read",
+        Some("s3:GetObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
-    if let Err(resp) =
-        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        dest_bucket,
+        "write",
+        Some("s3:CopyObject"),
+        Some(dest_key),
+    )
+    .await
     {
         return resp;
     }
@@ -3688,14 +3795,39 @@ async fn move_object_json(
         );
     }
 
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "read",
+        Some("s3:GetObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "delete",
+        Some("s3:DeleteObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
-    if let Err(resp) =
-        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        dest_bucket,
+        "write",
+        Some("s3:CopyObject"),
+        Some(dest_key),
+    )
+    .await
     {
         return resp;
     }
@@ -3756,7 +3888,16 @@ async fn delete_object_json(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "delete",
+        Some("s3:DeleteObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
 
@@ -4049,8 +4190,20 @@ pub async fn object_get_dispatch(
         return json_error(StatusCode::NOT_FOUND, "Unknown object action");
     };
 
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "read", Some(&key)).await
+    let s3_action = match action {
+        ObjectGetAction::Tags => "s3:GetObjectTagging",
+        ObjectGetAction::Versions => "s3:GetObjectVersion",
+        _ => "s3:GetObject",
+    };
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some(s3_action),
+        Some(&key),
+    )
+    .await
     {
         return resp;
     }
@@ -4087,8 +4240,15 @@ pub async fn object_post_dispatch(
             object_presign_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Tags => {
-            if let Err(resp) =
-                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            if let Err(resp) = ensure_ui_authorized(
+                &state,
+                &session,
+                &bucket_name,
+                "write",
+                Some("s3:PutObjectTagging"),
+                Some(&key),
+            )
+            .await
             {
                 return resp;
             }
@@ -4101,8 +4261,15 @@ pub async fn object_post_dispatch(
             move_object_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Restore(version_id) => {
-            if let Err(resp) =
-                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            if let Err(resp) = ensure_ui_authorized(
+                &state,
+                &session,
+                &bucket_name,
+                "write",
+                Some("s3:PutObject"),
+                Some(&key),
+            )
+            .await
             {
                 return resp;
             }
@@ -4454,16 +4621,30 @@ pub async fn archived_post_dispatch(
     Path((bucket_name, rest)): Path<(String, String)>,
 ) -> Response {
     if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
-        if let Err(resp) =
-            ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(key)).await
+        if let Err(resp) = ensure_ui_authorized(
+            &state,
+            &session,
+            &bucket_name,
+            "write",
+            Some("s3:PutObject"),
+            Some(key),
+        )
+        .await
         {
             return resp;
         }
         return restore_object_version_json(&state, &bucket_name, key, version_id).await;
     }
     if let Some(key) = rest.strip_suffix("/purge") {
-        if let Err(resp) =
-            ensure_ui_authorized(&state, &session, &bucket_name, "delete", Some(key)).await
+        if let Err(resp) = ensure_ui_authorized(
+            &state,
+            &session,
+            &bucket_name,
+            "delete",
+            Some("s3:DeleteObjectVersion"),
+            Some(key),
+        )
+        .await
         {
             return resp;
         }
@@ -4627,7 +4808,16 @@ pub async fn lifecycle_history(
     Path(bucket_name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetLifecycleConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let limit = params
@@ -4678,7 +4868,16 @@ pub async fn replication_status(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let Some(rule) = state.replication.get_rule(&bucket_name) else {
@@ -4778,7 +4977,16 @@ pub async fn replication_failures(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
@@ -4801,8 +5009,15 @@ pub async fn retry_replication_failure(
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "replication", None).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
     {
         return resp;
     }
@@ -4817,8 +5032,15 @@ pub async fn retry_replication_failure_path(
     let Some(object_key) = rest.strip_suffix("/retry") else {
         return json_error(StatusCode::NOT_FOUND, "Unknown replication failure action");
     };
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "replication", None).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
     {
         return resp;
     }
@@ -4859,8 +5081,15 @@ pub async fn retry_all_replication_failures(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "replication", None).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
     {
         return resp;
     }
@@ -4893,8 +5122,15 @@ pub async fn dismiss_replication_failure(
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "replication", None).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
     {
         return resp;
     }
@@ -4906,8 +5142,15 @@ pub async fn dismiss_replication_failure_path(
     Extension(session): Extension<SessionHandle>,
     Path((bucket_name, object_key)): Path<(String, String)>,
 ) -> Response {
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "replication", None).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
     {
         return resp;
     }
@@ -4944,8 +5187,15 @@ pub async fn clear_replication_failures(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "replication", None).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
     {
         return resp;
     }

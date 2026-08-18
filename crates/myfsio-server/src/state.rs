@@ -14,6 +14,7 @@ use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
 use crate::services::peer_admin::PeerAdminClient;
 use crate::services::peer_fetch::PeerFetcher;
+use crate::services::peer_nonce::PeerNonceStore;
 use crate::services::replication::ReplicationManager;
 use crate::services::s3_client::ClientOptions;
 use crate::services::site_registry::SiteRegistry;
@@ -53,6 +54,7 @@ pub struct AppState {
     pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
+    pub peer_nonce_store: Arc<PeerNonceStore>,
     pub boot_time_utc: chrono::DateTime<chrono::Utc>,
     pub relay_idempotency_cache: Arc<Mutex<LruCache<String, RelayIdempotencyEntry>>>,
     pub relay_idempotency_inflight:
@@ -93,9 +95,10 @@ pub fn build_storage_backend(config: &ServerConfig) -> Arc<FsStorageBackend> {
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
         let storage = build_storage_backend(&config);
-        let iam = Arc::new(IamService::new_with_secret(
+        let iam = Arc::new(IamService::new_with_filesystem(
             config.iam_config_path.clone(),
             config.secret_key.clone(),
+            storage.case_insensitive_fs(),
         ));
 
         let gc = if config.gc_enabled {
@@ -325,6 +328,10 @@ impl AppState {
         ));
         let nonce_cap = NonZeroUsize::new(config.peer_nonce_cache_size.max(1))
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
+        let peer_nonce_store = Arc::new(PeerNonceStore::new(
+            &config.storage_root,
+            config.peer_sigv4_timestamp_tolerance_secs,
+        ));
         let idemp_cap = NonZeroUsize::new(config.relay_idempotency_cache_size.max(1))
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
         let audit_log = Arc::new(AuditLog::new(
@@ -360,6 +367,7 @@ impl AppState {
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
+            peer_nonce_store,
             boot_time_utc: chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
                 .unwrap_or_else(chrono::Utc::now),
             relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),

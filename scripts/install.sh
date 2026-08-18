@@ -410,9 +410,14 @@ echo "------------------------------------------------------------"
 echo "STEP 6: Setting Permissions"
 echo "------------------------------------------------------------"
 echo ""
-chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" && echo "  [OK] Set ownership for $INSTALL_DIR"
-chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"    && echo "  [OK] Set ownership for $DATA_DIR"
-chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"     && echo "  [OK] Set ownership for $LOG_DIR"
+if [[ "$SERVICE_USER" == "root" ]]; then
+    echo "  [WARNING] Service user is root; recursive ownership changes were skipped."
+    echo "            Existing ownership for install, data, and log paths was left untouched."
+else
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR" && echo "  [OK] Set ownership for $INSTALL_DIR"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"    && echo "  [OK] Set ownership for $DATA_DIR"
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"     && echo "  [OK] Set ownership for $LOG_DIR"
+fi
 
 if [[ "$SKIP_SYSTEMD" != true ]]; then
     echo ""
@@ -510,17 +515,16 @@ if [[ "$SKIP_SYSTEMD" != true ]]; then
             echo "  ============================================"
             echo "  ADMIN CREDENTIALS (save these securely!)"
             echo "  ============================================"
-            CRED_OUTPUT=$(journalctl -u myfsio --no-pager -n 200 2>/dev/null | grep -A 5 "MYFSIO - ADMIN CREDENTIALS")
-            ACCESS_KEY=$(echo "$CRED_OUTPUT" | grep "Access Key:" | head -1 | sed 's/.*Access Key: //' | awk '{print $1}')
-            SECRET_KEY=$(echo "$CRED_OUTPUT" | grep "Secret Key:" | head -1 | sed 's/.*Secret Key: //' | awk '{print $1}')
-            if [[ -n "$ACCESS_KEY" && -n "$SECRET_KEY" ]]; then
+            ACCESS_KEY=$(journalctl -u myfsio --no-pager -n 200 2>/dev/null | grep -A 5 "MYFSIO - ADMIN CREDENTIALS" | grep "Access Key:" | head -1 | sed 's/.*Access Key: //' | awk '{print $1}')
+            if [[ -n "$ACCESS_KEY" ]]; then
                 echo "  Access Key: $ACCESS_KEY"
-                echo "  Secret Key: $SECRET_KEY"
             else
-                echo "  [!] Could not extract credentials from service logs."
-                echo "      Check: journalctl -u myfsio --no-pager | grep -A 5 'MYFSIO - ADMIN CREDENTIALS'"
-                echo "      Or reset:  $INSTALL_DIR/myfsio --reset-cred"
+                echo "  [!] Could not extract the access key from service logs."
             fi
+            echo "  Retrieve the secret securely from the initialization log:"
+            echo "      journalctl -u myfsio | grep -A 5 'MYFSIO - ADMIN CREDENTIALS'"
+            echo "  If it is no longer available, reset the credentials:"
+            echo "      $INSTALL_DIR/myfsio --reset-cred"
             echo "  ============================================"
         else
             echo "  [WARNING] MyFSIO may not have started correctly"
