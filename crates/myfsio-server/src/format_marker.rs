@@ -7,7 +7,7 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const LISTING_INDEX_VERSION: u32 = 1;
 
 const METADATA_LAYOUT_RANK: [&str; 2] = ["index", "sidecar"];
-const MULTIPART_LAYOUT_RANK: [&str; 2] = ["concat", "segments"];
+const MULTIPART_LAYOUT_RANK: [&str; 3] = ["concat", "segments", "part-records-v1"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 struct FormatFeatures {
@@ -131,10 +131,8 @@ pub fn enforce_format_marker(storage_root: &Path, active: &ActiveFormat) -> Resu
         MetadataLayout::Sidecar => "sidecar",
         MetadataLayout::Index => "index",
     };
-    let active_multipart = match active.multipart_layout {
-        MultipartLayout::Segments => "segments",
-        MultipartLayout::Concat => "concat",
-    };
+    let _ = active.multipart_layout;
+    let active_multipart = "part-records-v1";
 
     let recorded_features = existing
         .as_ref()
@@ -239,7 +237,10 @@ mod tests {
         let marker: FormatMarker = serde_json::from_str(&text).unwrap();
         assert_eq!(marker.format_version, FORMAT_VERSION);
         assert_eq!(marker.features.metadata.as_deref(), Some("sidecar"));
-        assert_eq!(marker.features.multipart.as_deref(), Some("segments"));
+        assert_eq!(
+            marker.features.multipart.as_deref(),
+            Some("part-records-v1")
+        );
         assert_eq!(marker.features.listing_index, Some(LISTING_INDEX_VERSION));
     }
 
@@ -281,7 +282,10 @@ mod tests {
         let text = std::fs::read_to_string(format_marker_path(dir.path())).unwrap();
         let marker: FormatMarker = serde_json::from_str(&text).unwrap();
         assert_eq!(marker.features.metadata.as_deref(), Some("sidecar"));
-        assert_eq!(marker.features.multipart.as_deref(), Some("segments"));
+        assert_eq!(
+            marker.features.multipart.as_deref(),
+            Some("part-records-v1")
+        );
         assert_eq!(marker.features.listing_index, Some(LISTING_INDEX_VERSION));
     }
 

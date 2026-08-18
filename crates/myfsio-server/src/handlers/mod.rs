@@ -5234,24 +5234,31 @@ async fn copy_object_handler(
             return storage_err_response(e);
         }
     };
-    if let myfsio_storage::traits::SnapshotSource::Segments { files, .. } = snap_source {
-        let dest = src_snap.clone();
-        let materialize = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let mut out = std::fs::File::create(&dest)?;
-            let mut reader = myfsio_storage::segments::OpenSegmentsRead::new(files);
-            std::io::copy(&mut reader, &mut out)?;
-            Ok(())
-        })
-        .await;
-        let materialize = match materialize {
-            Ok(r) => r,
-            Err(join) => Err(std::io::Error::other(join)),
-        };
-        if let Err(e) = materialize {
-            let _ = tokio::fs::remove_file(&src_snap).await;
-            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+    let source_path = match snap_source {
+        myfsio_storage::traits::SnapshotSource::LinkedFile(_) => src_snap.clone(),
+        segments => {
+            let dest = tmp_dir.join(format!("copy-mat-{}", uuid::Uuid::new_v4()));
+            let mut reader = match segments.into_range_stream(0, None).await {
+                Ok(reader) => reader,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&src_snap).await;
+                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                }
+            };
+            let mut out = match tokio::fs::File::create(&dest).await {
+                Ok(out) => out,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&src_snap).await;
+                    return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+                }
+            };
+            if let Err(e) = tokio::io::copy(&mut reader, &mut out).await {
+                let _ = tokio::fs::remove_file(&dest).await;
+                return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+            }
+            dest
         }
-    }
+    };
 
     let snap_internal = &snap_meta.internal_metadata;
 
@@ -5309,7 +5316,7 @@ async fn copy_object_handler(
 
     let plaintext_path = if let Some(enc_info) = src_enc_info.as_ref() {
         let Some(enc_svc) = state.encryption.as_ref() else {
-            let _ = tokio::fs::remove_file(&src_snap).await;
+            let _ = tokio::fs::remove_file(&source_path).await;
             return s3_error_response(S3Error::new(
                 S3ErrorCode::InternalError,
                 "Source object is encrypted but encryption service is disabled",
@@ -5318,26 +5325,26 @@ async fn copy_object_handler(
         let customer_key = match extract_copy_source_sse_c_key(headers) {
             Ok(k) => k,
             Err(resp) => {
-                let _ = tokio::fs::remove_file(&src_snap).await;
+                let _ = tokio::fs::remove_file(&source_path).await;
                 return resp;
             }
         };
         let dec_tmp = tmp_dir.join(format!("copy-dec-{}", uuid::Uuid::new_v4()));
         if let Err(e) = enc_svc
-            .decrypt_object(&src_snap, &dec_tmp, enc_info, customer_key.as_deref())
+            .decrypt_object(&source_path, &dec_tmp, enc_info, customer_key.as_deref())
             .await
         {
-            let _ = tokio::fs::remove_file(&src_snap).await;
+            let _ = tokio::fs::remove_file(&source_path).await;
             let _ = tokio::fs::remove_file(&dec_tmp).await;
             return s3_error_response(S3Error::new(
                 S3ErrorCode::InternalError,
                 format!("Source decryption failed: {}", e),
             ));
         }
-        let _ = tokio::fs::remove_file(&src_snap).await;
+        let _ = tokio::fs::remove_file(&source_path).await;
         dec_tmp
     } else {
-        src_snap
+        source_path
     };
 
     let mut dst_metadata = dst_metadata;

@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 
 use myfsio_common::types::ListParams;
 use myfsio_storage::fs_backend::{metadata_is_corrupted, FsStorageBackend};
-use myfsio_storage::traits::StorageEngine;
+use myfsio_storage::traits::{SnapshotSource, StorageEngine};
 
 use crate::services::replication_ledger::{
     LedgerEntry, LedgerKey, LoadResult, ReplicationLedger, ReplicationOpKind,
@@ -476,10 +476,60 @@ impl BatchRun {
 
 struct TmpFileGuard(Option<PathBuf>);
 
+type ReplicationReadStream = std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>;
+
 impl Drop for TmpFileGuard {
     fn drop(&mut self) {
         if let Some(path) = self.0.take() {
             let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ReplicationSource {
+    File(PathBuf),
+    Segments {
+        paths: myfsio_storage::segments::SegmentPaths,
+        total: u64,
+    },
+}
+
+impl ReplicationSource {
+    fn len(&self) -> u64 {
+        match self {
+            Self::File(path) => std::fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            Self::Segments { total, .. } => *total,
+        }
+    }
+
+    fn display(&self) -> String {
+        match self {
+            Self::File(path) => path.display().to_string(),
+            Self::Segments { .. } => "linked segment snapshot".to_string(),
+        }
+    }
+
+    async fn open_range(&self, offset: u64, length: u64) -> std::io::Result<ReplicationReadStream> {
+        match self {
+            Self::File(path) => {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                let mut file = tokio::fs::File::open(path).await?;
+                if offset > 0 {
+                    file.seek(std::io::SeekFrom::Start(offset)).await?;
+                }
+                Ok(Box::pin(file.take(length)))
+            }
+            Self::Segments { paths, .. } => Ok(Box::pin(
+                myfsio_storage::segments::LazySegmentRangeReader::open(
+                    paths.clone(),
+                    offset,
+                    length,
+                )
+                .await?,
+            )),
         }
     }
 }
@@ -1731,39 +1781,63 @@ impl ReplicationManager {
             .await
             .unwrap_or_default();
         let segmented = stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
-        let (src_path, _materialized_guard) = if segmented {
+        let (source, _materialized_guard) = if segmented {
+            let snapshot_path = self
+                .rules_path
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".myfsio.sys"))
+                .join("tmp")
+                .join(format!("repl-src-{}", uuid::Uuid::new_v4()));
             match self
                 .storage
-                .materialize_object_to_tmp(bucket, object_key)
+                .snapshot_object_to_link(bucket, object_key, &snapshot_path)
                 .await
             {
-                Ok(p) => {
-                    let guard = TmpFileGuard(Some(p.clone()));
-                    (p, guard)
+                Ok((_, SnapshotSource::Segments { source, total, .. })) => {
+                    let paths = source.reopenable();
+                    (
+                        ReplicationSource::Segments { paths, total },
+                        TmpFileGuard(None),
+                    )
                 }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to materialize segmented source {}/{} for replication: {}",
-                        bucket,
-                        object_key,
-                        e
-                    );
-                    return ReplicateOutcome::Failed;
+                Ok((_, SnapshotSource::EagerSegments { .. })) | Err(_) => {
+                    match self
+                        .storage
+                        .materialize_object_to_tmp(bucket, object_key)
+                        .await
+                    {
+                        Ok(path) => {
+                            let guard = TmpFileGuard(Some(path.clone()));
+                            (ReplicationSource::File(path), guard)
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                "Failed to snapshot segmented source {}/{} for replication: {}",
+                                bucket,
+                                object_key,
+                                error
+                            );
+                            return ReplicateOutcome::Failed;
+                        }
+                    }
+                }
+                Ok((_, SnapshotSource::LinkedFile(path))) => {
+                    let guard = TmpFileGuard(Some(path.clone()));
+                    (ReplicationSource::File(path), guard)
                 }
             }
         } else {
             match self.storage.get_object_path(bucket, object_key).await {
-                Ok(p) => (p, TmpFileGuard(None)),
+                Ok(path) => (ReplicationSource::File(path), TmpFileGuard(None)),
                 Err(_) => {
                     tracing::error!("Source object not found: {}/{}", bucket, object_key);
                     return ReplicateOutcome::Failed;
                 }
             }
         };
-        let file_size = match tokio::fs::metadata(&src_path).await {
-            Ok(m) => m.len(),
-            Err(_) => 0,
-        };
+        let file_size = source.len();
         let mut obj_meta = ReplicationObjectMeta::from_internal_metadata(&stored_meta);
         if obj_meta.content_type.is_none() {
             obj_meta.content_type = mime_guess::from_path(object_key)
@@ -1876,7 +1950,7 @@ impl ReplicationManager {
             &client,
             &rule.target_bucket,
             object_key,
-            &src_path,
+            &source,
             file_size,
             self.streaming_threshold_bytes,
             Some(&obj_meta),
@@ -1904,7 +1978,7 @@ impl ReplicationManager {
                             &client,
                             &rule.target_bucket,
                             object_key,
-                            &src_path,
+                            &source,
                             file_size,
                             self.streaming_threshold_bytes,
                             Some(&obj_meta),
@@ -2460,7 +2534,7 @@ async fn upload_object(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     key: &str,
-    path: &Path,
+    source: &ReplicationSource,
     file_size: u64,
     streaming_threshold: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
@@ -2474,7 +2548,7 @@ async fn upload_object(
             client,
             bucket,
             key,
-            path,
+            source,
             file_size,
             obj_meta,
             tuning,
@@ -2488,7 +2562,7 @@ async fn upload_object(
             client,
             bucket,
             key,
-            path,
+            source,
             file_size,
             streaming_threshold,
             obj_meta,
@@ -2501,38 +2575,58 @@ async fn upload_object_single(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     key: &str,
-    path: &Path,
+    source: &ReplicationSource,
     file_size: u64,
     streaming_threshold: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
 ) -> Result<(), ReplicationUploadError> {
-    let mut req = client.put_object().bucket(bucket).key(key);
+    let mut req = client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .content_length(file_size as i64);
     if let Some(meta) = obj_meta {
         req = apply_meta_to_put_object(req, meta);
     }
 
-    let body = if file_size >= streaming_threshold {
-        ByteStream::from_path(path)
-            .await
-            .map_err(|e| ReplicationUploadError {
-                code: None,
-                message: format!("failed to open {} for upload: {}", path.display(), e),
-                is_no_such_bucket: false,
-                pending_mpu: None,
-                clears_pending: false,
-            })?
-    } else {
-        let bytes = tokio::fs::read(path)
-            .await
-            .map_err(|e| ReplicationUploadError {
-                code: None,
-                message: format!("failed to read {}: {}", path.display(), e),
-                is_no_such_bucket: false,
-                pending_mpu: None,
-                clears_pending: false,
-            })?;
-        ByteStream::from(bytes)
-    };
+    let body =
+        match source {
+            ReplicationSource::File(path) if file_size >= streaming_threshold => {
+                ByteStream::from_path(path)
+                    .await
+                    .map_err(|e| ReplicationUploadError {
+                        code: None,
+                        message: format!("failed to open {} for upload: {}", path.display(), e),
+                        is_no_such_bucket: false,
+                        pending_mpu: None,
+                        clears_pending: false,
+                    })?
+            }
+            ReplicationSource::File(path) => {
+                let bytes = tokio::fs::read(path)
+                    .await
+                    .map_err(|e| ReplicationUploadError {
+                        code: None,
+                        message: format!("failed to read {}: {}", path.display(), e),
+                        is_no_such_bucket: false,
+                        pending_mpu: None,
+                        clears_pending: false,
+                    })?;
+                ByteStream::from(bytes)
+            }
+            ReplicationSource::Segments { .. } => {
+                let reader = source.open_range(0, file_size).await.map_err(|error| {
+                    ReplicationUploadError {
+                        code: None,
+                        message: format!("failed to open linked segments for upload: {}", error),
+                        is_no_such_bucket: false,
+                        pending_mpu: None,
+                        clears_pending: false,
+                    }
+                })?;
+                byte_stream_from_reader(reader, 1024 * 1024)
+            }
+        };
 
     req.body(body).send().await.map(|_| ()).map_err(map_sdk_err)
 }
@@ -2550,7 +2644,7 @@ async fn upload_object_multipart(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     key: &str,
-    path: &Path,
+    source: &ReplicationSource,
     file_size: u64,
     obj_meta: Option<&ReplicationObjectMeta>,
     tuning: &ResolvedTuning,
@@ -2663,7 +2757,7 @@ async fn upload_object_multipart(
             bucket,
             key,
             &upload_id,
-            path,
+            source,
             &remaining,
             tuning,
             stall_timeout,
@@ -2921,7 +3015,7 @@ async fn run_part_pass(
     bucket: &str,
     key: &str,
     upload_id: &str,
-    path: &Path,
+    source: &ReplicationSource,
     plan: &[PartPlan],
     tuning: &ResolvedTuning,
     stall_timeout: Duration,
@@ -2945,14 +3039,14 @@ async fn run_part_pass(
             let bucket = bucket.to_string();
             let key = key.to_string();
             let upload_id = upload_id.to_string();
-            let path = path.to_path_buf();
+            let source = source.clone();
             tasks.spawn(async move {
                 let res = upload_one_part_with_retry(
                     &client,
                     &bucket,
                     &key,
                     &upload_id,
-                    &path,
+                    &source,
                     p.offset,
                     p.length,
                     p.part_number,
@@ -3034,7 +3128,7 @@ async fn upload_one_part_with_retry(
     bucket: &str,
     key: &str,
     upload_id: &str,
-    path: &Path,
+    source: &ReplicationSource,
     offset: u64,
     length: u64,
     part_number: i32,
@@ -3050,7 +3144,7 @@ async fn upload_one_part_with_retry(
             bucket,
             key,
             upload_id,
-            path,
+            source,
             offset,
             length,
             part_number,
@@ -3102,7 +3196,7 @@ async fn upload_one_part(
     bucket: &str,
     key: &str,
     upload_id: &str,
-    path: &Path,
+    source: &ReplicationSource,
     offset: u64,
     length: u64,
     part_number: i32,
@@ -3111,7 +3205,7 @@ async fn upload_one_part(
     stall_timeout: Duration,
 ) -> Result<CompletedPart, ReplicationUploadError> {
     let progress = ProgressTracker::new();
-    let body = build_progress_body(path, offset, length, buffer_bytes, progress.clone())
+    let body = build_progress_body(source, offset, length, buffer_bytes, progress.clone())
         .await
         .map_err(|e| ReplicationUploadError {
             code: None,
@@ -3120,7 +3214,7 @@ async fn upload_one_part(
                 part_number,
                 length,
                 offset,
-                path.display(),
+                source.display(),
                 e
             ),
             is_no_such_bucket: false,
@@ -3183,21 +3277,20 @@ async fn upload_one_part(
 }
 
 async fn build_progress_body(
-    path: &Path,
+    source: &ReplicationSource,
     offset: u64,
     length: u64,
     buffer_bytes: usize,
     progress: Arc<ProgressTracker>,
 ) -> std::io::Result<ByteStream> {
-    use tokio::io::AsyncSeekExt;
-    let mut file = tokio::fs::File::open(path).await?;
-    if offset > 0 {
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
-    }
-    let limited = tokio::io::AsyncReadExt::take(file, length);
-    let progress_reader = ProgressReader::new(limited, progress);
+    let reader = source.open_range(offset, length).await?;
+    let progress_reader = ProgressReader::new(reader, progress);
     let cap = buffer_bytes.max(64 * 1024);
-    let stream = tokio_util::io::ReaderStream::with_capacity(progress_reader, cap);
+    Ok(byte_stream_from_reader(Box::pin(progress_reader), cap))
+}
+
+fn byte_stream_from_reader(reader: ReplicationReadStream, capacity: usize) -> ByteStream {
+    let stream = tokio_util::io::ReaderStream::with_capacity(reader, capacity);
     use futures::stream::TryStreamExt;
     let framed = stream.map_ok(http_body::Frame::data);
     let body = http_body_util::StreamBody::new(framed);
@@ -3206,7 +3299,7 @@ async fn build_progress_body(
             Box::new(e)
         });
     let sdk_body = aws_smithy_types::body::SdkBody::from_body_1_x(mapped);
-    Ok(ByteStream::new(sdk_body))
+    ByteStream::new(sdk_body)
 }
 
 async fn body_stall_watchdog(progress: Arc<ProgressTracker>, stall_timeout: Duration) {
@@ -4202,6 +4295,44 @@ mod tests {
         reader.read_to_end(&mut out).await.unwrap();
         assert_eq!(out, b"hello world");
         assert_eq!(progress.bytes_read(), 11);
+    }
+
+    #[tokio::test]
+    async fn replication_segment_source_reopens_ranges_without_materializing() {
+        use tokio::io::AsyncReadExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let original = tmp.path().join("original");
+        let holding = tmp.path().join("holding");
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&holding).unwrap();
+        let parts = [b"abcdef".as_slice(), b"ghijkl".as_slice()];
+        let mut linked = Vec::new();
+        for (ordinal, part) in parts.iter().enumerate() {
+            let source_path = original.join(format!("part-{ordinal}"));
+            let linked_path = holding.join(format!("part-{ordinal}"));
+            std::fs::write(&source_path, part).unwrap();
+            std::fs::hard_link(&source_path, &linked_path).unwrap();
+            linked.push((linked_path, part.len() as u64));
+        }
+        let source = ReplicationSource::Segments {
+            paths: myfsio_storage::segments::SegmentPaths::with_cleanup(linked, holding.clone()),
+            total: 12,
+        };
+        std::fs::remove_dir_all(&original).unwrap();
+
+        let mut first = source.open_range(0, 6).await.unwrap();
+        let mut first_bytes = Vec::new();
+        first.read_to_end(&mut first_bytes).await.unwrap();
+        assert_eq!(first_bytes, b"abcdef");
+        let mut crossing = source.open_range(4, 4).await.unwrap();
+        let mut crossing_bytes = Vec::new();
+        crossing.read_to_end(&mut crossing_bytes).await.unwrap();
+        assert_eq!(crossing_bytes, b"efgh");
+        drop(first);
+        drop(crossing);
+        assert!(holding.exists());
+        drop(source);
+        assert!(!holding.exists());
     }
 
     #[test]

@@ -254,11 +254,21 @@ impl GcService {
                             if let Ok(modified) = metadata.modified() {
                                 if let Ok(age) = now.duration_since(modified) {
                                     if age > temp_max_age {
-                                        let size = metadata.len();
+                                        let is_dir = metadata.is_dir();
+                                        let size = if is_dir {
+                                            dir_total_bytes(&entry.path())
+                                        } else {
+                                            metadata.len()
+                                        };
                                         if !dry_run {
-                                            if let Err(e) = std::fs::remove_file(entry.path()) {
+                                            let remove_result = if is_dir {
+                                                std::fs::remove_dir_all(entry.path())
+                                            } else {
+                                                std::fs::remove_file(entry.path())
+                                            };
+                                            if let Err(e) = remove_result {
                                                 errors.push(format!(
-                                                    "Failed to remove temp file: {}",
+                                                    "Failed to remove temporary entry: {}",
                                                     e
                                                 ));
                                                 continue;
@@ -823,6 +833,33 @@ mod tests {
 
         assert_eq!(result["temp_files_deleted"], 1);
         assert!(file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn temp_sweep_removes_leaked_segment_snapshot_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshot_dir = tmp
+            .path()
+            .join(".myfsio.sys")
+            .join("tmp")
+            .join("repl-src-leaked");
+        std::fs::create_dir_all(snapshot_dir.join("segments")).unwrap();
+        std::fs::write(snapshot_dir.join("stub"), b"stub").unwrap();
+        std::fs::write(snapshot_dir.join("segments").join("seg-00001"), b"part").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let service = Arc::new(GcService::new(
+            tmp.path().to_path_buf(),
+            GcConfig {
+                temp_file_max_age_hours: 0.0,
+                dry_run: false,
+                ..GcConfig::default()
+            },
+        ));
+
+        let result = service.run_now(false).await.unwrap();
+
+        assert_eq!(result["temp_files_deleted"], 1);
+        assert!(!snapshot_dir.exists());
     }
 
     #[tokio::test]
