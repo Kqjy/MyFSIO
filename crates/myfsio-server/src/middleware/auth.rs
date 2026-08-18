@@ -434,15 +434,15 @@ async fn virtual_host_bucket(
     path: &str,
     method: &Method,
 ) -> Option<String> {
-    if path.starts_with("/ui") || path.starts_with("/myfsio") {
+    if path == "/ui"
+        || path.starts_with("/ui/")
+        || path == "/myfsio"
+        || path.starts_with("/myfsio/")
+    {
         return None;
     }
 
     let bucket = virtual_host_candidate(host)?;
-    if path == format!("/{}", bucket) || path.starts_with(&format!("/{}/", bucket)) {
-        return None;
-    }
-
     match state.storage.bucket_exists(&bucket).await {
         Ok(true) => Some(bucket),
         Ok(false) if *method == Method::PUT && path == "/" => Some(bucket),
@@ -472,6 +472,43 @@ fn sigv4_canonical_path(req: &Request) -> &str {
         .get::<OriginalCanonicalPath>()
         .map(|path| path.0.as_str())
         .unwrap_or_else(|| req.uri().path())
+}
+
+fn is_website_request(state: &AppState, method: &Method, host: &str) -> bool {
+    state.config.website_hosting_enabled
+        && (*method == Method::GET || *method == Method::HEAD)
+        && state
+            .website_domains
+            .as_ref()
+            .is_some_and(|store| store.get_bucket(host).is_some())
+}
+
+pub async fn virtual_host_rewrite_layer(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(':').next())
+        .map(|value| value.trim().to_ascii_lowercase());
+
+    if let Some(host) = host {
+        let path = req.uri().path().to_string();
+        let method = req.method().clone();
+        if !is_website_request(&state, &method, &host) {
+            if let Some(bucket) = virtual_host_bucket(&state, &host, &path, &method).await {
+                if let Some(rewritten) = rewrite_uri_for_virtual_host(req.uri(), &bucket) {
+                    req.extensions_mut().insert(OriginalCanonicalPath(path));
+                    *req.uri_mut() = rewritten;
+                }
+            }
+        }
+    }
+
+    next.run(req).await
 }
 
 pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
@@ -518,20 +555,7 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
     {
         response
     } else {
-        let auth_path = if let Some(bucket) =
-            virtual_host_bucket(&state, host.as_deref().unwrap_or_default(), &path, &method).await
-        {
-            if let Some(rewritten) = rewrite_uri_for_virtual_host(req.uri(), &bucket) {
-                req.extensions_mut()
-                    .insert(OriginalCanonicalPath(path.clone()));
-                *req.uri_mut() = rewritten;
-                req.uri().path().to_string()
-            } else {
-                path.clone()
-            }
-        } else {
-            path.clone()
-        };
+        let auth_path = path.clone();
 
         match try_auth(&state, &req) {
             AuthResult::NoAuth => match authorize_request(
@@ -802,12 +826,21 @@ async fn authorize_request(
     let remaining: Vec<String> = segments.map(urlencoding_decode).collect();
 
     if remaining.is_empty() {
-        let action = resolve_bucket_action(method, query)?;
+        if *method == Method::POST
+            && matches!(
+                crate::handlers::parse_bucket_subresource(Some(query)),
+                Ok(Some(crate::handlers::BucketSubresource::Delete))
+            )
+        {
+            return Ok(());
+        }
+        let (action, s3_action) = resolve_bucket_action(method, query)?;
         return authorize_action(
             state,
             principal,
             bucket,
             action,
+            Some(s3_action),
             None,
             method_access(method),
         )
@@ -815,7 +848,15 @@ async fn authorize_request(
     }
 
     let object_key = remaining.join("/");
-    if *method == Method::PUT {
+    let object_subresource = match crate::handlers::parse_object_subresource(Some(query)) {
+        Ok(value) => value,
+        Err(selectors) => return Err(crate::handlers::ambiguous_subresource_error(&selectors)),
+    };
+    let copy_eligible = matches!(
+        object_subresource,
+        None | Some(crate::handlers::ObjectSubresource::UploadId)
+    );
+    if *method == Method::PUT && copy_eligible {
         if let Some(copy_source) = copy_source {
             let source = copy_source.strip_prefix('/').unwrap_or(copy_source);
             if let Some((src_bucket_raw, src_key_and_query)) = source.split_once('/') {
@@ -834,6 +875,7 @@ async fn authorize_request(
                     principal,
                     &src_bucket,
                     "read",
+                    Some("s3:GetObject"),
                     Some(&src_key),
                     Some(false),
                 )
@@ -844,6 +886,7 @@ async fn authorize_request(
                     principal,
                     bucket,
                     "write",
+                    Some("s3:PutObject"),
                     Some(&object_key),
                     Some(true),
                 )
@@ -857,12 +900,13 @@ async fn authorize_request(
         }
     }
 
-    let action = resolve_object_action(method, query)?;
+    let (action, s3_action) = resolve_object_action(method, query)?;
     authorize_action(
         state,
         principal,
         bucket,
         action,
+        Some(s3_action),
         Some(&object_key),
         method_access(method),
     )
@@ -876,9 +920,27 @@ pub async fn ui_authorize(
     action: &str,
     object_key: Option<&str>,
 ) -> Result<(), String> {
-    authorize_action(state, Some(principal), bucket, action, object_key, None)
-        .await
-        .map_err(|err| err.message)
+    let s3_action = if object_key.is_some() {
+        match action {
+            "read" => Some("s3:GetObject"),
+            "write" => Some("s3:PutObject"),
+            "delete" => Some("s3:DeleteObject"),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    authorize_action(
+        state,
+        Some(principal),
+        bucket,
+        action,
+        s3_action,
+        object_key,
+        None,
+    )
+    .await
+    .map_err(|err| err.message)
 }
 
 pub async fn ui_authorize_list(
@@ -895,6 +957,7 @@ pub async fn ui_authorize_list(
         Some(principal.access_key.as_str()),
         bucket,
         "list",
+        None,
         None,
         None,
     )
@@ -929,6 +992,7 @@ pub async fn ui_can_see_bucket(state: &AppState, principal: &Principal, bucket: 
         "list",
         None,
         None,
+        None,
     )
     .await;
 
@@ -953,6 +1017,7 @@ pub(crate) async fn authorize_action(
     principal: Option<&Principal>,
     bucket: &str,
     action: &str,
+    s3_action: Option<&str>,
     object_key: Option<&str>,
     write: Option<bool>,
 ) -> Result<(), S3Error> {
@@ -968,6 +1033,7 @@ pub(crate) async fn authorize_action(
         principal.map(|principal| principal.access_key.as_str()),
         bucket,
         action,
+        s3_action,
         object_key,
         write,
     )
@@ -1037,6 +1103,7 @@ async fn evaluate_bucket_policy(
     access_key: Option<&str>,
     bucket: &str,
     action: &str,
+    s3_action: Option<&str>,
     object_key: Option<&str>,
     write: Option<bool>,
 ) -> PolicyDecision {
@@ -1057,7 +1124,7 @@ async fn evaluate_bucket_policy(
         Some(Value::Array(items)) => {
             for statement in items.iter() {
                 match evaluate_policy_statement(
-                    statement, access_key, bucket, action, object_key, write,
+                    statement, access_key, bucket, action, s3_action, object_key, write,
                 ) {
                     PolicyDecision::Deny => return PolicyDecision::Deny,
                     PolicyDecision::Allow => decision = PolicyDecision::Allow,
@@ -1067,7 +1134,7 @@ async fn evaluate_bucket_policy(
         }
         Some(statement) => {
             return evaluate_policy_statement(
-                statement, access_key, bucket, action, object_key, write,
+                statement, access_key, bucket, action, s3_action, object_key, write,
             );
         }
         None => return PolicyDecision::Neutral,
@@ -1081,6 +1148,7 @@ fn evaluate_policy_statement(
     access_key: Option<&str>,
     bucket: &str,
     action: &str,
+    s3_action: Option<&str>,
     object_key: Option<&str>,
     write: Option<bool>,
 ) -> PolicyDecision {
@@ -1098,7 +1166,9 @@ fn evaluate_policy_statement(
     let unsupported = statement_has_unsupported_clause(statement);
 
     if unsupported && matches!(effect, PolicyDecision::Deny) {
-        return if unsupported_deny_may_apply(statement, access_key, bucket, action, object_key) {
+        return if unsupported_deny_may_apply(
+            statement, access_key, bucket, action, s3_action, object_key,
+        ) {
             PolicyDecision::Deny
         } else {
             PolicyDecision::Neutral
@@ -1112,7 +1182,7 @@ fn evaluate_policy_statement(
     };
 
     if !statement_matches_principal(statement, access_key)
-        || !statement_matches_action(statement, action, action_gate)
+        || !statement_matches_action(statement, action, s3_action, action_gate)
         || !statement_matches_resource(statement, bucket, object_key)
     {
         return PolicyDecision::Neutral;
@@ -1130,12 +1200,13 @@ fn unsupported_deny_may_apply(
     access_key: Option<&str>,
     bucket: &str,
     action: &str,
+    s3_action: Option<&str>,
     object_key: Option<&str>,
 ) -> bool {
     let principal_ok =
         statement.get("Principal").is_none() || statement_matches_principal(statement, access_key);
-    let action_ok =
-        statement.get("Action").is_none() || statement_matches_action(statement, action, None);
+    let action_ok = statement.get("Action").is_none()
+        || statement_matches_action(statement, action, s3_action, None);
     let resource_ok = statement.get("Resource").is_none()
         || statement_matches_resource(statement, bucket, object_key);
     principal_ok && action_ok && resource_ok
@@ -1176,20 +1247,30 @@ fn principal_value_matches(value: &Value, access_key: Option<&str>) -> bool {
     }
 }
 
-fn statement_matches_action(statement: &Value, action: &str, write: Option<bool>) -> bool {
+fn statement_matches_action(
+    statement: &Value,
+    action: &str,
+    s3_action: Option<&str>,
+    write: Option<bool>,
+) -> bool {
     match statement.get("Action") {
-        Some(Value::String(value)) => action_grant_matches(value, action, write),
+        Some(Value::String(value)) => action_grant_matches(value, action, s3_action, write),
         Some(Value::Array(items)) => items.iter().any(|item| {
             item.as_str()
-                .map(|value| action_grant_matches(value, action, write))
+                .map(|value| action_grant_matches(value, action, s3_action, write))
                 .unwrap_or(false)
         }),
         _ => false,
     }
 }
 
-fn action_grant_matches(policy_action: &str, requested_action: &str, write: Option<bool>) -> bool {
-    if !policy_action_matches(policy_action, requested_action) {
+fn action_grant_matches(
+    policy_action: &str,
+    requested_action: &str,
+    requested_s3_action: Option<&str>,
+    write: Option<bool>,
+) -> bool {
+    if !policy_action_matches(policy_action, requested_action, requested_s3_action) {
         return false;
     }
     match (write, policy_action_is_write(policy_action)) {
@@ -1270,10 +1351,49 @@ const S3_ACTION_TABLE: &[(&str, &str)] = &[
     ("s3:deletebucketcors", "cors"),
 ];
 
-fn policy_action_matches(policy_action: &str, requested_action: &str) -> bool {
+fn canonical_s3_action_name(name: &str) -> &str {
+    match name {
+        "s3:headobject" => "s3:getobject",
+        "s3:headbucket" => "s3:listbucket",
+        "s3:getobjectversion" => "s3:getobject",
+        "s3:getobjectversiontagging" => "s3:getobjecttagging",
+        "s3:deleteobjectversion" => "s3:deleteobject",
+        "s3:copyobject"
+        | "s3:createmultipartupload"
+        | "s3:uploadpart"
+        | "s3:completemultipartupload" => "s3:putobject",
+        "s3:listmultipartuploads" => "s3:listbucketmultipartuploads",
+        "s3:listparts" => "s3:listmultipartuploadparts",
+        "s3:getbucketlifecycle" => "s3:getlifecycleconfiguration",
+        "s3:putbucketlifecycle" => "s3:putlifecycleconfiguration",
+        other => other,
+    }
+}
+
+fn policy_action_matches(
+    policy_action: &str,
+    requested_action: &str,
+    requested_s3_action: Option<&str>,
+) -> bool {
     let normalized_policy = policy_action.trim().to_ascii_lowercase();
     if normalized_policy == "*" {
         return true;
+    }
+    if let Some(requested_s3) = requested_s3_action {
+        let requested_s3 = requested_s3.to_ascii_lowercase();
+        let requested_s3 = canonical_s3_action_name(&requested_s3);
+        if normalized_policy.contains('*') || normalized_policy.contains('?') {
+            return wildcard_match(requested_s3, &normalized_policy)
+                || S3_ACTION_TABLE.iter().any(|(candidate, _)| {
+                    canonical_s3_action_name(candidate) == requested_s3
+                        && wildcard_match(candidate, &normalized_policy)
+                });
+        }
+        return if normalized_policy.starts_with("s3:") {
+            canonical_s3_action_name(&normalized_policy) == requested_s3
+        } else {
+            normalized_policy == requested_action
+        };
     }
     if normalized_policy.contains('*') || normalized_policy.contains('?') {
         for (s3_action, internal_action) in S3_ACTION_TABLE {
@@ -1380,26 +1500,38 @@ fn wildcard_match_inner(value: &str, pattern: &str, case_sensitive: bool) -> boo
     pattern_idx == pattern.len()
 }
 
-fn resolve_bucket_action(method: &Method, query: &str) -> Result<&'static str, S3Error> {
+fn resolve_bucket_action(
+    method: &Method,
+    query: &str,
+) -> Result<(&'static str, &'static str), S3Error> {
     match crate::handlers::parse_bucket_subresource(Some(query)) {
         Err(selectors) => Err(crate::handlers::ambiguous_subresource_error(&selectors)),
-        Ok(Some(subresource)) => Ok(subresource.action()),
-        Ok(None) => Ok(match *method {
-            Method::GET => "list",
-            Method::HEAD => "read",
-            Method::PUT => "create_bucket",
-            Method::DELETE => "delete_bucket",
-            Method::POST => "write",
-            _ => "list",
-        }),
+        Ok(Some(subresource)) => Ok((subresource.action(), subresource.s3_action(method))),
+        Ok(None) => Ok((
+            match *method {
+                Method::GET => "list",
+                Method::HEAD => "read",
+                Method::PUT => "create_bucket",
+                Method::DELETE => "delete_bucket",
+                Method::POST => "write",
+                _ => "list",
+            },
+            crate::handlers::bucket_method_default_s3_action(method),
+        )),
     }
 }
 
-fn resolve_object_action(method: &Method, query: &str) -> Result<&'static str, S3Error> {
+fn resolve_object_action(
+    method: &Method,
+    query: &str,
+) -> Result<(&'static str, &'static str), S3Error> {
     match crate::handlers::parse_object_subresource(Some(query)) {
         Err(selectors) => Err(crate::handlers::ambiguous_subresource_error(&selectors)),
-        Ok(Some(subresource)) => Ok(subresource.action(method)),
-        Ok(None) => Ok(crate::handlers::object_method_default_action(method)),
+        Ok(Some(subresource)) => Ok((subresource.action(method), subresource.s3_action(method))),
+        Ok(None) => Ok((
+            crate::handlers::object_method_default_action(method),
+            crate::handlers::object_method_default_s3_action(method),
+        )),
     }
 }
 
@@ -1837,6 +1969,22 @@ fn enforce_peer_freshness_and_nonce(
     {
         return Some(err);
     }
+    match NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ") {
+        Ok(request_time) => {
+            if request_time.and_utc() < state.boot_time_utc {
+                return Some(S3Error::new(
+                    S3ErrorCode::AccessDenied,
+                    "Peer request timestamp predates server start; re-sign and retry",
+                ));
+            }
+        }
+        Err(_) => {
+            return Some(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Malformed request timestamp",
+            ));
+        }
+    }
     let key = format!("{}:{}", principal.access_key, signature);
     let mut cache = state.peer_request_nonces.lock();
     if cache.put(key, Instant::now()).is_some() {
@@ -1911,98 +2059,272 @@ mod tests {
         assert!(action_grant_matches(
             "s3:GetBucketCors",
             "cors",
+            None,
             Some(false)
         ));
         assert!(!action_grant_matches(
             "s3:GetBucketCors",
             "cors",
+            None,
             Some(true)
         ));
-        assert!(action_grant_matches("s3:PutBucketCors", "cors", Some(true)));
+        assert!(action_grant_matches(
+            "s3:PutBucketCors",
+            "cors",
+            None,
+            Some(true)
+        ));
         assert!(!action_grant_matches(
             "s3:PutBucketCors",
             "cors",
+            None,
             Some(false)
         ));
         assert!(action_grant_matches(
             "s3:GetLifecycleConfiguration",
             "lifecycle",
+            None,
             Some(false)
         ));
         assert!(!action_grant_matches(
             "s3:GetLifecycleConfiguration",
             "lifecycle",
+            None,
             Some(true)
         ));
     }
 
     #[test]
     fn wildcards_and_core_actions_still_match_with_gate() {
-        assert!(action_grant_matches("s3:*", "cors", Some(true)));
-        assert!(action_grant_matches("s3:*", "cors", Some(false)));
-        assert!(action_grant_matches("*", "cors", Some(true)));
-        assert!(action_grant_matches("s3:GetObject", "read", Some(false)));
-        assert!(action_grant_matches("s3:PutObject", "write", Some(true)));
+        assert!(action_grant_matches("s3:*", "cors", None, Some(true)));
+        assert!(action_grant_matches("s3:*", "cors", None, Some(false)));
+        assert!(action_grant_matches("*", "cors", None, Some(true)));
+        assert!(action_grant_matches(
+            "s3:GetObject",
+            "read",
+            None,
+            Some(false)
+        ));
+        assert!(action_grant_matches(
+            "s3:PutObject",
+            "write",
+            None,
+            Some(true)
+        ));
     }
 
     #[test]
     fn no_method_disposition_skips_gate() {
-        assert!(action_grant_matches("s3:GetBucketCors", "cors", None));
-        assert!(action_grant_matches("s3:PutBucketCors", "cors", None));
+        assert!(action_grant_matches("s3:GetBucketCors", "cors", None, None));
+        assert!(action_grant_matches("s3:PutBucketCors", "cors", None, None));
     }
 
     #[test]
     fn star_action_matches_anything() {
-        assert!(policy_action_matches("*", "read"));
-        assert!(policy_action_matches("*", "delete"));
-        assert!(policy_action_matches("*", "policy"));
+        assert!(policy_action_matches("*", "read", None));
+        assert!(policy_action_matches("*", "delete", None));
+        assert!(policy_action_matches("*", "policy", None));
+        assert!(policy_action_matches("*", "read", Some("s3:GetObject")));
     }
 
     #[test]
     fn s3_star_action_matches_any_s3_action() {
-        assert!(policy_action_matches("s3:*", "read"));
-        assert!(policy_action_matches("s3:*", "write"));
-        assert!(policy_action_matches("s3:*", "delete"));
-        assert!(policy_action_matches("s3:*", "list"));
-        assert!(policy_action_matches("s3:*", "policy"));
+        assert!(policy_action_matches("s3:*", "read", None));
+        assert!(policy_action_matches("s3:*", "write", None));
+        assert!(policy_action_matches("s3:*", "delete", None));
+        assert!(policy_action_matches("s3:*", "list", None));
+        assert!(policy_action_matches("s3:*", "policy", None));
+        assert!(policy_action_matches("s3:*", "read", Some("s3:GetObject")));
+        assert!(policy_action_matches(
+            "s3:*",
+            "policy",
+            Some("s3:PutBucketPolicy")
+        ));
     }
 
     #[test]
     fn s3_get_star_matches_read_only() {
-        assert!(policy_action_matches("s3:Get*", "read"));
-        assert!(!policy_action_matches("s3:Get*", "write"));
-        assert!(!policy_action_matches("s3:Get*", "delete"));
+        assert!(policy_action_matches("s3:Get*", "read", None));
+        assert!(!policy_action_matches("s3:Get*", "write", None));
+        assert!(!policy_action_matches("s3:Get*", "delete", None));
+        assert!(policy_action_matches(
+            "s3:Get*",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:Get*",
+            "read",
+            Some("s3:GetObjectTagging")
+        ));
+        assert!(!policy_action_matches(
+            "s3:Get*",
+            "write",
+            Some("s3:PutObject")
+        ));
     }
 
     #[test]
     fn s3_put_star_matches_write_and_share_policy_lifecycle() {
-        assert!(policy_action_matches("s3:Put*", "write"));
-        assert!(policy_action_matches("s3:PutObject*", "write"));
-        assert!(policy_action_matches("s3:PutBucket*", "write"));
+        assert!(policy_action_matches("s3:Put*", "write", None));
+        assert!(policy_action_matches("s3:PutObject*", "write", None));
+        assert!(policy_action_matches("s3:PutBucket*", "write", None));
     }
 
     #[test]
     fn s3_list_star_matches_list() {
-        assert!(policy_action_matches("s3:List*", "list"));
-        assert!(!policy_action_matches("s3:List*", "read"));
+        assert!(policy_action_matches("s3:List*", "list", None));
+        assert!(!policy_action_matches("s3:List*", "read", None));
+        assert!(policy_action_matches(
+            "s3:List*",
+            "list",
+            Some("s3:ListBucket")
+        ));
     }
 
     #[test]
     fn s3_delete_star_matches_delete() {
-        assert!(policy_action_matches("s3:Delete*", "delete"));
-        assert!(!policy_action_matches("s3:Delete*", "write"));
+        assert!(policy_action_matches("s3:Delete*", "delete", None));
+        assert!(!policy_action_matches("s3:Delete*", "write", None));
     }
 
     #[test]
     fn exact_action_still_matches() {
-        assert!(policy_action_matches("s3:GetObject", "read"));
-        assert!(policy_action_matches("s3:PutObject", "write"));
-        assert!(!policy_action_matches("s3:GetObject", "write"));
+        assert!(policy_action_matches("s3:GetObject", "read", None));
+        assert!(policy_action_matches("s3:PutObject", "write", None));
+        assert!(!policy_action_matches("s3:GetObject", "write", None));
+        assert!(policy_action_matches(
+            "s3:GetObject",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:PutObject",
+            "write",
+            Some("s3:PutObject")
+        ));
+    }
+
+    #[test]
+    fn narrow_grant_no_longer_authorizes_whole_action_class() {
+        assert!(!policy_action_matches(
+            "s3:GetObjectTagging",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(!policy_action_matches(
+            "s3:GetObjectAcl",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(!policy_action_matches(
+            "s3:GetObject",
+            "read",
+            Some("s3:GetObjectTagging")
+        ));
+        assert!(!policy_action_matches(
+            "s3:PutObjectTagging",
+            "write",
+            Some("s3:PutObject")
+        ));
+        assert!(!policy_action_matches(
+            "s3:DeleteObjectTagging",
+            "delete",
+            Some("s3:DeleteObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:GetObjectTagging",
+            "read",
+            Some("s3:GetObjectTagging")
+        ));
+    }
+
+    #[test]
+    fn s3_action_aliases_are_canonicalized() {
+        assert!(policy_action_matches(
+            "s3:HeadObject",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:HeadBucket",
+            "read",
+            Some("s3:ListBucket")
+        ));
+        assert!(policy_action_matches(
+            "s3:UploadPart",
+            "write",
+            Some("s3:PutObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:CopyObject",
+            "write",
+            Some("s3:PutObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:GetObjectVersion",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:ListParts",
+            "read",
+            Some("s3:ListMultipartUploadParts")
+        ));
+        assert!(policy_action_matches(
+            "s3:PutBucketLifecycle",
+            "lifecycle",
+            Some("s3:PutLifecycleConfiguration")
+        ));
+        assert!(policy_action_matches(
+            "s3:GetObjectVersion*",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:Upload*",
+            "write",
+            Some("s3:PutObject")
+        ));
+    }
+
+    #[test]
+    fn internal_action_names_still_work_in_policies() {
+        assert!(policy_action_matches("read", "read", Some("s3:GetObject")));
+        assert!(policy_action_matches(
+            "versioning",
+            "versioning",
+            Some("s3:PutBucketVersioning")
+        ));
+        assert!(!policy_action_matches(
+            "read",
+            "write",
+            Some("s3:PutObject")
+        ));
+    }
+
+    #[test]
+    fn glob_over_exact_names_stays_scoped() {
+        assert!(!policy_action_matches(
+            "s3:GetObject*",
+            "read",
+            Some("s3:GetBucketVersioning")
+        ));
+        assert!(policy_action_matches(
+            "s3:GetObject*",
+            "read",
+            Some("s3:GetObjectTagging")
+        ));
+        assert!(!policy_action_matches(
+            "s3:NeverHeardOf*",
+            "read",
+            Some("s3:GetObject")
+        ));
     }
 
     #[test]
     fn unknown_glob_pattern_does_not_match_unknown_action() {
-        assert!(!policy_action_matches("s3:NeverHeardOf*", "read"));
+        assert!(!policy_action_matches("s3:NeverHeardOf*", "read", None));
     }
 
     #[test]
@@ -2016,26 +2338,53 @@ mod tests {
     fn bypass_governance_is_its_own_policy_action() {
         assert!(policy_action_matches(
             "s3:BypassGovernanceRetention",
-            "bypass_governance"
+            "bypass_governance",
+            None
         ));
-        assert!(policy_action_matches("s3:*", "bypass_governance"));
+        assert!(policy_action_matches("s3:*", "bypass_governance", None));
         assert!(!policy_action_matches(
             "s3:DeleteObject",
-            "bypass_governance"
+            "bypass_governance",
+            None
         ));
-        assert!(!policy_action_matches("s3:Delete*", "bypass_governance"));
+        assert!(!policy_action_matches(
+            "s3:Delete*",
+            "bypass_governance",
+            None
+        ));
         assert!(!policy_action_matches(
             "s3:BypassGovernanceRetention",
-            "delete"
+            "delete",
+            None
+        ));
+        assert!(policy_action_matches(
+            "s3:BypassGovernanceRetention",
+            "bypass_governance",
+            Some("s3:BypassGovernanceRetention")
+        ));
+        assert!(!policy_action_matches(
+            "s3:DeleteObject",
+            "bypass_governance",
+            Some("s3:BypassGovernanceRetention")
         ));
     }
 
     #[test]
     fn action_patterns_remain_case_insensitive() {
-        assert!(policy_action_matches("s3:getobject", "read"));
-        assert!(policy_action_matches("S3:GETOBJECT", "read"));
-        assert!(policy_action_matches("s3:GeT*", "read"));
+        assert!(policy_action_matches("s3:getobject", "read", None));
+        assert!(policy_action_matches("S3:GETOBJECT", "read", None));
+        assert!(policy_action_matches("s3:GeT*", "read", None));
         assert!(wildcard_match("s3:GetObject", "S3:get*"));
+        assert!(policy_action_matches(
+            "S3:GETOBJECT",
+            "read",
+            Some("s3:GetObject")
+        ));
+        assert!(policy_action_matches(
+            "s3:GeT*",
+            "read",
+            Some("s3:GetObject")
+        ));
     }
 
     #[test]

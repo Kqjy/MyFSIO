@@ -481,15 +481,11 @@ pub async fn bucket_detail(
     let mut ctx = page_context(&state, &session, "ui.bucket_detail");
     ctx.insert("request_args", &request_args);
     let can_delete_bucket = match crate::handlers::ui::current_principal(&state, &session) {
-        Some(principal) => crate::middleware::ui_authorize(
-            &state,
-            &principal,
-            &bucket_name,
-            "delete_bucket",
-            None,
-        )
-        .await
-        .is_ok(),
+        Some(principal) => {
+            crate::middleware::ui_authorize(&state, &principal, &bucket_name, "delete_bucket", None)
+                .await
+                .is_ok()
+        }
         None => false,
     };
     ctx.insert("can_delete_bucket", &can_delete_bucket);

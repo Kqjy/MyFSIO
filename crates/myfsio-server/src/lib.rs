@@ -767,7 +767,7 @@ pub fn create_router(state: state::AppState) -> Router {
     let request_body_timeout =
         std::time::Duration::from_secs(state.config.request_body_timeout_secs);
 
-    api_router
+    let routed = api_router
         .merge(admin_router)
         .merge(admin_peer_router)
         .layer(axum::middleware::from_fn(middleware::server_header))
@@ -781,7 +781,14 @@ pub fn create_router(state: state::AppState) -> Router {
         .layer(tower_http::timeout::RequestBodyTimeoutLayer::new(
             request_body_timeout,
         ))
-        .with_state(state)
+        .with_state(state.clone());
+
+    Router::new()
+        .fallback_service(routed)
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            middleware::virtual_host_rewrite_layer,
+        ))
 }
 
 fn cors_layer(config: &config::ServerConfig) -> tower_http::cors::CorsLayer {

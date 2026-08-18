@@ -631,6 +631,8 @@ fn wait_after_listing_compaction_seal(control: &ListingCompactionTestControl, bu
 
 pub struct FsStorageBackend {
     root: PathBuf,
+    canonical_root: Option<PathBuf>,
+    case_insensitive_fs: bool,
     object_key_max_length_bytes: usize,
     object_cache_max_size: usize,
     stream_chunk_size: usize,
@@ -733,8 +735,10 @@ impl FsStorageBackend {
             .map(|_| RwLock::new(()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let backend = Self {
+        let mut backend = Self {
             root,
+            canonical_root: None,
+            case_insensitive_fs: false,
             object_key_max_length_bytes: config.object_key_max_length_bytes,
             object_cache_max_size: config.object_cache_max_size,
             stream_chunk_size,
@@ -767,7 +771,124 @@ impl FsStorageBackend {
             stats_full_walks: std::sync::atomic::AtomicUsize::new(0),
         };
         backend.ensure_system_roots();
+        backend.canonical_root = std::fs::canonicalize(&backend.root).ok();
+        backend.case_insensitive_fs = backend.probe_case_insensitive_fs();
         backend
+    }
+
+    fn probe_case_insensitive_fs(&self) -> bool {
+        let dir = self.tmp_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let name = format!(".case-probe-{}", Uuid::new_v4().simple());
+        let lower = dir.join(&name);
+        let upper = dir.join(name.to_ascii_uppercase());
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lower)
+            .is_err()
+        {
+            return true;
+        }
+        let insensitive = upper.exists();
+        let _ = std::fs::remove_file(&lower);
+        insensitive
+    }
+
+    fn verify_disk_casing(&self, expected: &Path) -> StorageResult<bool> {
+        if !self.case_insensitive_fs {
+            return Ok(true);
+        }
+        let mut probe = expected;
+        let existing = loop {
+            if !probe.starts_with(&self.root) {
+                return Ok(false);
+            }
+            if probe == self.root.as_path() {
+                return Ok(true);
+            }
+            match std::fs::symlink_metadata(probe) {
+                Ok(_) => break probe,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => match probe.parent() {
+                    Some(parent) => probe = parent,
+                    None => return Ok(true),
+                },
+                Err(err) => return Err(StorageError::Io(err)),
+            }
+        };
+        let canonical_root = match &self.canonical_root {
+            Some(path) => path.clone(),
+            None => std::fs::canonicalize(&self.root).map_err(StorageError::Io)?,
+        };
+        let canonical = std::fs::canonicalize(existing).map_err(StorageError::Io)?;
+        let expected_rel = match existing.strip_prefix(&self.root) {
+            Ok(rel) => rel,
+            Err(_) => return Ok(false),
+        };
+        let actual_rel = match canonical.strip_prefix(&canonical_root) {
+            Ok(rel) => rel,
+            Err(_) => return Ok(false),
+        };
+        let mut expected_parts = expected_rel.components();
+        let mut actual_parts = actual_rel.components();
+        loop {
+            match (expected_parts.next(), actual_parts.next()) {
+                (Some(e), Some(a)) => {
+                    if e.as_os_str() != a.as_os_str() {
+                        return Ok(false);
+                    }
+                }
+                (None, None) => return Ok(true),
+                _ => return Ok(false),
+            }
+        }
+    }
+
+    fn guard_object_casing(&self, bucket_name: &str, object_key: &str) -> StorageResult<()> {
+        if !self.case_insensitive_fs {
+            return Ok(());
+        }
+        let live_path = self.object_live_path(bucket_name, object_key);
+        let live_ok = self.verify_disk_casing(&live_path)?;
+        let metadata_ok = if std::fs::symlink_metadata(&live_path).is_ok() {
+            true
+        } else {
+            let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, object_key);
+            self.verify_disk_casing(&sidecar_path)?
+                && self.verify_disk_casing(&self.legacy_metadata_file(bucket_name, object_key))?
+        };
+        if live_ok && metadata_ok {
+            return Ok(());
+        }
+        Err(StorageError::ObjectNotFound {
+            bucket: bucket_name.to_string(),
+            key: object_key.to_string(),
+        })
+    }
+
+    fn guard_versioned_key_casing(&self, bucket_name: &str, object_key: &str) -> StorageResult<()> {
+        let live_ok = self.verify_disk_casing(&self.object_live_path(bucket_name, object_key))?;
+        let version_ok = self.verify_disk_casing(&self.version_dir(bucket_name, object_key))?;
+        if live_ok && version_ok {
+            Ok(())
+        } else {
+            Err(StorageError::ObjectNotFound {
+                bucket: bucket_name.to_string(),
+                key: object_key.to_string(),
+            })
+        }
+    }
+
+    fn purge_meta_read_cache_for_bucket(&self, bucket_name: &str) {
+        let mut cache = self.meta_read_cache.lock();
+        let stale: Vec<(String, String)> = cache
+            .iter()
+            .filter(|((bucket, _), _)| bucket == bucket_name)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            cache.pop(&key);
+        }
     }
 
     pub fn shutdown_listing_compactor(&self) {
@@ -1187,20 +1308,26 @@ impl FsStorageBackend {
     fn object_path(&self, bucket_name: &str, object_key: &str) -> StorageResult<PathBuf> {
         self.validate_key(object_key)?;
         let encoded = fs_encode_key(object_key);
-        if object_key.ends_with('/') {
+        let path = if object_key.ends_with('/') {
             let trimmed = encoded.trim_end_matches('/');
-            Ok(self
-                .bucket_path(bucket_name)
+            self.bucket_path(bucket_name)
                 .join(trimmed)
-                .join(DIR_MARKER_FILE))
+                .join(DIR_MARKER_FILE)
         } else {
             let direct = self.bucket_path(bucket_name).join(&encoded);
             if direct.is_dir() {
-                Ok(direct.join(KEY_DATA_MARKER_FILE))
+                direct.join(KEY_DATA_MARKER_FILE)
             } else {
-                Ok(direct)
+                direct
             }
+        };
+        if !self.verify_disk_casing(&path)? {
+            return Err(StorageError::ObjectNotFound {
+                bucket: bucket_name.to_string(),
+                key: object_key.to_string(),
+            });
         }
+        Ok(path)
     }
 
     fn object_live_path(&self, bucket_name: &str, object_key: &str) -> PathBuf {
@@ -2417,6 +2544,11 @@ impl FsStorageBackend {
     {
         self.require_bucket(bucket_name)?;
         self.validate_key(key)?;
+        if version_id.is_some() {
+            self.guard_versioned_key_casing(bucket_name, key)?;
+        } else {
+            self.guard_object_casing(bucket_name, key)?;
+        }
 
         let Some(version_id) = version_id else {
             let mut metadata = self.read_metadata_sync(bucket_name, key);
@@ -2487,6 +2619,7 @@ impl FsStorageBackend {
     pub async fn delete_object_metadata_entry(&self, bucket: &str, key: &str) -> StorageResult<()> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).write();
+            self.guard_object_casing(bucket, key)?;
             self.delete_metadata_sync(bucket, key)
                 .map_err(StorageError::Io)?;
             if self.listing_index_enabled {
@@ -3452,6 +3585,7 @@ impl FsStorageBackend {
     ) -> StorageResult<(Value, PathBuf)> {
         self.require_bucket(bucket_name)?;
         self.validate_key(key)?;
+        self.guard_versioned_key_casing(bucket_name, key)?;
         Self::validate_version_id(bucket_name, key, version_id)?;
 
         if let Some(record_and_path) =
@@ -5127,6 +5261,17 @@ impl FsStorageBackend {
             }
         };
 
+        if !rel_dir.as_os_str().is_empty()
+            && !self.verify_disk_casing(&self.bucket_path(bucket_name).join(&rel_dir))?
+        {
+            return Ok(ShallowListResult {
+                objects: Vec::new(),
+                common_prefixes: Vec::new(),
+                is_truncated: false,
+                next_continuation_token: None,
+            });
+        }
+
         let cached = self.get_shallow_sync(bucket_name, &rel_dir, &params.delimiter)?;
 
         let (file_start, file_end) = slice_range_for_prefix(&cached.files, |o| &o.key, prefix);
@@ -5215,6 +5360,13 @@ impl FsStorageBackend {
         let etag = options.etag_override.clone().unwrap_or(etag);
         self.require_bucket(bucket_name)?;
         let bucket_root = self.bucket_path(bucket_name);
+        if !self.verify_disk_casing(&self.object_live_path(bucket_name, key))? {
+            return Err(StorageError::InvalidObjectKey(format!(
+                "Object key '{}' collides with existing content whose path differs only by \
+                 letter case; the storage filesystem is case-insensitive and cannot hold both",
+                key
+            )));
+        }
         self.ensure_writable_parents_sync(&bucket_root, key)
             .map_err(StorageError::Io)?;
         let destination = self.object_live_path(bucket_name, key);
@@ -5616,6 +5768,22 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         if let Some(parent) = bucket_path.parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
+        let rebuild_lock = self.get_list_rebuild_lock(name);
+        let _rebuild_guard = rebuild_lock.lock();
+
+        if bucket_path.exists() {
+            return Err(StorageError::BucketAlreadyExists(name.to_string()));
+        }
+
+        self.discard_listing_index_locked_sync(name);
+        Self::remove_tree(&self.system_bucket_root(name)).map_err(StorageError::Io)?;
+        Self::remove_tree(&self.multipart_bucket_root(name)).map_err(StorageError::Io)?;
+        self.remove_legacy_bucket_policy_sync(name)
+            .map_err(StorageError::Io)?;
+        self.bucket_config_cache.remove(name);
+        self.invalidate_bucket_caches(name);
+        self.purge_meta_read_cache_for_bucket(name);
+
         match std::fs::create_dir(&bucket_path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -5623,7 +5791,10 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             Err(err) => return Err(StorageError::Io(err)),
         }
-        std::fs::create_dir_all(self.system_bucket_root(name)).map_err(StorageError::Io)?;
+        if let Err(err) = std::fs::create_dir_all(self.system_bucket_root(name)) {
+            let _ = std::fs::remove_dir(&bucket_path);
+            return Err(StorageError::Io(err));
+        }
         Ok(())
     }
 
@@ -5652,9 +5823,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         Self::remove_tree(&bucket_path).map_err(StorageError::Io)?;
         Self::remove_tree(&self.system_bucket_root(name)).map_err(StorageError::Io)?;
         Self::remove_tree(&self.multipart_bucket_root(name)).map_err(StorageError::Io)?;
+        self.remove_legacy_bucket_policy_sync(name)
+            .map_err(StorageError::Io)?;
 
         self.bucket_config_cache.remove(name);
         self.invalidate_bucket_caches(name);
+        self.purge_meta_read_cache_for_bucket(name);
 
         Ok(())
     }
@@ -5767,7 +5941,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let (obj, content) = self.open_object_for_read_locked_sync(bucket, key, window)?;
                 match content {
                     OpenedObjectContent::Single(_) => {
-                        let path = self.object_path(bucket, key)?;
+                        let path = self.object_live_path(bucket, key);
                         if let Some(parent) = link_owned.parent() {
                             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
                         }
@@ -5822,7 +5996,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let (_, content) = self.open_object_for_read_locked_sync(bucket, key, None)?;
             match content {
                 OpenedObjectContent::Single(_) => {
-                    let path = self.object_path(bucket, key)?;
+                    let path = self.object_live_path(bucket, key);
                     if std::fs::hard_link(&path, &dest_owned).is_err() {
                         std::fs::copy(&path, &dest_owned).map_err(StorageError::Io)?;
                     }
@@ -6055,6 +6229,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     ) -> StorageResult<Option<HashMap<String, String>>> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).read();
+            self.require_bucket(bucket)?;
+            self.validate_key(key)?;
+            self.guard_versioned_key_casing(bucket, key)?;
             let (manifest_path, _) = self.version_record_paths(bucket, key, "null");
             if !manifest_path.is_file() {
                 return Ok(None);
@@ -6207,6 +6384,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _guard = self.get_object_lock(bucket, key).write();
             let bucket_path = self.require_bucket(bucket)?;
             self.validate_key(key)?;
+            self.guard_versioned_key_casing(bucket, key)?;
             Self::validate_version_id(bucket, key, version_id)?;
 
             let live_path = self.object_live_path(bucket, key);
@@ -6430,10 +6608,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         key: &str,
     ) -> StorageResult<HashMap<String, String>> {
-        Ok(run_blocking(|| {
+        run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).read();
-            self.read_metadata_sync(bucket, key)
-        }))
+            self.guard_object_casing(bucket, key)?;
+            Ok(self.read_metadata_sync(bucket, key))
+        })
     }
 
     async fn put_object_metadata(
@@ -6444,6 +6623,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     ) -> StorageResult<()> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).write();
+            self.guard_object_casing(bucket, key)?;
             let mut entry = self.read_index_entry_sync(bucket, key).unwrap_or_default();
             let meta_map: serde_json::Map<String, Value> = metadata
                 .iter()
@@ -6469,6 +6649,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _guard = self.get_object_lock(bucket, key).write();
             self.require_bucket(bucket)?;
             self.validate_key(key)?;
+            self.guard_versioned_key_casing(bucket, key)?;
             Self::validate_version_id(bucket, key, version_id)?;
 
             if self
@@ -7285,6 +7466,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         key: &str,
     ) -> StorageResult<Vec<VersionInfo>> {
         self.require_bucket(bucket)?;
+        self.validate_key(key)?;
+        self.guard_versioned_key_casing(bucket, key)?;
         let version_dir = self.version_dir(bucket, key);
         if !version_dir.exists() {
             return Ok(Vec::new());
@@ -7465,6 +7648,200 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = FsStorageBackend::new(dir.path().to_path_buf());
         (dir, backend)
+    }
+
+    #[test]
+    fn disk_casing_verification_fails_closed_outside_root() {
+        let (dir, mut backend) = create_test_backend();
+        backend.case_insensitive_fs = true;
+        let outside = dir.path().parent().unwrap().join("outside-case-probe");
+        assert!(!backend.verify_disk_casing(&outside).unwrap());
+    }
+
+    #[tokio::test]
+    async fn case_aliased_keys_fail_closed_on_case_insensitive_fs() {
+        let (_dir, backend) = create_test_backend();
+        if !backend.case_insensitive_fs {
+            return;
+        }
+        backend.create_bucket("case-guard").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"victim data".to_vec()));
+        backend
+            .put_object("case-guard", "Docs/secret.txt", stream, None)
+            .await
+            .unwrap();
+
+        let err = backend
+            .get_object_metadata("case-guard", "docs/secret.txt")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::ObjectNotFound { .. }),
+            "aliased metadata read must be NotFound, got {err:?}"
+        );
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"attacker".to_vec()));
+        let err = backend
+            .put_object("case-guard", "docs/secret.txt", stream, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidObjectKey(_)),
+            "aliased overwrite must be rejected, got {err:?}"
+        );
+
+        let err = backend
+            .update_object_legal_hold("case-guard", "DOCS/secret.txt", None, true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::ObjectNotFound { .. }),
+            "aliased metadata mutation must be NotFound, got {err:?}"
+        );
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"sibling".to_vec()));
+        let err = backend
+            .put_object("case-guard", "Docs/SECRET.txt", stream, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidObjectKey(_)),
+            "sibling file differing only by case must be rejected, got {err:?}"
+        );
+
+        let meta = backend
+            .get_object_metadata("case-guard", "Docs/secret.txt")
+            .await
+            .unwrap();
+        assert!(
+            !meta.is_empty(),
+            "exact-cased object must remain readable and intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn case_aliased_version_ops_fail_closed() {
+        let (_dir, backend) = create_test_backend();
+        if !backend.case_insensitive_fs {
+            return;
+        }
+        backend.create_bucket("case-ver").await.unwrap();
+        backend
+            .set_versioning_status("case-ver", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "case-ver", "Vault/item", b"v1").await;
+        put_listing_object(&backend, "case-ver", "Vault/item", b"v2").await;
+
+        let versions = backend
+            .list_object_versions("case-ver", "Vault/item")
+            .await
+            .unwrap();
+        let list_err = backend
+            .list_object_versions("case-ver", "vault/item")
+            .await
+            .unwrap_err();
+        assert!(matches!(list_err, StorageError::ObjectNotFound { .. }));
+        let archived = versions
+            .iter()
+            .find(|v| !v.is_latest)
+            .expect("expected an archived version");
+        let vid = archived.version_id.clone();
+
+        let read_err = backend
+            .get_object_version_metadata("case-ver", "vault/item", &vid)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(read_err, StorageError::ObjectNotFound { .. }),
+            "aliased version metadata read must be NotFound, got {read_err:?}"
+        );
+
+        let del_err = backend
+            .delete_object_version_checked("case-ver", "VAULT/item", &vid, false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(del_err, StorageError::ObjectNotFound { .. }),
+            "aliased version delete must be NotFound, got {del_err:?}"
+        );
+
+        backend
+            .get_object_version_metadata("case-ver", "Vault/item", &vid)
+            .await
+            .expect("exact-cased version metadata must remain readable");
+
+        backend
+            .delete_object_checked("case-ver", "Vault/item", false)
+            .await
+            .unwrap();
+        let archived_only_err = backend
+            .get_object_version_metadata("case-ver", "vault/item", &vid)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(archived_only_err, StorageError::ObjectNotFound { .. }),
+            "aliased archived-only version read must be NotFound, got {archived_only_err:?}"
+        );
+        let mutation_err = backend
+            .put_object_version_metadata("case-ver", "vault/item", &vid, &HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(mutation_err, StorageError::ObjectNotFound { .. }));
+        backend
+            .get_object_version_metadata("case-ver", "Vault/item", &vid)
+            .await
+            .expect("exact-cased archived version must remain readable after live delete");
+    }
+
+    #[tokio::test]
+    async fn recreated_bucket_does_not_inherit_prior_state() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("reborn").await.unwrap();
+        backend
+            .set_versioning_status("reborn", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        std::fs::remove_dir_all(backend.bucket_path("reborn")).unwrap();
+        assert!(backend.system_bucket_root("reborn").exists());
+        let versions_dir = backend.system_bucket_root("reborn").join("versions");
+        std::fs::create_dir_all(&versions_dir).unwrap();
+        std::fs::write(versions_dir.join("stale.bin"), b"old tenant").unwrap();
+        std::fs::create_dir_all(backend.multipart_bucket_root("reborn")).unwrap();
+        let legacy_policy_path = backend.legacy_bucket_policies_path();
+        std::fs::create_dir_all(legacy_policy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_policy_path,
+            serde_json::json!({
+                "policies": {
+                    "reborn": {
+                        "Version": "2012-10-17",
+                        "Statement": []
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        backend.create_bucket("reborn").await.unwrap();
+
+        assert!(
+            !versions_dir.exists(),
+            "stale archived versions must be purged on bucket recreation"
+        );
+        assert!(!backend.multipart_bucket_root("reborn").exists());
+        let config = backend.get_bucket_config("reborn").await.unwrap();
+        assert_eq!(
+            config.versioning_status(),
+            VersioningStatus::Disabled,
+            "recreated bucket must not inherit the prior bucket's configuration"
+        );
+        assert!(config.policy.is_none());
+        let legacy_policy: Value =
+            serde_json::from_str(&std::fs::read_to_string(legacy_policy_path).unwrap()).unwrap();
+        assert!(legacy_policy["policies"].get("reborn").is_none());
     }
 
     fn create_listing_backend(

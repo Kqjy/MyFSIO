@@ -4950,6 +4950,156 @@ async fn test_virtual_host_bucket_routes_to_s3_object_handlers() {
 }
 
 #[tokio::test]
+async fn test_virtual_host_multi_segment_key_stays_in_host_bucket() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/vh-main", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/vh-victim", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/vh-victim/planted.txt")
+                .header("host", "vh-main.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("multi segment body"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let victim_list = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-victim?list-type=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(victim_list.status(), StatusCode::OK);
+    let victim_body = String::from_utf8(
+        victim_list
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !victim_body.contains("planted.txt"),
+        "virtual-host request must never write into the path-named bucket"
+    );
+
+    let host_get = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-main/vh-victim/planted.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        host_get.status(),
+        StatusCode::OK,
+        "the object must land under the Host-derived bucket with the full path as key"
+    );
+
+    let self_prefix_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/vh-main/nested.txt")
+                .header("host", "vh-main.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("self prefix body"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(self_prefix_put.status(), StatusCode::OK);
+
+    let self_prefix_get = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-main/vh-main/nested.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(self_prefix_get.status(), StatusCode::OK);
+    let self_prefix_body = self_prefix_get
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(&self_prefix_body[..], b"self prefix body");
+
+    let tag_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/vh-victim/planted.txt?tagging")
+                .header("host", "vh-main.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet></Tagging>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tag_put.status(),
+        StatusCode::OK,
+        "subresource queries must survive virtual-host dispatch"
+    );
+
+    let tag_get = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-main/vh-victim/planted.txt?tagging",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tag_get.status(), StatusCode::OK);
+    let tag_body = String::from_utf8(
+        tag_get
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        tag_body.contains("<Key>k</Key>"),
+        "tagging written via virtual host must be readable path-style"
+    );
+}
+
+#[tokio::test]
 async fn test_bucket_tagging() {
     let (app, _tmp) = test_app();
 
@@ -5588,6 +5738,369 @@ async fn test_public_bucket_policy_allows_anonymous_reads() {
     )
     .unwrap();
     assert!(list_body.contains("hello.txt"));
+}
+
+#[tokio::test]
+async fn test_narrow_policy_action_does_not_grant_whole_class() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/narrow-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_object = Request::builder()
+        .method(Method::PUT)
+        .uri("/narrow-bucket/data.txt")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from("tagged payload"))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_object).await.unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:GetObjectTagging",
+          "Resource": "arn:aws:s3:::narrow-bucket/*"
+        }
+      ]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/narrow-bucket?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let tagging_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/narrow-bucket/data.txt?tagging")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tagging_resp.status(),
+        StatusCode::OK,
+        "the exact granted action must be allowed"
+    );
+
+    let object_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/narrow-bucket/data.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        object_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tagging-only grant must not authorize GetObject"
+    );
+
+    let acl_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/narrow-bucket/data.txt?acl")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        acl_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tagging-only grant must not authorize other read-class subresources"
+    );
+}
+
+#[tokio::test]
+async fn test_multi_delete_authorizes_each_object_resource() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/multi-policy", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/multi-policy/delete-me.txt",
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Allow",
+        "Principal": "*",
+        "Action": "s3:DeleteObject",
+        "Resource": "arn:aws:s3:::multi-policy/*"
+      }]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/multi-policy?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let delete_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/multi-policy?delete")
+                .header("content-type", "application/xml")
+                .body(Body::from(
+                    "<Delete><Object><Key>delete-me.txt</Key></Object></Delete>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), StatusCode::OK);
+    let delete_body = String::from_utf8(
+        delete_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(delete_body.contains("<Key>delete-me.txt</Key>"));
+    assert!(!delete_body.contains("<Error>"));
+
+    let get_resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/multi-policy/delete-me.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_copy_source_header_does_not_bypass_subresource_auth() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/copy-auth", Body::empty()))
+        .await
+        .unwrap();
+    let seed = Request::builder()
+        .method(Method::PUT)
+        .uri("/copy-auth/src.txt")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from("source object"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(seed).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": ["s3:GetObject", "s3:PutObject"],
+          "Resource": "arn:aws:s3:::copy-auth/*"
+        }
+      ]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-auth?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let copy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-auth/dst.txt")
+                .header("x-amz-copy-source", "/copy-auth/src.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        copy_resp.status(),
+        StatusCode::OK,
+        "a plain CopyObject must still be authorized by the copy grant"
+    );
+
+    let retention_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-auth/src.txt?retention")
+                .header("x-amz-copy-source", "/copy-auth/src.txt")
+                .header("content-type", "application/xml")
+                .body(Body::from(
+                    "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retention_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a copy grant plus a bogus copy-source header must not authorize PutObjectRetention"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_part_copy_authorizes_source_read() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/upc-src", Body::empty()))
+        .await
+        .unwrap();
+    let seed = Request::builder()
+        .method(Method::PUT)
+        .uri("/upc-src/private.bin")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from("private source data"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(seed).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/upc-dst", Body::empty()))
+        .await
+        .unwrap();
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:PutObject",
+          "Resource": "arn:aws:s3:::upc-dst/*"
+        }
+      ]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/upc-dst?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let init = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/upc-dst/target.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(init.status(), StatusCode::OK);
+    let init_body = String::from_utf8(
+        init.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = init_body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap();
+
+    let upc = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/upc-dst/target.bin?uploadId={}&partNumber=1",
+                    upload_id
+                ))
+                .header("x-amz-copy-source", "/upc-src/private.bin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        upc.status(),
+        StatusCode::FORBIDDEN,
+        "UploadPartCopy must authorize a read of the copy source"
+    );
 }
 
 #[tokio::test]

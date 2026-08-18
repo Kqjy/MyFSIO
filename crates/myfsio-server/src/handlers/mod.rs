@@ -395,22 +395,10 @@ async fn ensure_object_version_lock_allows_delete(
 
 pub async fn list_buckets(
     State(state): State<AppState>,
-    Query(query): Query<BucketQuery>,
-    headers: HeaderMap,
+    Query(_query): Query<BucketQuery>,
+    _headers: HeaderMap,
     request: axum::extract::Request,
 ) -> Response {
-    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
-        let raw_query = axum::extract::RawQuery(request.uri().query().map(str::to_string));
-        return get_bucket(
-            State(state),
-            Path(host_bucket),
-            Query(query),
-            raw_query,
-            headers,
-        )
-        .await;
-    }
-
     let (owner_id, owner_display) = caller_owner(&state, &request);
 
     match state.storage.list_buckets().await {
@@ -454,29 +442,12 @@ pub async fn create_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     raw_query: axum::extract::RawQuery,
-    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
-    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
-    streaming_sigv4: Option<axum::extract::Extension<crate::middleware::StreamingSigV4Context>>,
+    _peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    _principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
+    _streaming_sigv4: Option<axum::extract::Extension<crate::middleware::StreamingSigV4Context>>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
-        if host_bucket != bucket {
-            return put_object(
-                State(state),
-                Path((host_bucket, bucket)),
-                Query(ObjectQuery::default()),
-                axum::extract::RawQuery(None),
-                peer,
-                principal,
-                streaming_sigv4,
-                headers,
-                body,
-            )
-            .await;
-        }
-    }
-
     if let Some(unsupported) = unsupported_bucket_subresource(raw_query.0.as_deref()) {
         return s3_error_response(S3Error::new(
             S3ErrorCode::NotImplemented,
@@ -745,6 +716,128 @@ impl BucketSubresource {
             Self::Website => "website",
         }
     }
+
+    pub fn s3_action(self, method: &Method) -> &'static str {
+        let read = matches!(*method, Method::GET | Method::HEAD);
+        match self {
+            Self::Acl => {
+                if read {
+                    "s3:GetBucketAcl"
+                } else {
+                    "s3:PutBucketAcl"
+                }
+            }
+            Self::Cors => {
+                if read {
+                    "s3:GetBucketCORS"
+                } else {
+                    "s3:PutBucketCORS"
+                }
+            }
+            Self::Delete => "s3:DeleteObject",
+            Self::Encryption => {
+                if read {
+                    "s3:GetEncryptionConfiguration"
+                } else {
+                    "s3:PutEncryptionConfiguration"
+                }
+            }
+            Self::Lifecycle => {
+                if read {
+                    "s3:GetLifecycleConfiguration"
+                } else {
+                    "s3:PutLifecycleConfiguration"
+                }
+            }
+            Self::Location => "s3:GetBucketLocation",
+            Self::Logging => {
+                if read {
+                    "s3:GetBucketLogging"
+                } else {
+                    "s3:PutBucketLogging"
+                }
+            }
+            Self::Notification => {
+                if read {
+                    "s3:GetBucketNotification"
+                } else {
+                    "s3:PutBucketNotification"
+                }
+            }
+            Self::ObjectLock => {
+                if read {
+                    "s3:GetBucketObjectLockConfiguration"
+                } else {
+                    "s3:PutBucketObjectLockConfiguration"
+                }
+            }
+            Self::OwnershipControls => {
+                if read {
+                    "s3:GetBucketOwnershipControls"
+                } else {
+                    "s3:PutBucketOwnershipControls"
+                }
+            }
+            Self::Policy => match *method {
+                Method::PUT | Method::POST => "s3:PutBucketPolicy",
+                Method::DELETE => "s3:DeleteBucketPolicy",
+                _ => "s3:GetBucketPolicy",
+            },
+            Self::PolicyStatus => "s3:GetBucketPolicyStatus",
+            Self::PublicAccessBlock => {
+                if read {
+                    "s3:GetBucketPublicAccessBlock"
+                } else {
+                    "s3:PutBucketPublicAccessBlock"
+                }
+            }
+            Self::Quota => {
+                if read {
+                    "s3:GetBucketQuota"
+                } else {
+                    "s3:PutBucketQuota"
+                }
+            }
+            Self::Replication => {
+                if read {
+                    "s3:GetReplicationConfiguration"
+                } else {
+                    "s3:PutReplicationConfiguration"
+                }
+            }
+            Self::Tagging => {
+                if read {
+                    "s3:GetBucketTagging"
+                } else {
+                    "s3:PutBucketTagging"
+                }
+            }
+            Self::Uploads => "s3:ListBucketMultipartUploads",
+            Self::Versioning => {
+                if read {
+                    "s3:GetBucketVersioning"
+                } else {
+                    "s3:PutBucketVersioning"
+                }
+            }
+            Self::Versions => "s3:ListBucketVersions",
+            Self::Website => match *method {
+                Method::PUT | Method::POST => "s3:PutBucketWebsite",
+                Method::DELETE => "s3:DeleteBucketWebsite",
+                _ => "s3:GetBucketWebsite",
+            },
+        }
+    }
+}
+
+pub fn bucket_method_default_s3_action(method: &Method) -> &'static str {
+    match *method {
+        Method::GET | Method::HEAD => "s3:ListBucket",
+        Method::PUT => "s3:CreateBucket",
+        Method::DELETE => "s3:DeleteBucket",
+        Method::POST => "s3:PutObject",
+        _ => "s3:ListBucket",
+    }
 }
 
 fn decode_query_key(raw: &str) -> String {
@@ -841,6 +934,15 @@ pub fn object_method_default_action(method: &Method) -> &'static str {
     }
 }
 
+pub fn object_method_default_s3_action(method: &Method) -> &'static str {
+    match *method {
+        Method::GET | Method::HEAD => "s3:GetObject",
+        Method::PUT | Method::POST => "s3:PutObject",
+        Method::DELETE => "s3:DeleteObject",
+        _ => "s3:GetObject",
+    }
+}
+
 impl ObjectSubresource {
     pub fn selector(self) -> &'static str {
         match self {
@@ -884,6 +986,49 @@ impl ObjectSubresource {
                     "write"
                 }
             }
+        }
+    }
+
+    pub fn s3_action(self, method: &Method) -> &'static str {
+        if !self.is_dispatched_for(method) {
+            return object_method_default_s3_action(method);
+        }
+        let read = matches!(*method, Method::GET | Method::HEAD);
+        match self {
+            Self::Acl => {
+                if read {
+                    "s3:GetObjectAcl"
+                } else {
+                    "s3:PutObjectAcl"
+                }
+            }
+            Self::Attributes => "s3:GetObjectAttributes",
+            Self::LegalHold => {
+                if read {
+                    "s3:GetObjectLegalHold"
+                } else {
+                    "s3:PutObjectLegalHold"
+                }
+            }
+            Self::Retention => {
+                if read {
+                    "s3:GetObjectRetention"
+                } else {
+                    "s3:PutObjectRetention"
+                }
+            }
+            Self::Select => "s3:GetObject",
+            Self::Tagging => match *method {
+                Method::DELETE => "s3:DeleteObjectTagging",
+                Method::PUT | Method::POST => "s3:PutObjectTagging",
+                _ => "s3:GetObjectTagging",
+            },
+            Self::UploadId => match *method {
+                Method::GET => "s3:ListMultipartUploadParts",
+                Method::DELETE => "s3:AbortMultipartUpload",
+                _ => "s3:PutObject",
+            },
+            Self::Uploads => "s3:PutObject",
         }
     }
 }
@@ -975,45 +1120,16 @@ fn unsupported_bucket_subresource(query: Option<&str>) -> Option<String> {
     None
 }
 
-async fn virtual_host_bucket_from_headers(state: &AppState, headers: &HeaderMap) -> Option<String> {
-    let host = headers
-        .get("host")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(':').next())?
-        .trim()
-        .to_ascii_lowercase();
-    let (candidate, _) = host.split_once('.')?;
-    if myfsio_storage::validation::validate_bucket_name(candidate).is_some() {
-        return None;
-    }
-    match state.storage.bucket_exists(candidate).await {
-        Ok(true) => Some(candidate.to_string()),
-        _ => None,
-    }
-}
-
 pub async fn get_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     Query(query): Query<BucketQuery>,
     raw_query: axum::extract::RawQuery,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Response {
     let (owner_id, owner_display) = canonical_default_owner(&state);
     let owner_id_ref = owner_id.as_str();
     let owner_display_ref = owner_display.as_str();
-    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
-        if host_bucket != bucket {
-            return get_object(
-                State(state),
-                Path((host_bucket, bucket)),
-                Query(ObjectQuery::default()),
-                axum::extract::RawQuery(None),
-                headers,
-            )
-            .await;
-        }
-    }
 
     if let Some(unsupported) = unsupported_bucket_subresource(raw_query.0.as_deref()) {
         return s3_error_response(S3Error::new(
@@ -1495,21 +1611,6 @@ pub async fn post_bucket(
 ) -> Response {
     let peer_marker = peer.as_ref().map(|e| &e.0);
     let principal_ref = principal.as_ref().map(|e| &e.0);
-    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
-        if host_bucket != bucket {
-            return post_object(
-                State(state),
-                Path((host_bucket, bucket)),
-                Query(ObjectQuery::default()),
-                axum::extract::RawQuery(None),
-                peer,
-                principal,
-                headers,
-                body,
-            )
-            .await;
-        }
-    }
 
     let subresource = match parse_bucket_subresource(raw_query.0.as_deref()) {
         Ok(value) => value,
@@ -1555,25 +1656,10 @@ pub async fn delete_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
     raw_query: axum::extract::RawQuery,
-    peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
-    principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
-    headers: HeaderMap,
+    _peer: Option<axum::extract::Extension<crate::middleware::ReplicationPeerRequest>>,
+    _principal: Option<axum::extract::Extension<myfsio_common::types::Principal>>,
+    _headers: HeaderMap,
 ) -> Response {
-    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
-        if host_bucket != bucket {
-            return delete_object(
-                State(state),
-                Path((host_bucket, bucket)),
-                Query(ObjectQuery::default()),
-                axum::extract::RawQuery(None),
-                peer,
-                principal,
-                headers,
-            )
-            .await;
-        }
-    }
-
     if let Some(unsupported) = unsupported_bucket_subresource(raw_query.0.as_deref()) {
         return s3_error_response(S3Error::new(
             S3ErrorCode::NotImplemented,
@@ -1629,20 +1715,8 @@ pub async fn delete_bucket(
 pub async fn head_bucket(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
 ) -> Response {
-    if let Some(host_bucket) = virtual_host_bucket_from_headers(&state, &headers).await {
-        if host_bucket != bucket {
-            return head_object(
-                State(state),
-                Path((host_bucket, bucket)),
-                Query(ObjectQuery::default()),
-                headers,
-            )
-            .await;
-        }
-    }
-
     match state.storage.bucket_exists(&bucket).await {
         Ok(true) => {
             let mut headers = HeaderMap::new();
@@ -5445,6 +5519,7 @@ async fn delete_objects_handler(
                     principal.as_ref(),
                     &bucket,
                     "delete",
+                    Some("s3:DeleteObject"),
                     Some(&obj.key),
                     Some(true),
                 )
@@ -6220,6 +6295,7 @@ pub(crate) async fn governance_bypass_authorized(
         Some(principal),
         bucket,
         "bypass_governance",
+        Some("s3:BypassGovernanceRetention"),
         key,
         None,
     )
