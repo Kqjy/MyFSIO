@@ -72,11 +72,72 @@ pub fn arm_from_spec(spec: &str) {
         let Some((name, action)) = entry.split_once('=') else {
             continue;
         };
-        let action = match action.trim() {
-            "abort" => FailAction::Abort,
-            "panic" => FailAction::Panic,
-            _ => FailAction::Error(std::io::ErrorKind::Other),
-        };
+        let action = parse_action(action.trim());
         set_global(name.trim(), action);
+    }
+}
+
+fn parse_action(action: &str) -> FailAction {
+    match action {
+        "abort" => FailAction::Abort,
+        "panic" => FailAction::Panic,
+        "error:storage_full" => FailAction::Error(std::io::ErrorKind::StorageFull),
+        "error:not_found" => FailAction::Error(std::io::ErrorKind::NotFound),
+        "error:permission_denied" => FailAction::Error(std::io::ErrorKind::PermissionDenied),
+        "error:already_exists" => FailAction::Error(std::io::ErrorKind::AlreadyExists),
+        "error:invalid_input" => FailAction::Error(std::io::ErrorKind::InvalidInput),
+        "error:invalid_data" => FailAction::Error(std::io::ErrorKind::InvalidData),
+        "error:timed_out" => FailAction::Error(std::io::ErrorKind::TimedOut),
+        "error:write_zero" => FailAction::Error(std::io::ErrorKind::WriteZero),
+        "error:interrupted" => FailAction::Error(std::io::ErrorKind::Interrupted),
+        "error:unexpected_eof" => FailAction::Error(std::io::ErrorKind::UnexpectedEof),
+        "error:out_of_memory" => FailAction::Error(std::io::ErrorKind::OutOfMemory),
+        "error:other" | "error" => FailAction::Error(std::io::ErrorKind::Other),
+        _ => FailAction::Error(std::io::ErrorKind::Other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_storage_full_and_legacy_actions() {
+        assert_eq!(
+            parse_action("error:storage_full"),
+            FailAction::Error(std::io::ErrorKind::StorageFull)
+        );
+        assert_eq!(
+            parse_action("error"),
+            FailAction::Error(std::io::ErrorKind::Other)
+        );
+        assert_eq!(parse_action("panic"), FailAction::Panic);
+        assert_eq!(parse_action("abort"), FailAction::Abort);
+        assert_eq!(
+            parse_action("legacy-bare-error"),
+            FailAction::Error(std::io::ErrorKind::Other)
+        );
+    }
+
+    #[test]
+    fn parses_existing_io_error_kinds() {
+        for (action, expected) in [
+            ("error:not_found", std::io::ErrorKind::NotFound),
+            (
+                "error:permission_denied",
+                std::io::ErrorKind::PermissionDenied,
+            ),
+            ("error:already_exists", std::io::ErrorKind::AlreadyExists),
+            ("error:invalid_input", std::io::ErrorKind::InvalidInput),
+            ("error:invalid_data", std::io::ErrorKind::InvalidData),
+            ("error:timed_out", std::io::ErrorKind::TimedOut),
+            ("error:write_zero", std::io::ErrorKind::WriteZero),
+            ("error:interrupted", std::io::ErrorKind::Interrupted),
+            ("error:unexpected_eof", std::io::ErrorKind::UnexpectedEof),
+            ("error:out_of_memory", std::io::ErrorKind::OutOfMemory),
+            ("error:other", std::io::ErrorKind::Other),
+        ] {
+            assert_eq!(parse_action(action), FailAction::Error(expected));
+        }
     }
 }

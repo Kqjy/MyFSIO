@@ -7456,6 +7456,7 @@ async fn test_app_encrypted_small_parts() -> (axum::Router, tempfile::TempDir) {
         storage_root: tmp.path().to_path_buf(),
         iam_config_path: iam_path.join("iam.json"),
         encryption_enabled: true,
+        kms_enabled: true,
         ui_enabled: false,
         multipart_min_part_size: 1,
         multipart_object_layout: "segments".to_string(),
@@ -7487,6 +7488,7 @@ async fn test_sse_multipart_never_uses_segments_layout() {
                 .header("x-access-key", TEST_ACCESS_KEY)
                 .header("x-secret-key", TEST_SECRET_KEY)
                 .header("x-amz-server-side-encryption", "AES256")
+                .header("x-amz-tagging", "team=storage")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7559,6 +7561,14 @@ async fn test_sse_multipart_never_uses_segments_layout() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption")
+            .and_then(|value| value.to_str().ok()),
+        Some("AES256")
+    );
+    let complete_body = String::from_utf8(body_bytes(resp).await.to_vec()).unwrap();
+    assert!(complete_body.contains("-2"), "{complete_body}");
 
     let meta_dir = tmp
         .path()
@@ -7566,24 +7576,48 @@ async fn test_sse_multipart_never_uses_segments_layout() {
         .join("buckets")
         .join("enc-mpu")
         .join("meta");
-    let mut sidecar_text = String::new();
+    let mut committed_metadata = None;
     for entry in std::fs::read_dir(&meta_dir).unwrap().flatten() {
         if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
-            sidecar_text.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+            let sidecar: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+            if sidecar
+                .get("metadata")
+                .and_then(|value| value.get("x-amz-encryption-nonce"))
+                .is_some()
+            {
+                committed_metadata = sidecar.get("metadata").cloned();
+            }
         }
     }
+    let committed_metadata = committed_metadata.expect("encrypted object sidecar");
+    assert!(committed_metadata
+        .get("x-amz-encrypted-data-key")
+        .and_then(serde_json::Value::as_str)
+        .is_some());
     assert!(
-        sidecar_text.contains("encryption") || sidecar_text.contains("__enc"),
-        "object should carry encryption metadata: {}",
-        sidecar_text
+        committed_metadata.get("__segments__").is_none(),
+        "an encrypted multipart object must never use the segments layout"
     );
-    assert!(
-        !sidecar_text.contains("__segments__"),
-        "an encrypted multipart object must never use the segments layout, because \
-         the encrypted read paths (ui_api zip download, complete_multipart SSE) resolve \
-         the object by its direct file path: {}",
-        sidecar_text
+    assert!(committed_metadata
+        .get("__pending_sse_algorithm__")
+        .is_none());
+    assert!(committed_metadata
+        .get("__pending_sse_kms_key_id__")
+        .is_none());
+    assert!(committed_metadata.get("__pending_tagging__").is_none());
+    let raw = std::fs::read(tmp.path().join("enc-mpu").join("big.bin")).unwrap();
+    assert_ne!(raw, format!("{}{}", part_a, part_b).as_bytes());
+    assert_eq!(
+        committed_metadata
+            .get("__size__")
+            .and_then(|value| value.as_str()),
+        Some(raw.len().to_string().as_str())
     );
+    assert!(committed_metadata
+        .get("__etag__")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|etag| etag.ends_with("-2")));
 
     let resp = app
         .clone()
@@ -7601,6 +7635,19 @@ async fn test_sse_multipart_never_uses_segments_layout() {
         String::from_utf8(body.to_vec()).unwrap(),
         format!("{}{}", part_a, part_b)
     );
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/enc-mpu/big.bin?tagging",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await.to_vec()).unwrap();
+    assert!(body.contains("<Key>team</Key>"));
+    assert!(body.contains("<Value>storage</Value>"));
 
     let plain_upload_id = {
         let resp = app
@@ -7691,6 +7738,142 @@ async fn test_sse_multipart_never_uses_segments_layout() {
         "control: an unencrypted multipart object of this size must use the segments \
          layout, otherwise the assertion above is vacuous: {}",
         plain_sidecar
+    );
+}
+
+#[tokio::test]
+async fn test_sse_kms_multipart_commits_ciphertext_and_final_metadata_once() {
+    let (app, tmp) = test_app_encrypted_small_parts().await;
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/kms-mpu", Body::empty()))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/myfsio/kms/keys",
+            Body::from(r#"{"Description":"multipart"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let key_response: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let key_id = key_response.get("KeyId").unwrap().as_str().unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/kms-mpu/object.bin?uploads")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-server-side-encryption", "aws:kms")
+                .header("x-amz-server-side-encryption-aws-kms-key-id", key_id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload_body = body_bytes(resp).await;
+    let upload_id = extract_upload_id(std::str::from_utf8(&upload_body).unwrap());
+    let first = b"kms-first".to_vec();
+    let second = b"kms-second".to_vec();
+    let mut etags = Vec::new();
+    for (part_number, body) in [(1, first.clone()), (2, second.clone())] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/kms-mpu/object.bin?partNumber={part_number}&uploadId={upload_id}"),
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        etags.push(etag_from_response(&resp));
+    }
+    let completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+        etags[0], etags[1]
+    );
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            &format!("/kms-mpu/object.bin?uploadId={upload_id}"),
+            Body::from(completion),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption")
+            .and_then(|value| value.to_str().ok()),
+        Some("aws:kms")
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption-aws-kms-key-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(key_id)
+    );
+
+    let mut plaintext = first;
+    plaintext.extend_from_slice(&second);
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/kms-mpu/object.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_bytes(resp).await, plaintext);
+    let raw = std::fs::read(tmp.path().join("kms-mpu").join("object.bin")).unwrap();
+    assert_ne!(raw, plaintext);
+    let mut final_metadata = None;
+    let meta_dir = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("kms-mpu")
+        .join("meta");
+    for entry in std::fs::read_dir(meta_dir).unwrap().flatten() {
+        let sidecar: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+        if sidecar
+            .get("metadata")
+            .and_then(|metadata| metadata.get("x-amz-encryption-key-id"))
+            .is_some()
+        {
+            final_metadata = sidecar.get("metadata").cloned();
+        }
+    }
+    let final_metadata = final_metadata.unwrap();
+    assert_eq!(
+        final_metadata
+            .get("x-amz-encryption-key-id")
+            .and_then(serde_json::Value::as_str),
+        Some(key_id)
+    );
+    assert!(final_metadata.get("__pending_sse_algorithm__").is_none());
+    assert!(final_metadata.get("__pending_sse_kms_key_id__").is_none());
+    assert!(final_metadata.get("__segments__").is_none());
+    assert!(final_metadata
+        .get("__etag__")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|etag| etag.ends_with("-2")));
+    assert_eq!(
+        final_metadata
+            .get("__size__")
+            .and_then(serde_json::Value::as_str),
+        Some(raw.len().to_string().as_str())
     );
 }
 

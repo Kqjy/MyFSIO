@@ -618,6 +618,35 @@ impl IntegrityService {
             }
         })
     }
+
+    pub(crate) async fn handle_read_corruption(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected_etag: &str,
+        actual_etag: &str,
+    ) {
+        let detail = format!(
+            "stored_etag={} actual_etag={} detected_on_read=true",
+            expected_etag, actual_etag
+        );
+        let status = heal_corrupted(
+            &self.storage,
+            self.peer_fetcher.as_deref(),
+            bucket,
+            key,
+            &detail,
+        )
+        .await;
+        tracing::error!(
+            bucket,
+            key,
+            expected_etag,
+            actual_etag,
+            status = ?status,
+            "Verify-on-read corruption handling completed"
+        );
+    }
 }
 
 #[derive(Debug)]

@@ -37,6 +37,7 @@ pub struct AppState {
     pub kms: Option<Arc<KmsService>>,
     pub gc: Option<Arc<GcService>>,
     pub integrity: Option<Arc<IntegrityService>>,
+    pub read_integrity: Option<Arc<IntegrityService>>,
     pub metrics: Option<Arc<MetricsService>>,
     pub system_metrics: Option<Arc<SystemMetricsService>>,
     pub site_registry: Option<Arc<SiteRegistry>>,
@@ -285,7 +286,9 @@ impl AppState {
             )))
         };
 
-        let integrity = if config.integrity_enabled {
+        let integrity_service = if config.integrity_enabled
+            || config.read_verify_mode == crate::config::ReadVerifyMode::Abort
+        {
             Some(Arc::new(IntegrityService::new(
                 storage.clone(),
                 &config.storage_root,
@@ -304,6 +307,13 @@ impl AppState {
         } else {
             None
         };
+        let integrity = config
+            .integrity_enabled
+            .then(|| integrity_service.clone())
+            .flatten();
+        let read_integrity = (config.read_verify_mode == crate::config::ReadVerifyMode::Abort)
+            .then(|| integrity_service.clone())
+            .flatten();
 
         let templates = init_templates(&config.templates_dir, &config.display_timezone);
         let access_logging = Arc::new(AccessLoggingService::new(&config.storage_root));
@@ -334,6 +344,7 @@ impl AppState {
             kms: None,
             gc,
             integrity,
+            read_integrity,
             metrics,
             system_metrics,
             site_registry,

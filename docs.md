@@ -145,6 +145,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `DISPLAY_TIMEZONE` | `UTC` | Timezone used by UI date formatting |
 | `REQUEST_BODY_TIMEOUT_SECONDS` | `300` | Idle timeout between request-body reads; stalled uploads receive `400 RequestTimeout` |
 | `UPLOAD_STREAM_BUFFER_BYTES` | `8388608` | In-memory buffer between client stream and disk writer for uploads (8 MiB); `0` disables |
+| `READ_VERIFY_MODE` | `off` | `off` serves unencrypted reads without verification; `abort` verifies eligible full-object reads while streaming and aborts/quarantines on mismatch |
 | `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum part size enforced where applicable (5 MiB) |
 | `MULTIPART_OBJECT_LAYOUT` | `segments` | How completed multipart objects are stored: `segments` keeps part files and completes in O(metadata) (recommended, especially on HDD/ext4); `concat` assembles one file like older releases. Affects new completes only; both layouts stay readable. Note: binaries older than this feature cannot read `segments` objects |
 | `METADATA_LAYOUT` | `sidecar` | How object metadata is written: `sidecar` writes one `.__myfsio_meta__<name>.json` file per object (O(1) metadata updates, no shared rewrite); `index` keeps appending to the legacy per-directory `_index.json` (every update rewrites the whole directory index). Affects writes only; both layouts stay readable forever, and sidecars always take precedence over index entries. Note: binaries older than this feature cannot read sidecar metadata |
@@ -158,6 +159,8 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `OBJECT_TAG_LIMIT` | `50` | Maximum tags per object |
 
 The web UI uses 1024-byte binary units consistently and labels them `KiB`, `MiB`, `GiB`, `TiB`, and `PiB`. Presigned-link custom expiry values must be whole seconds; empty or non-numeric values are rejected, and any server-side bound adjustment is shown in the dialog.
+
+`READ_VERIFY_MODE=abort` hashes current, full-object, unencrypted GETs while their bodies stream when the stored ETag is a 32-hex MD5 for the stored bytes. A final mismatch aborts the response before its declared `Content-Length` is satisfied, logs an error, and sends the object through the integrity scanner's quarantine and peer-recovery path. Range and `partNumber` reads, archived `versionId` reads, multipart/composite ETags in both concat and segments layouts, segmented objects, and objects with missing or non-MD5 ETags remain unverified. The derived `integrity_verified.json` index cannot extend coverage because it stores file identity and the existing ETag, not a reusable whole-object digest. SSE-S3, SSE-KMS, and SSE-C reads retain their existing per-chunk AES-GCM authentication and do not use this verifier. The default is `off`, which performs no hashing or verifier allocation; HDD-backed deployments should leave it off unless the per-GET MD5 cost is acceptable.
 
 ### Credential and secret files
 

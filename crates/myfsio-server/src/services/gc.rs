@@ -867,8 +867,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tmp_dir = tmp.path().join(".myfsio.sys").join("tmp");
         std::fs::create_dir_all(&tmp_dir).unwrap();
-        let stale_tmp = tmp_dir.join("stale.tmp");
-        std::fs::write(&stale_tmp, b"temporary").unwrap();
+        let stale_temps = [
+            tmp_dir.join("put-leaked.tmp"),
+            tmp_dir.join("mpu-plain-leaked"),
+            tmp_dir.join("mpu-block-leaked"),
+        ];
+        for stale_tmp in &stale_temps {
+            std::fs::write(stale_tmp, b"temporary").unwrap();
+        }
         let intent = tmp_dir.join("retained.sidecar-stage");
         std::fs::write(&intent, b"{}").unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -884,8 +890,8 @@ mod tests {
 
         let result = service.run_now(false).await.unwrap();
 
-        assert_eq!(result["temp_files_deleted"], 1);
-        assert!(!stale_tmp.exists());
+        assert_eq!(result["temp_files_deleted"], 3);
+        assert!(stale_temps.iter().all(|path| !path.exists()));
         assert!(
             intent.exists(),
             "commit intents are recovery records owned by startup reconciliation, never GC"

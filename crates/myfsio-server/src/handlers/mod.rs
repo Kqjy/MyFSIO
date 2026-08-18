@@ -2783,6 +2783,7 @@ pub async fn put_object(
         etag_override: None,
         conditions: put_conditions_from_headers(&headers),
         bypass_governance,
+        tags: None,
     };
 
     if let Some(enc_ctx) = resolved_enc_ctx {
@@ -3056,10 +3057,16 @@ pub async fn get_object(
         return resp;
     }
 
-    let served = match object_read::serve_object_data(&state, snapshot, None, &headers).await {
-        Ok(served) => served,
-        Err(err) => return object_read_error_response(err),
-    };
+    let verification_target = version_id
+        .is_none()
+        .then_some((bucket.as_str(), key.as_str()));
+    let served =
+        match object_read::serve_object_data(&state, snapshot, None, &headers, verification_target)
+            .await
+        {
+            Ok(served) => served,
+            Err(err) => return object_read_error_response(err),
+        };
     let enc_header = served.encryption_algorithm.as_deref();
     let body = served.body;
 
@@ -3783,18 +3790,12 @@ async fn initiate_multipart_handler(
     }
 }
 
-async fn read_pending_multipart_sse(
-    state: &AppState,
-    bucket: &str,
-    key: &str,
-) -> Option<(
-    myfsio_crypto::encryption::EncryptionContext,
-    HashMap<String, String>,
-)> {
-    let stored = state.storage.get_object_metadata(bucket, key).await.ok()?;
-    let alg = stored.get(MULTIPART_PENDING_SSE_ALG)?.clone();
-    let kms_key_id = stored.get(MULTIPART_PENDING_SSE_KMS_KEY).cloned();
-    let customer_key = stored.get(MULTIPART_PENDING_SSE_C_KEY).and_then(|s| {
+fn pending_multipart_sse_context(
+    metadata: &HashMap<String, String>,
+) -> Option<myfsio_crypto::encryption::EncryptionContext> {
+    let alg = metadata.get(MULTIPART_PENDING_SSE_ALG)?.clone();
+    let kms_key_id = metadata.get(MULTIPART_PENDING_SSE_KMS_KEY).cloned();
+    let customer_key = metadata.get(MULTIPART_PENDING_SSE_C_KEY).and_then(|s| {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine;
         B64.decode(s).ok()
@@ -3807,14 +3808,11 @@ async fn read_pending_multipart_sse(
         "aws:kms" => myfsio_crypto::encryption::SseAlgorithm::AwsKms,
         _ => return None,
     };
-    Some((
-        myfsio_crypto::encryption::EncryptionContext {
-            algorithm,
-            kms_key_id,
-            customer_key,
-        },
-        stored,
-    ))
+    Some(myfsio_crypto::encryption::EncryptionContext {
+        algorithm,
+        kms_key_id,
+        customer_key,
+    })
 }
 
 fn apply_pending_mpu_sse_headers(headers: &mut HeaderMap, pending: &HashMap<String, String>) {
@@ -4330,6 +4328,120 @@ fn mpu_failpoint(
     Ok(())
 }
 
+async fn complete_pending_sse_multipart(
+    state: &AppState,
+    bucket: &str,
+    upload_id: &str,
+    parts: &[PartInfo],
+    enc_ctx: &myfsio_crypto::encryption::EncryptionContext,
+    mut options: myfsio_storage::traits::PutCommitOptions,
+) -> Result<(myfsio_common::types::ObjectMeta, u64), Response> {
+    let Some(enc_svc) = state.encryption.as_ref() else {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Encryption requested for multipart upload but encryption service is disabled",
+        )));
+    };
+    let prepared = state
+        .storage
+        .prepare_multipart_for_transform(bucket, upload_id, parts)
+        .await
+        .map_err(storage_err_response)?;
+    let plaintext_size = prepared.plaintext_size;
+    if let Err(error) = mpu_failpoint(state, "mpu:before-encryption") {
+        let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+        return Err(storage_err_response(error));
+    }
+    let ciphertext_path = match state.storage.allocate_prepared_tmp_path() {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+            return Err(storage_err_response(error));
+        }
+    };
+    if let Err(error) = tokio::fs::File::create(&ciphertext_path).await {
+        let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+        return Err(storage_err_response(
+            myfsio_storage::error::StorageError::Io(error),
+        ));
+    }
+    if let Err(error) = mpu_failpoint(state, "mpu:during-encryption") {
+        let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+        let _ = tokio::fs::remove_file(&ciphertext_path).await;
+        return Err(storage_err_response(error));
+    }
+    let enc_meta = match enc_svc
+        .encrypt_object(&prepared.plaintext_path, &ciphertext_path, enc_ctx)
+        .await
+    {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+            let _ = tokio::fs::remove_file(&ciphertext_path).await;
+            return Err(encryption_failure_response(error));
+        }
+    };
+    if let Err(error) = mpu_failpoint(state, "mpu:after-encryption") {
+        let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+        let _ = tokio::fs::remove_file(&ciphertext_path).await;
+        return Err(storage_err_response(error));
+    }
+    let ciphertext_size = match tokio::fs::metadata(&ciphertext_path).await {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+            let _ = tokio::fs::remove_file(&ciphertext_path).await;
+            return Err(storage_err_response(
+                myfsio_storage::error::StorageError::Io(error),
+            ));
+        }
+    };
+    let mut final_metadata = prepared.metadata.clone();
+    final_metadata.remove(MULTIPART_PENDING_SSE_ALG);
+    final_metadata.remove(MULTIPART_PENDING_SSE_KMS_KEY);
+    final_metadata.remove(MULTIPART_PENDING_SSE_C_KEY);
+    final_metadata.remove(myfsio_storage::segments::META_KEY_SEGMENTS);
+    for (key, value) in enc_meta.to_metadata_map() {
+        final_metadata.insert(key, value);
+    }
+    if let Some(raw) = final_metadata.remove("__pending_tagging__") {
+        match parse_tagging_header(&raw) {
+            Ok(tags) if tags.len() <= state.config.object_tag_limit => options.tags = Some(tags),
+            Ok(_) => tracing::warn!(
+                bucket = bucket,
+                key = prepared.object_key,
+                "skipping multipart tagging: exceeds object_tag_limit"
+            ),
+            Err(_) => tracing::warn!(
+                bucket = bucket,
+                key = prepared.object_key,
+                "discarding malformed __pending_tagging__ value from multipart manifest"
+            ),
+        }
+    }
+    if let Some(ref customer_key) = enc_ctx.customer_key {
+        final_metadata.insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(customer_key));
+    }
+    object_lock::apply_default_retention(state, bucket, &mut final_metadata).await;
+    let commit = state
+        .storage
+        .commit_transformed_multipart(
+            &prepared,
+            &ciphertext_path,
+            ciphertext_size,
+            final_metadata,
+            options,
+        )
+        .await;
+    let _ = tokio::fs::remove_file(&prepared.plaintext_path).await;
+    if commit.is_err() {
+        let _ = tokio::fs::remove_file(&ciphertext_path).await;
+    }
+    commit
+        .map(|metadata| (metadata, plaintext_size))
+        .map_err(storage_err_response)
+}
+
 async fn complete_multipart_handler(
     state: &AppState,
     bucket: &str,
@@ -4422,11 +4534,14 @@ async fn complete_multipart_handler(
     let min_part_size: u64 = state.config.multipart_min_part_size;
     let total_parts = parsed.parts.len();
 
-    let pending_manifest = state
+    let pending_manifest = match state
         .storage
         .get_multipart_metadata(bucket, upload_id)
         .await
-        .unwrap_or_default();
+    {
+        Ok(metadata) => metadata,
+        Err(error) => return storage_err_response(error),
+    };
     let sse_c_enc_svc = if mpu_is_sse_c(&pending_manifest) {
         match state.encryption.as_ref() {
             Some(svc) => Some(svc),
@@ -4508,222 +4623,121 @@ async fn complete_multipart_handler(
         Ok(permit) => permit,
         Err(response) => return response,
     };
-    match state
-        .storage
-        .complete_multipart_checked(
-            bucket,
-            upload_id,
-            &parts,
-            myfsio_storage::traits::PutCommitOptions {
-                etag_override: None,
-                conditions: put_conditions_from_headers(headers),
-                bypass_governance,
-            },
-        )
-        .await
-    {
-        Ok(meta) => {
-            let Some(etag) = meta.etag.as_deref() else {
-                tracing::error!(
-                    bucket = bucket,
-                    key = key,
-                    upload_id = upload_id,
-                    "complete_multipart returned meta without etag"
-                );
-                return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
-            };
-            if let Err(e) = mpu_failpoint(state, "mpu:after-publish") {
-                return storage_err_response(e);
-            }
-            apply_pending_multipart_tagging(state, bucket, key).await;
-
-            let pending_sse = read_pending_multipart_sse(state, bucket, key).await;
-
-            let mut sse_alg_response: Option<String> = None;
-            let mut sse_kms_id_response: Option<String> = None;
-            if let Some((enc_ctx, _)) = pending_sse {
-                let Some(enc_svc) = state.encryption.as_ref() else {
-                    let _ = state.storage.delete_object(bucket, key).await;
-                    return s3_error_response(S3Error::new(
-                        S3ErrorCode::InternalError,
-                        "Encryption requested for multipart upload but encryption service is disabled",
-                    ));
-                };
-                let obj_path = match state.storage.get_object_path(bucket, key).await {
-                    Ok(p) => p,
-                    Err(e) => return storage_err_response(e),
-                };
-                let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
-                let _ = tokio::fs::create_dir_all(&tmp_dir).await;
-                let enc_tmp = tmp_dir.join(format!("mp-enc-{}", uuid::Uuid::new_v4()));
-                match enc_svc.encrypt_object(&obj_path, &enc_tmp, &enc_ctx).await {
-                    Ok(enc_meta) => {
-                        if let Err(e) = tokio::fs::rename(&enc_tmp, &obj_path).await {
-                            let _ = tokio::fs::remove_file(&enc_tmp).await;
-                            let _ = state.storage.delete_object(bucket, key).await;
-                            return storage_err_response(myfsio_storage::error::StorageError::Io(
-                                e,
-                            ));
-                        }
-                        if let Err(e) = mpu_failpoint(state, "mpu:after-ciphertext-rename") {
-                            return storage_err_response(e);
-                        }
-                        let enc_size = tokio::fs::metadata(&obj_path)
-                            .await
-                            .map(|m| m.len())
-                            .unwrap_or(0);
-                        let mut enc_metadata = enc_meta.to_metadata_map();
-                        let all_meta = state
-                            .storage
-                            .get_object_metadata(bucket, key)
-                            .await
-                            .unwrap_or_default();
-                        for (k, v) in &all_meta {
-                            if k == MULTIPART_PENDING_SSE_ALG
-                                || k == MULTIPART_PENDING_SSE_KMS_KEY
-                                || k == MULTIPART_PENDING_SSE_C_KEY
-                            {
-                                continue;
-                            }
-                            enc_metadata.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
-                        enc_metadata.insert("__size__".to_string(), enc_size.to_string());
-                        if let Some(ref ck) = enc_ctx.customer_key {
-                            enc_metadata.insert(SSE_C_KEY_MD5_META.to_string(), sse_c_key_md5(ck));
-                        }
-                        let metadata_write = match mpu_failpoint(state, "mpu:sse-metadata-write") {
-                            Err(e) => Err(e),
-                            Ok(()) => {
-                                state
-                                    .storage
-                                    .put_object_metadata(bucket, key, &enc_metadata)
-                                    .await
-                            }
-                        };
-                        if let Err(e) = metadata_write {
-                            let detail = format!(
-                                "multipart SSE finalization published ciphertext but could not \
-                                 persist its encryption metadata: {}",
-                                e
-                            );
-                            match state
-                                .storage
-                                .poison_object_if_version_matches(
-                                    bucket,
-                                    key,
-                                    meta.version_id.as_deref(),
-                                    &detail,
-                                )
-                                .await
-                            {
-                                Ok(true) => tracing::error!(
-                                    bucket = bucket,
-                                    key = key,
-                                    version_id = ?meta.version_id,
-                                    error = %e,
-                                    "multipart SSE finalization left undecryptable ciphertext; \
-                                     the object is marked corrupted so reads fail closed"
-                                ),
-                                Ok(false) => tracing::error!(
-                                    bucket = bucket,
-                                    key = key,
-                                    version_id = ?meta.version_id,
-                                    error = %e,
-                                    "multipart SSE finalization could not persist encryption \
-                                     metadata; the object was already replaced by a later write \
-                                     and was left untouched"
-                                ),
-                                Err(poison_err) => tracing::error!(
-                                    bucket = bucket,
-                                    key = key,
-                                    version_id = ?meta.version_id,
-                                    error = %e,
-                                    poison_error = %poison_err,
-                                    "multipart SSE finalization left undecryptable ciphertext \
-                                     that could not be marked corrupted; the object must be \
-                                     deleted or re-uploaded manually"
-                                ),
-                            }
-                            return storage_err_response(e);
-                        }
-                        sse_alg_response = Some(enc_ctx.algorithm.as_str().to_string());
-                        sse_kms_id_response = enc_ctx.kms_key_id.clone();
-                    }
-                    Err(e) => {
-                        let _ = tokio::fs::remove_file(&enc_tmp).await;
-                        let _ = state.storage.delete_object(bucket, key).await;
-                        return encryption_failure_response(e);
-                    }
-                }
-            }
-
-            let mut sse_c_md5_response: Option<String> = None;
-            let post_complete_meta = state
-                .storage
-                .get_object_metadata(bucket, key)
-                .await
-                .unwrap_or_default();
-            if mpu_is_sse_c(&post_complete_meta) {
-                match finalize_mpu_sse_c_metadata(state, bucket, key, &parts, post_complete_meta)
-                    .await
-                {
-                    Ok(md5) => sse_c_md5_response = md5,
-                    Err(resp) => {
-                        let _ = state.storage.delete_object(bucket, key).await;
-                        return resp;
-                    }
-                }
-            }
-
-            object_lock::apply_default_retention_to_stored(state, bucket, key).await;
-
-            let xml = myfsio_xml::response::complete_multipart_upload_xml(
-                bucket,
-                key,
-                etag,
-                &format!("/{}/{}", bucket, key),
-            );
-            notifications::emit_object_created(
+    let commit_options = myfsio_storage::traits::PutCommitOptions {
+        etag_override: None,
+        conditions: put_conditions_from_headers(headers),
+        bypass_governance,
+        tags: None,
+    };
+    let pending_sse = pending_multipart_sse_context(&pending_manifest);
+    if pending_manifest.contains_key(MULTIPART_PENDING_SSE_ALG) && pending_sse.is_none() {
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Multipart upload carries invalid pending encryption metadata",
+        ));
+    }
+    let completion = match pending_sse.as_ref() {
+        Some(enc_ctx) => {
+            complete_pending_sse_multipart(
                 state,
                 bucket,
-                key,
-                meta.size,
-                Some(etag),
-                "",
-                "",
-                "",
-                "CompleteMultipartUpload",
-            );
-            trigger_replication_for_request(state, peer_marker, bucket, key, "write", None);
-            let mut resp_headers = HeaderMap::new();
-            resp_headers.insert("content-type", "application/xml".parse().unwrap());
-            if let Some(ref vid) = meta.version_id {
-                if let Ok(value) = vid.parse() {
-                    resp_headers.insert("x-amz-version-id", value);
-                }
-            }
-            if let Some(alg) = sse_alg_response {
-                if let Ok(value) = alg.parse() {
-                    resp_headers.insert("x-amz-server-side-encryption", value);
-                }
-            }
-            if let Some(kid) = sse_kms_id_response {
-                if let Ok(value) = kid.parse() {
-                    resp_headers.insert("x-amz-server-side-encryption-aws-kms-key-id", value);
-                }
-            }
-            if let Some(md5) = sse_c_md5_response {
-                if let Ok(value) = "AES256".parse() {
-                    resp_headers.insert(SSE_C_ALGORITHM_HEADER, value);
-                }
-                if let Ok(value) = md5.parse() {
-                    resp_headers.insert(SSE_C_KEY_MD5_HEADER, value);
-                }
-            }
-            (StatusCode::OK, resp_headers, xml).into_response()
+                upload_id,
+                &parts,
+                enc_ctx,
+                commit_options,
+            )
+            .await
         }
-        Err(e) => storage_err_response(e),
+        None => state
+            .storage
+            .complete_multipart_checked(bucket, upload_id, &parts, commit_options)
+            .await
+            .map(|metadata| {
+                let size = metadata.size;
+                (metadata, size)
+            })
+            .map_err(storage_err_response),
+    };
+    let (meta, notification_size) = match completion {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
+    let Some(etag) = meta.etag.as_deref() else {
+        tracing::error!(
+            bucket = bucket,
+            key = key,
+            upload_id = upload_id,
+            "complete_multipart returned meta without etag"
+        );
+        return s3_error_response(S3Error::from_code(S3ErrorCode::InternalError));
+    };
+
+    apply_pending_multipart_tagging(state, bucket, key).await;
+
+    let mut sse_c_md5_response: Option<String> = None;
+    if pending_sse.is_none() {
+        let post_complete_meta = state
+            .storage
+            .get_object_metadata(bucket, key)
+            .await
+            .unwrap_or_default();
+        if mpu_is_sse_c(&post_complete_meta) {
+            match finalize_mpu_sse_c_metadata(state, bucket, key, &parts, post_complete_meta).await
+            {
+                Ok(md5) => sse_c_md5_response = md5,
+                Err(resp) => {
+                    let _ = state.storage.delete_object(bucket, key).await;
+                    return resp;
+                }
+            }
+        }
+        object_lock::apply_default_retention_to_stored(state, bucket, key).await;
     }
+
+    let xml = myfsio_xml::response::complete_multipart_upload_xml(
+        bucket,
+        key,
+        etag,
+        &format!("/{}/{}", bucket, key),
+    );
+    notifications::emit_object_created(
+        state,
+        bucket,
+        key,
+        notification_size,
+        Some(etag),
+        "",
+        "",
+        "",
+        "CompleteMultipartUpload",
+    );
+    trigger_replication_for_request(state, peer_marker, bucket, key, "write", None);
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert("content-type", "application/xml".parse().unwrap());
+    if let Some(ref vid) = meta.version_id {
+        if let Ok(value) = vid.parse() {
+            resp_headers.insert("x-amz-version-id", value);
+        }
+    }
+    if let Some(enc_ctx) = pending_sse {
+        if let Ok(value) = enc_ctx.algorithm.as_str().parse() {
+            resp_headers.insert("x-amz-server-side-encryption", value);
+        }
+        if let Some(kid) = enc_ctx.kms_key_id {
+            if let Ok(value) = kid.parse() {
+                resp_headers.insert("x-amz-server-side-encryption-aws-kms-key-id", value);
+            }
+        }
+    }
+    if let Some(md5) = sse_c_md5_response {
+        if let Ok(value) = "AES256".parse() {
+            resp_headers.insert(SSE_C_ALGORITHM_HEADER, value);
+        }
+        if let Ok(value) = md5.parse() {
+            resp_headers.insert(SSE_C_KEY_MD5_HEADER, value);
+        }
+    }
+    (StatusCode::OK, resp_headers, xml).into_response()
 }
 
 async fn finalize_mpu_sse_c_metadata(
@@ -5417,6 +5431,7 @@ async fn copy_object_handler(
                 etag_override: plaintext_etag_override,
                 conditions: Default::default(),
                 bypass_governance,
+                tags: None,
             },
         )
         .await;
@@ -5717,7 +5732,8 @@ async fn serve_range_from_snapshot(
     }
 
     let served =
-        match object_read::serve_object_data(state, snapshot, Some(range_str), headers).await {
+        match object_read::serve_object_data(state, snapshot, Some(range_str), headers, None).await
+        {
             Ok(served) => served,
             Err(err) => return object_read_error_response(err),
         };

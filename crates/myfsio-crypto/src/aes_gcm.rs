@@ -102,6 +102,7 @@ pub fn encrypt_stream_chunked(
 
     outfile.seek(SeekFrom::Start(0))?;
     outfile.write_all(&chunk_index.to_be_bytes())?;
+    outfile.sync_all()?;
 
     Ok(chunk_index)
 }

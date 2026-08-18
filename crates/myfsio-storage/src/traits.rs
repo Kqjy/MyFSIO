@@ -30,6 +30,7 @@ pub struct PutCommitOptions {
     pub etag_override: Option<String>,
     pub conditions: PutConditions,
     pub bypass_governance: bool,
+    pub tags: Option<Vec<Tag>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

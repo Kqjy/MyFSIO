@@ -63,6 +63,8 @@ fn spawn_server(root: &Path, failpoints: Option<&str>) -> Server {
         .env("ALLOW_LEGACY_HEADER_AUTH", "true")
         .env("ADMIN_ACCESS_KEY", ACCESS_KEY)
         .env("ADMIN_SECRET_KEY", SECRET_KEY)
+        .env("ENCRYPTION_ENABLED", "true")
+        .env("MULTIPART_MIN_PART_SIZE", "1")
         .env("LOG_LEVEL", "ERROR")
         .env_remove("MYFSIO_FAILPOINTS")
         .stdout(Stdio::null())
@@ -120,6 +122,105 @@ async fn get_object(
         .unwrap_or_default();
     let body = resp.bytes().await.unwrap().to_vec();
     (status, etag, body)
+}
+
+struct SseMultipart {
+    upload_id: String,
+    completion_xml: String,
+    plaintext: Vec<u8>,
+}
+
+async fn initiate_sse_multipart(client: &reqwest::Client, server: &Server) -> SseMultipart {
+    let response = authed(client.post(server.url("/crash-bkt/obj.bin?uploads")))
+        .header("x-amz-server-side-encryption", "AES256")
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let body = response.text().await.unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .and_then(|value| value.split("</UploadId>").next())
+        .unwrap()
+        .to_string();
+    let first = vec![b'A'; 4096];
+    let second = vec![b'B'; 2048];
+    let mut etags = Vec::new();
+    for (part_number, part) in [(1, first.clone()), (2, second.clone())] {
+        let response = authed(client.put(server.url(&format!(
+            "/crash-bkt/obj.bin?partNumber={part_number}&uploadId={upload_id}"
+        ))))
+        .body(part)
+        .send()
+        .await
+        .unwrap();
+        assert!(response.status().is_success());
+        etags.push(
+            response
+                .headers()
+                .get("etag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let completion_xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        etags[0], etags[1]
+    );
+    let mut plaintext = first;
+    plaintext.extend_from_slice(&second);
+    SseMultipart {
+        upload_id,
+        completion_xml,
+        plaintext,
+    }
+}
+
+async fn complete_sse_multipart(
+    client: &reqwest::Client,
+    server: &Server,
+    upload: &SseMultipart,
+) -> Result<reqwest::Response, reqwest::Error> {
+    authed(client.post(server.url(&format!("/crash-bkt/obj.bin?uploadId={}", upload.upload_id))))
+        .header("content-type", "application/xml")
+        .body(upload.completion_xml.clone())
+        .send()
+        .await
+}
+
+async fn assert_upload_exists(client: &reqwest::Client, server: &Server, upload_id: &str) {
+    let response =
+        authed(client.get(server.url(&format!("/crash-bkt/obj.bin?uploadId={upload_id}"))))
+            .send()
+            .await
+            .unwrap();
+    assert!(
+        response.status().is_success(),
+        "multipart upload {upload_id} must remain available"
+    );
+}
+
+fn committed_metadata(root: &Path) -> serde_json::Value {
+    let meta_dir = root
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("crash-bkt")
+        .join("meta");
+    for entry in std::fs::read_dir(meta_dir).unwrap().flatten() {
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+        if value
+            .get("metadata")
+            .and_then(|metadata| metadata.get("x-amz-encryption-nonce"))
+            .is_some()
+        {
+            return value.get("metadata").unwrap().clone();
+        }
+    }
+    panic!("encrypted object sidecar not found")
 }
 
 #[tokio::test]
@@ -234,4 +335,200 @@ async fn killing_the_server_mid_put_commit_preserves_the_invariants() {
     assert_eq!(body, b"vvvv4444");
     assert_ne!(etag, etag_v1);
     server.kill();
+}
+
+#[tokio::test]
+async fn storage_full_env_failpoint_returns_internal_error_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let server = spawn_server(root, None);
+    wait_healthy(&client, &server).await;
+    let response = authed(client.put(server.url("/crash-bkt")))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let response = put_object(&client, &server, b"old-object").await.unwrap();
+    assert!(response.status().is_success());
+    server.kill();
+
+    let server = spawn_server(root, Some("put:stage-data-write=error:storage_full"));
+    wait_healthy(&client, &server).await;
+    let response = put_object(&client, &server, b"new-object").await.unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let error_body = response.text().await.unwrap();
+    assert!(error_body.contains("InternalError"));
+    wait_healthy(&client, &server).await;
+    let (status, _, body) = get_object(&client, &server).await;
+    assert!(status.is_success());
+    assert_eq!(body, b"old-object");
+    let listing = authed(client.get(server.url("/crash-bkt?list-type=2")))
+        .send()
+        .await
+        .unwrap();
+    assert!(listing.status().is_success());
+    let listing = listing.text().await.unwrap();
+    assert_eq!(listing.matches("<Key>obj.bin</Key>").count(), 1);
+    let ordinary_temps = std::fs::read_dir(root.join(".myfsio.sys").join("tmp"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(ordinary_temps, 0);
+    server.kill();
+
+    let server = spawn_server(root, None);
+    wait_healthy(&client, &server).await;
+    let response = put_object(&client, &server, b"new-object").await.unwrap();
+    assert!(response.status().is_success());
+    let (status, _, body) = get_object(&client, &server).await;
+    assert!(status.is_success());
+    assert_eq!(body, b"new-object");
+    server.kill();
+}
+
+async fn run_sse_multipart_precommit_abort(failpoint: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let server = spawn_server(root, None);
+    wait_healthy(&client, &server).await;
+    let response = authed(client.put(server.url("/crash-bkt")))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let response = put_object(&client, &server, b"old-object").await.unwrap();
+    assert!(response.status().is_success());
+    let upload = initiate_sse_multipart(&client, &server).await;
+    server.kill();
+
+    let spec = format!("{failpoint}=abort");
+    let mut crashed = spawn_server(root, Some(&spec));
+    wait_healthy(&client, &crashed).await;
+    let result = complete_sse_multipart(&client, &crashed, &upload).await;
+    assert!(result.is_err() || !result.unwrap().status().is_success());
+    assert!(
+        crashed.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "{failpoint} must terminate the process"
+    );
+    assert_eq!(
+        std::fs::read(root.join("crash-bkt").join("obj.bin")).unwrap(),
+        b"old-object",
+        "{failpoint} must not publish assembled plaintext"
+    );
+
+    let server = spawn_server(root, None);
+    wait_healthy(&client, &server).await;
+    let (status, _, body) = get_object(&client, &server).await;
+    assert!(status.is_success());
+    assert_eq!(body, b"old-object");
+    assert_upload_exists(&client, &server, &upload.upload_id).await;
+    let response = complete_sse_multipart(&client, &server, &upload)
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "retry after {failpoint} failed: {}",
+        response.status()
+    );
+    let (status, _, body) = get_object(&client, &server).await;
+    assert!(status.is_success());
+    assert_eq!(body, upload.plaintext);
+    let stored = std::fs::read(root.join("crash-bkt").join("obj.bin")).unwrap();
+    assert_ne!(stored, upload.plaintext);
+    let metadata = committed_metadata(root);
+    assert!(metadata.get("__pending_sse_algorithm__").is_none());
+    assert!(metadata.get("__segments__").is_none());
+    server.kill();
+}
+
+async fn run_sse_multipart_committed_abort(failpoint: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let server = spawn_server(root, None);
+    wait_healthy(&client, &server).await;
+    let response = authed(client.put(server.url("/crash-bkt")))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let response = put_object(&client, &server, b"old-object").await.unwrap();
+    assert!(response.status().is_success());
+    let upload = initiate_sse_multipart(&client, &server).await;
+    server.kill();
+
+    let spec = format!("{failpoint}=abort");
+    let mut crashed = spawn_server(root, Some(&spec));
+    wait_healthy(&client, &crashed).await;
+    let result = complete_sse_multipart(&client, &crashed, &upload).await;
+    assert!(result.is_err() || !result.unwrap().status().is_success());
+    assert!(
+        crashed.wait_for_exit(Duration::from_secs(10)).is_some(),
+        "{failpoint} must terminate the process"
+    );
+
+    let server = spawn_server(root, None);
+    wait_healthy(&client, &server).await;
+    let (status, _, body) = get_object(&client, &server).await;
+    assert!(status.is_success());
+    assert_eq!(body, upload.plaintext);
+    let stored = std::fs::read(root.join("crash-bkt").join("obj.bin")).unwrap();
+    assert_ne!(stored, upload.plaintext);
+    assert_ne!(stored, b"old-object");
+    let metadata = committed_metadata(root);
+    assert!(metadata.get("x-amz-encryption-nonce").is_some());
+    assert!(metadata.get("__pending_sse_algorithm__").is_none());
+    assert!(metadata.get("__segments__").is_none());
+    assert_upload_exists(&client, &server, &upload.upload_id).await;
+    let response = authed(
+        client.delete(server.url(&format!("/crash-bkt/obj.bin?uploadId={}", upload.upload_id))),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    server.kill();
+}
+
+#[tokio::test]
+async fn killing_sse_multipart_before_data_publish_never_exposes_plaintext() {
+    for failpoint in [
+        "mpu:during-assembly",
+        "mpu:after-assembly",
+        "mpu:before-encryption",
+        "mpu:during-encryption",
+        "mpu:after-encryption",
+        "mpu:before-commit",
+        "put:after-archive",
+        "put:stage-sidecar",
+        "put:stage-dir-fsync",
+        "put:before-data-rename",
+    ] {
+        run_sse_multipart_precommit_abort(failpoint).await;
+    }
+}
+
+#[tokio::test]
+async fn killing_sse_multipart_after_ciphertext_publish_recovers_encrypted_state() {
+    for failpoint in ["put:before-publish-sidecar", "mpu:after-commit"] {
+        run_sse_multipart_committed_abort(failpoint).await;
+    }
 }

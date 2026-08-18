@@ -516,6 +516,8 @@ fn compact_listing_index_work(
             sealed.cutoff_generation,
             Uuid::new_v4()
         ));
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::listing_index::hit_failpoint(&sealed.listing_dir, "listing:snapshot-write")?;
         crate::listing_index::write_snapshot_temp(&temp_path, &snapshot)?;
 
         let install_started = {
@@ -624,6 +626,19 @@ struct MultipartManifest {
     object_key: String,
     metadata: HashMap<String, String>,
     parts: BTreeMap<u32, ManifestPart>,
+}
+
+#[derive(Debug)]
+pub struct PreparedMultipartUpload {
+    pub object_key: String,
+    pub plaintext_path: PathBuf,
+    pub composite_etag: String,
+    pub plaintext_size: u64,
+    pub part_sizes: Vec<u64>,
+    pub metadata: HashMap<String, String>,
+    bucket: String,
+    upload_id: String,
+    selected_parts: Vec<(u32, String, u64)>,
 }
 
 impl MultipartManifest {
@@ -1923,11 +1938,14 @@ impl FsStorageBackend {
     }
 
     fn publish_part_record_sync(
+        &self,
         upload_dir: &Path,
         part_number: u32,
         etag: &str,
         size: u64,
     ) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "mpu:part-record-write")?;
         let record = serde_json::to_value(ManifestPart {
             etag: etag.to_string(),
             size,
@@ -2021,6 +2039,8 @@ impl FsStorageBackend {
         key: &str,
         entry: &HashMap<String, Value>,
     ) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "metadata:rewrite")?;
         if Self::entry_marks_unreadable_metadata(entry) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -2095,6 +2115,8 @@ impl FsStorageBackend {
     }
 
     fn delete_index_entry_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "delete:metadata-remove")?;
         let (index_path, entry_name) = self.index_file_for_key(bucket_name, key);
         let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, key);
         if sidecar_path.exists() {
@@ -2466,6 +2488,7 @@ impl FsStorageBackend {
         bucket_name: &str,
         key: &str,
         metadata: &HashMap<String, String>,
+        tags: Option<&[Tag]>,
     ) -> std::io::Result<PathBuf> {
         #[cfg(any(test, feature = "failpoints"))]
         crate::failpoints::hit(&self.root, "put:stage-sidecar")?;
@@ -2473,6 +2496,14 @@ impl FsStorageBackend {
         let meta_value = serde_json::to_value(metadata).map_err(std::io::Error::other)?;
         let mut entry = serde_json::Map::new();
         entry.insert("metadata".to_string(), meta_value);
+        if let Some(tags) = tags {
+            if !tags.is_empty() {
+                entry.insert(
+                    "tags".to_string(),
+                    serde_json::to_value(tags).map_err(std::io::Error::other)?,
+                );
+            }
+        }
         entry.insert(
             SIDECAR_ENTRY_NAME_FIELD.to_string(),
             Value::String(entry_name),
@@ -2639,10 +2670,9 @@ impl FsStorageBackend {
                 ));
             }
         }
-        let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
-        let tmp = manifest_path.with_extension("json.tmp");
-        std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
-        std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "metadata:version-rewrite").map_err(StorageError::Io)?;
+        Self::atomic_write_json_sync(&manifest_path, &record, true).map_err(StorageError::Io)?;
         self.invalidate_bucket_caches(bucket_name);
         Ok(())
     }
@@ -2931,11 +2961,15 @@ impl FsStorageBackend {
 
         let chunk_size = self.stream_chunk_size;
         let drain_tmp = tmp_path.clone();
+        #[cfg(any(test, feature = "failpoints"))]
+        let fp_root = self.root.clone();
 
         let drain_result = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
             use std::io::{BufWriter, Read, Write};
             let mut reader = tokio_util::io::SyncIoBridge::new(stream);
             let file = std::fs::File::create(&drain_tmp).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "put:stage-data-write").map_err(StorageError::Io)?;
             let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
             let mut hasher = Md5::new();
             let mut total: u64 = 0;
@@ -2952,6 +2986,8 @@ impl FsStorageBackend {
             let file = writer
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "put:stage-data-sync").map_err(StorageError::Io)?;
             file.sync_all().map_err(StorageError::Io)?;
             Ok((format!("{:x}", hasher.finalize()), total))
         })
@@ -3021,6 +3057,224 @@ impl FsStorageBackend {
         });
         if result.is_err() {
             let _ = tokio::fs::remove_file(prepared_tmp).await;
+        }
+        result
+    }
+
+    pub async fn prepare_multipart_for_transform(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        parts: &[PartInfo],
+    ) -> StorageResult<PreparedMultipartUpload> {
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        if !manifest_path.exists() {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
+        let plaintext_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+        let plaintext_path_owned = plaintext_path.clone();
+        let upload_dir_owned = upload_dir.clone();
+        let manifest_path_owned = manifest_path.clone();
+        let part_infos = parts.to_vec();
+        let chunk_size = self.stream_chunk_size;
+        let upload_lock =
+            self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+        #[cfg(any(test, feature = "failpoints"))]
+        let fp_root = self.root.clone();
+
+        let assemble = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let _guard = upload_lock.lock();
+            let manifest = MultipartManifest::read_sync(&manifest_path_owned)?;
+            let mut output =
+                std::fs::File::create(&plaintext_path_owned).map_err(StorageError::Io)?;
+            let mut digest_concat = Vec::with_capacity(part_infos.len() * 16);
+            let mut total_size = 0u64;
+            let mut part_sizes = Vec::with_capacity(part_infos.len());
+            let mut selected_parts = Vec::with_capacity(part_infos.len());
+            let mut buffer = vec![0u8; chunk_size];
+
+            for part_info in &part_infos {
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&fp_root, "mpu:during-assembly")
+                    .map_err(StorageError::Io)?;
+                let part_file =
+                    upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
+                let file_size = std::fs::metadata(&part_file)
+                    .map_err(StorageError::Io)?
+                    .len();
+                let manifest_part =
+                    manifest.parts.get(&part_info.part_number).ok_or_else(|| {
+                        StorageError::InvalidObjectKey(format!(
+                            "Part {} not found",
+                            part_info.part_number
+                        ))
+                    })?;
+                let mut input = std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                let mut copied = 0u64;
+                let mut hasher = Md5::new();
+                loop {
+                    let count = input.read(&mut buffer).map_err(StorageError::Io)?;
+                    if count == 0 {
+                        break;
+                    }
+                    output
+                        .write_all(&buffer[..count])
+                        .map_err(StorageError::Io)?;
+                    hasher.update(&buffer[..count]);
+                    copied += count as u64;
+                }
+                if copied != file_size || file_size != manifest_part.size {
+                    return Err(StorageError::Internal(format!(
+                        "Part {} changed while completing the multipart upload",
+                        part_info.part_number
+                    )));
+                }
+                let digest =
+                    parse_md5_hex(&manifest_part.etag).unwrap_or_else(|| hasher.finalize().into());
+                digest_concat.extend_from_slice(&digest);
+                total_size += file_size;
+                part_sizes.push(file_size);
+                selected_parts.push((
+                    part_info.part_number,
+                    manifest_part.etag.clone(),
+                    manifest_part.size,
+                ));
+            }
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "mpu:assembly-sync").map_err(StorageError::Io)?;
+            output.sync_all().map_err(StorageError::Io)?;
+            let mut composite_hasher = Md5::new();
+            composite_hasher.update(&digest_concat);
+            let composite_etag = format!("{:x}-{}", composite_hasher.finalize(), part_infos.len());
+            Ok::<_, StorageError>((
+                manifest,
+                composite_etag,
+                total_size,
+                part_sizes,
+                selected_parts,
+            ))
+        })
+        .await;
+
+        let (manifest, composite_etag, plaintext_size, part_sizes, selected_parts) = match assemble
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_file(&plaintext_path);
+                return Err(error);
+            }
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => {
+                let _ = std::fs::remove_file(&plaintext_path);
+                return Err(StorageError::Io(std::io::Error::other(join)));
+            }
+        };
+
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(error) = crate::failpoints::hit(&self.root, "mpu:after-assembly") {
+            let _ = std::fs::remove_file(&plaintext_path);
+            return Err(StorageError::Io(error));
+        }
+
+        let mut metadata = manifest.metadata;
+        metadata.insert(
+            META_KEY_PART_SIZES.to_string(),
+            encode_part_sizes(&part_sizes),
+        );
+        Ok(PreparedMultipartUpload {
+            object_key: manifest.object_key,
+            plaintext_path,
+            composite_etag,
+            plaintext_size,
+            part_sizes,
+            metadata,
+            bucket: bucket.to_string(),
+            upload_id: upload_id.to_string(),
+            selected_parts,
+        })
+    }
+
+    pub async fn commit_transformed_multipart(
+        &self,
+        prepared: &PreparedMultipartUpload,
+        transformed_path: &Path,
+        stored_size: u64,
+        metadata: HashMap<String, String>,
+        mut options: crate::traits::PutCommitOptions,
+    ) -> StorageResult<ObjectMeta> {
+        if metadata_has_pending_sse(&metadata)
+            || metadata.contains_key(crate::segments::META_KEY_SEGMENTS)
+        {
+            return Err(StorageError::InvalidArgument(
+                "transformed multipart metadata is not final".to_string(),
+            ));
+        }
+        if prepared.bucket.is_empty()
+            || prepared.upload_id.is_empty()
+            || transformed_path.parent() != Some(self.tmp_dir().as_path())
+        {
+            return Err(StorageError::InvalidArgument(
+                "prepared multipart data must live in the storage tmp directory".to_string(),
+            ));
+        }
+        let upload_dir = self.multipart_upload_dir(&prepared.bucket, &prepared.upload_id)?;
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        let upload_lock =
+            self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+        options.etag_override = Some(prepared.composite_etag.clone());
+
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "mpu:before-commit").map_err(StorageError::Io)?;
+
+        let result = run_blocking(|| {
+            let _upload_guard = upload_lock.lock();
+            if !manifest_path.exists() {
+                return Err(StorageError::UploadNotFound(prepared.upload_id.clone()));
+            }
+            let manifest = MultipartManifest::read_sync(&manifest_path)?;
+            if manifest.object_key != prepared.object_key {
+                return Err(StorageError::UploadNotFound(prepared.upload_id.clone()));
+            }
+            for (part_number, etag, size) in &prepared.selected_parts {
+                let Some(current) = manifest.parts.get(part_number) else {
+                    return Err(StorageError::PreconditionFailed(format!(
+                        "Part {} changed while completing the multipart upload",
+                        part_number
+                    )));
+                };
+                if current.etag != *etag || current.size != *size {
+                    return Err(StorageError::PreconditionFailed(format!(
+                        "Part {} changed while completing the multipart upload",
+                        part_number
+                    )));
+                }
+            }
+            let quota_lock = self.quota_lock_if_configured(&prepared.bucket);
+            let _quota_guard = quota_lock.as_ref().map(|lock| lock.lock());
+            let _object_guard = self
+                .get_object_lock(&prepared.bucket, &prepared.object_key)
+                .write();
+            self.finalize_put_sync(
+                &prepared.bucket,
+                &prepared.object_key,
+                transformed_path,
+                prepared.composite_etag.clone(),
+                stored_size,
+                Some(metadata),
+                &options,
+            )
+        });
+
+        if result.is_ok() {
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "mpu:after-commit").map_err(StorageError::Io)?;
+            let _guard = upload_lock.lock();
+            let _ = std::fs::remove_dir_all(upload_dir);
         }
         result
     }
@@ -3132,6 +3386,8 @@ impl FsStorageBackend {
         }
         let config_path = self.bucket_config_path(bucket_name);
         let json_val = serde_json::to_value(config).map_err(std::io::Error::other)?;
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "bucket:config-write")?;
         Self::atomic_write_json_sync(&config_path, &json_val, true)?;
         if config.policy.is_none() {
             self.remove_legacy_bucket_policy_sync(bucket_name)?;
@@ -3273,6 +3529,8 @@ impl FsStorageBackend {
         if !source.exists() {
             return Ok(None);
         }
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "version:archive-write")?;
 
         let version_dir = self.version_dir(bucket_name, key);
         std::fs::create_dir_all(&version_dir)?;
@@ -3363,7 +3621,11 @@ impl FsStorageBackend {
         }
 
         let manifest_path = version_dir.join(format!("{}.json", version_id));
-        Self::atomic_write_json_sync(&manifest_path, &record, true)?;
+        if let Err(error) = Self::atomic_write_json_sync(&manifest_path, &record, true) {
+            let _ = Self::safe_unlink(&data_path);
+            Self::cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
+            return Err(error);
+        }
 
         Ok(Some(VersionMutation {
             version_id,
@@ -3475,6 +3737,8 @@ impl FsStorageBackend {
     }
 
     fn write_delete_marker_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<String> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "delete:marker-write")?;
         let version_dir = self.version_dir(bucket_name, key);
         std::fs::create_dir_all(&version_dir)?;
         let now = Utc::now();
@@ -5610,7 +5874,6 @@ impl FsStorageBackend {
         }
 
         let abort_commit = |e: std::io::Error| {
-            let _ = std::fs::remove_file(tmp_path);
             self.rollback_failed_commit_sync(
                 bucket_name,
                 key,
@@ -5659,7 +5922,12 @@ impl FsStorageBackend {
         match self.metadata_layout {
             MetadataLayout::Sidecar => {
                 let staged = self
-                    .stage_live_metadata_sync(bucket_name, key, &internal_meta)
+                    .stage_live_metadata_sync(
+                        bucket_name,
+                        key,
+                        &internal_meta,
+                        options.tags.as_deref(),
+                    )
                     .map_err(abort_commit)?;
                 #[cfg(any(test, feature = "failpoints"))]
                 if let Err(err) = crate::failpoints::hit(&self.root, "put:before-data-rename") {
@@ -5702,7 +5970,24 @@ impl FsStorageBackend {
                 }
             }
             MetadataLayout::Index => {
-                self.write_metadata_sync(bucket_name, key, &internal_meta)
+                let mut entry = HashMap::new();
+                entry.insert(
+                    "metadata".to_string(),
+                    serde_json::to_value(&internal_meta)
+                        .map_err(std::io::Error::other)
+                        .map_err(abort_commit)?,
+                );
+                if let Some(tags) = options.tags.as_deref() {
+                    if !tags.is_empty() {
+                        entry.insert(
+                            "tags".to_string(),
+                            serde_json::to_value(tags)
+                                .map_err(std::io::Error::other)
+                                .map_err(abort_commit)?,
+                        );
+                    }
+                }
+                self.write_index_entry_sync(bucket_name, key, &entry)
                     .map_err(abort_commit)?;
                 std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
                 if let Some(parent) = destination.parent() {
@@ -6343,6 +6628,20 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             let versioning_status = bucket_config.versioning_status();
 
+            if path.exists() {
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "delete:data-remove")
+                    .map_err(StorageError::Io)?;
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "delete:metadata-remove")
+                    .map_err(StorageError::Io)?;
+            }
+            if versioning_status.is_active() {
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "delete:marker-write")
+                    .map_err(StorageError::Io)?;
+            }
+
             if versioning_status.is_active() {
                 let mut version_mutations = Vec::new();
                 if path.exists() {
@@ -6483,6 +6782,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     {
                         return Err(StorageError::ObjectLocked(message));
                     }
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&self.root, "delete-version:data-remove")
+                        .map_err(StorageError::Io)?;
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&self.root, "delete-version:metadata-remove")
+                        .map_err(StorageError::Io)?;
                     if let Some(seg_id) = metadata.get(crate::segments::META_KEY_SEGMENTS) {
                         self.release_segment_dir(bucket, seg_id);
                     }
@@ -6563,13 +6868,18 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     }
                 }
             }
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "delete-version:data-remove")
+                .map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "delete-version:metadata-remove")
+                .map_err(StorageError::Io)?;
             if let Some(seg_id) = version_record
                 .as_ref()
                 .and_then(|record| record.get("segment_id").and_then(Value::as_str))
             {
                 self.release_segment_dir(bucket, seg_id);
             }
-
             Self::safe_unlink(&data_path).map_err(StorageError::Io)?;
             Self::safe_unlink(&manifest_path).map_err(StorageError::Io)?;
             let versions_root = self.bucket_versions_root(bucket);
@@ -6639,6 +6949,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                                 &src_metadata,
                             );
                         if can_link {
+                            #[cfg(any(test, feature = "failpoints"))]
+                            crate::failpoints::hit(&self.root, "put:stage-data-write")
+                                .map_err(StorageError::Io)?;
                             std::fs::create_dir_all(&new_segment_dir).map_err(StorageError::Io)?;
                             let mut link_error = None;
                             for (ordinal, (path, _)) in source.paths().entries().iter().enumerate()
@@ -6708,6 +7021,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     }
                 };
                 let tmp_file = std::fs::File::create(&tmp_path).map_err(StorageError::Io)?;
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "put:stage-data-write")
+                    .map_err(StorageError::Io)?;
                 let mut writer = BufWriter::with_capacity(chunk_size * 4, tmp_file);
                 let mut hasher = Md5::new();
                 let mut buf = vec![0u8; chunk_size];
@@ -6725,6 +7041,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let file = writer
                     .into_inner()
                     .map_err(|error| StorageError::Io(error.into_error()))?;
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "put:stage-data-sync")
+                    .map_err(StorageError::Io)?;
                 file.sync_all().map_err(StorageError::Io)?;
 
                 src_metadata.remove(crate::segments::META_KEY_SEGMENTS);
@@ -6868,10 +7187,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     ));
                 }
             }
-            let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
-            let tmp = manifest_path.with_extension("json.tmp");
-            std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
-            std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "metadata:version-rewrite")
+                .map_err(StorageError::Io)?;
+            Self::atomic_write_json_sync(&manifest_path, &record, true)
+                .map_err(StorageError::Io)?;
             self.invalidate_bucket_caches(bucket);
             Ok(())
         })
@@ -6954,7 +7274,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         });
 
         let manifest_path = upload_dir.join(MANIFEST_FILE);
-        Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
+        #[cfg(any(test, feature = "failpoints"))]
+        let write_result = crate::failpoints::hit(&self.root, "mpu:manifest-write")
+            .and_then(|()| Self::atomic_write_json_sync(&manifest_path, &manifest, true));
+        #[cfg(not(any(test, feature = "failpoints")))]
+        let write_result = Self::atomic_write_json_sync(&manifest_path, &manifest, true);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_dir_all(&upload_dir);
+            return Err(StorageError::Io(error));
+        }
 
         Ok(upload_id)
     }
@@ -6977,10 +7305,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
         let chunk_size = self.stream_chunk_size;
         let tmp_file_owned = tmp_file.clone();
+        #[cfg(any(test, feature = "failpoints"))]
+        let fp_root = self.root.clone();
         let drain_res = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
             use std::io::{BufWriter, Read, Write};
             let mut reader = tokio_util::io::SyncIoBridge::new(stream);
             let file = std::fs::File::create(&tmp_file_owned).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "mpu:part-write").map_err(StorageError::Io)?;
             let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
             let mut hasher = Md5::new();
             let mut part_size: u64 = 0;
@@ -6997,6 +7329,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let file = writer
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "mpu:part-sync").map_err(StorageError::Io)?;
             file.sync_all().map_err(StorageError::Io)?;
             Ok((format!("{:x}", hasher.finalize()), part_size))
         })
@@ -7017,8 +7351,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let lock_path = upload_dir.join(".manifest.lock");
         let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
         let _guard = lock.lock();
-        std::fs::rename(&tmp_file, &part_file).map_err(StorageError::Io)?;
-        Self::publish_part_record_sync(&upload_dir, part_number, &etag, part_size)
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(error) = crate::failpoints::hit(&self.root, "mpu:part-publish") {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
+        }
+        if let Err(error) = std::fs::rename(&tmp_file, &part_file) {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
+        }
+        self.publish_part_record_sync(&upload_dir, part_number, &etag, part_size)
             .map_err(StorageError::Io)?;
 
         Ok(etag)
@@ -7106,6 +7448,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 }
             };
             let dst = std::fs::File::create(&tmp_file).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "mpu:part-write").map_err(StorageError::Io)?;
             let mut dst = BufWriter::with_capacity(chunk_size * 4, dst);
             let mut hasher = Md5::new();
             let mut remaining = length;
@@ -7129,6 +7473,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let dst = dst
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "mpu:part-sync").map_err(StorageError::Io)?;
             dst.sync_all().map_err(StorageError::Io)?;
             Ok((format!("{:x}", hasher.finalize()), length, last_modified))
         });
@@ -7144,8 +7490,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let lock_path = upload_dir.join(".manifest.lock");
         let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
         let _guard = lock.lock();
-        std::fs::rename(&tmp_file, &part_file).map_err(StorageError::Io)?;
-        Self::publish_part_record_sync(&upload_dir, part_number, &etag, length)
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(error) = crate::failpoints::hit(&self.root, "mpu:part-publish") {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
+        }
+        if let Err(error) = std::fs::rename(&tmp_file, &part_file) {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
+        }
+        self.publish_part_record_sync(&upload_dir, part_number, &etag, length)
             .map_err(StorageError::Io)?;
 
         Ok((etag, last_modified))
@@ -7167,6 +7521,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let manifest = MultipartManifest::read_sync(&manifest_path)?;
         let object_key = manifest.object_key.clone();
         let metadata: HashMap<String, String> = manifest.metadata.clone();
+        if metadata_has_pending_sse(&metadata) {
+            return Err(StorageError::InvalidArgument(
+                "pending-SSE multipart uploads require transformed completion".to_string(),
+            ));
+        }
 
         let tmp_dir = self.tmp_dir();
         std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
@@ -7251,6 +7610,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 if part_infos.len() == 1 {
                     let part_file = upload_dir_owned
                         .join(format!("part-{:05}.part", part_infos[0].part_number));
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&fp_root, "mpu:assembly-move")
+                        .map_err(StorageError::Io)?;
                     if std::fs::rename(&part_file, &tmp_path_owned).is_err() {
                         std::fs::copy(&part_file, &tmp_path_owned).map_err(StorageError::Io)?;
                     }
@@ -7267,6 +7629,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                             .join(format!("part-{:05}.part", part_info.part_number));
                         let seg_file =
                             segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                        #[cfg(any(test, feature = "failpoints"))]
+                        if let Err(error) = crate::failpoints::hit(&fp_root, "mpu:segment-move") {
+                            move_err = Some(error);
+                            break;
+                        }
                         match std::fs::rename(&part_file, &seg_file) {
                             Ok(()) => moved.push((seg_file, part_file)),
                             Err(e) => {
@@ -7291,7 +7658,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         part_sizes.clone(),
                         etag.clone(),
                     );
-                    if let Err(e) = crate::segments::write_stub(&tmp_path_owned, &header) {
+                    #[cfg(any(test, feature = "failpoints"))]
+                    let stub_result = crate::failpoints::hit(&fp_root, "mpu:segment-stub-write")
+                        .and_then(|()| crate::segments::write_stub(&tmp_path_owned, &header));
+                    #[cfg(not(any(test, feature = "failpoints")))]
+                    let stub_result = crate::segments::write_stub(&tmp_path_owned, &header);
+                    if let Err(e) = stub_result {
                         for (seg_file, part_file) in moved.into_iter().rev() {
                             let _ = std::fs::rename(&seg_file, &part_file);
                         }
@@ -7336,6 +7708,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         seg_file
                     };
                     let mut src = std::fs::File::open(&source_file).map_err(StorageError::Io)?;
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&fp_root, "mpu:during-assembly")
+                        .map_err(StorageError::Io)?;
                     let copied =
                         std::io::copy(&mut src, &mut out_file).map_err(StorageError::Io)?;
                     if copied != *expected {
@@ -7345,6 +7720,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         )));
                     }
                 }
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&fp_root, "mpu:assembly-sync").map_err(StorageError::Io)?;
                 out_file.sync_all().map_err(StorageError::Io)?;
                 Ok((etag, total_size, part_sizes, None))
             },
@@ -7378,6 +7755,17 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         #[cfg(any(test, feature = "failpoints"))]
         if let Err(err) = crate::failpoints::hit(&self.root, "mpu:before-finalize") {
             let _ = std::fs::remove_file(&tmp_path);
+            if let Some(ref seg_id) = segmented_as {
+                let seg_dir = self.segments_bucket_root(bucket).join(seg_id);
+                for (ordinal, part_info) in parts.iter().enumerate() {
+                    let seg_file =
+                        seg_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                    let part_file =
+                        upload_dir.join(format!("part-{:05}.part", part_info.part_number));
+                    let _ = std::fs::rename(&seg_file, &part_file);
+                }
+                let _ = std::fs::remove_dir(&seg_dir);
+            }
             return Err(StorageError::Io(err));
         }
         let result = run_blocking(|| {
@@ -7431,6 +7819,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
     async fn abort_multipart(&self, bucket: &str, upload_id: &str) -> StorageResult<()> {
         let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
+        let upload_lock =
+            self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+        let _guard = upload_lock.lock();
         if upload_dir.exists() {
             std::fs::remove_dir_all(&upload_dir).map_err(StorageError::Io)?;
         }
@@ -8157,7 +8548,7 @@ mod tests {
         new_meta.insert("__etag__".to_string(), "newetag".to_string());
         new_meta.insert("__size__".to_string(), "2".to_string());
         let staged = backend
-            .stage_live_metadata_sync("commit-order", "obj.bin", &new_meta)
+            .stage_live_metadata_sync("commit-order", "obj.bin", &new_meta, None)
             .unwrap();
 
         let next_tmp = backend.tmp_dir().join("next.tmp");
@@ -8232,6 +8623,699 @@ mod tests {
             .unwrap_or(0)
     }
 
+    fn ordinary_tmp_count(backend: &FsStorageBackend) -> usize {
+        std::fs::read_dir(backend.tmp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        name.ends_with(".tmp") && !name.ends_with(".sidecar-stage")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn assert_storage_full<T>(result: StorageResult<T>) {
+        match result {
+            Err(StorageError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::StorageFull)
+            }
+            Err(error) => panic!("expected StorageFull I/O error, got {error}"),
+            Ok(_) => panic!("expected StorageFull I/O error, got success"),
+        }
+    }
+
+    async fn object_bytes(backend: &FsStorageBackend, bucket: &str, key: &str) -> Vec<u8> {
+        let (_, mut stream) = backend.get_object(bucket, key).await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        body
+    }
+
+    async fn listed_keys(backend: &FsStorageBackend, bucket: &str) -> Vec<String> {
+        backend
+            .list_objects(bucket, &ListParams::default())
+            .await
+            .unwrap()
+            .objects
+            .into_iter()
+            .map(|object| object.key)
+            .collect()
+    }
+
+    async fn create_multipart_with_parts(
+        backend: &FsStorageBackend,
+        bucket: &str,
+        key: &str,
+        sizes: &[usize],
+    ) -> (String, Vec<PartInfo>, Vec<u8>) {
+        let upload_id = backend.initiate_multipart(bucket, key, None).await.unwrap();
+        let mut parts = Vec::new();
+        let mut expected = Vec::new();
+        for (index, size) in sizes.iter().copied().enumerate() {
+            let body = vec![b'A' + index as u8; size];
+            expected.extend_from_slice(&body);
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+            let etag = backend
+                .upload_part(bucket, &upload_id, index as u32 + 1, stream)
+                .await
+                .unwrap();
+            parts.push(PartInfo {
+                part_number: index as u32 + 1,
+                etag,
+            });
+        }
+        (upload_id, parts, expected)
+    }
+
+    #[tokio::test]
+    async fn storage_full_put_fsops_preserve_previous_object_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-put").await.unwrap();
+        put_listing_object(&backend, "enospc-put", "obj.bin", b"old").await;
+        assert_eq!(listed_keys(&backend, "enospc-put").await, ["obj.bin"]);
+
+        for name in [
+            "put:stage-data-write",
+            "put:stage-data-sync",
+            "put:stage-sidecar",
+            "put:stage-dir-fsync",
+            "put:before-data-rename",
+        ] {
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new".to_vec()));
+            let result = backend
+                .put_object("enospc-put", "obj.bin", stream, None)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            assert_eq!(
+                object_bytes(&backend, "enospc-put", "obj.bin").await,
+                b"old"
+            );
+            assert_eq!(listed_keys(&backend, "enospc-put").await, ["obj.bin"]);
+            assert_eq!(staged_sidecar_count(&backend), 0);
+            assert_eq!(ordinary_tmp_count(&backend), 0);
+
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new".to_vec()));
+            backend
+                .put_object("enospc-put", "obj.bin", stream, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                object_bytes(&backend, "enospc-put", "obj.bin").await,
+                b"new"
+            );
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"old".to_vec()));
+            backend
+                .put_object("enospc-put", "obj.bin", stream, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_version_archive_preserves_live_version_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-version").await.unwrap();
+        backend
+            .set_versioning_status("enospc-version", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "enospc-version", "obj.bin", b"old-version").await;
+        let before = backend
+            .get_object_metadata("enospc-version", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "version:archive-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new-version".to_vec()));
+        let result = backend
+            .put_object("enospc-version", "obj.bin", stream, None)
+            .await;
+        crate::failpoints::clear(&backend.root, "version:archive-write");
+        assert_storage_full(result);
+        assert_eq!(
+            object_bytes(&backend, "enospc-version", "obj.bin").await,
+            b"old-version"
+        );
+        let after = backend
+            .get_object_metadata("enospc-version", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__version_id__"), before.get("__version_id__"));
+        assert_eq!(
+            backend
+                .list_object_versions("enospc-version", "obj.bin")
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new-version".to_vec()));
+        backend
+            .put_object("enospc-version", "obj.bin", stream, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            object_bytes(&backend, "enospc-version", "obj.bin").await,
+            b"new-version"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_full_delete_fsops_preserve_object_listing_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-delete").await.unwrap();
+
+        for name in ["delete:data-remove", "delete:metadata-remove"] {
+            put_listing_object(&backend, "enospc-delete", "obj.bin", b"old").await;
+            assert_eq!(listed_keys(&backend, "enospc-delete").await, ["obj.bin"]);
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend.delete_object("enospc-delete", "obj.bin").await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            assert_eq!(
+                object_bytes(&backend, "enospc-delete", "obj.bin").await,
+                b"old"
+            );
+            assert_eq!(listed_keys(&backend, "enospc-delete").await, ["obj.bin"]);
+            backend
+                .delete_object("enospc-delete", "obj.bin")
+                .await
+                .unwrap();
+            assert!(listed_keys(&backend, "enospc-delete").await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_metadata_rewrite_preserves_metadata_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-meta").await.unwrap();
+        let mut original = HashMap::new();
+        original.insert("color".to_string(), "blue".to_string());
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"body".to_vec()));
+        backend
+            .put_object("enospc-meta", "obj.bin", stream, Some(original.clone()))
+            .await
+            .unwrap();
+
+        let mut replacement = original.clone();
+        replacement.insert("color".to_string(), "green".to_string());
+        crate::failpoints::set(
+            &backend.root,
+            "metadata:rewrite",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .put_object_metadata("enospc-meta", "obj.bin", &replacement)
+            .await;
+        crate::failpoints::clear(&backend.root, "metadata:rewrite");
+        assert_storage_full(result);
+        let after = backend
+            .get_object_metadata("enospc-meta", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("blue"));
+        assert_eq!(
+            object_bytes(&backend, "enospc-meta", "obj.bin").await,
+            b"body"
+        );
+        assert_eq!(listed_keys(&backend, "enospc-meta").await, ["obj.bin"]);
+
+        backend
+            .put_object_metadata("enospc-meta", "obj.bin", &replacement)
+            .await
+            .unwrap();
+        let after = backend
+            .get_object_metadata("enospc-meta", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("green"));
+    }
+
+    #[tokio::test]
+    async fn storage_full_version_metadata_rewrite_preserves_record_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-version-meta").await.unwrap();
+        backend
+            .set_versioning_status("enospc-version-meta", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        let mut original = HashMap::new();
+        original.insert("color".to_string(), "blue".to_string());
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"old".to_vec()));
+        backend
+            .put_object(
+                "enospc-version-meta",
+                "obj.bin",
+                stream,
+                Some(original.clone()),
+            )
+            .await
+            .unwrap();
+        put_listing_object(&backend, "enospc-version-meta", "obj.bin", b"new").await;
+        let archived = backend
+            .list_object_versions("enospc-version-meta", "obj.bin")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|version| !version.is_latest)
+            .unwrap();
+        let mut replacement = original.clone();
+        replacement.insert("color".to_string(), "green".to_string());
+
+        crate::failpoints::set(
+            &backend.root,
+            "metadata:version-rewrite",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .put_object_version_metadata(
+                "enospc-version-meta",
+                "obj.bin",
+                &archived.version_id,
+                &replacement,
+            )
+            .await;
+        crate::failpoints::clear(&backend.root, "metadata:version-rewrite");
+        assert_storage_full(result);
+        let after = backend
+            .get_object_version_metadata("enospc-version-meta", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("blue"));
+        let (_, mut stream) = backend
+            .get_object_version("enospc-version-meta", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"old");
+
+        backend
+            .put_object_version_metadata(
+                "enospc-version-meta",
+                "obj.bin",
+                &archived.version_id,
+                &replacement,
+            )
+            .await
+            .unwrap();
+        let after = backend
+            .get_object_version_metadata("enospc-version-meta", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("green"));
+    }
+
+    #[tokio::test]
+    async fn storage_full_bucket_config_write_preserves_config_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-config").await.unwrap();
+        crate::failpoints::set(
+            &backend.root,
+            "bucket:config-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .set_versioning_status("enospc-config", VersioningStatus::Enabled)
+            .await;
+        crate::failpoints::clear(&backend.root, "bucket:config-write");
+        assert_storage_full(result);
+        assert_eq!(
+            backend
+                .get_versioning_status("enospc-config")
+                .await
+                .unwrap(),
+            VersioningStatus::Disabled
+        );
+
+        backend
+            .set_versioning_status("enospc-config", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .get_versioning_status("enospc-config")
+                .await
+                .unwrap(),
+            VersioningStatus::Enabled
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_full_version_delete_preserves_archived_version_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend
+            .create_bucket("enospc-version-delete")
+            .await
+            .unwrap();
+        backend
+            .set_versioning_status("enospc-version-delete", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        for (index, name) in [
+            "delete-version:data-remove",
+            "delete-version:metadata-remove",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("obj-{index}.bin");
+            put_listing_object(&backend, "enospc-version-delete", &key, b"old").await;
+            put_listing_object(&backend, "enospc-version-delete", &key, b"new").await;
+            let archived = backend
+                .list_object_versions("enospc-version-delete", &key)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|version| !version.is_latest)
+                .unwrap();
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend
+                .delete_object_version_checked(
+                    "enospc-version-delete",
+                    &key,
+                    &archived.version_id,
+                    false,
+                )
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            let (_, mut stream) = backend
+                .get_object_version("enospc-version-delete", &key, &archived.version_id)
+                .await
+                .unwrap();
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body).await.unwrap();
+            assert_eq!(body, b"old");
+            assert_eq!(
+                object_bytes(&backend, "enospc-version-delete", &key).await,
+                b"new"
+            );
+
+            backend
+                .delete_object_version_checked(
+                    "enospc-version-delete",
+                    &key,
+                    &archived.version_id,
+                    false,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                backend
+                    .get_object_version("enospc-version-delete", &key, &archived.version_id,)
+                    .await,
+                Err(StorageError::VersionNotFound { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_delete_marker_preserves_live_version_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-marker").await.unwrap();
+        backend
+            .set_versioning_status("enospc-marker", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "enospc-marker", "obj.bin", b"old").await;
+
+        crate::failpoints::set(
+            &backend.root,
+            "delete:marker-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend.delete_object("enospc-marker", "obj.bin").await;
+        crate::failpoints::clear(&backend.root, "delete:marker-write");
+        assert_storage_full(result);
+        assert_eq!(
+            object_bytes(&backend, "enospc-marker", "obj.bin").await,
+            b"old"
+        );
+        assert_eq!(listed_keys(&backend, "enospc-marker").await, ["obj.bin"]);
+
+        backend
+            .delete_object("enospc-marker", "obj.bin")
+            .await
+            .unwrap();
+        assert!(matches!(
+            backend.get_object("enospc-marker", "obj.bin").await,
+            Err(StorageError::DeleteMarker { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_full_listing_index_degrades_to_rebuild_without_phantoms() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-listing").await.unwrap();
+        put_listing_object(&backend, "enospc-listing", "old.bin", b"old").await;
+
+        crate::failpoints::set(
+            &backend.root,
+            "listing:snapshot-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend.rebuild_listing_index_sync("enospc-listing");
+        crate::failpoints::clear(&backend.root, "listing:snapshot-write");
+        assert_storage_full(result);
+        assert_eq!(listed_keys(&backend, "enospc-listing").await, ["old.bin"]);
+
+        let listing_dir = backend.bucket_listing_dir("enospc-listing");
+        assert!(listing_dir.join("snapshot.json").is_file());
+        crate::failpoints::set(
+            &backend.root,
+            "listing:journal-append",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        put_listing_object(&backend, "enospc-listing", "new.bin", b"new").await;
+        crate::failpoints::clear(&backend.root, "listing:journal-append");
+        let mut keys = listed_keys(&backend, "enospc-listing").await;
+        keys.sort();
+        assert_eq!(keys, ["new.bin", "old.bin"]);
+        assert_eq!(
+            object_bytes(&backend, "enospc-listing", "old.bin").await,
+            b"old"
+        );
+        assert_eq!(
+            object_bytes(&backend, "enospc-listing", "new.bin").await,
+            b"new"
+        );
+
+        put_listing_object(&backend, "enospc-listing", "new.bin", b"new").await;
+        assert_eq!(listed_keys(&backend, "enospc-listing").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn storage_full_multipart_manifest_and_part_writes_are_retryable_and_abortable() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-mpu-part").await.unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:manifest-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .initiate_multipart("enospc-mpu-part", "manifest.bin", None)
+            .await;
+        crate::failpoints::clear(&backend.root, "mpu:manifest-write");
+        assert_storage_full(result);
+        assert_eq!(
+            std::fs::read_dir(backend.multipart_bucket_root("enospc-mpu-part"))
+                .map(|entries| entries.flatten().count())
+                .unwrap_or(0),
+            0
+        );
+        let upload_id = backend
+            .initiate_multipart("enospc-mpu-part", "manifest.bin", None)
+            .await
+            .unwrap();
+        backend
+            .abort_multipart("enospc-mpu-part", &upload_id)
+            .await
+            .unwrap();
+
+        for (index, name) in [
+            "mpu:part-write",
+            "mpu:part-sync",
+            "mpu:part-publish",
+            "mpu:part-record-write",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("retry-{index}.bin");
+            let upload_id = backend
+                .initiate_multipart("enospc-mpu-part", &key, None)
+                .await
+                .unwrap();
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"part-body".to_vec()));
+            let result = backend
+                .upload_part("enospc-mpu-part", &upload_id, 1, stream)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            let upload_dir = backend
+                .multipart_upload_dir("enospc-mpu-part", &upload_id)
+                .unwrap();
+            assert!(upload_dir.is_dir());
+            assert_eq!(
+                std::fs::read_dir(&upload_dir)
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                    .count(),
+                0
+            );
+            backend
+                .list_parts("enospc-mpu-part", &upload_id)
+                .await
+                .unwrap();
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"part-body".to_vec()));
+            backend
+                .upload_part("enospc-mpu-part", &upload_id, 1, stream)
+                .await
+                .unwrap();
+            assert_eq!(
+                backend
+                    .list_parts("enospc-mpu-part", &upload_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            backend
+                .abort_multipart("enospc-mpu-part", &upload_id)
+                .await
+                .unwrap();
+            assert!(!upload_dir.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_multipart_assembly_sites_preserve_old_object_and_upload() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-mpu-complete").await.unwrap();
+
+        for (index, (name, sizes)) in [
+            ("mpu:assembly-move", vec![512]),
+            ("mpu:during-assembly", vec![512, 512]),
+            ("mpu:assembly-sync", vec![512, 512]),
+            ("mpu:segment-move", vec![3072, 3072]),
+            ("mpu:segment-stub-write", vec![3072, 3072]),
+            ("mpu:segment-dir-fsync", vec![3072, 3072]),
+            ("mpu:before-finalize", vec![3072, 3072]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("target-{index}.bin");
+            put_listing_object(&backend, "enospc-mpu-complete", &key, b"old").await;
+            let (upload_id, parts, expected) =
+                create_multipart_with_parts(&backend, "enospc-mpu-complete", &key, &sizes).await;
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend
+                .complete_multipart("enospc-mpu-complete", &upload_id, &parts)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            assert_eq!(
+                object_bytes(&backend, "enospc-mpu-complete", &key).await,
+                b"old"
+            );
+            assert!(listed_keys(&backend, "enospc-mpu-complete")
+                .await
+                .contains(&key));
+            assert_eq!(
+                backend
+                    .list_parts("enospc-mpu-complete", &upload_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                sizes.len()
+            );
+            backend
+                .complete_multipart("enospc-mpu-complete", &upload_id, &parts)
+                .await
+                .unwrap();
+            assert_eq!(
+                object_bytes(&backend, "enospc-mpu-complete", &key).await,
+                expected
+            );
+
+            let abort_key = format!("abort-{index}.bin");
+            let (abort_id, abort_parts, _) =
+                create_multipart_with_parts(&backend, "enospc-mpu-complete", &abort_key, &sizes)
+                    .await;
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend
+                .complete_multipart("enospc-mpu-complete", &abort_id, &abort_parts)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            backend
+                .abort_multipart("enospc-mpu-complete", &abort_id)
+                .await
+                .unwrap();
+            assert!(!backend
+                .multipart_upload_dir("enospc-mpu-complete", &abort_id)
+                .unwrap()
+                .exists());
+            assert!(!backend
+                .segments_bucket_root("enospc-mpu-complete")
+                .join(&abort_id)
+                .exists());
+        }
+    }
+
     #[tokio::test]
     async fn injected_error_during_sidecar_stage_aborts_the_put_cleanly() {
         let _fp = failpoint_test_guard();
@@ -8246,7 +9330,7 @@ mod tests {
         crate::failpoints::set(
             &backend.root,
             "put:stage-sidecar",
-            crate::failpoints::FailAction::Error(std::io::ErrorKind::Other),
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
         );
         let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
         let result = backend
@@ -8518,6 +9602,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transformed_mpu_precondition_failure_preserves_object_upload_and_temps() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("mpu-transform-cond").await.unwrap();
+        put_listing_object(&backend, "mpu-transform-cond", "obj.bin", b"old").await;
+
+        let mut pending = HashMap::new();
+        pending.insert(MULTIPART_PENDING_SSE_ALG.to_string(), "AES256".to_string());
+        let upload_id = backend
+            .initiate_multipart("mpu-transform-cond", "obj.bin", Some(pending))
+            .await
+            .unwrap();
+        let first: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new-".to_vec()));
+        let first_etag = backend
+            .upload_part("mpu-transform-cond", &upload_id, 1, first)
+            .await
+            .unwrap();
+        let second: AsyncReadStream = Box::pin(std::io::Cursor::new(b"body".to_vec()));
+        let second_etag = backend
+            .upload_part("mpu-transform-cond", &upload_id, 2, second)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: first_etag,
+            },
+            PartInfo {
+                part_number: 2,
+                etag: second_etag,
+            },
+        ];
+        let ordinary = backend
+            .complete_multipart("mpu-transform-cond", &upload_id, &parts)
+            .await;
+        assert!(matches!(ordinary, Err(StorageError::InvalidArgument(_))));
+        let prepared = backend
+            .prepare_multipart_for_transform("mpu-transform-cond", &upload_id, &parts)
+            .await
+            .unwrap();
+        let transformed = backend.allocate_prepared_tmp_path().unwrap();
+        std::fs::copy(&prepared.plaintext_path, &transformed).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&transformed)
+            .unwrap()
+            .sync_all()
+            .unwrap();
+        let transformed_size = std::fs::metadata(&transformed).unwrap().len();
+        let mut final_metadata = prepared.metadata.clone();
+        final_metadata.remove(MULTIPART_PENDING_SSE_ALG);
+        let result = backend
+            .commit_transformed_multipart(
+                &prepared,
+                &transformed,
+                transformed_size,
+                final_metadata.clone(),
+                crate::traits::PutCommitOptions {
+                    conditions: crate::traits::PutConditions {
+                        if_match: Some("not-the-old-etag".to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(StorageError::PreconditionFailed(_))));
+        assert!(prepared.plaintext_path.is_file());
+        assert!(transformed.is_file());
+        assert!(backend
+            .multipart_upload_dir("mpu-transform-cond", &upload_id)
+            .unwrap()
+            .join("part-00001.part")
+            .is_file());
+        let (_, mut old_stream) = backend
+            .get_object("mpu-transform-cond", "obj.bin")
+            .await
+            .unwrap();
+        let mut old_body = Vec::new();
+        old_stream.read_to_end(&mut old_body).await.unwrap();
+        assert_eq!(old_body, b"old");
+
+        let committed = backend
+            .commit_transformed_multipart(
+                &prepared,
+                &transformed,
+                transformed_size,
+                final_metadata,
+                crate::traits::PutCommitOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.etag.as_deref(),
+            Some(prepared.composite_etag.as_str())
+        );
+        assert!(!backend
+            .multipart_upload_dir("mpu-transform-cond", &upload_id)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_file(&prepared.plaintext_path);
+    }
+
+    #[tokio::test]
+    async fn transformed_mpu_assembly_failpoints_preserve_the_upload() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("mpu-transform-fp").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("mpu-transform-fp", "obj.bin", None)
+            .await
+            .unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        let etag = backend
+            .upload_part("mpu-transform-fp", &upload_id, 1, stream)
+            .await
+            .unwrap();
+        let parts = vec![PartInfo {
+            part_number: 1,
+            etag,
+        }];
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:during-assembly",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        assert!(backend
+            .prepare_multipart_for_transform("mpu-transform-fp", &upload_id, &parts)
+            .await
+            .is_err());
+        crate::failpoints::clear(&backend.root, "mpu:during-assembly");
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:after-assembly",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let crashed_upload = upload_id.clone();
+        let crashed_parts = parts.clone();
+        let join = tokio::spawn(async move {
+            crashed
+                .prepare_multipart_for_transform(
+                    "mpu-transform-fp",
+                    &crashed_upload,
+                    &crashed_parts,
+                )
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "mpu:after-assembly");
+        assert!(join.unwrap_err().is_panic());
+        assert!(backend
+            .multipart_upload_dir("mpu-transform-fp", &upload_id)
+            .unwrap()
+            .join("part-00001.part")
+            .is_file());
+        let prepared = backend
+            .prepare_multipart_for_transform("mpu-transform-fp", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&prepared.plaintext_path).unwrap(), b"payload");
+        let _ = std::fs::remove_file(&prepared.plaintext_path);
+    }
+
+    #[tokio::test]
     async fn crash_before_segments_mpu_finalize_is_recovered_on_retry() {
         let _fp = failpoint_test_guard();
         let (_dir, backend) = create_test_backend();
@@ -8634,7 +9885,7 @@ mod tests {
         crate::failpoints::set(
             &backend.root,
             "mpu:segment-dir-fsync",
-            crate::failpoints::FailAction::Error(std::io::ErrorKind::Other),
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
         );
         let result = backend
             .complete_multipart("fp-mpu-f", &upload_id, &parts)
@@ -8968,7 +10219,7 @@ mod tests {
         crate::failpoints::set(
             &backend.root,
             "put:stage-dir-fsync",
-            crate::failpoints::FailAction::Error(std::io::ErrorKind::Other),
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
         );
         let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
         let result = backend
@@ -9138,7 +10389,7 @@ mod tests {
         crate::failpoints::set(
             &backend.root,
             "put:before-publish-sidecar",
-            crate::failpoints::FailAction::Error(std::io::ErrorKind::Other),
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
         );
         let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2-longer".to_vec()));
         let result = backend.put_object("fp-torn", "obj.bin", stream, None).await;

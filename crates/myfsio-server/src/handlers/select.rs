@@ -85,7 +85,7 @@ async fn run_streaming_select(
         }
     };
 
-    let served = match serve_object_data(state, snapshot, None, headers).await {
+    let served = match serve_object_data(state, snapshot, None, headers, None).await {
         Ok(served) => served,
         Err(ObjectReadError::Rejected(response)) => return response,
         Err(ObjectReadError::Storage(_)) => {

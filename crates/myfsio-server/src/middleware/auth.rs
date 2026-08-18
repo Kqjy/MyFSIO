@@ -245,19 +245,26 @@ async fn serve_website_document(
         ));
     }
 
-    let served =
-        match object_read::serve_object_data(state, snapshot, range, &HeaderMap::new()).await {
-            Ok(served) => served,
-            Err(object_read::ObjectReadError::RangeNotSatisfiable(total)) => {
-                let mut range_headers = HeaderMap::new();
-                range_headers.insert(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{}", total).parse().unwrap(),
-                );
-                return Some((StatusCode::RANGE_NOT_SATISFIABLE, range_headers).into_response());
-            }
-            Err(_) => return None,
-        };
+    let served = match object_read::serve_object_data(
+        state,
+        snapshot,
+        range,
+        &HeaderMap::new(),
+        Some((bucket, key)),
+    )
+    .await
+    {
+        Ok(served) => served,
+        Err(object_read::ObjectReadError::RangeNotSatisfiable(total)) => {
+            let mut range_headers = HeaderMap::new();
+            range_headers.insert(
+                header::CONTENT_RANGE,
+                format!("bytes */{}", total).parse().unwrap(),
+            );
+            return Some((StatusCode::RANGE_NOT_SATISFIABLE, range_headers).into_response());
+        }
+        Err(_) => return None,
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());

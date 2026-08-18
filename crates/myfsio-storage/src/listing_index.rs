@@ -264,6 +264,7 @@ impl BucketListingIndex {
 
     pub(crate) fn invalidate(&mut self) {
         self.valid = false;
+        self.journal = None;
     }
 
     pub(crate) fn apply_put(&mut self, record: ListingRecord) -> std::io::Result<()> {
@@ -460,6 +461,8 @@ impl BucketListingIndex {
     }
 
     fn append(&mut self, op: &JournalOp) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        hit_failpoint(&self.listing_dir, "listing:journal-append")?;
         let journal = self
             .journal
             .as_mut()
@@ -470,11 +473,22 @@ impl BucketListingIndex {
     }
 
     fn write_snapshot(&self) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        hit_failpoint(&self.listing_dir, "listing:snapshot-write")?;
         let entries = self.map.values().cloned().collect::<Vec<_>>();
         let snapshot = make_snapshot(self.snapshot_high_water_generation, self.counters, entries)?;
         let bytes = serde_json::to_vec(&snapshot).map_err(invalid_data)?;
         atomic_write(&self.listing_dir.join("snapshot.json"), &bytes)
     }
+}
+
+#[cfg(any(test, feature = "failpoints"))]
+pub(crate) fn hit_failpoint(listing_dir: &Path, name: &str) -> std::io::Result<()> {
+    let root = listing_dir
+        .ancestors()
+        .nth(4)
+        .unwrap_or_else(|| Path::new(""));
+    crate::failpoints::hit(root, name)
 }
 
 pub(crate) fn prepare_compaction_snapshot(

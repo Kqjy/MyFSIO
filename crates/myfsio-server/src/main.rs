@@ -520,6 +520,7 @@ fn print_config_summary(config: &ServerConfig) {
         config.gc_interval_hours, config.gc_dry_run
     );
     println!("Integrity enabled: {}", config.integrity_enabled);
+    println!("Read verify mode: {}", config.read_verify_mode.as_str());
     println!("Lifecycle enabled: {}", config.lifecycle_enabled);
     println!(
         "Lifecycle history limit: {}",
