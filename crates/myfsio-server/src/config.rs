@@ -48,6 +48,7 @@ pub struct ServerConfig {
     pub integrity_heal_concurrency: usize,
     pub integrity_scan_pacing_ms: u64,
     pub integrity_quarantine_retention_days: u64,
+    pub integrity_reverify_days: u64,
     pub metrics_enabled: bool,
     pub metrics_history_enabled: bool,
     pub metrics_interval_minutes: u64,
@@ -204,6 +205,7 @@ impl ServerConfig {
         let integrity_scan_pacing_ms = parse_u64_env("INTEGRITY_SCAN_PACING_MS", 0);
         let integrity_quarantine_retention_days =
             parse_u64_env("INTEGRITY_QUARANTINE_RETENTION_DAYS", 7).max(1);
+        let integrity_reverify_days = parse_u64_env("INTEGRITY_REVERIFY_DAYS", 30);
 
         let metrics_enabled = parse_bool_env("OPERATION_METRICS_ENABLED", false);
 
@@ -369,6 +371,7 @@ impl ServerConfig {
             integrity_heal_concurrency,
             integrity_scan_pacing_ms,
             integrity_quarantine_retention_days,
+            integrity_reverify_days,
             metrics_enabled,
             metrics_history_enabled,
             metrics_interval_minutes,
@@ -485,6 +488,7 @@ impl Default for ServerConfig {
             integrity_heal_concurrency: 1,
             integrity_scan_pacing_ms: 0,
             integrity_quarantine_retention_days: 7,
+            integrity_reverify_days: 30,
             metrics_enabled: false,
             metrics_history_enabled: false,
             metrics_interval_minutes: 5,

@@ -297,6 +297,7 @@ impl AppState {
                     heal_concurrency: config.integrity_heal_concurrency,
                     scan_pacing_ms: config.integrity_scan_pacing_ms,
                     quarantine_retention_days: config.integrity_quarantine_retention_days,
+                    reverify_days: config.integrity_reverify_days,
                 },
                 integrity_peer_fetcher,
             )))
@@ -348,7 +349,8 @@ impl AppState {
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
-            boot_time_utc: chrono::Utc::now(),
+            boot_time_utc: chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+                .unwrap_or_else(chrono::Utc::now),
             relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),
             relay_idempotency_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
             audit_log,

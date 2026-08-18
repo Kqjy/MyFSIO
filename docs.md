@@ -218,6 +218,7 @@ These limits gate S3 object data reads and writes only. Admin and UI requests, H
 | `INTEGRITY_BATCH_SIZE` | `10000` | Max objects scanned per cycle |
 | `INTEGRITY_HEAL_CONCURRENCY` | `1` | Max concurrent heal tasks per cycle |
 | `INTEGRITY_SCAN_PACING_MS` | `0` | Optional delay between scanned objects |
+| `INTEGRITY_REVERIFY_DAYS` | `30` | Re-hash unchanged objects after this many days; `0` disables checksum caching |
 | `INTEGRITY_QUARANTINE_RETENTION_DAYS` | `7` | How long to retain quarantined files (cleaned up by GC) |
 | `LIFECYCLE_ENABLED` | `false` | Start the lifecycle worker |
 | `METRICS_HISTORY_ENABLED` | `false` | Persist system metrics snapshots |
@@ -541,10 +542,11 @@ INTEGRITY_BATCH_SIZE=10000
 INTEGRITY_AUTO_HEAL=false
 INTEGRITY_DRY_RUN=false
 INTEGRITY_HEAL_CONCURRENCY=1
+INTEGRITY_REVERIFY_DAYS=30
 INTEGRITY_QUARANTINE_RETENTION_DAYS=7
 ```
 
-The checksum phase verifies single-part objects against their stored MD5 and multipart objects against a recomputed composite ETag, reading either the segment files or the concatenated body according to the `__part_sizes__` manifest. Objects the scanner cannot verify are counted rather than accused: `encrypted_objects_unverifiable` for server-side-encrypted objects, and `multipart_objects_unverifiable` for multipart objects completed before `__part_sizes__` existed. A read failure that indicates damaged content (short read, trailing bytes, wrong segment size) is reported as `corrupted_object`; any other IO failure is reported in `errors` and the object is left alone.
+The checksum phase verifies single-part objects against their stored MD5 and multipart objects against a recomputed composite ETag, reading either the segment files or the concatenated body according to the `__part_sizes__` manifest. Clean non-segmented objects are recorded in the derived per-bucket `integrity_verified.json` index and skipped while size, mtime, and stored ETag remain unchanged, until `INTEGRITY_REVERIFY_DAYS` expires. Objects the scanner cannot verify are counted rather than accused: `encrypted_objects_unverifiable` for server-side-encrypted objects, and `multipart_objects_unverifiable` for multipart objects completed before `__part_sizes__` existed. A read failure that indicates damaged content (short read, trailing bytes, wrong segment size) is reported as `corrupted_object`; any other IO failure is reported in `errors` and the object is left alone.
 
 When `INTEGRITY_AUTO_HEAL=true` (and `INTEGRITY_DRY_RUN=false`), each scan ends with a heal phase that processes the issues it just recorded. For `corrupted_object` the bad bytes are renamed into `data/.myfsio.sys/quarantine/<bucket>/<ts>/<key>` and the heal logic tries, in order:
 
@@ -557,7 +559,7 @@ Poisoned entries whose live object is gone are re-reported on every scan as `poi
 
 Subsequent reads (`GET`, `HEAD`, `CopyObject` source) on a poisoned key return `422 ObjectCorrupted` instead of serving rotted bytes; the response includes an `x-amz-error-code: ObjectCorrupted` header so HEAD callers (which receive no body) can still detect the condition. Replication push skips poisoned keys; the checksum phase skips poisoned keys instead of re-flagging them as corrupt. Overwriting the key with a fresh `PUT` clears the poison.
 
-`stale_version`, `etag_cache_inconsistency`, and `phantom_metadata` issues are healed locally (move-to-quarantine, rebuild cache, drop entry); `orphaned_object` is reported only. A metadata key that does not resolve to a path inside its bucket is reported as `invalid_metadata_key` and never touched.
+`stale_version` and `phantom_metadata` issues are healed locally (move-to-quarantine and drop entry); `orphaned_object` is reported only. A metadata key that does not resolve to a path inside its bucket is reported as `invalid_metadata_key` and never touched.
 
 Override per-invocation by passing `auto_heal` / `dry_run` to `POST /myfsio/admin/integrity/run`. Setting both requests a heal preview: the scan runs, every issue is classified as healable or not, and nothing is modified — reported as `issues_would_heal` and the per-type `would_heal` count. The response and history records include a `heal_stats` map keyed by issue type with `{found, healed, poisoned, peer_mismatch, peer_unavailable, verify_failed, failed, skipped, would_heal}`. History is at `data/.myfsio.sys/config/integrity_history.json`; if it cannot be written the error is surfaced on the System page instead of being silently dropped.
 

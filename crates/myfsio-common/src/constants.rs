@@ -5,7 +5,6 @@ pub const BUCKET_META_DIR: &str = "meta";
 pub const BUCKET_VERSIONS_DIR: &str = "versions";
 pub const BUCKET_CONFIG_FILE: &str = ".bucket.json";
 pub const STATS_FILE: &str = "stats.json";
-pub const ETAG_INDEX_FILE: &str = "etag_index.json";
 pub const INDEX_FILE: &str = "_index.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DIR_MARKER_FILE: &str = ".__myfsio_dirobj__";
