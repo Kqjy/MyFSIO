@@ -3,7 +3,7 @@
 {% block title %}Sites{% endblock %}
 
 {% block content %}
-<div class="page-header d-flex justify-content-between align-items-center mb-4">
+<div class="page-header mb-4">
   <div>
     <p class="text-uppercase text-muted small mb-1">Geo-Distribution</p>
     <h1 class="h3 mb-1 d-flex align-items-center gap-2">
@@ -14,156 +14,12 @@
     </h1>
     <p class="text-muted mb-0 mt-1">Configure this site's identity and manage peer sites for geo-distribution.</p>
   </div>
-  <div class="d-none d-md-flex align-items-center gap-2">
-    {% if local_site and local_site.site_id %}
-    <span class="badge bg-secondary bg-opacity-10 text-secondary fs-6 px-3 py-2">
-      {{ local_site.site_id }}
-    </span>
-    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
-      <path fill-rule="evenodd" d="M1 8a.5.5 0 0 1 .5-.5h11.793l-3.147-3.146a.5.5 0 0 1 .708-.708l4 4a.5.5 0 0 1 0 .708l-4 4a.5.5 0 0 1-.708-.708L13.293 8.5H1.5A.5.5 0 0 1 1 8z"/>
-    </svg>
-    {% endif %}
-    <span class="badge bg-primary bg-opacity-10 text-primary fs-6 px-3 py-2">
-      {{ peers|length }} peer{% if peers|length != 1 %}s{% else %}{% endif %}
-    </span>
-  </div>
 </div>
 
 <div class="row g-4">
-    <div class="col-lg-4 col-md-5">
-        <div class="card shadow-sm border-0 mb-4" style="border-radius: 1rem;">
-            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4">
-                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                        <path d="M8 16s6-5.686 6-10A6 6 0 0 0 2 6c0 4.314 6 10 6 10zm0-7a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/>
-                    </svg>
-                    Local Site Identity
-                </h5>
-                <p class="text-muted small mb-0">This site's configuration</p>
-            </div>
-            <div class="card-body px-4 pb-4">
-                <form method="POST" action="{{ url_for(endpoint="ui.update_local_site") }}" id="localSiteForm">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
-                    <div class="mb-3">
-                        <label for="site_id" class="form-label fw-medium">Site ID</label>
-                        <input type="text" class="form-control" id="site_id" name="site_id" required
-                            value="{% if local_site %}{{ local_site.site_id }}{% else %}{{ config_site_id | default(value="") }}{% endif %}"
-                            placeholder="us-west-1">
-                        <div class="form-text">Unique identifier for this site</div>
-                    </div>
-                    <div class="mb-3">
-                        <label for="endpoint" class="form-label fw-medium">Endpoint URL</label>
-                        <input type="url" class="form-control" id="endpoint" name="endpoint"
-                            value="{% if local_site %}{{ local_site.endpoint }}{% else %}{{ config_site_endpoint | default(value="") }}{% endif %}"
-                            placeholder="https://s3.us-west-1.example.com">
-                        <div class="form-text">Public URL for this site</div>
-                    </div>
-                    <div class="mb-3">
-                        <label for="region" class="form-label fw-medium">Region</label>
-                        <input type="text" class="form-control" id="region" name="region"
-                            value="{% if local_site %}{{ local_site.region }}{% else %}{{ config_site_region }}{% endif %}">
-                    </div>
-                    <div class="row mb-3">
-                        <div class="col-6">
-                            <label for="priority" class="form-label fw-medium">Priority</label>
-                            <input type="number" class="form-control" id="priority" name="priority"
-                                value="{% if local_site %}{{ local_site.priority }}{% else %}{{ 100 }}{% endif %}" min="0">
-                            <div class="form-text">Lower = preferred</div>
-                        </div>
-                        <div class="col-6">
-                            <label for="display_name" class="form-label fw-medium">Display Name</label>
-                            <input type="text" class="form-control" id="display_name" name="display_name"
-                                value="{% if local_site %}{{ local_site.display_name }}{% else %}{{ "" }}{% endif %}"
-                                placeholder="US West Primary">
-                        </div>
-                    </div>
-                    <div class="d-grid">
-                        <button type="submit" class="btn btn-primary">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                                <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
-                            </svg>
-                            Save Local Site
-                        </button>
-                    </div>
-                </form>
-            </div>
-        </div>
-
+    <div class="col-12 col-lg-8">
         <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-            <div class="card-header bg-transparent border-0 pt-3 pb-0 px-4">
-                <button class="btn btn-link text-decoration-none p-0 w-100 d-flex align-items-center justify-content-between"
-                    type="button" data-bs-toggle="collapse" data-bs-target="#addPeerCollapse"
-                    aria-expanded="false" aria-controls="addPeerCollapse">
-                    <span class="d-flex align-items-center gap-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary" viewBox="0 0 16 16">
-                            <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
-                        </svg>
-                        <span class="fw-semibold h5 mb-0">Add Peer Site</span>
-                    </span>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted add-peer-chevron" viewBox="0 0 16 16">
-                        <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
-                    </svg>
-                </button>
-                <p class="text-muted small mb-0 mt-1">Register a remote site</p>
-            </div>
-            <div class="collapse" id="addPeerCollapse">
-                <div class="card-body px-4 pb-4">
-                    <form method="POST" action="{{ url_for(endpoint="ui.add_peer_site") }}" id="addPeerForm">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
-                        <div class="mb-3">
-                            <label for="peer_site_id" class="form-label fw-medium">Site ID</label>
-                            <input type="text" class="form-control" id="peer_site_id" name="site_id" required placeholder="us-east-1">
-                        </div>
-                        <div class="mb-3">
-                            <label for="peer_endpoint" class="form-label fw-medium">Endpoint URL</label>
-                            <input type="url" class="form-control" id="peer_endpoint" name="endpoint" required placeholder="https://s3.us-east-1.example.com">
-                        </div>
-                        <div class="mb-3">
-                            <label for="peer_region" class="form-label fw-medium">Region</label>
-                            <input type="text" class="form-control" id="peer_region" name="region" value="us-east-1">
-                        </div>
-                        <div class="row mb-3">
-                            <div class="col-6">
-                                <label for="peer_priority" class="form-label fw-medium">Priority</label>
-                                <input type="number" class="form-control" id="peer_priority" name="priority" value="100" min="0">
-                            </div>
-                            <div class="col-6">
-                                <label for="peer_display_name" class="form-label fw-medium">Display Name</label>
-                                <input type="text" class="form-control" id="peer_display_name" name="display_name" placeholder="US East DR">
-                            </div>
-                        </div>
-                        <div class="mb-3">
-                            <label for="peer_connection_id" class="form-label fw-medium">Connection</label>
-                            <select class="form-select" id="peer_connection_id" name="connection_id">
-                                <option value="">No connection</option>
-                                {% for conn in connections %}
-                                <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
-                                {% endfor %}
-                            </select>
-                            <div class="form-text">Link to a remote connection for health checks</div>
-                        </div>
-                        <div class="mb-3">
-                            <label for="peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
-                            <input type="text" class="form-control" id="peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (required for bidirectional replication)" autocomplete="off" spellcheck="false">
-                            <div class="form-text"><strong>Required for bidirectional replication</strong> to prevent loops. This is the S3 access key the peer signs its replication PUTs with when pushing to this site &mdash; we use it to recognize "this object came from a peer" and skip re-replication. Optional for admin-only or one-way replication setups.</div>
-                        </div>
-                        <div class="d-grid">
-                            <button type="submit" class="btn btn-primary">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
-                                    <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
-                                </svg>
-                                Add Peer Site
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-lg-8 col-md-7">
-        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
-            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4 d-flex justify-content-between align-items-start">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-3 px-md-4 d-flex justify-content-between align-items-start flex-wrap gap-2">
                 <div>
                     <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
@@ -182,18 +38,16 @@
                 </button>
                 {% endif %}
             </div>
-            <div class="card-body px-4 pb-4">
+            <div class="card-body px-3 px-md-4 pb-4">
                 {% if peers %}
                 <div class="table-responsive">
-                    <table class="table table-hover align-middle mb-0">
+                    <table class="table table-fluid table-hover align-middle mb-0" id="peerTable">
                         <thead class="table-light">
                             <tr>
-                                <th scope="col" style="width: 50px;">Health</th>
-                                <th scope="col">Site ID</th>
-                                <th scope="col">Endpoint</th>
-                                <th scope="col">Region</th>
-                                <th scope="col">Priority</th>
-                                <th scope="col">Sync Status</th>
+                                <th scope="col" style="width: 44px;">Health</th>
+                                <th scope="col">Site</th>
+                                <th scope="col" class="d-none d-xl-table-cell">Endpoint</th>
+                                <th scope="col" class="d-none d-lg-table-cell">Sync Status</th>
                                 <th scope="col" class="text-end">Actions</th>
                             </tr>
                         </thead>
@@ -223,21 +77,69 @@
                                     </span>
                                 </td>
                                 <td>
-                                    <div class="d-flex align-items-center gap-2">
-                                        <div class="peer-icon">
+                                    <div class="d-flex align-items-start gap-2">
+                                        <div class="peer-icon flex-shrink-0">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
                                                 <path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm7.5-6.923c-.67.204-1.335.82-1.887 1.855A7.97 7.97 0 0 0 5.145 4H7.5V1.077zM4.09 4a9.267 9.267 0 0 1 .64-1.539 6.7 6.7 0 0 1 .597-.933A7.025 7.025 0 0 0 2.255 4H4.09zm-.582 3.5c.03-.877.138-1.718.312-2.5H1.674a6.958 6.958 0 0 0-.656 2.5h2.49zM4.847 5a12.5 12.5 0 0 0-.338 2.5H7.5V5H4.847zM8.5 5v2.5h2.99a12.495 12.495 0 0 0-.337-2.5H8.5zM4.51 8.5a12.5 12.5 0 0 0 .337 2.5H7.5V8.5H4.51zm3.99 0V11h2.653c.187-.765.306-1.608.338-2.5H8.5z"/>
                                             </svg>
                                         </div>
-                                        <div>
+                                        <div style="min-width: 0; overflow-wrap: anywhere;">
                                             <span class="fw-medium">{% if peer.display_name %}{{ peer.display_name }}{% else %}{{ peer.site_id }}{% endif %}</span>
                                             {% if peer.display_name and peer.display_name != peer.site_id %}
-                                            <br><small class="text-muted">{{ peer.site_id }}</small>
+                                            <div><small class="text-muted">{{ peer.site_id }}</small></div>
                                             {% endif %}
+                                            <div class="d-xl-none mt-1 d-flex align-items-center gap-1">
+                                                <span class="endpoint-display text-muted small" data-full-url="{{ peer.endpoint }}" title="{{ peer.endpoint }}" style="cursor: pointer;">
+                                                    {% set parsed = peer.endpoint | split(pat="//") %}
+                                                    {% if parsed|length > 1 %}{% set host_parts = parsed[1] | split(pat="/") %}{{ host_parts[0] }}{% else %}{{ peer.endpoint }}{% endif %}
+                                                </span>
+                                                <button type="button" class="btn btn-link btn-sm p-0 btn-copy-endpoint flex-shrink-0" data-url="{{ peer.endpoint }}" title="Copy full URL">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                                                        <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+                                                        <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                            <div class="d-flex flex-wrap align-items-center gap-2 mt-1">
+                                                <span class="badge bg-primary bg-opacity-10 text-primary">{{ peer.region }}</span>
+                                                <span class="text-muted small">priority {{ peer.priority }}</span>
+                                            </div>
+                                            <div class="d-lg-none">
+                                                <div class="mt-1">
+                                                    {% if item.has_connection %}
+                                                    <div class="d-flex flex-wrap align-items-center gap-2">
+                                                        <span class="badge bg-secondary bg-opacity-10 text-secondary">{{ item.buckets_syncing }} bucket{% if item.buckets_syncing != 1 %}s{% else %}{% endif %}</span>
+                                                        {% if item.has_bidirectional %}
+                                                        <span class="bidir-status-icon" data-site-id="{{ peer.site_id }}" title="Bidirectional sync - click to verify">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="text-info" viewBox="0 0 16 16" style="cursor: pointer;">
+                                                                <path fill-rule="evenodd" d="M1 11.5a.5.5 0 0 0 .5.5h11.793l-3.147 3.146a.5.5 0 0 0 .708.708l4-4a.5.5 0 0 0 0-.708l-4-4a.5.5 0 0 0-.708.708L13.293 11H1.5a.5.5 0 0 0-.5.5zm14-7a.5.5 0 0 1-.5.5H2.707l3.147 3.146a.5.5 0 1 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 1 1 .708.708L2.707 4H14.5a.5.5 0 0 1 .5.5z"/>
+                                                            </svg>
+                                                        </span>
+                                                        {% endif %}
+                                                        {% if item.errors and item.errors > 0 %}
+                                                        <span class="badge bg-danger bg-opacity-10 text-danger" title="Sync errors across bidirectional buckets">{{ item.errors }} err</span>
+                                                        {% endif %}
+                                                    </div>
+                                                    {% if item.last_sync_at %}
+                                                    <div class="text-muted small mt-1" data-last-sync-at="{{ item.last_sync_at }}">
+                                                        last sync: <span class="last-sync-rel">just now</span>
+                                                        {% if item.objects_pulled %} · {{ item.objects_pulled }} pulled{% endif %}
+                                                    </div>
+                                                    {% endif %}
+                                                    {% else %}
+                                                    <a href="#" class="text-muted small link-no-connection"
+                                                        data-site-id="{{ peer.site_id }}"
+                                                        title="Click to link a connection">Link a connection</a>
+                                                    {% endif %}
+                                                </div>
+                                            </div>
+                                            <div class="sync-stats-detail d-none mt-2 small" id="stats-{{ peer.site_id }}">
+                                                <span class="spinner-border spinner-border-sm text-muted" style="width: 12px; height: 12px;"></span>
+                                            </div>
                                         </div>
                                     </div>
                                 </td>
-                                <td>
+                                <td class="d-none d-xl-table-cell" style="min-width: 0; overflow-wrap: anywhere;">
                                     <span class="endpoint-display text-muted small" data-full-url="{{ peer.endpoint }}" title="{{ peer.endpoint }}" style="cursor: pointer;">
                                         {% set parsed = peer.endpoint | split(pat="//") %}
                                         {% if parsed|length > 1 %}{% set host_parts = parsed[1] | split(pat="/") %}{{ host_parts[0] }}{% else %}{{ peer.endpoint }}{% endif %}
@@ -249,9 +151,7 @@
                                         </svg>
                                     </button>
                                 </td>
-                                <td><span class="text-muted small">{{ peer.region }}</span></td>
-                                <td><span class="text-muted small">{{ peer.priority }}</span></td>
-                                <td class="sync-stats-cell" data-site-id="{{ peer.site_id }}">
+                                <td class="sync-stats-cell d-none d-lg-table-cell" data-site-id="{{ peer.site_id }}">
                                     {% if item.has_connection %}
                                     <div class="d-flex align-items-center gap-2">
                                         <span class="badge bg-primary bg-opacity-10 text-primary">{{ item.buckets_syncing }} bucket{% if item.buckets_syncing != 1 %}s{% else %}{% endif %}</span>
@@ -272,16 +172,13 @@
                                         {% if item.objects_pulled %} · {{ item.objects_pulled }} pulled{% endif %}
                                     </div>
                                     {% endif %}
-                                    <div class="sync-stats-detail d-none mt-2 small" id="stats-{{ peer.site_id }}">
-                                        <span class="spinner-border spinner-border-sm text-muted" style="width: 12px; height: 12px;"></span>
-                                    </div>
                                     {% else %}
                                     <a href="#" class="text-muted small link-no-connection"
                                         data-site-id="{{ peer.site_id }}"
                                         title="Click to link a connection">Link a connection</a>
                                     {% endif %}
                                 </td>
-                                <td class="text-end">
+                                <td class="text-end align-middle">
                                     <div class="d-flex align-items-center justify-content-end gap-1">
                                         <button type="button" class="btn btn-outline-secondary btn-sm"
                                             data-bs-toggle="modal"
@@ -381,23 +278,154 @@
             </div>
         </div>
     </div>
+
+    <div class="col-12 col-lg-4">
+        <div class="card shadow-sm border-0 mb-4" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-4 pb-0 px-3 px-md-4">
+                <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary flex-shrink-0" viewBox="0 0 16 16">
+                        <path d="M8 16s6-5.686 6-10A6 6 0 0 0 2 6c0 4.314 6 10 6 10zm0-7a3 3 0 1 1 0-6 3 3 0 0 1 0 6z"/>
+                    </svg>
+                    Local Site Identity
+                </h5>
+                <p class="text-muted small mb-0">This site's configuration</p>
+            </div>
+            <div class="card-body px-3 px-md-4 pb-4">
+                <form method="POST" action="{{ url_for(endpoint="ui.update_local_site") }}" id="localSiteForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
+                    <div class="mb-3">
+                        <label for="site_id" class="form-label fw-medium">Site ID</label>
+                        <input type="text" class="form-control" id="site_id" name="site_id" required
+                            value="{% if local_site %}{{ local_site.site_id }}{% else %}{{ config_site_id | default(value="") }}{% endif %}"
+                            placeholder="us-west-1">
+                        <div class="form-text">Unique identifier for this site</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="endpoint" class="form-label fw-medium">Endpoint URL</label>
+                        <input type="url" class="form-control" id="endpoint" name="endpoint"
+                            value="{% if local_site %}{{ local_site.endpoint }}{% else %}{{ config_site_endpoint | default(value="") }}{% endif %}"
+                            placeholder="https://s3.us-west-1.example.com">
+                        <div class="form-text">Public URL for this site</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="region" class="form-label fw-medium">Region</label>
+                        <input type="text" class="form-control" id="region" name="region"
+                            value="{% if local_site %}{{ local_site.region }}{% else %}{{ config_site_region }}{% endif %}">
+                    </div>
+                    <div class="row g-3 mb-3">
+                        <div class="col-12 col-sm-6">
+                            <label for="priority" class="form-label fw-medium">Priority</label>
+                            <input type="number" class="form-control" id="priority" name="priority"
+                                value="{% if local_site %}{{ local_site.priority }}{% else %}{{ 100 }}{% endif %}" min="0">
+                            <div class="form-text">Lower = preferred</div>
+                        </div>
+                        <div class="col-12 col-sm-6">
+                            <label for="display_name" class="form-label fw-medium">Display Name</label>
+                            <input type="text" class="form-control" id="display_name" name="display_name"
+                                value="{% if local_site %}{{ local_site.display_name }}{% else %}{{ "" }}{% endif %}"
+                                placeholder="US West Primary">
+                        </div>
+                    </div>
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                <path d="M10.97 4.97a.75.75 0 0 1 1.07 1.05l-3.99 4.99a.75.75 0 0 1-1.08.02L4.324 8.384a.75.75 0 1 1 1.06-1.06l2.094 2.093 3.473-4.425a.267.267 0 0 1 .02-.022z"/>
+                            </svg>
+                            Save Local Site
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0" style="border-radius: 1rem;">
+            <div class="card-header bg-transparent border-0 pt-3 pb-0 px-3 px-md-4">
+                <button class="btn btn-link text-decoration-none p-0 w-100 d-flex align-items-center justify-content-between gap-2"
+                    type="button" data-bs-toggle="collapse" data-bs-target="#addPeerCollapse"
+                    aria-expanded="false" aria-controls="addPeerCollapse">
+                    <span class="d-flex align-items-center gap-2 text-start">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-primary flex-shrink-0" viewBox="0 0 16 16">
+                            <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                        </svg>
+                        <span class="fw-semibold h5 mb-0">Add Peer Site</span>
+                    </span>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="text-muted add-peer-chevron flex-shrink-0" viewBox="0 0 16 16">
+                        <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+                    </svg>
+                </button>
+                <p class="text-muted small mb-0 mt-1">Register a remote site</p>
+            </div>
+            <div class="collapse" id="addPeerCollapse">
+                <div class="card-body px-3 px-md-4 pb-4">
+                    <form method="POST" action="{{ url_for(endpoint="ui.add_peer_site") }}" id="addPeerForm">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token_value }}"/>
+                        <div class="mb-3">
+                            <label for="peer_site_id" class="form-label fw-medium">Site ID</label>
+                            <input type="text" class="form-control" id="peer_site_id" name="site_id" required placeholder="us-east-1">
+                        </div>
+                        <div class="mb-3">
+                            <label for="peer_endpoint" class="form-label fw-medium">Endpoint URL</label>
+                            <input type="url" class="form-control" id="peer_endpoint" name="endpoint" required placeholder="https://s3.us-east-1.example.com">
+                        </div>
+                        <div class="mb-3">
+                            <label for="peer_region" class="form-label fw-medium">Region</label>
+                            <input type="text" class="form-control" id="peer_region" name="region" value="us-east-1">
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-12 col-sm-6">
+                                <label for="peer_priority" class="form-label fw-medium">Priority</label>
+                                <input type="number" class="form-control" id="peer_priority" name="priority" value="100" min="0">
+                            </div>
+                            <div class="col-12 col-sm-6">
+                                <label for="peer_display_name" class="form-label fw-medium">Display Name</label>
+                                <input type="text" class="form-control" id="peer_display_name" name="display_name" placeholder="US East DR">
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="peer_connection_id" class="form-label fw-medium">Connection</label>
+                            <select class="form-select" id="peer_connection_id" name="connection_id">
+                                <option value="">No connection</option>
+                                {% for conn in connections %}
+                                <option value="{{ conn.id }}">{{ conn.name }} ({{ conn.endpoint_url }})</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">Link to a remote connection for health checks</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="peer_inbound_access_key" class="form-label fw-medium">Peer Inbound Access Key</label>
+                            <input type="text" class="form-control" id="peer_inbound_access_key" name="peer_inbound_access_key" placeholder="AKIA... (required for bidirectional replication)" autocomplete="off" spellcheck="false">
+                            <div class="form-text"><strong>Required for bidirectional replication</strong> to prevent loops. This is the S3 access key the peer signs its replication PUTs with when pushing to this site &mdash; we use it to recognize "this object came from a peer" and skip re-replication. Optional for admin-only or one-way replication setups.</div>
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                    <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                                </svg>
+                                Add Peer Site
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <div class="card shadow-sm border-0 mt-4" style="border-radius: 1rem;">
-    <div class="card-header bg-transparent border-0 pt-4 pb-0 px-4 d-flex justify-content-between align-items-start flex-wrap gap-2">
-        <div>
+    <div class="card-header bg-transparent border-0 pt-4 pb-0 px-3 px-md-4 d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div style="min-width: 0;">
             <h5 class="fw-semibold d-flex align-items-center gap-2 mb-1">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted" viewBox="0 0 16 16">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="text-muted flex-shrink-0" viewBox="0 0 16 16">
                     <path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/>
                     <path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
                 </svg>
                 Peer Credentials
             </h5>
-            <p class="text-muted small mb-0">SigV4-only credentials for cross-site admin federation. Scoped to <code>/myfsio/admin/cluster/overview</code> and <code>/myfsio/admin/peer/*</code>; never granted S3 or user-management access.</p>
+            <p class="text-muted small mb-0" style="overflow-wrap: anywhere;">SigV4-only credentials for cross-site admin federation. Scoped to <code>/myfsio/admin/cluster/overview</code> and <code>/myfsio/admin/peer/*</code>; never granted S3 or user-management access.</p>
         </div>
-        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newPeerCredModal">+ Issue credential</button>
+        <button type="button" class="btn btn-primary btn-sm flex-shrink-0" data-bs-toggle="modal" data-bs-target="#newPeerCredModal">+ Issue credential</button>
     </div>
-    <div class="card-body px-4 pb-4">
+    <div class="card-body px-3 px-md-4 pb-4">
         {% if peer_credential_issued %}
         <div id="peer-cred-issued-data" data-payload="{{ peer_credential_issued | json_encode | escape }}" hidden></div>
         {% endif %}
@@ -409,24 +437,28 @@
         </div>
         {% else %}
         <div class="table-responsive">
-            <table class="table table-hover align-middle mb-0">
+            <table class="table table-fluid table-hover align-middle mb-0" id="peerCredTable">
                 <thead class="table-light">
                     <tr>
-                        <th class="ps-3">Site</th>
-                        <th>Display name</th>
+                        <th>Site</th>
+                        <th class="d-none d-lg-table-cell">Display name</th>
                         <th>Access key</th>
                         <th>Status</th>
-                        <th>Created</th>
-                        <th class="pe-3 text-end">Actions</th>
+                        <th class="d-none d-xl-table-cell">Created</th>
+                        <th class="text-end">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for cred in peer_credentials %}
                     {% set ak = cred.access_keys[0] %}
                     <tr>
-                        <td class="ps-3"><code>{{ cred.site_id }}</code></td>
-                        <td>{{ cred.display_name }}</td>
-                        <td><code class="small">{{ ak.access_key }}</code></td>
+                        <td style="min-width: 0; overflow-wrap: anywhere;">
+                            <code>{{ cred.site_id }}</code>
+                            <div class="d-lg-none text-muted small mt-1">{{ cred.display_name }}</div>
+                            <div class="d-xl-none text-muted small">{{ ak.created_at | default(value="") }}</div>
+                        </td>
+                        <td class="d-none d-lg-table-cell">{{ cred.display_name }}</td>
+                        <td style="min-width: 0; overflow-wrap: anywhere;"><code class="small">{{ ak.access_key }}</code></td>
                         <td>
                             {% if cred.enabled %}
                             <span class="badge bg-success bg-opacity-10 text-success">enabled</span>
@@ -434,8 +466,8 @@
                             <span class="badge bg-secondary bg-opacity-10 text-secondary">disabled</span>
                             {% endif %}
                         </td>
-                        <td class="small text-muted">{{ ak.created_at | default(value="") }}</td>
-                        <td class="pe-3 text-end">
+                        <td class="small text-muted d-none d-xl-table-cell">{{ ak.created_at | default(value="") }}</td>
+                        <td class="text-end">
                             <button type="button" class="btn btn-sm btn-outline-danger btn-revoke-peer-cred"
                                     data-bs-toggle="modal"
                                     data-bs-target="#revokePeerCredModal"
@@ -1175,6 +1207,33 @@
 </script>
 
 <style>
+.peer-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 0.5rem;
+    background: var(--myfsio-preview-bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--myfsio-muted);
+    flex-shrink: 0;
+}
+[data-theme='dark'] .peer-icon {
+    background: rgba(255, 255, 255, 0.1);
+}
+#peerCredTable code {
+    overflow-wrap: anywhere;
+}
+@media (max-width: 575.98px) {
+    #peerTable > :not(caption) > * > *,
+    #peerCredTable > :not(caption) > * > * {
+        padding-left: 0.4rem;
+        padding-right: 0.4rem;
+    }
+    #peerTable .peer-icon {
+        display: none;
+    }
+}
 .add-peer-chevron {
     transition: transform 0.2s ease;
 }

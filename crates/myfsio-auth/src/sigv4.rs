@@ -3,6 +3,7 @@ use lru::LruCache;
 use parking_lot::Mutex;
 use percent_encoding::{percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use sha2::{Digest, Sha256};
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -10,12 +11,29 @@ use std::time::Instant;
 type HmacSha256 = Hmac<Sha256>;
 
 struct CacheEntry {
+    secret_key: String,
+    date_stamp: String,
+    region: String,
+    service: String,
     key: Vec<u8>,
     created: Instant,
 }
 
-static SIGNING_KEY_CACHE: LazyLock<Mutex<LruCache<(String, String, String, String), CacheEntry>>> =
-    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())));
+const SIGNING_KEY_CACHE_CAPACITY: usize = 256;
+const SIGNING_KEY_CACHE_SHARDS: usize = 16;
+const SIGNING_KEY_CACHE_SHARD_CAPACITY: usize =
+    SIGNING_KEY_CACHE_CAPACITY / SIGNING_KEY_CACHE_SHARDS;
+
+type SigningKeyShard = Mutex<LruCache<u64, Vec<CacheEntry>>>;
+
+static SIGNING_KEY_CACHE: LazyLock<[SigningKeyShard; SIGNING_KEY_CACHE_SHARDS]> =
+    LazyLock::new(|| {
+        std::array::from_fn(|_| {
+            Mutex::new(LruCache::new(
+                NonZeroUsize::new(SIGNING_KEY_CACHE_SHARD_CAPACITY).unwrap(),
+            ))
+        })
+    });
 
 const CACHE_TTL_SECS: u64 = 60;
 
@@ -24,6 +42,28 @@ const AWS_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'.')
     .remove(b'~');
+
+fn signing_key_hash(secret_key: &str, date_stamp: &str, region: &str, service: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    secret_key.hash(&mut hasher);
+    date_stamp.hash(&mut hasher);
+    region.hash(&mut hasher);
+    service.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cache_entry_matches(
+    entry: &CacheEntry,
+    secret_key: &str,
+    date_stamp: &str,
+    region: &str,
+    service: &str,
+) -> bool {
+    entry.secret_key == secret_key
+        && entry.date_stamp == date_stamp
+        && entry.region == region
+        && entry.service == service
+}
 
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length is always valid");
@@ -47,40 +87,68 @@ pub fn derive_signing_key_cached(
     region: &str,
     service: &str,
 ) -> Vec<u8> {
-    let cache_key = (
-        secret_key.to_owned(),
-        date_stamp.to_owned(),
-        region.to_owned(),
-        service.to_owned(),
-    );
+    let cache_hash = signing_key_hash(secret_key, date_stamp, region, service);
+    let shard_index = cache_hash as usize & (SIGNING_KEY_CACHE_SHARDS - 1);
 
     {
-        let mut cache = SIGNING_KEY_CACHE.lock();
-        if let Some(entry) = cache.get(&cache_key) {
-            if entry.created.elapsed().as_secs() < CACHE_TTL_SECS {
-                return entry.key.clone();
+        let mut cache = SIGNING_KEY_CACHE[shard_index].lock();
+        let mut remove_bucket = false;
+        if let Some(entries) = cache.get_mut(&cache_hash) {
+            if let Some(index) = entries.iter().position(|entry| {
+                cache_entry_matches(entry, secret_key, date_stamp, region, service)
+            }) {
+                if entries[index].created.elapsed().as_secs() < CACHE_TTL_SECS {
+                    return entries[index].key.clone();
+                }
+                entries.swap_remove(index);
+                remove_bucket = entries.is_empty();
             }
-            cache.pop(&cache_key);
+        }
+        if remove_bucket {
+            cache.pop(&cache_hash);
         }
     }
 
-    let k_date = hmac_sha256(
-        format!("AWS4{}", secret_key).as_bytes(),
-        date_stamp.as_bytes(),
-    );
+    let mut prefixed_secret = Vec::with_capacity(4 + secret_key.len());
+    prefixed_secret.extend_from_slice(b"AWS4");
+    prefixed_secret.extend_from_slice(secret_key.as_bytes());
+    let k_date = hmac_sha256(&prefixed_secret, date_stamp.as_bytes());
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
 
     {
-        let mut cache = SIGNING_KEY_CACHE.lock();
-        cache.put(
-            cache_key,
-            CacheEntry {
-                key: k_signing.clone(),
-                created: Instant::now(),
-            },
-        );
+        let mut cache = SIGNING_KEY_CACHE[shard_index].lock();
+        if let Some(entries) = cache.get_mut(&cache_hash) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| cache_entry_matches(entry, secret_key, date_stamp, region, service))
+            {
+                entry.key.clone_from(&k_signing);
+                entry.created = Instant::now();
+            } else {
+                entries.push(CacheEntry {
+                    secret_key: secret_key.to_owned(),
+                    date_stamp: date_stamp.to_owned(),
+                    region: region.to_owned(),
+                    service: service.to_owned(),
+                    key: k_signing.clone(),
+                    created: Instant::now(),
+                });
+            }
+        } else {
+            cache.put(
+                cache_hash,
+                vec![CacheEntry {
+                    secret_key: secret_key.to_owned(),
+                    date_stamp: date_stamp.to_owned(),
+                    region: region.to_owned(),
+                    service: service.to_owned(),
+                    key: k_signing.clone(),
+                    created: Instant::now(),
+                }],
+            );
+        }
     }
 
     k_signing
@@ -195,7 +263,9 @@ pub fn constant_time_compare(a: &str, b: &str) -> bool {
 }
 
 pub fn clear_signing_key_cache() {
-    SIGNING_KEY_CACHE.lock().clear();
+    for shard in SIGNING_KEY_CACHE.iter() {
+        shard.lock().clear();
+    }
 }
 
 #[cfg(test)]
@@ -215,9 +285,41 @@ mod tests {
 
     #[test]
     fn test_derive_signing_key_cached() {
+        clear_signing_key_cache();
         let key1 = derive_signing_key("secret", "20240101", "us-east-1", "s3");
         let key2 = derive_signing_key("secret", "20240101", "us-east-1", "s3");
         assert_eq!(key1, key2);
+        let cache_hash = signing_key_hash("secret", "20240101", "us-east-1", "s3");
+        let shard = &SIGNING_KEY_CACHE[cache_hash as usize & (SIGNING_KEY_CACHE_SHARDS - 1)];
+        let cache = shard.lock();
+        let entries = cache.peek(&cache_hash).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(cache_entry_matches(
+            &entries[0],
+            "secret",
+            "20240101",
+            "us-east-1",
+            "s3"
+        ));
+    }
+
+    #[test]
+    fn signing_key_cache_shards_distinct_components() {
+        clear_signing_key_cache();
+        let first = derive_signing_key("secret-a", "20240101", "us-east-1", "s3");
+        let second = derive_signing_key("secret-b", "20240101", "us-east-1", "s3");
+        let third = derive_signing_key("secret-a", "20240102", "us-east-1", "s3");
+        assert_ne!(first, second);
+        assert_ne!(first, third);
+        let populated = SIGNING_KEY_CACHE
+            .iter()
+            .filter(|shard| !shard.lock().is_empty())
+            .count();
+        assert!(populated >= 1);
+        clear_signing_key_cache();
+        assert!(SIGNING_KEY_CACHE
+            .iter()
+            .all(|shard| shard.lock().is_empty()));
     }
 
     #[test]

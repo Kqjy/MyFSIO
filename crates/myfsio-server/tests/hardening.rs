@@ -1209,6 +1209,64 @@ async fn read_only_principal_cannot_write_or_delete_via_object_selector_shadow()
 }
 
 #[tokio::test]
+async fn percent_encoded_object_selectors_do_not_bypass_authorization() {
+    let (app, _tmp) = app_with_scoped_principal(serde_json::json!(["list", "read", "write"]));
+    app.clone()
+        .oneshot(request(Method::PUT, "/objpct", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(request(
+            Method::PUT,
+            "/objpct/victim.txt",
+            Body::from("original"),
+        ))
+        .await
+        .unwrap();
+
+    let retention_xml = "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2999-01-01T00:00:00Z</RetainUntilDate></Retention>";
+    for uri in [
+        "/objpct/victim.txt?%72etention=",
+        "/objpct/victim.txt?%72etention",
+        "/objpct/victim.txt?%6c%65%67%61%6c-hold=",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(scoped_request(Method::PUT, uri, Body::from(retention_xml)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "PUT {} must be denied: a write-only principal lacks object_lock",
+            uri
+        );
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/objpct/victim.txt?retention=",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::OK,
+        "no retention should have been applied"
+    );
+
+    let resp = app
+        .oneshot(request(Method::GET, "/objpct/victim.txt", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_bytes(resp).await, b"original");
+}
+
+#[tokio::test]
 async fn ambiguous_object_subresources_are_rejected() {
     let (app, _tmp) = app();
     app.clone()

@@ -4,7 +4,9 @@ pub mod ratelimit;
 pub mod session;
 pub(crate) mod sha_body;
 
-pub use auth::{auth_layer, ui_authorize, ui_authorize_list, ui_can_see_bucket};
+pub use auth::{
+    auth_layer, ui_authorize, ui_authorize_list, ui_can_see_bucket, virtual_host_rewrite_layer,
+};
 pub(crate) use auth::{authorize_action, UNSUPPORTED_POLICY_CLAUSES};
 pub use auth::{StreamingPayloadVariant, StreamingSigV4Context};
 pub use bucket_cors::bucket_cors_layer;

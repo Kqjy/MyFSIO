@@ -546,8 +546,92 @@
 <script src="{{ url_for(endpoint="static", filename="js/vendor/chart.umd.min.js") }}"></script>
 <script src="{{ url_for(endpoint="static", filename="js/metrics.js") }}"></script>
 <script>
+var _displayTimezone = {{ display_timezone | json_island | safe }};
+
+function withDisplayTimezone(opts) {
+  var out = {};
+  Object.keys(opts).forEach(function(key) { out[key] = opts[key]; });
+  out.timeZone = _displayTimezone;
+  return out;
+}
+
 function formatTime(ts) {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '—';
+  var opts = { hour: '2-digit', minute: '2-digit' };
+  try {
+    return d.toLocaleTimeString('en-US', withDisplayTimezone(opts));
+  } catch (e) {
+    return d.toLocaleTimeString('en-US', opts);
+  }
+}
+
+function formatChartDate(ts) {
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  var opts = { month: 'short', day: 'numeric' };
+  try {
+    return d.toLocaleDateString('en-US', withDisplayTimezone(opts));
+  } catch (e) {
+    return d.toLocaleDateString('en-US', opts);
+  }
+}
+
+function chartDayKey(ts) {
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  var opts = { year: 'numeric', month: '2-digit', day: '2-digit' };
+  try {
+    return d.toLocaleDateString('en-US', withDisplayTimezone(opts));
+  } catch (e) {
+    return d.toLocaleDateString('en-US', opts);
+  }
+}
+
+function formatFullTimestamp(ts) {
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '—';
+  var opts = { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' };
+  try {
+    return d.toLocaleString('en-US', withDisplayTimezone(opts));
+  } catch (e) {
+    return d.toISOString();
+  }
+}
+
+function buildChartLabels(timestamps) {
+  var keys = timestamps.map(chartDayKey).filter(function(key) { return key !== ''; });
+  var spansDays = keys.length > 1 && keys[0] !== keys[keys.length - 1];
+  return timestamps.map(function(ts) {
+    return spansDays ? [formatChartDate(ts), formatTime(ts)] : formatTime(ts);
+  });
+}
+
+function chartTooltipTitle(getTimestamps) {
+  return function(items) {
+    if (!items || !items.length) return '';
+    var timestamps = getTimestamps() || [];
+    var ts = timestamps[items[0].dataIndex];
+    return ts === undefined ? '' : formatFullTimestamp(ts);
+  };
+}
+
+function formatEventTimestamp(ts) {
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return { date: '—', time: '', full: '' };
+  var dateOpts = { month: 'short', day: '2-digit', timeZone: _displayTimezone };
+  var timeOpts = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: _displayTimezone };
+  var fullOpts = { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: _displayTimezone, timeZoneName: 'short' };
+  try {
+    return {
+      date: d.toLocaleDateString('en-US', dateOpts),
+      time: d.toLocaleTimeString('en-US', timeOpts),
+      full: d.toLocaleString('en-US', fullOpts)
+    };
+  } catch (e) {
+    var iso = d.toISOString();
+    return { date: iso.slice(0, 10), time: iso.slice(11, 19) + 'Z', full: iso };
+  }
 }
 
 function formatUptime(seconds) {
@@ -922,6 +1006,7 @@ function bootstrapOperationsSection() {
   var clearRecentErrorFilter = document.getElementById('clearRecentErrorFilter');
   var opTimer = null;
   var trendTimer = null;
+  var opTrendTimestamps = [];
   var recentErrorsTimer = null;
   var selectedErrorCode = null;
   var operationsLoadInFlight = false;
@@ -957,7 +1042,10 @@ function bootstrapOperationsSection() {
       }]},
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: { legend: { display: false } },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { title: chartTooltipTitle(function() { return opTrendTimestamps; }) } }
+        },
         scales: {
           x: { display: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8, font: { size: 10 } } },
           y: { display: true, beginAtZero: true, ticks: { callback: yCallback, font: { size: 10 } } }
@@ -1046,7 +1134,10 @@ function bootstrapOperationsSection() {
           responsive: true,
           maintainAspectRatio: false,
           animation: false,
-          plugins: { legend: { position: 'top', labels: { boxWidth: 12, font: { size: 10 } } } },
+          plugins: {
+            legend: { position: 'top', labels: { boxWidth: 12, font: { size: 10 } } },
+            tooltip: { callbacks: { title: chartTooltipTitle(function() { return opTrendTimestamps; }) } }
+          },
           scales: {
             x: { stacked: true, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12, font: { size: 10 } } },
             y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } }
@@ -1257,8 +1348,9 @@ function bootstrapOperationsSection() {
     recentErrorsBody.innerHTML = errors.slice(0, 50).map(function(err) {
       var bucketKey = err.bucket ? err.bucket + (err.key ? '/' + err.key : '') : '\u2014';
       var requestId = err.request_id || '\u2014';
+      var when = formatEventTimestamp(err.timestamp);
       return '<tr>' +
-        '<td class="ps-3 small text-muted text-nowrap">' + esc(formatTime(err.timestamp)) + '</td>' +
+        '<td class="ps-3 small text-muted text-nowrap" title="' + esc(when.full) + '">' + esc(when.date) + '<div class="small">' + esc(when.time) + '</div></td>' +
         '<td><code class="small text-danger">' + esc(err.code) + '</code><div><span class="badge bg-secondary-subtle text-secondary" style="font-size: 0.65rem;">' + esc(err.source || '') + '</span></div></td>' +
         '<td><span class="badge bg-light text-dark border">' + esc(err.method) + '</span></td>' +
         '<td class="text-break" style="max-width: 320px;" title="' + esc(bucketKey) + '"><code class="small">' + esc(bucketKey) + '</code></td>' +
@@ -1357,7 +1449,8 @@ function bootstrapOperationsSection() {
           return;
         }
         var history = zeroFillHistory(data.history, data.interval_minutes || 5);
-        var labels = history.map(function(h) { return formatTime(h.timestamp); });
+        opTrendTimestamps = history.map(function(h) { return h.timestamp; });
+        var labels = buildChartLabels(opTrendTimestamps);
         var reqRates = history.map(function(h) { return h.window_seconds > 0 ? (h.totals.count || 0) / h.window_seconds : 0; });
         var throughputs = history.map(function(h) { return h.window_seconds > 0 ? ((h.totals.bytes_in || 0) + (h.totals.bytes_out || 0)) / h.window_seconds : 0; });
         var latencies = history.map(function(h) { return h.totals.latency_avg_ms || 0; });
@@ -1488,6 +1581,7 @@ function bootstrapHistorySection() {
   var historyLoadInFlight = false;
   var historyLoadSucceeded = false;
   var renderedHistory = [];
+  var renderedHistoryTimestamps = [];
   var renderedHistoryAggregated = false;
   var renderedBucketSeconds = null;
 
@@ -1527,6 +1621,7 @@ function bootstrapHistorySection() {
           legend: { display: false },
           tooltip: {
             callbacks: {
+              title: chartTooltipTitle(function() { return renderedHistoryTimestamps; }),
               label: function(ctx) {
                 if (!renderedHistoryAggregated) return ctx.parsed.y.toFixed(2) + '%';
                 var point = renderedHistory[ctx.dataIndex] || {};
@@ -1586,7 +1681,8 @@ function bootstrapHistorySection() {
         renderedHistory = history;
         renderedHistoryAggregated = Boolean(data.aggregated);
         renderedBucketSeconds = data.bucket_seconds;
-        var labels = history.map(function(h) { return formatTime(h.timestamp); });
+        renderedHistoryTimestamps = history.map(function(h) { return h.timestamp; });
+        var labels = buildChartLabels(renderedHistoryTimestamps);
 
         function updateChart(chart, data) {
           if (!chart) return;

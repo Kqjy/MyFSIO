@@ -98,6 +98,15 @@ html {
 	white-space: normal;
 	min-width: 200px;
 }
+
+.table-responsive table.table-fluid {
+	min-width: 0;
+}
+
+.table-responsive table.table-fluid th,
+.table-responsive table.table-fluid td {
+	white-space: normal;
+}
 code { font-size: 0.85rem; }
 
 code {
@@ -2801,16 +2810,6 @@ pre code {
 	border: none;
 	border-radius: 1rem;
 	overflow: hidden;
-}
-
-.login-card::before {
-	content: '';
-	position: absolute;
-	top: 0;
-	left: 0;
-	right: 0;
-	height: 4px;
-	background: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899);
 }
 
 @media (max-width: 768px) {

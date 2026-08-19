@@ -16,6 +16,21 @@ impl RateLimitSetting {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadVerifyMode {
+    Off,
+    Abort,
+}
+
+impl ReadVerifyMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Abort => "abort",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub bind_addr: SocketAddr,
@@ -48,6 +63,7 @@ pub struct ServerConfig {
     pub integrity_heal_concurrency: usize,
     pub integrity_scan_pacing_ms: u64,
     pub integrity_quarantine_retention_days: u64,
+    pub integrity_reverify_days: u64,
     pub metrics_enabled: bool,
     pub metrics_history_enabled: bool,
     pub metrics_interval_minutes: u64,
@@ -113,6 +129,7 @@ pub struct ServerConfig {
     pub stream_chunk_size: usize,
     pub request_body_timeout_secs: u64,
     pub upload_stream_buffer_bytes: usize,
+    pub read_verify_mode: ReadVerifyMode,
     pub multipart_object_layout: String,
     pub metadata_layout: String,
     pub listing_index_enabled: bool,
@@ -204,6 +221,7 @@ impl ServerConfig {
         let integrity_scan_pacing_ms = parse_u64_env("INTEGRITY_SCAN_PACING_MS", 0);
         let integrity_quarantine_retention_days =
             parse_u64_env("INTEGRITY_QUARANTINE_RETENTION_DAYS", 7).max(1);
+        let integrity_reverify_days = parse_u64_env("INTEGRITY_REVERIFY_DAYS", 30);
 
         let metrics_enabled = parse_bool_env("OPERATION_METRICS_ENABLED", false);
 
@@ -311,6 +329,7 @@ impl ServerConfig {
         let stream_chunk_size = parse_usize_env("STREAM_CHUNK_SIZE", 1_048_576);
         let request_body_timeout_secs = parse_u64_env("REQUEST_BODY_TIMEOUT_SECONDS", 300);
         let upload_stream_buffer_bytes = parse_usize_env("UPLOAD_STREAM_BUFFER_BYTES", 8_388_608);
+        let read_verify_mode = parse_read_verify_mode();
         let multipart_object_layout =
             std::env::var("MULTIPART_OBJECT_LAYOUT").unwrap_or_else(|_| "segments".to_string());
         let metadata_layout =
@@ -369,6 +388,7 @@ impl ServerConfig {
             integrity_heal_concurrency,
             integrity_scan_pacing_ms,
             integrity_quarantine_retention_days,
+            integrity_reverify_days,
             metrics_enabled,
             metrics_history_enabled,
             metrics_interval_minutes,
@@ -434,6 +454,7 @@ impl ServerConfig {
             stream_chunk_size,
             request_body_timeout_secs,
             upload_stream_buffer_bytes,
+            read_verify_mode,
             multipart_object_layout,
             metadata_layout,
             listing_index_enabled,
@@ -485,6 +506,7 @@ impl Default for ServerConfig {
             integrity_heal_concurrency: 1,
             integrity_scan_pacing_ms: 0,
             integrity_quarantine_retention_days: 7,
+            integrity_reverify_days: 30,
             metrics_enabled: false,
             metrics_history_enabled: false,
             metrics_interval_minutes: 5,
@@ -557,6 +579,7 @@ impl Default for ServerConfig {
             stream_chunk_size: 1_048_576,
             request_body_timeout_secs: 300,
             upload_stream_buffer_bytes: 8_388_608,
+            read_verify_mode: ReadVerifyMode::Off,
             multipart_object_layout: "segments".to_string(),
             metadata_layout: "sidecar".to_string(),
             listing_index_enabled: true,
@@ -755,6 +778,23 @@ fn parse_optional_string_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn parse_read_verify_mode() -> ReadVerifyMode {
+    let Ok(raw) = std::env::var("READ_VERIFY_MODE") else {
+        return ReadVerifyMode::Off;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => ReadVerifyMode::Off,
+        "abort" => ReadVerifyMode::Abort,
+        _ => {
+            tracing::warn!(
+                "Invalid READ_VERIFY_MODE '{}'; expected 'off' or 'abort', falling back to off",
+                raw
+            );
+            ReadVerifyMode::Off
+        }
+    }
+}
+
 fn parse_list_env(key: &str, default: &str) -> Vec<String> {
     std::env::var(key)
         .unwrap_or_else(|_| default.to_string())
@@ -871,6 +911,7 @@ mod tests {
         std::env::set_var("OBJECT_TAG_LIMIT", "not-a-number");
         std::env::set_var("RATE_LIMIT_DEFAULT", "invalid");
         std::env::remove_var("STRICT_STREAMING_SIGV4");
+        std::env::remove_var("READ_VERIFY_MODE");
 
         let config = ServerConfig::from_env();
 
@@ -878,6 +919,7 @@ mod tests {
         assert_eq!(config.object_tag_limit, 50);
         assert_eq!(config.ratelimit_default, RateLimitSetting::new(50_000, 60));
         assert!(config.strict_streaming_sigv4);
+        assert_eq!(config.read_verify_mode, ReadVerifyMode::Off);
 
         std::env::remove_var("OBJECT_TAG_LIMIT");
         std::env::remove_var("RATE_LIMIT_DEFAULT");
@@ -894,6 +936,7 @@ mod tests {
         std::env::set_var("HOST", "127.0.0.1");
         std::env::set_var("PORT", "5501");
         std::env::set_var("STRICT_STREAMING_SIGV4", "false");
+        std::env::set_var("READ_VERIFY_MODE", "abort");
         std::env::remove_var("API_BASE_URL");
 
         let config = ServerConfig::from_env();
@@ -903,6 +946,7 @@ mod tests {
         assert_eq!(config.ratelimit_admin, RateLimitSetting::new(7, 1));
         assert_eq!(config.api_base_url, "http://127.0.0.1:5501");
         assert!(!config.strict_streaming_sigv4);
+        assert_eq!(config.read_verify_mode, ReadVerifyMode::Abort);
 
         std::env::remove_var("OBJECT_KEY_MAX_LENGTH_BYTES");
         std::env::remove_var("GC_DRY_RUN");
@@ -910,6 +954,21 @@ mod tests {
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
         std::env::remove_var("STRICT_STREAMING_SIGV4");
+        std::env::remove_var("READ_VERIFY_MODE");
+        std::env::remove_var("STORAGE_ROOT");
+    }
+
+    #[test]
+    fn invalid_read_verify_mode_falls_back_to_off() {
+        let _guard = env_lock().lock().unwrap();
+        let _storage = isolated_storage_root();
+        std::env::set_var("READ_VERIFY_MODE", "verify");
+
+        let config = ServerConfig::from_env();
+
+        assert_eq!(config.read_verify_mode, ReadVerifyMode::Off);
+
+        std::env::remove_var("READ_VERIFY_MODE");
         std::env::remove_var("STORAGE_ROOT");
     }
 

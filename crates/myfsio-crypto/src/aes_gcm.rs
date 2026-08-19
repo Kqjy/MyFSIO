@@ -22,6 +22,10 @@ pub enum CryptoError {
     InvalidNonceSize(usize),
     #[error("Encryption failed: {0}")]
     EncryptionFailed(String),
+    #[error("KMS key not found: {0}")]
+    KmsKeyNotFound(String),
+    #[error("KMS key is disabled: {0}")]
+    KmsKeyDisabled(String),
     #[error("Decryption failed at chunk {0}")]
     DecryptionFailed(u32),
     #[error("HKDF expand failed: {0}")]
@@ -98,6 +102,7 @@ pub fn encrypt_stream_chunked(
 
     outfile.seek(SeekFrom::Start(0))?;
     outfile.write_all(&chunk_index.to_be_bytes())?;
+    outfile.sync_all()?;
 
     Ok(chunk_index)
 }

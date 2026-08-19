@@ -29,6 +29,7 @@ use tokio_util::io::StreamReader;
 use crate::handlers::{self, ObjectQuery};
 use crate::middleware::session::SessionHandle;
 use crate::services::object_lock;
+use crate::services::peer_admin::PeerAdminStatus;
 use crate::state::AppState;
 use crate::stores::connections::RemoteConnection;
 use crate::ui_format::human_size;
@@ -102,6 +103,7 @@ async fn ensure_ui_authorized(
     session: &SessionHandle,
     bucket: &str,
     action: &str,
+    s3_action: Option<&str>,
     object_key: Option<&str>,
 ) -> Result<(), Response> {
     let access_key = match session.read(|s| s.user_id.clone()) {
@@ -119,7 +121,9 @@ async fn ensure_ui_authorized(
             ));
         }
     };
-    match crate::middleware::ui_authorize(state, &principal, bucket, action, object_key).await {
+    match crate::middleware::ui_authorize(state, &principal, bucket, action, s3_action, object_key)
+        .await
+    {
         Ok(()) => Ok(()),
         Err(message) => Err(json_error(StatusCode::FORBIDDEN, message)),
     }
@@ -136,7 +140,7 @@ pub(crate) async fn ui_has_system_action(
     let Some(principal) = state.iam.get_principal(&access_key) else {
         return false;
     };
-    state.iam.authorize(&principal, None, action, None)
+    state.iam.authorize(&principal, None, action, None, None)
 }
 
 async fn ensure_ui_system_action(
@@ -156,7 +160,7 @@ async fn ensure_ui_system_action(
             "Your session is no longer valid.",
         ));
     };
-    if state.iam.authorize(&principal, None, action, None) {
+    if state.iam.authorize(&principal, None, action, None, None) {
         return Ok(());
     }
     Err(json_error(
@@ -219,9 +223,10 @@ async fn ensure_ui_authorized_for_upload(
     session: &SessionHandle,
     bucket: &str,
     upload_id: &str,
+    s3_action: &str,
 ) -> Result<String, Response> {
     let key = resolve_multipart_upload_key(state, bucket, upload_id).await?;
-    ensure_ui_authorized(state, session, bucket, "write", Some(&key)).await?;
+    ensure_ui_authorized(state, session, bucket, "write", Some(s3_action), Some(&key)).await?;
     Ok(key)
 }
 
@@ -265,7 +270,13 @@ async fn authorize_bulk_key_for(
         .iam
         .get_principal(&access_key)
         .ok_or_else(|| "Your session is no longer valid.".to_string())?;
-    crate::middleware::ui_authorize(state, &principal, bucket, action, Some(key)).await
+    let s3_action = match action {
+        "read" => Some("s3:GetObject"),
+        "write" => Some("s3:PutObject"),
+        "delete" => Some("s3:DeleteObject"),
+        _ => None,
+    };
+    crate::middleware::ui_authorize(state, &principal, bucket, action, s3_action, Some(key)).await
 }
 
 async fn check_object_lock_for_bulk(
@@ -580,6 +591,7 @@ async fn read_object_bytes_for_zip(
     state: &AppState,
     bucket: &str,
     key: &str,
+    max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
     let all_meta = state
         .storage
@@ -592,33 +604,56 @@ async fn read_object_bytes_for_zip(
             .encryption
             .as_ref()
             .ok_or_else(|| "Encryption service is not available".to_string())?;
-        let obj_path = state
-            .storage
-            .get_object_path(bucket, key)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut stream = enc_svc
+        let (obj_path, materialized) =
+            if all_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS) {
+                let path = state
+                    .storage
+                    .materialize_object_to_tmp(bucket, key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (path.clone(), Some(path))
+            } else {
+                let path = state
+                    .storage
+                    .get_object_path(bucket, key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                (path, None)
+            };
+        let result = match enc_svc
             .decrypt_object_stream(&obj_path, &enc_meta, None, None, false)
             .await
-            .map_err(|e| e.to_string())?;
-        let mut bytes = Vec::new();
-        stream
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(bytes);
+        {
+            Ok(stream) => read_capped(stream, max_bytes).await,
+            Err(e) => Err(e.to_string()),
+        };
+        if let Some(path) = materialized {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        return result;
     }
 
-    let (_meta, mut reader) = state
+    let (_meta, reader) = state
         .storage
         .get_object(bucket, key)
         .await
         .map_err(|e| e.to_string())?;
+    read_capped(reader, max_bytes).await
+}
+
+async fn read_capped<R>(reader: R, max_bytes: u64) -> Result<Vec<u8>, String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let mut bytes = Vec::new();
-    reader
+    let mut limited = reader.take(max_bytes.saturating_add(1));
+    limited
         .read_to_end(&mut bytes)
         .await
         .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("Total download size exceeds 256 MB limit. Select fewer objects.".to_string());
+    }
     Ok(bytes)
 }
 
@@ -2375,99 +2410,86 @@ pub async fn peer_bidirectional_status(
         return Json(result).into_response();
     }
 
-    let admin_url = format!(
-        "{}/myfsio/admin/sites",
-        connection.endpoint_url.trim_end_matches('/')
-    );
-    match reqwest::Client::new()
-        .get(&admin_url)
-        .header("accept", "application/json")
-        .header("x-access-key", &connection.access_key)
-        .header("x-secret-key", &connection.secret_key)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
+    match state
+        .peer_admin
+        .fetch_admin_status(&connection.endpoint_url, "/myfsio/admin/sites", &connection)
         .await
     {
-        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
-            Ok(remote_data) => {
-                let remote_local = remote_data.get("local").cloned().unwrap_or(Value::Null);
-                let remote_peers = remote_data
-                    .get("peers")
-                    .and_then(|value| value.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let mut has_peer_for_us = false;
-                let mut peer_connection_configured = false;
+        PeerAdminStatus::Ok(remote_data) => {
+            let remote_local = remote_data.get("local").cloned().unwrap_or(Value::Null);
+            let remote_peers = remote_data
+                .get("peers")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut has_peer_for_us = false;
+            let mut peer_connection_configured = false;
 
-                for remote_peer in &remote_peers {
-                    let matches_site = local_site
-                        .as_ref()
-                        .map(|site| {
-                            remote_peer.get("site_id").and_then(|v| v.as_str())
-                                == Some(site.site_id.as_str())
-                                || remote_peer.get("endpoint").and_then(|v| v.as_str())
-                                    == Some(site.endpoint.as_str())
-                        })
+            for remote_peer in &remote_peers {
+                let matches_site = local_site
+                    .as_ref()
+                    .map(|site| {
+                        remote_peer.get("site_id").and_then(|v| v.as_str())
+                            == Some(site.site_id.as_str())
+                            || remote_peer.get("endpoint").and_then(|v| v.as_str())
+                                == Some(site.endpoint.as_str())
+                    })
+                    .unwrap_or(false);
+                if matches_site {
+                    has_peer_for_us = true;
+                    peer_connection_configured = remote_peer
+                        .get("connection_id")
+                        .and_then(|v| v.as_str())
+                        .map(|v| !v.trim().is_empty())
                         .unwrap_or(false);
-                    if matches_site {
-                        has_peer_for_us = true;
-                        peer_connection_configured = remote_peer
-                            .get("connection_id")
-                            .and_then(|v| v.as_str())
-                            .map(|v| !v.trim().is_empty())
-                            .unwrap_or(false);
-                        break;
-                    }
-                }
-
-                result["remote_status"] = json!({
-                    "reachable": true,
-                    "local_site": remote_local,
-                    "site_sync_enabled": Value::Null,
-                    "has_peer_for_us": has_peer_for_us,
-                    "peer_connection_configured": peer_connection_configured,
-                    "has_bidirectional_rules_for_us": Value::Null,
-                });
-
-                if !has_peer_for_us {
-                    push_issue(
-                        &mut result,
-                        json!({
-                            "code": "REMOTE_NO_PEER_FOR_US",
-                            "message": "Remote site does not have this site registered as a peer",
-                            "severity": "error",
-                        }),
-                    );
-                } else if !peer_connection_configured {
-                    push_issue(
-                        &mut result,
-                        json!({
-                            "code": "REMOTE_NO_CONNECTION_FOR_US",
-                            "message": "Remote site has us as peer but no connection configured (cannot push back)",
-                            "severity": "error",
-                        }),
-                    );
+                    break;
                 }
             }
-            Err(_) => {
-                result["remote_status"] = json!({
-                    "reachable": true,
-                    "invalid_response": true,
-                });
+
+            result["remote_status"] = json!({
+                "reachable": true,
+                "local_site": remote_local,
+                "site_sync_enabled": Value::Null,
+                "has_peer_for_us": has_peer_for_us,
+                "peer_connection_configured": peer_connection_configured,
+                "has_bidirectional_rules_for_us": Value::Null,
+            });
+
+            if !has_peer_for_us {
                 push_issue(
                     &mut result,
                     json!({
-                        "code": "REMOTE_INVALID_RESPONSE",
-                        "message": "Remote admin API returned invalid JSON",
-                        "severity": "warning",
+                        "code": "REMOTE_NO_PEER_FOR_US",
+                        "message": "Remote site does not have this site registered as a peer",
+                        "severity": "error",
+                    }),
+                );
+            } else if !peer_connection_configured {
+                push_issue(
+                    &mut result,
+                    json!({
+                        "code": "REMOTE_NO_CONNECTION_FOR_US",
+                        "message": "Remote site has us as peer but no connection configured (cannot push back)",
+                        "severity": "error",
                     }),
                 );
             }
-        },
-        Ok(resp)
-            if resp.status() == StatusCode::UNAUTHORIZED
-                || resp.status() == StatusCode::FORBIDDEN =>
-        {
+        }
+        PeerAdminStatus::InvalidJson(_) => {
+            result["remote_status"] = json!({
+                "reachable": true,
+                "invalid_response": true,
+            });
+            push_issue(
+                &mut result,
+                json!({
+                    "code": "REMOTE_INVALID_RESPONSE",
+                    "message": "Remote admin API returned invalid JSON",
+                    "severity": "warning",
+                }),
+            );
+        }
+        PeerAdminStatus::Unauthorized { .. } => {
             result["remote_status"] = json!({
                 "reachable": true,
                 "admin_access_denied": true,
@@ -2481,21 +2503,21 @@ pub async fn peer_bidirectional_status(
                 }),
             );
         }
-        Ok(resp) => {
+        PeerAdminStatus::HttpError { status, .. } => {
             result["remote_status"] = json!({
                 "reachable": true,
-                "admin_api_error": resp.status().as_u16(),
+                "admin_api_error": status,
             });
             push_issue(
                 &mut result,
                 json!({
                     "code": "REMOTE_ADMIN_API_ERROR",
-                    "message": format!("Remote admin API returned status {}", resp.status().as_u16()),
+                    "message": format!("Remote admin API returned status {}", status),
                     "severity": "warning",
                 }),
             );
         }
-        Err(_) => {
+        PeerAdminStatus::Unreachable(_) => {
             result["remote_status"] = json!({
                 "reachable": false,
                 "error": "Connection failed",
@@ -2771,8 +2793,15 @@ pub async fn upload_object(
         Err(response) => return response,
     };
 
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "write",
+        Some("s3:PutObject"),
+        Some(&key),
+    )
+    .await
     {
         return resp;
     }
@@ -2866,8 +2895,15 @@ pub async fn initiate_multipart_upload(
     if object_key.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "object_key is required");
     }
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(object_key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "write",
+        Some("s3:CreateMultipartUpload"),
+        Some(object_key),
+    )
+    .await
     {
         return resp;
     }
@@ -2902,7 +2938,8 @@ pub async fn upload_multipart_part(
     body: Body,
 ) -> Response {
     if let Err(resp) =
-        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id, "s3:UploadPart")
+            .await
     {
         return resp;
     }
@@ -2997,11 +3034,18 @@ pub async fn complete_multipart_upload(
     Path((bucket_name, upload_id)): Path<(String, String)>,
     body: Body,
 ) -> Response {
-    let upload_key =
-        match ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await {
-            Ok(key) => key,
-            Err(resp) => return resp,
-        };
+    let upload_key = match ensure_ui_authorized_for_upload(
+        &state,
+        &session,
+        &bucket_name,
+        &upload_id,
+        "s3:CompleteMultipartUpload",
+    )
+    .await
+    {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
     let payload: CompleteMultipartPayload = match parse_json_body(body).await {
         Ok(payload) => payload,
         Err(response) => return response,
@@ -3056,8 +3100,14 @@ pub async fn abort_multipart_upload(
     Extension(session): Extension<SessionHandle>,
     Path((bucket_name, upload_id)): Path<(String, String)>,
 ) -> Response {
-    if let Err(resp) =
-        ensure_ui_authorized_for_upload(&state, &session, &bucket_name, &upload_id).await
+    if let Err(resp) = ensure_ui_authorized_for_upload(
+        &state,
+        &session,
+        &bucket_name,
+        &upload_id,
+        "s3:AbortMultipartUpload",
+    )
+    .await
     {
         return resp;
     }
@@ -3083,7 +3133,16 @@ pub async fn bucket_acl(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetBucketAcl"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     match get_bucket_config_json(&state, &bucket_name).await {
@@ -3106,10 +3165,18 @@ pub async fn update_bucket_acl(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "share",
+        Some("s3:PutBucketAcl"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let payload: BucketAclPayload = match parse_json_body(body).await {
@@ -3148,7 +3215,16 @@ pub async fn bucket_cors(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetBucketCORS"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     match get_bucket_config_json(&state, &bucket_name).await {
@@ -3167,10 +3243,18 @@ pub async fn update_bucket_cors(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "cors",
+        Some("s3:PutBucketCORS"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let payload: BucketCorsPayload = match parse_json_body(body).await {
@@ -3203,7 +3287,16 @@ pub async fn bucket_lifecycle(
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetLifecycleConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     match get_bucket_config_json(&state, &bucket_name).await {
@@ -3222,10 +3315,18 @@ pub async fn update_bucket_lifecycle(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
-    headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "lifecycle",
+        Some("s3:PutLifecycleConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let payload: BucketLifecyclePayload = match parse_json_body(body).await {
@@ -3618,11 +3719,27 @@ async fn copy_object_json(
         );
     }
 
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "read",
+        Some("s3:GetObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
-    if let Err(resp) =
-        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        dest_bucket,
+        "write",
+        Some("s3:CopyObject"),
+        Some(dest_key),
+    )
+    .await
     {
         return resp;
     }
@@ -3678,14 +3795,39 @@ async fn move_object_json(
         );
     }
 
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "read", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "read",
+        Some("s3:GetObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "delete",
+        Some("s3:DeleteObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
-    if let Err(resp) =
-        ensure_ui_authorized(state, session, dest_bucket, "write", Some(dest_key)).await
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        dest_bucket,
+        "write",
+        Some("s3:CopyObject"),
+        Some(dest_key),
+    )
+    .await
     {
         return resp;
     }
@@ -3746,7 +3888,16 @@ async fn delete_object_json(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(state, session, bucket, "delete", Some(key)).await {
+    if let Err(resp) = ensure_ui_authorized(
+        state,
+        session,
+        bucket,
+        "delete",
+        Some("s3:DeleteObject"),
+        Some(key),
+    )
+    .await
+    {
         return resp;
     }
 
@@ -4039,8 +4190,20 @@ pub async fn object_get_dispatch(
         return json_error(StatusCode::NOT_FOUND, "Unknown object action");
     };
 
-    if let Err(resp) =
-        ensure_ui_authorized(&state, &session, &bucket_name, "read", Some(&key)).await
+    let s3_action = match action {
+        ObjectGetAction::Tags => "s3:GetObjectTagging",
+        ObjectGetAction::Versions => "s3:GetObjectVersion",
+        _ => "s3:GetObject",
+    };
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some(s3_action),
+        Some(&key),
+    )
+    .await
     {
         return resp;
     }
@@ -4077,8 +4240,15 @@ pub async fn object_post_dispatch(
             object_presign_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Tags => {
-            if let Err(resp) =
-                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            if let Err(resp) = ensure_ui_authorized(
+                &state,
+                &session,
+                &bucket_name,
+                "write",
+                Some("s3:PutObjectTagging"),
+                Some(&key),
+            )
+            .await
             {
                 return resp;
             }
@@ -4091,8 +4261,15 @@ pub async fn object_post_dispatch(
             move_object_json(&state, &session, &bucket_name, &key, body).await
         }
         ObjectPostAction::Restore(version_id) => {
-            if let Err(resp) =
-                ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(&key)).await
+            if let Err(resp) = ensure_ui_authorized(
+                &state,
+                &session,
+                &bucket_name,
+                "write",
+                Some("s3:PutObject"),
+                Some(&key),
+            )
+            .await
             {
                 return resp;
             }
@@ -4304,7 +4481,9 @@ pub async fn bulk_download_objects(
         );
     }
 
+    let max_total_bytes = 256 * 1024 * 1024u64;
     let mut total_bytes = 0u64;
+    let mut bytes_read = 0u64;
     let mut archive_entries = Vec::new();
     for key in keys {
         if let Err(message) =
@@ -4312,24 +4491,25 @@ pub async fn bulk_download_objects(
         {
             return json_error(StatusCode::FORBIDDEN, format!("{}: {}", key, message));
         }
-        match state.storage.head_object(&bucket_name, &key).await {
-            Ok(meta) => {
-                total_bytes = total_bytes.saturating_add(meta.size);
-                match read_object_bytes_for_zip(&state, &bucket_name, &key).await {
-                    Ok(bytes) => archive_entries.push((key, bytes, meta.last_modified)),
-                    Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
-                }
-            }
+        let meta = match state.storage.head_object(&bucket_name, &key).await {
+            Ok(meta) => meta,
             Err(err) => return storage_json_error(err),
+        };
+        total_bytes = total_bytes.saturating_add(meta.size);
+        if total_bytes > max_total_bytes {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "Total download size exceeds 256 MB limit. Select fewer objects.",
+            );
         }
-    }
-
-    let max_total_bytes = 256 * 1024 * 1024u64;
-    if total_bytes > max_total_bytes {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "Total download size exceeds 256 MB limit. Select fewer objects.",
-        );
+        let remaining = max_total_bytes - bytes_read;
+        match read_object_bytes_for_zip(&state, &bucket_name, &key, remaining).await {
+            Ok(bytes) => {
+                bytes_read = bytes_read.saturating_add(bytes.len() as u64);
+                archive_entries.push((key, bytes, meta.last_modified))
+            }
+            Err(err) => return json_error(StatusCode::BAD_REQUEST, err),
+        }
     }
 
     let zip_bytes = match build_zip_archive(archive_entries) {
@@ -4441,16 +4621,30 @@ pub async fn archived_post_dispatch(
     Path((bucket_name, rest)): Path<(String, String)>,
 ) -> Response {
     if let Some((key, version_id)) = rest.rsplit_once("/restore/") {
-        if let Err(resp) =
-            ensure_ui_authorized(&state, &session, &bucket_name, "write", Some(key)).await
+        if let Err(resp) = ensure_ui_authorized(
+            &state,
+            &session,
+            &bucket_name,
+            "write",
+            Some("s3:PutObject"),
+            Some(key),
+        )
+        .await
         {
             return resp;
         }
         return restore_object_version_json(&state, &bucket_name, key, version_id).await;
     }
     if let Some(key) = rest.strip_suffix("/purge") {
-        if let Err(resp) =
-            ensure_ui_authorized(&state, &session, &bucket_name, "delete", Some(key)).await
+        if let Err(resp) = ensure_ui_authorized(
+            &state,
+            &session,
+            &bucket_name,
+            "delete",
+            Some("s3:DeleteObjectVersion"),
+            Some(key),
+        )
+        .await
         {
             return resp;
         }
@@ -4614,7 +4808,16 @@ pub async fn lifecycle_history(
     Path(bucket_name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetLifecycleConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let limit = params
@@ -4665,7 +4868,16 @@ pub async fn replication_status(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let Some(rule) = state.replication.get_rule(&bucket_name) else {
@@ -4765,7 +4977,16 @@ pub async fn replication_failures(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "read", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "read",
+        Some("s3:GetReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
@@ -4788,7 +5009,16 @@ pub async fn retry_replication_failure(
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     retry_replication_failure_key(&state, &bucket_name, q.object_key.trim()).await
@@ -4802,7 +5032,16 @@ pub async fn retry_replication_failure_path(
     let Some(object_key) = rest.strip_suffix("/retry") else {
         return json_error(StatusCode::NOT_FOUND, "Unknown replication failure action");
     };
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     retry_replication_failure_key(&state, &bucket_name, object_key.trim()).await
@@ -4842,7 +5081,16 @@ pub async fn retry_all_replication_failures(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     let result = state.replication.clone().retry_all(&bucket_name).await;
@@ -4874,7 +5122,16 @@ pub async fn dismiss_replication_failure(
     Path(bucket_name): Path<String>,
     Query(q): Query<ReplicationObjectKeyQuery>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     dismiss_replication_failure_key(&state, &bucket_name, q.object_key.trim())
@@ -4885,7 +5142,16 @@ pub async fn dismiss_replication_failure_path(
     Extension(session): Extension<SessionHandle>,
     Path((bucket_name, object_key)): Path<(String, String)>,
 ) -> Response {
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     dismiss_replication_failure_key(&state, &bucket_name, object_key.trim())
@@ -4921,7 +5187,16 @@ pub async fn clear_replication_failures(
     if let Some(resp) = reject_invalid_bucket(&bucket_name) {
         return resp;
     }
-    if let Err(resp) = ensure_ui_authorized(&state, &session, &bucket_name, "write", None).await {
+    if let Err(resp) = ensure_ui_authorized(
+        &state,
+        &session,
+        &bucket_name,
+        "replication",
+        Some("s3:PutReplicationConfiguration"),
+        None,
+    )
+    .await
+    {
         return resp;
     }
     state.replication.clear_failures(&bucket_name);

@@ -11,6 +11,7 @@ pub mod notifications;
 pub mod object_lock;
 pub mod peer_admin;
 pub mod peer_fetch;
+pub mod peer_nonce;
 pub mod replication;
 mod replication_ledger;
 pub mod s3_client;

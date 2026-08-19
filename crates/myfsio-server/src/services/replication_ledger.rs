@@ -339,6 +339,8 @@ impl ReplicationLedger {
     }
 
     fn append_record(&self, bucket: &str, record: &JournalRecord) -> Result<(), String> {
+        #[cfg(feature = "failpoints")]
+        self.failpoint("replication:pending-journal-append")?;
         let path = self.journal_path(bucket);
         let existed = path.exists();
         if let Some(parent) = path.parent() {
@@ -373,6 +375,8 @@ impl ReplicationLedger {
     }
 
     fn write_snapshot(&self, bucket: &str, snapshot: &LedgerSnapshot) -> Result<(), String> {
+        #[cfg(feature = "failpoints")]
+        self.failpoint("replication:pending-snapshot-write")?;
         let path = self.snapshot_path(bucket);
         let bytes = serde_json::to_vec(snapshot).map_err(|error| error.to_string())?;
         atomic_write(&path, &bytes).map_err(|error| error.to_string())
@@ -395,6 +399,11 @@ impl ReplicationLedger {
             sync_dir(path.parent()).map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn failpoint(&self, name: &str) -> Result<(), String> {
+        myfsio_storage::failpoints::hit(&self.storage_root, name).map_err(|error| error.to_string())
     }
 }
 
@@ -623,5 +632,70 @@ mod tests {
 
         let ledger = ReplicationLedger::new(tmp.path().to_path_buf());
         assert!(ledger.load("bucket", Some("rule")).is_err());
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn storage_full_journal_append_does_not_poison_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = ReplicationLedger::new(tmp.path().to_path_buf());
+        myfsio_storage::failpoints::set(
+            tmp.path(),
+            "replication:pending-journal-append",
+            myfsio_storage::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        assert!(ledger
+            .append("bucket", key("generation-1", ReplicationOpKind::Put))
+            .is_err());
+        myfsio_storage::failpoints::clear(tmp.path(), "replication:pending-journal-append");
+        assert!(!ledger.journal_path("bucket").exists());
+
+        let entry = ledger
+            .append("bucket", key("generation-1", ReplicationOpKind::Put))
+            .unwrap();
+        drop(ledger);
+        let ledger = ReplicationLedger::new(tmp.path().to_path_buf());
+        let LoadResult::Loaded(entries) = ledger.load("bucket", Some("rule")).unwrap() else {
+            panic!("ledger missing");
+        };
+        assert_eq!(entries, vec![entry]);
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn storage_full_snapshot_write_preserves_previous_ledger_and_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = ReplicationLedger::new(tmp.path().to_path_buf());
+        let original = ledger
+            .append("bucket", key("generation-1", ReplicationOpKind::Put))
+            .unwrap();
+        myfsio_storage::failpoints::set(
+            tmp.path(),
+            "replication:pending-snapshot-write",
+            myfsio_storage::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        assert!(ledger
+            .replace("bucket", vec![key("generation-2", ReplicationOpKind::Put)])
+            .is_err());
+        myfsio_storage::failpoints::clear(tmp.path(), "replication:pending-snapshot-write");
+        assert!(!ledger
+            .snapshot_path("bucket")
+            .with_extension("json.tmp")
+            .exists());
+        let LoadResult::Loaded(entries) = ledger.load("bucket", Some("rule")).unwrap() else {
+            panic!("ledger missing");
+        };
+        assert_eq!(entries, vec![original]);
+
+        ledger
+            .replace("bucket", vec![key("generation-2", ReplicationOpKind::Put)])
+            .unwrap();
+        drop(ledger);
+        let ledger = ReplicationLedger::new(tmp.path().to_path_buf());
+        let LoadResult::Loaded(entries) = ledger.load("bucket", Some("rule")).unwrap() else {
+            panic!("ledger missing");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].identity.generation, "generation-2");
     }
 }

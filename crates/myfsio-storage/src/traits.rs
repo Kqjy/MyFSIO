@@ -30,6 +30,7 @@ pub struct PutCommitOptions {
     pub etag_override: Option<String>,
     pub conditions: PutConditions,
     pub bypass_governance: bool,
+    pub tags: Option<Vec<Tag>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -57,6 +58,11 @@ impl RangeHint {
 pub enum SnapshotSource {
     LinkedFile(PathBuf),
     Segments {
+        source: crate::segments::LazySegmentSource,
+        total: u64,
+        base_offset: u64,
+    },
+    EagerSegments {
         files: Vec<(std::fs::File, u64)>,
         total: u64,
         base_offset: u64,
@@ -76,12 +82,37 @@ impl SnapshotSource {
                 if start > 0 {
                     file.seek(std::io::SeekFrom::Start(start)).await?;
                 }
+                let _ = tokio::fs::remove_file(&path).await;
                 Ok(match len {
                     Some(n) => Box::pin(file.take(n)),
                     None => Box::pin(file),
                 })
             }
             SnapshotSource::Segments {
+                source,
+                total,
+                base_offset,
+            } => {
+                let effective_len = len.unwrap_or_else(|| total.saturating_sub(start));
+                let rel_start = start.checked_sub(base_offset).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "requested range precedes the opened segment window",
+                    )
+                })?;
+                let covered = source.paths().total();
+                if rel_start.saturating_add(effective_len) > covered {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "opened segment window does not cover the requested range",
+                    ));
+                }
+                let reader =
+                    crate::segments::LazySegmentRangeReader::new(source, rel_start, effective_len)
+                        .await?;
+                Ok(Box::pin(reader))
+            }
+            SnapshotSource::EagerSegments {
                 files,
                 total,
                 base_offset,

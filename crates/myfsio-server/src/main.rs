@@ -94,6 +94,31 @@ async fn main() {
 
     myfsio_server::handlers::ui_api::init_server_start_time();
 
+    #[cfg(feature = "failpoints")]
+    if let Ok(spec) = std::env::var("MYFSIO_FAILPOINTS") {
+        tracing::warn!(
+            "failpoints armed from MYFSIO_FAILPOINTS ({}); this build is for crash testing only",
+            spec
+        );
+        myfsio_storage::failpoints::arm_from_spec(&spec);
+    }
+
+    let active_format = myfsio_server::format_marker::ActiveFormat {
+        metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
+            &config.metadata_layout,
+        ),
+        multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
+            &config.multipart_object_layout,
+        ),
+        listing_index_enabled: config.listing_index_enabled,
+    };
+    if let Err(err) =
+        myfsio_server::format_marker::enforce_format_marker(&config.storage_root, &active_format)
+    {
+        tracing::error!("{}", err);
+        std::process::exit(1);
+    }
+
     ensure_iam_bootstrap(&config);
     let (unclean_shutdown_marker, previous_shutdown_unclean) =
         match initialize_unclean_shutdown_marker(&config.storage_root) {
@@ -139,6 +164,50 @@ async fn main() {
         config.ui_enabled
     );
 
+    let recovery = {
+        let recovery_backend = myfsio_server::state::build_storage_backend(&config);
+        let recovery = match recovery_backend.recover_staged_commits_sync() {
+            Ok(recovery) => {
+                if !recovery.published.is_empty() || recovery.discarded > 0 || recovery.poisoned > 0
+                {
+                    tracing::warn!(
+                        published = recovery.published.len(),
+                        discarded = recovery.discarded,
+                        poisoned = recovery.poisoned,
+                        "Reconciled staged object commits before starting background workers"
+                    );
+                }
+                recovery
+            }
+            Err(err) => {
+                tracing::error!(
+                    "Failed to reconcile staged object commits: {}. Refusing to serve: objects \
+                     may expose data from an interrupted commit under stale metadata. Inspect \
+                     or remove the offending file under .myfsio.sys/tmp and start the server \
+                     again.",
+                    err
+                );
+                std::process::exit(1);
+            }
+        };
+        if previous_shutdown_unclean {
+            match recovery_backend.invalidate_all_listing_indexes_sync() {
+                Ok(count) => tracing::warn!(
+                    "Previous shutdown was unclean; discarded listing indexes for {} buckets",
+                    count
+                ),
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to invalidate listing indexes after unclean shutdown: {}",
+                        err
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        recovery
+    };
+
     let state = if config.encryption_enabled || config.kms_enabled {
         match AppState::new_with_encryption(config.clone()).await {
             Ok(state) => state,
@@ -150,18 +219,40 @@ async fn main() {
     } else {
         AppState::new(config.clone())
     };
-    if previous_shutdown_unclean {
-        match state.storage.invalidate_all_listing_indexes_sync() {
-            Ok(count) => tracing::warn!(
-                "Previous shutdown was unclean; discarded listing indexes for {} buckets",
-                count
-            ),
-            Err(err) => {
+    for commit in recovery.published {
+        use myfsio_server::services::replication::ReplicationTriggerOutcome;
+        let outcome = state
+            .replication
+            .clone()
+            .trigger(
+                commit.bucket.clone(),
+                commit.key.clone(),
+                "write".to_string(),
+                None,
+            )
+            .await;
+        match outcome {
+            ReplicationTriggerOutcome::NotApplicable | ReplicationTriggerOutcome::Enqueued => {
+                if let Err(err) = state
+                    .storage
+                    .finish_recovered_commit_sync(&commit.staged_path)
+                {
+                    tracing::warn!(
+                        bucket = commit.bucket,
+                        key = commit.key,
+                        error = %err,
+                        "could not remove a completed commit intent; the next startup will \
+                         reprocess it harmlessly"
+                    );
+                }
+            }
+            ReplicationTriggerOutcome::Failed => {
                 tracing::error!(
-                    "Failed to invalidate listing indexes after unclean shutdown: {}",
-                    err
+                    bucket = commit.bucket,
+                    key = commit.key,
+                    "the recovered commit could not be recorded in the replication ledger; \
+                     its intent is retained so the next startup retries the enqueue"
                 );
-                std::process::exit(1);
             }
         }
     }
@@ -429,6 +520,7 @@ fn print_config_summary(config: &ServerConfig) {
         config.gc_interval_hours, config.gc_dry_run
     );
     println!("Integrity enabled: {}", config.integrity_enabled);
+    println!("Read verify mode: {}", config.read_verify_mode.as_str());
     println!("Lifecycle enabled: {}", config.lifecycle_enabled);
     println!(
         "Lifecycle history limit: {}",
@@ -651,18 +743,7 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         return;
     }
 
-    let access_key = std::env::var("ADMIN_ACCESS_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
-    let env_secret_key = std::env::var("ADMIN_SECRET_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let secret_from_env = env_secret_key.is_some();
-    let secret_key =
-        env_secret_key.unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
+    let (access_key, secret_key, secret_from_env) = admin_credentials();
 
     if let Some(parent) = iam_path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -686,6 +767,35 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
         return;
     }
 
+    print_admin_credentials(iam_path, &access_key, &secret_key, secret_from_env);
+    tracing::info!(
+        "Admin credentials initialized; access key written to {}",
+        iam_path.display()
+    );
+}
+
+fn admin_credentials() -> (String, String, bool) {
+    let access_key = std::env::var("ADMIN_ACCESS_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("AK{}", uuid::Uuid::new_v4().simple()));
+    let env_secret_key = std::env::var("ADMIN_SECRET_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let secret_from_env = env_secret_key.is_some();
+    let secret_key =
+        env_secret_key.unwrap_or_else(|| format!("SK{}", uuid::Uuid::new_v4().simple()));
+    (access_key, secret_key, secret_from_env)
+}
+
+fn print_admin_credentials(
+    iam_path: &std::path::Path,
+    access_key: &str,
+    secret_key: &str,
+    secret_from_env: bool,
+) {
     println!("============================================================");
     println!("MYFSIO - ADMIN CREDENTIALS INITIALIZED");
     println!("============================================================");
@@ -697,10 +807,6 @@ fn ensure_iam_bootstrap(config: &ServerConfig) {
     }
     println!("Saved to: {}", iam_path.display());
     println!("============================================================");
-    tracing::info!(
-        "Admin credentials initialized; access key written to {}",
-        iam_path.display()
-    );
 }
 
 fn migrate_peer_credentials(config: &ServerConfig) {
@@ -802,6 +908,28 @@ fn migrate_metadata_to_sidecars(config: &ServerConfig) {
             ..FsStorageBackendConfig::default()
         },
     );
+
+    let preflight = backend.preflight_meta_migration();
+    println!(
+        "Preflight: {} index files, {} entries",
+        preflight.index_files, preflight.entries
+    );
+    if !preflight.corrupt.is_empty() || !preflight.collisions.is_empty() {
+        println!();
+        println!("Preflight found problems; NOTHING has been modified.");
+        for issue in preflight.corrupt.iter().chain(preflight.collisions.iter()) {
+            println!("  - {}", issue);
+        }
+        println!();
+        println!("Repair or remove the files above, then re-run --migrate-meta.");
+        std::process::exit(1);
+    }
+    if preflight.index_files == 0 {
+        println!("Nothing to migrate.");
+        return;
+    }
+    println!();
+
     let report = backend.migrate_meta_indexes_to_sidecars();
 
     println!("Index files migrated : {}", report.index_files_migrated);
@@ -825,11 +953,14 @@ fn migrate_metadata_to_sidecars(config: &ServerConfig) {
     println!("- Object metadata now lives in per-object sidecar files");
     println!("  (.__myfsio_meta__*.json) under .myfsio.sys/buckets/<bucket>/meta/.");
     println!("- Older myfsio-server binaries CANNOT read sidecar metadata.");
-    println!("  Do not downgrade this deployment after migrating; there is no");
-    println!("  rollback tool.");
-    println!("- Cleanly migrated _index.json files were removed. Corrupt or");
-    println!("  partially migrated indexes were left in place (see failures");
-    println!("  above) and keep serving reads until fixed.");
+    println!("  Do not downgrade this deployment after migrating.");
+    println!("- Cleanly migrated _index.json files were renamed to");
+    println!("  _index.json.migrated as a rollback backup: to roll back,");
+    println!("  delete the new .__myfsio_meta__*.json sidecars and rename the");
+    println!("  backups to _index.json. Delete the backups once you are");
+    println!("  satisfied with the migration. Corrupt or partially migrated");
+    println!("  indexes were left in place (see failures above) and keep");
+    println!("  serving reads until fixed.");
     println!("- Re-running this command is safe; already-migrated entries are");
     println!("  skipped.");
     println!("============================================================");
@@ -918,30 +1049,29 @@ fn reset_admin_credentials(config: &ServerConfig) {
         }
     }
 
-    if config.iam_config_path.exists() {
-        let backup = config
-            .iam_config_path
-            .with_extension(format!("bak-{}", chrono::Utc::now().timestamp()));
-        if let Err(err) = std::fs::rename(&config.iam_config_path, &backup) {
-            eprintln!(
-                "Failed to back up existing IAM config {}: {}",
-                config.iam_config_path.display(),
-                err
-            );
+    let (access_key, secret_key, secret_from_env) = admin_credentials();
+    let iam = myfsio_auth::iam::IamService::new_with_secret(
+        config.iam_config_path.clone(),
+        config.secret_key.clone(),
+    );
+    let backup = match iam.reset_admin(&access_key, &secret_key) {
+        Ok(backup) => backup,
+        Err(err) => {
+            eprintln!("Failed to reset admin credentials: {}", err);
             std::process::exit(1);
         }
-        if let Err(err) = myfsio_common::fs_util::restrict_secret_permissions(&backup) {
-            tracing::debug!(
-                "Failed to restrict permissions on IAM backup {}: {}",
-                backup.display(),
-                err
-            );
-        }
+    };
+    if let Some(backup) = backup {
         println!("Backed up existing IAM config to {}", backup.display());
         prune_iam_backups(&config.iam_config_path, 5);
     }
 
-    ensure_iam_bootstrap(config);
+    print_admin_credentials(
+        &config.iam_config_path,
+        &access_key,
+        &secret_key,
+        secret_from_env,
+    );
     println!("Admin credentials reset.");
 }
 

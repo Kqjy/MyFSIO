@@ -151,6 +151,10 @@ pub fn register_ui_endpoints(engine: &TemplateEngine) {
             "ui.delete_website_domain",
             "/ui/website-domains/{domain}/delete",
         ),
+        (
+            "ui.website_domain_dns_check",
+            "/ui/website-domains/{domain}/dns-check",
+        ),
         ("ui.docs_page", "/ui/docs"),
     ]);
 }
@@ -381,6 +385,15 @@ pub async fn buckets_overview(
 
     let principal = crate::handlers::ui::current_principal(&state, &session);
     let is_admin = principal.as_ref().map(|p| p.is_admin).unwrap_or(false);
+    let can_create_bucket = principal
+        .as_ref()
+        .map(|p| {
+            state
+                .iam
+                .authorize_any_bucket(p, "create_bucket", Some("s3:CreateBucket"))
+        })
+        .unwrap_or(false);
+    ctx.insert("can_create_bucket", &can_create_bucket);
 
     let buckets = match state.storage.list_buckets().await {
         Ok(list) => list,
@@ -471,6 +484,20 @@ pub async fn bucket_detail(
 
     let mut ctx = page_context(&state, &session, "ui.bucket_detail");
     ctx.insert("request_args", &request_args);
+    let can_delete_bucket = match crate::handlers::ui::current_principal(&state, &session) {
+        Some(principal) => crate::middleware::ui_authorize(
+            &state,
+            &principal,
+            &bucket_name,
+            "delete_bucket",
+            Some("s3:DeleteBucket"),
+            None,
+        )
+        .await
+        .is_ok(),
+        None => false,
+    };
+    ctx.insert("can_delete_bucket", &can_delete_bucket);
     let bucket_meta = state
         .storage
         .list_buckets()
@@ -648,17 +675,64 @@ pub async fn bucket_detail(
             .map(|conn| conn.name.clone())
             .unwrap_or_default(),
     );
-    let viewer_is_admin = crate::handlers::ui::current_principal(&state, &session)
-        .map(|p| p.is_admin)
-        .unwrap_or(false);
+    let viewer_principal = crate::handlers::ui::current_principal(&state, &session);
+    let viewer_can = |action: &'static str, s3_action: &'static str| {
+        let state = &state;
+        let bucket_name = &bucket_name;
+        let principal = viewer_principal.as_ref();
+        async move {
+            match principal {
+                Some(principal) => crate::middleware::ui_authorize(
+                    state,
+                    principal,
+                    bucket_name,
+                    action,
+                    Some(s3_action),
+                    None,
+                )
+                .await
+                .is_ok(),
+                None => false,
+            }
+        }
+    };
+    let can_manage_replication = viewer_can("replication", "s3:PutReplicationConfiguration").await;
     ctx.insert("default_policy", &default_policy);
-    ctx.insert("can_manage_cors", &viewer_is_admin);
-    ctx.insert("can_manage_lifecycle", &viewer_is_admin);
-    ctx.insert("can_manage_quota", &viewer_is_admin);
-    ctx.insert("can_manage_versioning", &viewer_is_admin);
-    ctx.insert("can_manage_website", &viewer_is_admin);
-    ctx.insert("can_edit_policy", &viewer_is_admin);
-    ctx.insert("is_replication_admin", &viewer_is_admin);
+    ctx.insert(
+        "can_manage_cors",
+        &viewer_can("cors", "s3:PutBucketCORS").await,
+    );
+    ctx.insert(
+        "can_manage_lifecycle",
+        &viewer_can("lifecycle", "s3:PutLifecycleConfiguration").await,
+    );
+    ctx.insert(
+        "can_manage_quota",
+        &viewer_can("quota", "s3:PutBucketQuota").await,
+    );
+    ctx.insert(
+        "can_manage_versioning",
+        &viewer_can("versioning", "s3:PutBucketVersioning").await,
+    );
+    ctx.insert(
+        "can_manage_website",
+        &viewer_can("website", "s3:PutBucketWebsite").await,
+    );
+    ctx.insert(
+        "can_edit_policy",
+        &viewer_can("policy", "s3:PutBucketPolicy").await,
+    );
+    ctx.insert(
+        "can_manage_acl",
+        &viewer_can("share", "s3:PutBucketAcl").await,
+    );
+    ctx.insert(
+        "can_manage_encryption",
+        &(viewer_can("encryption", "s3:PutEncryptionConfiguration").await
+            && state.config.encryption_enabled),
+    );
+    ctx.insert("can_manage_replication", &can_manage_replication);
+    ctx.insert("is_replication_admin", &can_manage_replication);
     ctx.insert("lifecycle_enabled", &state.config.lifecycle_enabled);
     ctx.insert("site_sync_enabled", &state.config.site_sync_enabled);
     ctx.insert(
@@ -1637,21 +1711,31 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
         let conn_clone = conn.clone();
         let client_ref = &client;
         peer_futures.push(async move {
-            let value = match conn_clone {
-                Some(c) => client_ref.fetch_cluster_overview(&c.endpoint_url, &c).await,
-                None => Err("no connection configured".to_string()),
+            let outcome = match conn_clone {
+                Some(c) => {
+                    client_ref
+                        .fetch_admin_status(
+                            &c.endpoint_url,
+                            "/myfsio/admin/cluster/overview?local_only=1",
+                            &c,
+                        )
+                        .await
+                }
+                None => crate::services::peer_admin::PeerAdminStatus::Unreachable(
+                    "no connection configured".to_string(),
+                ),
             };
-            (peer, value)
+            (peer, outcome.into_result())
         });
     }
 
     let results = futures::future::join_all(peer_futures).await;
     for (peer, result) in results {
-        let (overview, online, error) = match result {
+        let (overview, online, failure) = match result {
             Ok(value) => (value, true, None),
-            Err(err) => (json!({}), false, Some(err)),
+            Err(failure) => (json!({}), false, Some(failure)),
         };
-        let mut card = decorate_site(overview, online, !online, error);
+        let mut card = decorate_site(overview, online, !online, failure);
         if card.get("site_id").and_then(|v| v.as_str()).is_none() {
             card["site_id"] = json!(peer.site_id.clone());
         }
@@ -1672,16 +1756,27 @@ async fn build_cluster_sites(state: &AppState) -> Vec<Value> {
     sites
 }
 
-fn decorate_site(mut value: Value, online: bool, stale: bool, error: Option<String>) -> Value {
+fn decorate_site(
+    mut value: Value,
+    online: bool,
+    stale: bool,
+    failure: Option<crate::services::peer_admin::PeerFailure>,
+) -> Value {
     if !value.is_object() {
         value = json!({});
     }
     value["online"] = json!(online);
     value["stale"] = json!(stale);
-    value["error"] = match error {
-        Some(e) => json!(e),
-        None => Value::Null,
-    };
+    match failure {
+        Some(f) => {
+            value["error"] = json!(f.message());
+            value["error_info"] = serde_json::to_value(&f).unwrap_or(Value::Null);
+        }
+        None => {
+            value["error"] = Value::Null;
+            value["error_info"] = Value::Null;
+        }
+    }
     value
 }
 
@@ -2207,6 +2302,7 @@ pub async fn metrics_dashboard(
         &storage_refreshed_at_display,
     );
     ctx.insert("has_issues", &has_issues);
+    ctx.insert("display_timezone", &state.config.display_timezone);
     ctx.insert(
         "summary",
         &json!({
@@ -2446,12 +2542,18 @@ pub async fn website_domains_dashboard(
     Extension(session): Extension<SessionHandle>,
 ) -> Response {
     let mut ctx = page_context(&state, &session, "ui.website_domains_dashboard");
-    let buckets: Vec<String> = state
+    let all_buckets: Vec<String> = state
         .storage
         .list_buckets()
         .await
         .map(|list| list.into_iter().map(|b| b.name).collect())
         .unwrap_or_default();
+    let mut buckets: Vec<String> = Vec::new();
+    for name in &all_buckets {
+        if bucket_website_hosting_enabled(&state, name).await {
+            buckets.push(name.clone());
+        }
+    }
     let mappings = state
         .website_domains
         .as_ref()
@@ -2474,11 +2576,22 @@ pub async fn website_domains_dashboard(
     ctx.insert("domains", &mappings);
     ctx.insert("mappings", &mappings);
     ctx.insert("buckets", &buckets);
+    ctx.insert("has_any_buckets", &!all_buckets.is_empty());
     ctx.insert(
         "website_hosting_enabled",
         &state.config.website_hosting_enabled,
     );
+    ctx.insert("website_port", &state.config.bind_addr.port());
     render(&state, "website_domains.html", &ctx)
+}
+
+async fn bucket_website_hosting_enabled(state: &AppState, bucket: &str) -> bool {
+    state
+        .storage
+        .get_bucket_config(bucket)
+        .await
+        .map(|cfg| cfg.website.is_some())
+        .unwrap_or(false)
 }
 
 pub async fn replication_wizard(
@@ -2839,15 +2952,64 @@ pub struct CreateBucketForm {
     pub csrf_token: String,
 }
 
+async fn ensure_bucket_action(
+    state: &AppState,
+    session: &SessionHandle,
+    wants_json: bool,
+    bucket_name: &str,
+    action: &str,
+    s3_action: &str,
+) -> Option<Response> {
+    let principal = match crate::handlers::ui::current_principal(state, session) {
+        Some(p) => p,
+        None => {
+            let message = "Sign in to continue.".to_string();
+            if wants_json {
+                return Some(
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        axum::Json(json!({ "error": message })),
+                    )
+                        .into_response(),
+                );
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Some(Redirect::to("/login").into_response());
+        }
+    };
+    if crate::middleware::ui_authorize(
+        state,
+        &principal,
+        bucket_name,
+        action,
+        Some(s3_action),
+        None,
+    )
+    .await
+    .is_ok()
+    {
+        return None;
+    }
+    let message = format!("Requires the '{}' IAM permission.", action);
+    if wants_json {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response(),
+        );
+    }
+    session.write(|s| s.push_flash("danger", message));
+    Some(Redirect::to("/ui/buckets").into_response())
+}
+
 pub async fn create_bucket(
     State(state): State<AppState>,
     Extension(session): Extension<SessionHandle>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    if let Some(resp) = crate::handlers::ui::ensure_admin(&state, &session, &headers) {
-        return resp;
-    }
     let wants_json = wants_json(&headers);
     let form = match parse_form_any(&headers, body).await {
         Ok(fields) => CreateBucketForm {
@@ -2879,6 +3041,19 @@ pub async fn create_bucket(
         }
         session.write(|s| s.push_flash("danger", message));
         return Redirect::to("/ui/buckets").into_response();
+    }
+
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        wants_json,
+        &bucket_name,
+        "create_bucket",
+        "s3:CreateBucket",
+    )
+    .await
+    {
+        return resp;
     }
 
     match state.storage.create_bucket(&bucket_name).await {
@@ -2918,8 +3093,21 @@ pub struct UpdateBucketVersioningForm {
 
 pub async fn delete_bucket(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
 ) -> Response {
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "delete_bucket",
+        "s3:DeleteBucket",
+    )
+    .await
+    {
+        return resp;
+    }
     match state.storage.delete_bucket(&bucket_name).await {
         Ok(()) => axum::Json(json!({
             "ok": true,
@@ -2936,9 +3124,22 @@ pub async fn delete_bucket(
 
 pub async fn update_bucket_versioning(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketVersioningForm>,
 ) -> Response {
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "versioning",
+        "s3:PutBucketVersioning",
+    )
+    .await
+    {
+        return resp;
+    }
     let enabled = form.state.eq_ignore_ascii_case("enable");
     match state.storage.set_versioning(&bucket_name, enabled).await {
         Ok(()) => axum::Json(json!({
@@ -3001,6 +3202,18 @@ pub async fn update_bucket_replication(
     Form(form): Form<UpdateBucketReplicationForm>,
 ) -> Response {
     let wants_json = wants_json(&headers);
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        wants_json,
+        &bucket_name,
+        "replication",
+        "s3:PutReplicationConfiguration",
+    )
+    .await
+    {
+        return resp;
+    }
 
     let respond = |ok: bool, status: StatusCode, message: String, extra: Value| -> Response {
         if wants_json {
@@ -3691,6 +3904,10 @@ pub async fn create_website_domain(
             return Redirect::to("/ui/website-domains").into_response();
         }
     }
+    if !bucket_website_hosting_enabled(&state, &bucket).await {
+        session.write(|s| s.push_flash("danger", website_hosting_required_message(&bucket)));
+        return Redirect::to("/ui/website-domains").into_response();
+    }
     store.set_mapping(&domain, &bucket);
     session.write(|s| {
         s.push_flash(
@@ -3699,6 +3916,13 @@ pub async fn create_website_domain(
         )
     });
     Redirect::to("/ui/website-domains").into_response()
+}
+
+fn website_hosting_required_message(bucket: &str) -> String {
+    format!(
+        "Bucket '{}' does not have website hosting enabled. Enable it on the bucket's Properties tab first.",
+        bucket
+    )
 }
 
 pub async fn update_website_domain(
@@ -3721,6 +3945,10 @@ pub async fn update_website_domain(
                 .write(|s| s.push_flash("danger", format!("Bucket '{}' does not exist.", bucket)));
             return Redirect::to("/ui/website-domains").into_response();
         }
+    }
+    if !bucket_website_hosting_enabled(&state, &bucket).await {
+        session.write(|s| s.push_flash("danger", website_hosting_required_message(&bucket)));
+        return Redirect::to("/ui/website-domains").into_response();
     }
     if store.get_bucket(&domain).is_none() {
         session.write(|s| s.push_flash("danger", format!("Domain '{}' was not found.", domain)));
@@ -3751,11 +3979,160 @@ pub async fn delete_website_domain(
     Redirect::to("/ui/website-domains").into_response()
 }
 
+pub async fn website_domain_dns_check(
+    State(state): State<AppState>,
+    Path(domain): Path<String>,
+) -> Response {
+    let domain = crate::services::website_domains::normalize_domain(&domain);
+    if !crate::services::website_domains::is_valid_domain(&domain) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "domain": domain,
+                "status": "error",
+                "addresses": Vec::<String>::new(),
+                "message": "Enter a valid domain name.",
+            })),
+        )
+            .into_response();
+    }
+
+    let port = state.config.bind_addr.port();
+    let resolved = match resolve_host_addresses(&domain).await {
+        Ok(addrs) => addrs,
+        Err(message) => {
+            return axum::Json(json!({
+                "domain": domain,
+                "status": "error",
+                "addresses": Vec::<String>::new(),
+                "message": message,
+            }))
+            .into_response();
+        }
+    };
+    if resolved.is_empty() {
+        return axum::Json(json!({
+            "domain": domain,
+            "status": "error",
+            "addresses": Vec::<String>::new(),
+            "message": "No A or AAAA records were returned for this domain.",
+        }))
+        .into_response();
+    }
+
+    let local = local_server_addresses(state.config.bind_addr);
+    let status = dns_status(&resolved, &local);
+    let rendered: Vec<String> = resolved.iter().map(|ip| ip.to_string()).collect();
+    let listed = summarize_addresses(&rendered);
+    let message = if status == "ok" {
+        format!("Resolves here ({}), port {}.", listed, port)
+    } else {
+        format!(
+            "Resolves to {} — not an address of this server. Still correct behind NAT, a proxy, or a CDN.",
+            listed
+        )
+    };
+
+    axum::Json(json!({
+        "domain": domain,
+        "status": status,
+        "addresses": rendered,
+        "port": port,
+        "message": message,
+        "detail": format!("{} resolves to {}", domain, rendered.join(", ")),
+    }))
+    .into_response()
+}
+
+fn summarize_addresses(addresses: &[String]) -> String {
+    const MAX_SHOWN: usize = 2;
+    let listed = addresses
+        .iter()
+        .take(MAX_SHOWN)
+        .cloned()
+        .collect::<Vec<String>>()
+        .join(", ");
+    if addresses.len() > MAX_SHOWN {
+        format!("{} +{} more", listed, addresses.len() - MAX_SHOWN)
+    } else {
+        listed
+    }
+}
+
+async fn resolve_host_addresses(domain: &str) -> Result<Vec<std::net::IpAddr>, String> {
+    let target = format!("{}:80", domain);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::lookup_host(target),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => {
+            let mut ips: Vec<std::net::IpAddr> = Vec::new();
+            for addr in addrs {
+                if !ips.contains(&addr.ip()) {
+                    ips.push(addr.ip());
+                }
+            }
+            Ok(ips)
+        }
+        Ok(Err(e)) => Err(format!("DNS lookup failed: {}", e)),
+        Err(_) => Err("DNS lookup timed out after 5 seconds.".to_string()),
+    }
+}
+
+fn local_server_addresses(bind_addr: std::net::SocketAddr) -> Vec<std::net::IpAddr> {
+    let mut addrs: Vec<std::net::IpAddr> = Vec::new();
+    let mut push = |ip: std::net::IpAddr| {
+        if !ip.is_unspecified() && !addrs.contains(&ip) {
+            addrs.push(ip);
+        }
+    };
+    push(bind_addr.ip());
+    for (bind, probe) in [
+        ("0.0.0.0:0", "198.51.100.1:80"),
+        ("[::]:0", "[2001:db8::1]:80"),
+    ] {
+        if let Ok(socket) = std::net::UdpSocket::bind(bind) {
+            if socket.connect(probe).is_ok() {
+                if let Ok(local) = socket.local_addr() {
+                    push(local.ip());
+                }
+            }
+        }
+    }
+    addrs
+}
+
+fn dns_status(resolved: &[std::net::IpAddr], local: &[std::net::IpAddr]) -> &'static str {
+    if resolved
+        .iter()
+        .any(|ip| ip.is_loopback() || local.contains(ip))
+    {
+        "ok"
+    } else {
+        "warning"
+    }
+}
+
 pub async fn update_bucket_quota(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketQuotaForm>,
 ) -> Response {
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "quota",
+        "s3:PutBucketQuota",
+    )
+    .await
+    {
+        return resp;
+    }
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -3806,9 +4183,22 @@ pub struct UpdateBucketEncryptionForm {
 
 pub async fn update_bucket_encryption(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketEncryptionForm>,
 ) -> Response {
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "encryption",
+        "s3:PutEncryptionConfiguration",
+    )
+    .await
+    {
+        return resp;
+    }
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -3881,6 +4271,18 @@ pub async fn update_bucket_policy(
     axum::extract::Form(form): axum::extract::Form<UpdateBucketPolicyForm>,
 ) -> Response {
     let wants_json = wants_json(&headers);
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        wants_json,
+        &bucket_name,
+        "policy",
+        "s3:PutBucketPolicy",
+    )
+    .await
+    {
+        return resp;
+    }
     let redirect_url = format!("/ui/buckets/{}?tab=permissions", bucket_name);
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
@@ -3981,9 +4383,22 @@ pub struct UpdateBucketWebsiteForm {
 
 pub async fn update_bucket_website(
     State(state): State<AppState>,
+    Extension(session): Extension<SessionHandle>,
     Path(bucket_name): Path<String>,
     axum::extract::Form(form): axum::extract::Form<UpdateBucketWebsiteForm>,
 ) -> Response {
+    if let Some(resp) = ensure_bucket_action(
+        &state,
+        &session,
+        true,
+        &bucket_name,
+        "website",
+        "s3:PutBucketWebsite",
+    )
+    .await
+    {
+        return resp;
+    }
     let mut config = match state.storage.get_bucket_config(&bucket_name).await {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -4027,6 +4442,81 @@ pub async fn update_bucket_website(
             axum::Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod website_domain_dns_tests {
+    use super::{dns_status, local_server_addresses};
+    use std::net::{IpAddr, SocketAddr};
+
+    fn ip(value: &str) -> IpAddr {
+        value.parse().expect("ip")
+    }
+
+    #[test]
+    fn matching_local_address_is_ok() {
+        assert_eq!(
+            dns_status(&[ip("203.0.113.10")], &[ip("203.0.113.10")]),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn loopback_counts_as_this_server() {
+        assert_eq!(dns_status(&[ip("127.0.0.1")], &[]), "ok");
+        assert_eq!(dns_status(&[ip("::1")], &[]), "ok");
+    }
+
+    #[test]
+    fn foreign_address_is_a_warning_not_a_failure() {
+        assert_eq!(
+            dns_status(&[ip("198.51.100.7")], &[ip("203.0.113.10")]),
+            "warning"
+        );
+    }
+
+    #[test]
+    fn any_matching_address_wins() {
+        assert_eq!(
+            dns_status(
+                &[ip("198.51.100.7"), ip("203.0.113.10")],
+                &[ip("203.0.113.10")]
+            ),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn address_summary_caps_the_listed_answers() {
+        let all = vec![
+            "104.20.23.154".to_string(),
+            "172.66.147.243".to_string(),
+            "2606:4700:10::ac42:93f3".to_string(),
+            "2606:4700:10::6814:179a".to_string(),
+        ];
+        assert_eq!(
+            super::summarize_addresses(&all),
+            "104.20.23.154, 172.66.147.243 +2 more"
+        );
+        assert_eq!(
+            super::summarize_addresses(&all[..2]),
+            "104.20.23.154, 172.66.147.243"
+        );
+        assert_eq!(super::summarize_addresses(&[]), "");
+    }
+
+    #[test]
+    fn unspecified_bind_address_is_not_advertised_as_local() {
+        let addrs = local_server_addresses("0.0.0.0:5000".parse::<SocketAddr>().expect("addr"));
+        assert!(!addrs.contains(&ip("0.0.0.0")));
+    }
+
+    #[test]
+    fn explicit_bind_address_is_local() {
+        let addrs =
+            local_server_addresses("203.0.113.10:5000".parse::<SocketAddr>().expect("addr"));
+        assert!(addrs.contains(&ip("203.0.113.10")));
     }
 }
 

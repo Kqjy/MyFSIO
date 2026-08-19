@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 const LEGACY_BUCKET_META_DIR: &str = ".meta";
 const QUARANTINE_DIR: &str = "quarantine";
 
+#[derive(Clone)]
 pub struct GcConfig {
     pub interval_hours: f64,
     pub temp_file_max_age_hours: f64,
@@ -131,11 +132,12 @@ impl GcService {
     pub async fn run_now(self: Arc<Self>, dry_run: bool) -> Result<Value, String> {
         self.try_claim()?;
         let svc = self.clone();
+        let guard = RunGuard {
+            running: self.running.clone(),
+            started_at: self.started_at.clone(),
+        };
         let handle = tokio::spawn(async move {
-            let _guard = RunGuard {
-                running: svc.running.clone(),
-                started_at: svc.started_at.clone(),
-            };
+            let _guard = guard;
             svc.execute(dry_run).await
         });
         handle
@@ -146,11 +148,12 @@ impl GcService {
     pub fn start_run(self: Arc<Self>, dry_run: bool) -> Result<(), String> {
         self.try_claim()?;
         let svc = self.clone();
+        let guard = RunGuard {
+            running: self.running.clone(),
+            started_at: self.started_at.clone(),
+        };
         tokio::spawn(async move {
-            let _guard = RunGuard {
-                running: svc.running.clone(),
-                started_at: svc.started_at.clone(),
-            };
+            let _guard = guard;
             if let Err(e) = svc.execute(dry_run).await {
                 tracing::warn!("GC cycle failed: {}", e);
             }
@@ -182,12 +185,39 @@ impl GcService {
                 history.drain(..excess);
             }
         }
-        self.save_history().await;
+        if let Err(error) = self.save_history().await {
+            tracing::error!("Failed to persist GC history: {}", error);
+        }
 
         Ok(result)
     }
 
     async fn execute_gc(&self, dry_run: bool) -> Value {
+        let storage_root = self.storage_root.clone();
+        let config = self.config.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::execute_gc_blocking(storage_root, config, dry_run)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            json!({
+                "temp_files_deleted": 0,
+                "temp_bytes_freed": 0,
+                "multipart_uploads_deleted": 0,
+                "lock_files_deleted": 0,
+                "empty_dirs_removed": 0,
+                "quarantine_entries_deleted": 0,
+                "quarantine_entries_protected": 0,
+                "quarantine_bytes_freed": 0,
+                "segment_dirs_deleted": 0,
+                "segment_bytes_freed": 0,
+                "total_bytes_freed": 0,
+                "errors": [format!("GC sweep task failed: {error}")],
+            })
+        })
+    }
+
+    fn execute_gc_blocking(storage_root: PathBuf, config: GcConfig, dry_run: bool) -> Value {
         let mut temp_files_deleted = 0u64;
         let mut temp_bytes_freed = 0u64;
         let mut multipart_uploads_deleted = 0u64;
@@ -200,28 +230,45 @@ impl GcService {
 
         let now = std::time::SystemTime::now();
         let temp_max_age =
-            std::time::Duration::from_secs_f64(self.config.temp_file_max_age_hours * 3600.0);
+            std::time::Duration::from_secs_f64(config.temp_file_max_age_hours * 3600.0);
         let multipart_max_age =
-            std::time::Duration::from_secs(self.config.multipart_max_age_days * 86400);
+            std::time::Duration::from_secs(config.multipart_max_age_days * 86400);
         let lock_max_age =
-            std::time::Duration::from_secs_f64(self.config.lock_file_max_age_hours * 3600.0);
+            std::time::Duration::from_secs_f64(config.lock_file_max_age_hours * 3600.0);
         let quarantine_max_age =
-            std::time::Duration::from_secs(self.config.quarantine_max_age_days * 86400);
+            std::time::Duration::from_secs(config.quarantine_max_age_days * 86400);
 
-        let tmp_dir = self.storage_root.join(".myfsio.sys").join("tmp");
+        let tmp_dir = storage_root.join(".myfsio.sys").join("tmp");
         if tmp_dir.exists() {
             match std::fs::read_dir(&tmp_dir) {
                 Ok(entries) => {
                     for entry in entries.flatten() {
+                        if entry
+                            .file_name()
+                            .to_string_lossy()
+                            .ends_with(".sidecar-stage")
+                        {
+                            continue;
+                        }
                         if let Ok(metadata) = entry.metadata() {
                             if let Ok(modified) = metadata.modified() {
                                 if let Ok(age) = now.duration_since(modified) {
                                     if age > temp_max_age {
-                                        let size = metadata.len();
+                                        let is_dir = metadata.is_dir();
+                                        let size = if is_dir {
+                                            dir_total_bytes(&entry.path())
+                                        } else {
+                                            metadata.len()
+                                        };
                                         if !dry_run {
-                                            if let Err(e) = std::fs::remove_file(entry.path()) {
+                                            let remove_result = if is_dir {
+                                                std::fs::remove_dir_all(entry.path())
+                                            } else {
+                                                std::fs::remove_file(entry.path())
+                                            };
+                                            if let Err(e) = remove_result {
                                                 errors.push(format!(
-                                                    "Failed to remove temp file: {}",
+                                                    "Failed to remove temporary entry: {}",
                                                     e
                                                 ));
                                                 continue;
@@ -239,7 +286,7 @@ impl GcService {
             }
         }
 
-        let multipart_dir = self.storage_root.join(".myfsio.sys").join("multipart");
+        let multipart_dir = storage_root.join(".myfsio.sys").join("multipart");
         if multipart_dir.exists() {
             if let Ok(bucket_dirs) = std::fs::read_dir(&multipart_dir) {
                 for bucket_entry in bucket_dirs.flatten() {
@@ -250,7 +297,16 @@ impl GcService {
                                     if let Ok(age) = now.duration_since(modified) {
                                         if age > multipart_max_age {
                                             if !dry_run {
-                                                let _ = std::fs::remove_dir_all(upload.path());
+                                                if let Err(e) =
+                                                    std::fs::remove_dir_all(upload.path())
+                                                {
+                                                    errors.push(format!(
+                                                        "Failed to remove multipart upload {}: {}",
+                                                        upload.path().display(),
+                                                        e
+                                                    ));
+                                                    continue;
+                                                }
                                             }
                                             multipart_uploads_deleted += 1;
                                         }
@@ -263,7 +319,7 @@ impl GcService {
             }
         }
 
-        let buckets_dir = self.storage_root.join(".myfsio.sys").join("buckets");
+        let buckets_dir = storage_root.join(".myfsio.sys").join("buckets");
         if buckets_dir.exists() {
             if let Ok(bucket_dirs) = std::fs::read_dir(&buckets_dir) {
                 for bucket_entry in bucket_dirs.flatten() {
@@ -276,7 +332,16 @@ impl GcService {
                                         if let Ok(age) = now.duration_since(modified) {
                                             if age > lock_max_age {
                                                 if !dry_run {
-                                                    let _ = std::fs::remove_file(lock.path());
+                                                    if let Err(e) =
+                                                        std::fs::remove_file(lock.path())
+                                                    {
+                                                        errors.push(format!(
+                                                            "Failed to remove lock file {}: {}",
+                                                            lock.path().display(),
+                                                            e
+                                                        ));
+                                                        continue;
+                                                    }
                                                 }
                                                 lock_files_deleted += 1;
                                             }
@@ -290,7 +355,7 @@ impl GcService {
             }
         }
 
-        let quarantine_dir = self.storage_root.join(SYSTEM_ROOT).join(QUARANTINE_DIR);
+        let quarantine_dir = storage_root.join(SYSTEM_ROOT).join(QUARANTINE_DIR);
         let mut quarantine_references: Option<(HashSet<String>, bool)> = None;
         if quarantine_dir.exists() {
             if let Ok(bucket_dirs) = std::fs::read_dir(&quarantine_dir) {
@@ -317,13 +382,13 @@ impl GcService {
                             let (references, scan_ok) =
                                 quarantine_references.get_or_insert_with(|| {
                                     let (references, mut reference_errors) =
-                                        collect_quarantine_references(&self.storage_root);
+                                        collect_quarantine_references(&storage_root);
                                     let scan_ok = reference_errors.is_empty();
                                     errors.append(&mut reference_errors);
                                     (references, scan_ok)
                                 });
                             let relative = ts_path
-                                .strip_prefix(&self.storage_root)
+                                .strip_prefix(&storage_root)
                                 .map(|path| path.to_string_lossy().replace('\\', "/"))
                                 .ok();
                             let protected = !*scan_ok
@@ -367,7 +432,7 @@ impl GcService {
         let mut segment_dirs_deleted = 0u64;
         let mut segment_bytes_freed = 0u64;
         let segment_max_age =
-            std::time::Duration::from_secs_f64(self.config.segment_max_age_hours * 3600.0);
+            std::time::Duration::from_secs_f64(config.segment_max_age_hours * 3600.0);
         if buckets_dir.exists() {
             if let Ok(bucket_dirs) = std::fs::read_dir(&buckets_dir) {
                 for bucket_entry in bucket_dirs.flatten() {
@@ -378,10 +443,8 @@ impl GcService {
                     let bucket_name = bucket_entry.file_name().to_string_lossy().to_string();
                     let mut referenced: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
-                    let mut scan_errors = collect_segment_refs(
-                        &self.storage_root.join(&bucket_name),
-                        &mut referenced,
-                    );
+                    let mut scan_errors =
+                        collect_segment_refs(&storage_root.join(&bucket_name), &mut referenced);
                     scan_errors.extend(collect_segment_refs(
                         &bucket_entry.path().join("versions"),
                         &mut referenced,
@@ -476,16 +539,18 @@ impl GcService {
         })
     }
 
-    async fn save_history(&self) {
-        let history = self.history.read().await;
-        let data = json!({ "executions": *history });
-        if let Some(parent) = self.history_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(
-            &self.history_path,
-            serde_json::to_string_pretty(&data).unwrap_or_default(),
-        );
+    async fn save_history(&self) -> Result<(), String> {
+        let data = {
+            let history = self.history.read().await;
+            json!({ "executions": *history })
+        };
+        let history_path = self.history_path.clone();
+        tokio::task::spawn_blocking(move || {
+            myfsio_common::fs_util::atomic_write_json(&history_path, &data)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("GC history task failed: {error}"))?
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -768,6 +833,69 @@ mod tests {
 
         assert_eq!(result["temp_files_deleted"], 1);
         assert!(file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn temp_sweep_removes_leaked_segment_snapshot_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshot_dir = tmp
+            .path()
+            .join(".myfsio.sys")
+            .join("tmp")
+            .join("repl-src-leaked");
+        std::fs::create_dir_all(snapshot_dir.join("segments")).unwrap();
+        std::fs::write(snapshot_dir.join("stub"), b"stub").unwrap();
+        std::fs::write(snapshot_dir.join("segments").join("seg-00001"), b"part").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let service = Arc::new(GcService::new(
+            tmp.path().to_path_buf(),
+            GcConfig {
+                temp_file_max_age_hours: 0.0,
+                dry_run: false,
+                ..GcConfig::default()
+            },
+        ));
+
+        let result = service.run_now(false).await.unwrap();
+
+        assert_eq!(result["temp_files_deleted"], 1);
+        assert!(!snapshot_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn temp_sweep_never_deletes_commit_intents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_dir = tmp.path().join(".myfsio.sys").join("tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let stale_temps = [
+            tmp_dir.join("put-leaked.tmp"),
+            tmp_dir.join("mpu-plain-leaked"),
+            tmp_dir.join("mpu-block-leaked"),
+        ];
+        for stale_tmp in &stale_temps {
+            std::fs::write(stale_tmp, b"temporary").unwrap();
+        }
+        let intent = tmp_dir.join("retained.sidecar-stage");
+        std::fs::write(&intent, b"{}").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let service = Arc::new(GcService::new(
+            tmp.path().to_path_buf(),
+            GcConfig {
+                temp_file_max_age_hours: 0.0,
+                dry_run: false,
+                ..GcConfig::default()
+            },
+        ));
+
+        let result = service.run_now(false).await.unwrap();
+
+        assert_eq!(result["temp_files_deleted"], 3);
+        assert!(stale_temps.iter().all(|path| !path.exists()));
+        assert!(
+            intent.exists(),
+            "commit intents are recovery records owned by startup reconciliation, never GC"
+        );
     }
 
     fn write_segment_fixture(root: &std::path::Path, bucket: &str, segment_id: &str) -> PathBuf {

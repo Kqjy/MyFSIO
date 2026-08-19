@@ -6,10 +6,23 @@ use serde_json::Value;
 
 use crate::services::safe_resolver::SafeResolver;
 
-fn extract_error_detail(body: &str) -> String {
+#[derive(Debug, Clone, Default)]
+pub struct PeerErrorBody {
+    pub detail: String,
+    pub source: Option<String>,
+}
+
+fn parse_error_body(body: &str, server_header: Option<&str>) -> PeerErrorBody {
+    let mut source = server_header
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate_chars(s, 60));
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        return String::new();
+        return PeerErrorBody {
+            detail: String::new(),
+            source,
+        };
     }
 
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
@@ -33,7 +46,20 @@ fn extract_error_detail(body: &str) -> String {
             (None, None) => String::new(),
         };
         if !detail.is_empty() {
-            return truncate_chars(&detail, 240);
+            return PeerErrorBody {
+                detail: truncate_chars(&detail, 240),
+                source,
+            };
+        }
+    }
+
+    if looks_like_html(trimmed) {
+        let (detail, html_source) = parse_html_error(trimmed);
+        if html_source.is_some() {
+            source = html_source;
+        }
+        if !detail.is_empty() {
+            return PeerErrorBody { detail, source };
         }
     }
 
@@ -47,7 +73,10 @@ fn extract_error_detail(body: &str) -> String {
             (None, None) => String::new(),
         };
         if !detail.is_empty() {
-            return truncate_chars(&detail, 240);
+            return PeerErrorBody {
+                detail: truncate_chars(&detail, 240),
+                source,
+            };
         }
     }
 
@@ -57,7 +86,111 @@ fn extract_error_detail(body: &str) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    truncate_chars(&collapsed, 240)
+    PeerErrorBody {
+        detail: truncate_chars(&collapsed, 240),
+        source,
+    }
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let head = body
+        .chars()
+        .take(512)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    head.contains("<html") || head.contains("<!doctype html") || head.contains("<body")
+}
+
+fn parse_html_error(html: &str) -> (String, Option<String>) {
+    let source = html_footer_source(html);
+    let detail = html_tag_text(html, "h1")
+        .or_else(|| html_tag_text(html, "title"))
+        .unwrap_or_else(|| truncate_chars(&html_to_text(html), 240));
+    (detail, source)
+}
+
+fn html_tag_text(html: &str, tag: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = format!("<{}", tag);
+    let close = format!("</{}", tag);
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find(&open) {
+        let after_name = from + offset + open.len();
+        let boundary = lower[after_name..].chars().next();
+        if !matches!(boundary, Some(c) if c == '>' || c == '/' || c.is_whitespace()) {
+            from = after_name;
+            continue;
+        }
+        let gt = lower[after_name..].find('>')?;
+        let text_start = after_name + gt + 1;
+        let text_end = match lower[text_start..].find(&close) {
+            Some(end) => text_start + end,
+            None => html.len(),
+        };
+        let text = html_to_text(&html[text_start..text_end]);
+        if !text.is_empty() {
+            return Some(truncate_chars(&text, 240));
+        }
+        from = text_start;
+    }
+    None
+}
+
+fn html_footer_source(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.rfind("<hr")?;
+    let text = html_to_text(&html[start..]);
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 60 {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn html_to_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len().min(8192));
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let rest = &lower[i..];
+            if rest.starts_with("<script") || rest.starts_with("<style") {
+                let close = if rest.starts_with("<script") {
+                    "</script"
+                } else {
+                    "</style"
+                };
+                match lower[i..].find(close) {
+                    Some(offset) => i += offset,
+                    None => break,
+                }
+            }
+            match lower[i..].find('>') {
+                Some(offset) => {
+                    i += offset + 1;
+                    out.push(' ');
+                }
+                None => break,
+            }
+            continue;
+        }
+        let ch = html[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    decode_entities(&out.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+fn decode_entities(text: &str) -> String {
+    text.replace("&nbsp;", " ")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
@@ -87,16 +220,235 @@ use myfsio_auth::sigv4::{
 use crate::stores::connections::RemoteConnection;
 
 pub struct PeerAdminClient {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
     allow_internal_endpoints: bool,
 }
 
 pub enum PeerAdminStatus {
     Ok(Value),
-    Unauthorized(String),
-    HttpError { status: u16, detail: String },
+    Unauthorized { status: u16, body: PeerErrorBody },
+    HttpError { status: u16, body: PeerErrorBody },
     InvalidJson(String),
     Unreachable(String),
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PeerFailure {
+    pub kind: &'static str,
+    pub status: Option<u16>,
+    pub title: String,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub source: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl PeerFailure {
+    pub fn message(&self) -> String {
+        match self.detail.as_deref() {
+            Some(d) if !d.is_empty() && !self.summary.contains(d) => {
+                format!("{} ({})", self.summary, d)
+            }
+            _ => self.summary.clone(),
+        }
+    }
+
+    pub fn legacy_status(&self) -> &'static str {
+        match self.kind {
+            "unauthorized" => "unauthorized",
+            "unreachable" | "not_configured" => "unreachable",
+            _ => "error",
+        }
+    }
+
+    pub fn not_configured() -> Self {
+        PeerFailure {
+            kind: "not_configured",
+            status: None,
+            title: "No connection configured".to_string(),
+            summary: "This site has no saved connection, so its status cannot be polled."
+                .to_string(),
+            detail: None,
+            source: None,
+            hint: Some(
+                "Attach a connection holding this peer's credentials from the Sites page."
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn http(status: u16, body: PeerErrorBody, unauthorized: bool) -> Self {
+        let reason = reason_phrase(status);
+        let source = body.source.filter(|s| !s.is_empty());
+        let via_proxy = source.is_some();
+        let title = match status {
+            401 | 403 if via_proxy => "Blocked before reaching the peer".to_string(),
+            401 | 403 => "Peer rejected these credentials".to_string(),
+            404 => "Admin API not found at this endpoint".to_string(),
+            429 => "Peer is rate limiting cluster polls".to_string(),
+            502..=504 => "Peer is not serving requests".to_string(),
+            s if s >= 500 => "Peer returned a server error".to_string(),
+            _ => format!("Peer returned {} {}", status, reason),
+        };
+        let summary = match &source {
+            Some(src) => format!(
+                "{} answered {} {} before the request reached the peer's admin API.",
+                src, status, reason
+            ),
+            None => format!("The peer's admin API answered {} {}.", status, reason),
+        };
+        let hint = match status {
+            401 | 403 if via_proxy => Some(
+                "Allow /myfsio/admin/cluster/* through the proxy or WAF in front of this peer, and keep the SigV4 Authorization header intact."
+                    .to_string(),
+            ),
+            401 | 403 => Some(
+                "Re-issue a peer credential on the remote site and update this site's saved connection."
+                    .to_string(),
+            ),
+            404 => Some(
+                "Point the endpoint at the peer's S3 API listener (PORT), not the web UI (UI_PORT)."
+                    .to_string(),
+            ),
+            429 => Some("Raise RATE_LIMIT_ADMIN on the peer or poll less often.".to_string()),
+            s if s >= 500 => Some("Check the peer's server logs for the failing request.".to_string()),
+            _ => None,
+        };
+        let detail = body
+            .detail
+            .trim()
+            .to_string()
+            .into_option()
+            .filter(|d| !is_status_echo(d, status, reason));
+        PeerFailure {
+            kind: if unauthorized { "unauthorized" } else { "http" },
+            status: Some(status),
+            title,
+            summary,
+            detail,
+            source,
+            hint,
+        }
+    }
+
+    fn unreachable(detail: String) -> Self {
+        let lower = detail.to_ascii_lowercase();
+        if lower.contains("no connection configured") {
+            return PeerFailure::not_configured();
+        }
+        let (title, summary, hint) = if lower.contains("endpoint rejected") {
+            (
+                "Endpoint blocked by policy",
+                "The outbound guard refused this endpoint before any request was sent.",
+                Some("Set ALLOW_INTERNAL_ENDPOINTS=true if this peer really does live on a private network."),
+            )
+        } else if lower.contains("timed out") || lower.contains("timeout") {
+            (
+                "Connection timed out",
+                "The peer did not answer within the cluster poll timeout.",
+                Some("Confirm the peer is running and reachable from this host."),
+            )
+        } else if lower.contains("dns") || lower.contains("resolve") {
+            (
+                "DNS lookup failed",
+                "The peer hostname could not be resolved.",
+                Some("Check the endpoint hostname on the Sites page."),
+            )
+        } else if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
+            (
+                "TLS handshake failed",
+                "The TLS connection to the peer could not be established.",
+                Some("Check the peer's certificate chain and hostname."),
+            )
+        } else if lower.contains("refused") || lower.contains("connect") {
+            (
+                "Connection refused",
+                "Nothing accepted a connection at the peer endpoint.",
+                Some("Check the endpoint host and port, and that the peer's API listener is up."),
+            )
+        } else {
+            (
+                "Peer unreachable",
+                "The request to the peer could not be completed.",
+                None,
+            )
+        };
+        PeerFailure {
+            kind: "unreachable",
+            status: None,
+            title: title.to_string(),
+            summary: summary.to_string(),
+            detail: detail.trim().to_string().into_option(),
+            source: None,
+            hint: hint.map(str::to_string),
+        }
+    }
+
+    fn invalid_response(detail: String) -> Self {
+        PeerFailure {
+            kind: "invalid_response",
+            status: None,
+            title: "Unexpected response".to_string(),
+            summary: "The peer answered successfully but the body was not a MyFSIO admin payload."
+                .to_string(),
+            detail: detail.trim().to_string().into_option(),
+            source: None,
+            hint: Some(
+                "Confirm the endpoint points at MyFSIO rather than a proxy landing page."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+impl PeerAdminStatus {
+    pub fn into_result(self) -> Result<Value, PeerFailure> {
+        match self {
+            PeerAdminStatus::Ok(v) => Ok(v),
+            PeerAdminStatus::Unauthorized { status, body } => {
+                Err(PeerFailure::http(status, body, true))
+            }
+            PeerAdminStatus::HttpError { status, body } => {
+                Err(PeerFailure::http(status, body, false))
+            }
+            PeerAdminStatus::InvalidJson(detail) => Err(PeerFailure::invalid_response(detail)),
+            PeerAdminStatus::Unreachable(detail) => Err(PeerFailure::unreachable(detail)),
+        }
+    }
+}
+
+trait IntoOption {
+    fn into_option(self) -> Option<String>;
+}
+
+impl IntoOption for String {
+    fn into_option(self) -> Option<String> {
+        if self.is_empty() {
+            None
+        } else {
+            Some(self)
+        }
+    }
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|s| s.canonical_reason())
+        .unwrap_or("Error")
+}
+
+fn is_status_echo(detail: &str, status: u16, reason: &str) -> bool {
+    let normalized = detail
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized == format!("{} {}", status, reason).to_ascii_lowercase()
+        || normalized == reason.to_ascii_lowercase()
+        || normalized == status.to_string()
 }
 
 impl PeerAdminClient {
@@ -106,12 +458,23 @@ impl PeerAdminClient {
         allow_internal_endpoints: bool,
     ) -> Self {
         let resolver: Arc<SafeResolver> = Arc::new(SafeResolver::new(allow_internal_endpoints));
-        let client = reqwest::Client::builder()
+        let client = match reqwest::Client::builder()
             .connect_timeout(connect_timeout)
             .timeout(read_timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .dns_resolver(resolver)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to build the peer admin HTTP client; peer admin and relay requests \
+                     will be refused because the SSRF-filtering resolver is unavailable"
+                );
+                None
+            }
+        };
         Self {
             client,
             allow_internal_endpoints,
@@ -205,13 +568,21 @@ impl PeerAdminClient {
         );
 
         Ok(self
-            .client
+            .http_client()?
             .get(&url)
             .header("host", &host_with_port)
             .header("x-amz-content-sha256", &payload_hash)
             .header("x-amz-date", &amz_date)
             .header("x-myfsio-nonce", &nonce)
             .header("authorization", &authorization))
+    }
+
+    fn http_client(&self) -> Result<&reqwest::Client, String> {
+        self.client.as_ref().ok_or_else(|| {
+            "peer admin HTTP client unavailable: the SSRF-filtering resolver could not be \
+             initialized at startup"
+                .to_string()
+        })
     }
 
     async fn guard_endpoint(&self, endpoint: &str) -> Result<(), String> {
@@ -234,18 +605,10 @@ impl PeerAdminClient {
         path_and_query: &str,
         connection: &RemoteConnection,
     ) -> Result<Value, String> {
-        match self
-            .fetch_admin_status(endpoint, path_and_query, connection)
+        self.fetch_admin_status(endpoint, path_and_query, connection)
             .await
-        {
-            PeerAdminStatus::Ok(v) => Ok(v),
-            PeerAdminStatus::Unauthorized(detail) => Err(detail),
-            PeerAdminStatus::HttpError { status, detail } => {
-                Err(format!("peer returned status {} — {}", status, detail))
-            }
-            PeerAdminStatus::InvalidJson(detail) => Err(detail),
-            PeerAdminStatus::Unreachable(detail) => Err(detail),
-        }
+            .into_result()
+            .map_err(|failure| failure.message())
     }
 
     pub async fn fetch_admin_status(
@@ -272,19 +635,22 @@ impl PeerAdminClient {
                 Err(e) => PeerAdminStatus::InvalidJson(format!("invalid json: {}", e)),
             };
         }
+        let server_header = resp
+            .headers()
+            .get(reqwest::header::SERVER)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string());
         let body_text = resp.text().await.unwrap_or_default();
-        let detail = extract_error_detail(&body_text);
+        let body = parse_error_body(&body_text, server_header.as_deref());
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let message = if detail.is_empty() {
-                format!("peer returned status {}", status.as_u16())
-            } else {
-                format!("peer returned status {} — {}", status.as_u16(), detail)
-            };
-            PeerAdminStatus::Unauthorized(message)
+            PeerAdminStatus::Unauthorized {
+                status: status.as_u16(),
+                body,
+            }
         } else {
             PeerAdminStatus::HttpError {
                 status: status.as_u16(),
-                detail,
+                body,
             }
         }
     }
@@ -307,27 +673,15 @@ impl PeerAdminClient {
         endpoint: &str,
         connection: &RemoteConnection,
     ) -> Result<(), String> {
-        match self
-            .fetch_admin_status(
-                endpoint,
-                "/myfsio/admin/cluster/overview?local_only=1",
-                connection,
-            )
-            .await
-        {
-            PeerAdminStatus::Ok(_) => Ok(()),
-            PeerAdminStatus::InvalidJson(detail) => Err(format!(
-                "peer responded but body was not valid JSON: {}",
-                detail
-            )),
-            PeerAdminStatus::Unauthorized(detail) => {
-                Err(format!("peer credentials rejected: {}", detail))
-            }
-            PeerAdminStatus::HttpError { status, detail } => {
-                Err(format!("peer returned status {} — {}", status, detail))
-            }
-            PeerAdminStatus::Unreachable(detail) => Err(detail),
-        }
+        self.fetch_admin_status(
+            endpoint,
+            "/myfsio/admin/cluster/overview?local_only=1",
+            connection,
+        )
+        .await
+        .into_result()
+        .map(|_| ())
+        .map_err(|failure| failure.message())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -486,7 +840,7 @@ impl PeerAdminClient {
             other => return Err(format!("unsupported method: {}", other)),
         };
 
-        let mut req = self.client.request(req_method, &url);
+        let mut req = self.http_client()?.request(req_method, &url);
         for (k, v) in &header_pairs {
             req = req.header(k, v);
         }
@@ -532,4 +886,113 @@ pub struct RelayResponse {
     pub content_type: Option<String>,
     pub body: Vec<u8>,
     pub peer_headers: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLOUDFLARE_403: &str = "<html>\n<head><title>403 Forbidden</title></head>\n<body>\n<center><h1>403 Forbidden</h1></center>\n<hr><center>cloudflare</center>\n</body>\n</html>";
+
+    #[test]
+    fn html_error_page_yields_summary_and_source() {
+        let body = parse_error_body(CLOUDFLARE_403, None);
+        assert_eq!(body.detail, "403 Forbidden");
+        assert_eq!(body.source.as_deref(), Some("cloudflare"));
+    }
+
+    #[test]
+    fn html_error_page_never_leaks_markup() {
+        let failure = PeerAdminStatus::Unauthorized {
+            status: 403,
+            body: parse_error_body(CLOUDFLARE_403, None),
+        }
+        .into_result()
+        .unwrap_err();
+        assert!(!failure.message().contains('<'));
+        assert_eq!(failure.kind, "unauthorized");
+        assert_eq!(failure.status, Some(403));
+        assert_eq!(failure.source.as_deref(), Some("cloudflare"));
+        assert!(failure.detail.is_none());
+        assert!(failure.summary.contains("cloudflare"));
+        assert!(failure.hint.is_some());
+    }
+
+    #[test]
+    fn server_header_supplies_source_when_body_is_empty() {
+        let body = parse_error_body("", Some("cloudflare"));
+        assert!(body.detail.is_empty());
+        assert_eq!(body.source.as_deref(), Some("cloudflare"));
+    }
+
+    #[test]
+    fn script_and_style_blocks_are_dropped() {
+        let html = "<html><head><style>h1 { color: red }</style><script>var a = 1 < 2;</script><title>502 Bad Gateway</title></head><body><h1>502 Bad Gateway</h1></body></html>";
+        let body = parse_error_body(html, None);
+        assert_eq!(body.detail, "502 Bad Gateway");
+    }
+
+    #[test]
+    fn entities_are_decoded() {
+        let html = "<html><body><h1>Access &amp; policy denied</h1></body></html>";
+        assert_eq!(
+            parse_error_body(html, None).detail,
+            "Access & policy denied"
+        );
+    }
+
+    #[test]
+    fn json_and_xml_errors_still_parse() {
+        assert_eq!(
+            parse_error_body(
+                r#"{"error":{"code":"AccessDenied","message":"nope"}}"#,
+                None
+            )
+            .detail,
+            "AccessDenied: nope"
+        );
+        assert_eq!(
+            parse_error_body(
+                "<?xml version=\"1.0\"?><Error><Code>AccessDenied</Code><Message>nope</Message></Error>",
+                None
+            )
+            .detail,
+            "AccessDenied — nope"
+        );
+    }
+
+    #[test]
+    fn peer_body_detail_is_kept_when_it_adds_information() {
+        let failure = PeerAdminStatus::HttpError {
+            status: 500,
+            body: parse_error_body(
+                r#"{"error":{"message":"listing index rebuild failed"}}"#,
+                None,
+            ),
+        }
+        .into_result()
+        .unwrap_err();
+        assert_eq!(
+            failure.detail.as_deref(),
+            Some("listing index rebuild failed")
+        );
+        assert!(failure.message().contains("listing index rebuild failed"));
+    }
+
+    #[test]
+    fn unreachable_details_are_classified() {
+        let timeout = PeerAdminStatus::Unreachable(
+            "request failed: error sending request: operation timed out".to_string(),
+        )
+        .into_result()
+        .unwrap_err();
+        assert_eq!(timeout.title, "Connection timed out");
+        assert_eq!(timeout.legacy_status(), "unreachable");
+
+        let missing = PeerAdminStatus::Unreachable("no connection configured".to_string())
+            .into_result()
+            .unwrap_err();
+        assert_eq!(missing.kind, "not_configured");
+        assert!(missing.detail.is_none());
+    }
 }

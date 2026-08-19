@@ -1,6 +1,8 @@
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use serde::{Deserialize, Serialize};
@@ -175,25 +177,224 @@ impl SegmentSet {
     }
 
     fn window(&self, start: u64, len: u64) -> Vec<(usize, u64, u64)> {
-        let mut out = Vec::new();
-        let mut offset = 0u64;
-        let mut remaining = len;
-        for (i, size) in self.sizes.iter().copied().enumerate() {
-            if remaining == 0 {
-                break;
-            }
-            let seg_end = offset + size;
-            if start < seg_end && size > 0 {
-                let skip = start.saturating_sub(offset);
-                let avail = size - skip;
-                let take = avail.min(remaining);
-                out.push((i, skip, take));
-                remaining -= take;
-            }
-            offset = seg_end;
-        }
-        out
+        segment_window(&self.sizes, start, len)
     }
+}
+
+fn segment_window(sizes: &[u64], start: u64, len: u64) -> Vec<(usize, u64, u64)> {
+    segment_window_iter(sizes.iter().copied(), start, len)
+}
+
+fn segment_window_iter(
+    sizes: impl Iterator<Item = u64>,
+    start: u64,
+    len: u64,
+) -> Vec<(usize, u64, u64)> {
+    let mut out = Vec::new();
+    let mut offset = 0u64;
+    let mut remaining = len;
+    for (i, size) in sizes.enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        let seg_end = offset + size;
+        if start < seg_end && size > 0 {
+            let skip = start.saturating_sub(offset);
+            let avail = size - skip;
+            let take = avail.min(remaining);
+            out.push((i, skip, take));
+            remaining -= take;
+        }
+        offset = seg_end;
+    }
+    out
+}
+
+#[derive(Debug)]
+struct SegmentCleanup {
+    path: PathBuf,
+}
+
+impl Drop for SegmentCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "failed to remove linked segment snapshot"
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SegmentPaths {
+    segments: Arc<Vec<(PathBuf, u64)>>,
+    _cleanup: Option<Arc<SegmentCleanup>>,
+}
+
+impl SegmentPaths {
+    pub fn new(segments: Vec<(PathBuf, u64)>) -> Self {
+        Self {
+            segments: Arc::new(segments),
+            _cleanup: None,
+        }
+    }
+
+    pub fn with_cleanup(segments: Vec<(PathBuf, u64)>, cleanup: PathBuf) -> Self {
+        Self {
+            segments: Arc::new(segments),
+            _cleanup: Some(Arc::new(SegmentCleanup { path: cleanup })),
+        }
+    }
+
+    pub fn entries(&self) -> &[(PathBuf, u64)] {
+        self.segments.as_slice()
+    }
+
+    pub fn total(&self) -> u64 {
+        self.segments.iter().map(|(_, size)| size).sum()
+    }
+
+    fn window(&self, start: u64, len: u64) -> Vec<(usize, u64, u64)> {
+        segment_window_iter(self.segments.iter().map(|(_, size)| *size), start, len)
+    }
+}
+
+#[derive(Debug)]
+pub struct LazySegmentSource {
+    paths: SegmentPaths,
+    eager: Option<(usize, std::fs::File)>,
+}
+
+impl LazySegmentSource {
+    pub fn open_first(paths: SegmentPaths) -> std::io::Result<Self> {
+        let total = paths.total();
+        Self::open_for_window(paths, 0, total)
+    }
+
+    pub fn open_for_window(paths: SegmentPaths, start: u64, len: u64) -> std::io::Result<Self> {
+        let first = paths
+            .window(start, len)
+            .first()
+            .map(|(ordinal, _, _)| *ordinal);
+        let eager = first
+            .map(|ordinal| {
+                let (path, expected) = &paths.entries()[ordinal];
+                open_segment_sync(path, *expected).map(|file| (ordinal, file))
+            })
+            .transpose()?;
+        Ok(Self { paths, eager })
+    }
+
+    pub fn paths(&self) -> &SegmentPaths {
+        &self.paths
+    }
+
+    pub(crate) fn from_parts(paths: SegmentPaths, eager: Option<(usize, std::fs::File)>) -> Self {
+        Self { paths, eager }
+    }
+
+    pub fn reopenable(&self) -> SegmentPaths {
+        self.paths.clone()
+    }
+
+    pub fn into_parts(self) -> (SegmentPaths, Option<(usize, std::fs::File)>) {
+        (self.paths, self.eager)
+    }
+
+    pub fn into_eager_files(self) -> std::io::Result<Vec<(std::fs::File, u64)>> {
+        let (paths, mut eager) = self.into_parts();
+        let mut files = Vec::with_capacity(paths.entries().len());
+        for (ordinal, (path, expected)) in paths.entries().iter().enumerate() {
+            let file = match eager.take() {
+                Some((eager_ordinal, file)) if eager_ordinal == ordinal => file,
+                Some(other) => {
+                    eager = Some(other);
+                    open_segment_sync(path, *expected)?
+                }
+                None => open_segment_sync(path, *expected)?,
+            };
+            files.push((file, *expected));
+        }
+        Ok(files)
+    }
+}
+
+fn segment_size_error(path: &Path, expected: u64, actual: u64) -> std::io::Error {
+    tracing::error!(
+        path = %path.display(),
+        expected_size = expected,
+        actual_size = actual,
+        "segmented object corruption discovered during lazy read"
+    );
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "segment {} has size {} but manifest says {}",
+            path.display(),
+            actual,
+            expected
+        ),
+    )
+}
+
+fn open_segment_sync(path: &Path, expected: u64) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(path).inspect_err(|error| {
+        tracing::error!(
+            path = %path.display(),
+            error = %error,
+            "segmented object corruption discovered during lazy read"
+        );
+    })?;
+    let actual = file
+        .metadata()
+        .inspect_err(|error| {
+            tracing::error!(
+                path = %path.display(),
+                error = %error,
+                "segmented object corruption discovered during lazy read"
+            );
+        })?
+        .len();
+    if actual != expected {
+        return Err(segment_size_error(path, expected, actual));
+    }
+    Ok(file)
+}
+
+async fn open_segment_async(
+    path: PathBuf,
+    expected: u64,
+    skip: u64,
+) -> std::io::Result<tokio::fs::File> {
+    let mut file = tokio::fs::File::open(&path).await.inspect_err(|error| {
+        tracing::error!(
+            path = %path.display(),
+            error = %error,
+            "segmented object corruption discovered during lazy read"
+        );
+    })?;
+    let actual = file
+        .metadata()
+        .await
+        .inspect_err(|error| {
+            tracing::error!(
+                path = %path.display(),
+                error = %error,
+                "segmented object corruption discovered during lazy read"
+            );
+        })?
+        .len();
+    if actual != expected {
+        return Err(segment_size_error(&path, expected, actual));
+    }
+    if skip > 0 {
+        file.seek(SeekFrom::Start(skip)).await?;
+    }
+    Ok(file)
 }
 
 pub struct SegmentChainRead {
@@ -229,7 +430,8 @@ impl Read for SegmentChainRead {
                 let Some(&(ordinal, skip, take)) = self.plan.get(self.plan_idx) else {
                     return Ok(0);
                 };
-                let mut file = std::fs::File::open(self.set.seg_path(ordinal))?;
+                let path = self.set.seg_path(ordinal);
+                let mut file = open_segment_sync(&path, self.set.sizes[ordinal])?;
                 if skip > 0 {
                     file.seek(SeekFrom::Start(skip))?;
                 }
@@ -247,6 +449,9 @@ impl Read for SegmentChainRead {
                 .min(self.seg_remaining.min(usize::MAX as u64) as usize);
             let n = file.read(&mut buf[..want])?;
             if n == 0 {
+                tracing::error!(
+                    "segmented object corruption discovered during lazy read: segment ended early"
+                );
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "segment file ended before manifest size",
@@ -257,6 +462,88 @@ impl Read for SegmentChainRead {
                 self.current = None;
                 self.plan_idx += 1;
             }
+            return Ok(n);
+        }
+    }
+}
+
+pub struct LazyOpenSegmentsRead {
+    source: SegmentPaths,
+    eager: Option<(usize, std::fs::File)>,
+    plan: Vec<(usize, u64, u64)>,
+    plan_idx: usize,
+    current: Option<std::fs::File>,
+    seg_remaining: u64,
+}
+
+impl LazyOpenSegmentsRead {
+    pub fn new(source: LazySegmentSource) -> Self {
+        let total = source.paths.total();
+        Self::with_window(source, 0, total).expect("full segment window is valid")
+    }
+
+    pub fn with_window(source: LazySegmentSource, start: u64, len: u64) -> std::io::Result<Self> {
+        let (paths, eager) = source.into_parts();
+        let plan = paths.window(start, len);
+        if plan.iter().map(|(_, _, take)| *take).sum::<u64>() != len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "segment window exceeds the available content",
+            ));
+        }
+        Ok(Self {
+            source: paths,
+            eager,
+            plan,
+            plan_idx: 0,
+            current: None,
+            seg_remaining: 0,
+        })
+    }
+}
+
+impl Read for LazyOpenSegmentsRead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.current.is_none() {
+                let Some(&(ordinal, skip, take)) = self.plan.get(self.plan_idx) else {
+                    return Ok(0);
+                };
+                let (path, expected) = &self.source.entries()[ordinal];
+                let mut file = match self.eager.take() {
+                    Some((eager_ordinal, file)) if eager_ordinal == ordinal => file,
+                    Some(other) => {
+                        self.eager = Some(other);
+                        open_segment_sync(path, *expected)?
+                    }
+                    None => open_segment_sync(path, *expected)?,
+                };
+                if skip > 0 {
+                    file.seek(SeekFrom::Start(skip))?;
+                }
+                self.current = Some(file);
+                self.seg_remaining = take;
+            }
+            if self.seg_remaining == 0 {
+                self.current = None;
+                self.plan_idx += 1;
+                continue;
+            }
+            let file = self.current.as_mut().expect("current segment file");
+            let want = buf
+                .len()
+                .min(self.seg_remaining.min(usize::MAX as u64) as usize);
+            let n = file.read(&mut buf[..want])?;
+            if n == 0 {
+                tracing::error!(
+                    "segmented object corruption discovered during lazy read: segment ended early"
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "segment file ended before manifest size",
+                ));
+            }
+            self.seg_remaining -= n as u64;
             return Ok(n);
         }
     }
@@ -335,6 +622,122 @@ pub struct SegmentRangeReader {
     files: Vec<(tokio::fs::File, u64)>,
     idx: usize,
     seg_remaining: u64,
+}
+
+type SegmentOpenFuture =
+    Pin<Box<dyn Future<Output = std::io::Result<tokio::fs::File>> + Send + Sync>>;
+
+pub struct LazySegmentRangeReader {
+    source: SegmentPaths,
+    plan: Vec<(usize, u64, u64)>,
+    plan_idx: usize,
+    current: Option<tokio::fs::File>,
+    opening: Option<SegmentOpenFuture>,
+    seg_remaining: u64,
+}
+
+impl LazySegmentRangeReader {
+    pub async fn new(source: LazySegmentSource, start: u64, len: u64) -> std::io::Result<Self> {
+        let (paths, eager) = source.into_parts();
+        let plan = paths.window(start, len);
+        if plan.iter().map(|(_, _, take)| *take).sum::<u64>() != len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "segment window exceeds the available content",
+            ));
+        }
+        let mut current = None;
+        let mut seg_remaining = 0;
+        if let (Some((eager_ordinal, file)), Some((ordinal, skip, take))) =
+            (eager, plan.first().copied())
+        {
+            if eager_ordinal == ordinal {
+                let mut file = tokio::fs::File::from_std(file);
+                if skip > 0 {
+                    file.seek(SeekFrom::Start(skip)).await?;
+                }
+                current = Some(file);
+                seg_remaining = take;
+            }
+        }
+        Ok(Self {
+            source: paths,
+            plan,
+            plan_idx: 0,
+            current,
+            opening: None,
+            seg_remaining,
+        })
+    }
+
+    pub async fn open(paths: SegmentPaths, start: u64, len: u64) -> std::io::Result<Self> {
+        let source = LazySegmentSource::open_for_window(paths, start, len)?;
+        Self::new(source, start, len).await
+    }
+}
+
+impl AsyncRead for LazySegmentRangeReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            if self.plan_idx >= self.plan.len() {
+                return Poll::Ready(Ok(()));
+            }
+            if self.current.is_none() {
+                if self.opening.is_none() {
+                    let (ordinal, skip, _) = self.plan[self.plan_idx];
+                    let (path, expected) = self.source.entries()[ordinal].clone();
+                    self.opening = Some(Box::pin(open_segment_async(path, expected, skip)));
+                }
+                let opening = self.opening.as_mut().expect("segment open future");
+                match opening.as_mut().poll(cx) {
+                    Poll::Ready(Ok(file)) => {
+                        self.current = Some(file);
+                        self.opening = None;
+                        self.seg_remaining = self.plan[self.plan_idx].2;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            if self.seg_remaining == 0 {
+                self.current = None;
+                self.plan_idx += 1;
+                continue;
+            }
+            let want = self.seg_remaining.min(buf.remaining() as u64) as usize;
+            if want == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let mut limited = buf.take(want);
+            let this = self.as_mut().get_mut();
+            match Pin::new(this.current.as_mut().expect("current segment file"))
+                .poll_read(cx, &mut limited)
+            {
+                Poll::Ready(Ok(())) => {
+                    let n = limited.filled().len();
+                    if n == 0 {
+                        tracing::error!(
+                            "segmented object corruption discovered during lazy read: segment ended early"
+                        );
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "segment file ended before manifest size",
+                        )));
+                    }
+                    unsafe { buf.assume_init(n) };
+                    buf.advance(n);
+                    this.seg_remaining -= n as u64;
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
 }
 
 impl SegmentRangeReader {
@@ -548,7 +951,50 @@ mod tests {
         let mut reader = SegmentChainRead::full(set);
         let mut out = Vec::new();
         let err = reader.read_to_end(&mut out).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn lazy_reader_opens_later_segments_only_when_reached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let set = build_segments(&tmp.path().join("segs"), &[b"first", b"second"]);
+        let paths = SegmentPaths::new(
+            set.sizes
+                .iter()
+                .enumerate()
+                .map(|(ordinal, size)| (set.seg_path(ordinal), *size))
+                .collect(),
+        );
+        let source = LazySegmentSource::open_first(paths).unwrap();
+        std::fs::remove_file(set.seg_path(1)).unwrap();
+        let mut reader = LazyOpenSegmentsRead::new(source);
+        let mut first = [0u8; 5];
+        reader.read_exact(&mut first).unwrap();
+        assert_eq!(&first, b"first");
+        let error = reader.read(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn lazy_async_reader_detects_later_size_mismatch_midstream() {
+        use tokio::io::AsyncReadExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let set = build_segments(&tmp.path().join("segs"), &[b"first", b"second"]);
+        let paths = SegmentPaths::new(
+            set.sizes
+                .iter()
+                .enumerate()
+                .map(|(ordinal, size)| (set.seg_path(ordinal), *size))
+                .collect(),
+        );
+        let source = LazySegmentSource::open_first(paths).unwrap();
+        std::fs::write(set.seg_path(1), b"short").unwrap();
+        let mut reader = LazySegmentRangeReader::new(source, 0, 11).await.unwrap();
+        let mut first = [0u8; 5];
+        reader.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first, b"first");
+        let error = reader.read_to_end(&mut Vec::new()).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]

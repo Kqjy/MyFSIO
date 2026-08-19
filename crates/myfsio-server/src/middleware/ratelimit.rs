@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -55,48 +56,65 @@ impl RateLimitLayerState {
         }
     }
 
-    fn select_limiter_and_scope(&self, req: &Request) -> (&Arc<TokenBucketLimiter>, &'static str) {
+    fn select_limiter_and_scope(&self, req: &Request) -> (&Arc<TokenBucketLimiter>, LimitScope) {
         let path = req.uri().path();
         let method = req.method();
         if path == "/" && *method == Method::GET {
             if let Some(ref limiter) = self.list_buckets_limiter {
-                return (limiter, "list_buckets");
+                return (limiter, LimitScope::ListBuckets);
             }
         } else {
             if *method == Method::HEAD {
                 if let Some(ref limiter) = self.head_ops_limiter {
-                    return (limiter, "head");
+                    return (limiter, LimitScope::Head);
                 }
             }
-            let segments: Vec<&str> = path
+            let mut segments = path
                 .trim_start_matches('/')
                 .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
-            if segments.len() == 1 {
+                .filter(|s| !s.is_empty());
+            let first = segments.next();
+            let second = segments.next();
+            if first.is_some() && second.is_none() {
                 if let Some(ref limiter) = self.bucket_ops_limiter {
-                    return (limiter, "bucket");
+                    return (limiter, LimitScope::Bucket);
                 }
-            } else if segments.len() >= 2 {
+            } else if second.is_some() {
                 if let Some(ref limiter) = self.object_ops_limiter {
-                    return (limiter, "object");
+                    return (limiter, LimitScope::Object);
                 }
             }
         }
-        (&self.default_limiter, "default")
+        (&self.default_limiter, LimitScope::Default)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LimitScope {
+    Default,
+    ListBuckets,
+    Bucket,
+    Object,
+    Head,
+    UiLogin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LimiterKey {
+    scope: LimitScope,
+    ip: Option<IpAddr>,
 }
 
 #[derive(Debug)]
 struct TokenBucketLimiter {
     capacity: f64,
     refill_per_sec: f64,
-    state: Mutex<LimiterState>,
+    shards: [Mutex<LimiterState>; LIMITER_SHARDS],
 }
 
 #[derive(Debug)]
 struct LimiterState {
-    entries: HashMap<String, BucketEntry>,
+    entries: HashMap<LimiterKey, BucketEntry>,
     last_sweep: Instant,
 }
 
@@ -108,6 +126,8 @@ struct BucketEntry {
 
 const SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const SWEEP_ENTRY_THRESHOLD: usize = 1024;
+const LIMITER_SHARDS: usize = 32;
+const SHARD_SWEEP_ENTRY_THRESHOLD: usize = SWEEP_ENTRY_THRESHOLD.div_ceil(LIMITER_SHARDS);
 
 impl TokenBucketLimiter {
     fn new(setting: RateLimitSetting) -> Self {
@@ -116,18 +136,26 @@ impl TokenBucketLimiter {
         Self {
             capacity,
             refill_per_sec: capacity / window,
-            state: Mutex::new(LimiterState {
-                entries: HashMap::new(),
-                last_sweep: Instant::now(),
+            shards: std::array::from_fn(|_| {
+                Mutex::new(LimiterState {
+                    entries: HashMap::new(),
+                    last_sweep: Instant::now(),
+                })
             }),
         }
     }
 
-    fn check(&self, key: &str) -> Result<(), u64> {
-        let now = Instant::now();
-        let mut state = self.state.lock();
+    fn shard_index(key: &LimiterKey) -> usize {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish() as usize & (LIMITER_SHARDS - 1)
+    }
 
-        if state.entries.len() >= SWEEP_ENTRY_THRESHOLD
+    fn check(&self, key: LimiterKey) -> Result<(), u64> {
+        let now = Instant::now();
+        let mut state = self.shards[Self::shard_index(&key)].lock();
+
+        if state.entries.len() >= SHARD_SWEEP_ENTRY_THRESHOLD
             && now.duration_since(state.last_sweep) >= SWEEP_MIN_INTERVAL
         {
             let capacity = self.capacity;
@@ -140,7 +168,7 @@ impl TokenBucketLimiter {
             state.last_sweep = now;
         }
 
-        let entry = state.entries.entry(key.to_string()).or_insert(BucketEntry {
+        let entry = state.entries.entry(key).or_insert(BucketEntry {
             tokens: self.capacity,
             last_refill: now,
         });
@@ -167,8 +195,7 @@ pub async fn rate_limit_layer(
 ) -> Response {
     let ip = client_ip(&req, state.num_trusted_proxies);
     let (limiter, scope) = state.select_limiter_and_scope(&req);
-    let key = format!("{}:{}", scope, ip);
-    match limiter.check(&key) {
+    match limiter.check(LimiterKey { scope, ip }) {
         Ok(()) => next.run(req).await,
         Err(retry_after) => {
             let resource = req.uri().path().to_string();
@@ -204,12 +231,14 @@ pub async fn ui_login_rate_limit_layer(
     next: Next,
 ) -> Response {
     let ip = client_ip(&req, state.num_trusted_proxies);
-    let key = format!("ui_login:{}", ip);
-    let Err(retry_after) = state.limiter.check(&key) else {
+    let Err(retry_after) = state.limiter.check(LimiterKey {
+        scope: LimitScope::UiLogin,
+        ip,
+    }) else {
         return next.run(req).await;
     };
 
-    tracing::warn!(client_ip = %ip, "Login rate limit exceeded");
+    tracing::warn!(client_ip = ?ip, "Login rate limit exceeded");
 
     let accept = req
         .headers()
@@ -274,35 +303,36 @@ fn too_many_requests(retry_after: u64, resource: &str) -> Response {
     response
 }
 
-fn client_ip(req: &Request, num_trusted_proxies: usize) -> String {
+fn client_ip(req: &Request, num_trusted_proxies: usize) -> Option<IpAddr> {
     if num_trusted_proxies > 0 {
         if let Some(value) = req
             .headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
         {
-            let parts = value
+            if let Some(candidate) = value
                 .split(',')
-                .map(|part| part.trim())
+                .map(str::trim)
                 .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>();
-            if parts.len() > num_trusted_proxies {
-                let index = parts.len() - num_trusted_proxies - 1;
-                return parts[index].to_string();
+                .rev()
+                .nth(num_trusted_proxies)
+            {
+                if let Ok(ip) = candidate.parse() {
+                    return Some(ip);
+                }
             }
         }
 
         if let Some(value) = req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()) {
-            if !value.trim().is_empty() {
-                return value.trim().to_string();
+            if let Ok(ip) = value.trim().parse() {
+                return Some(ip);
             }
         }
     }
 
     req.extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map(|ConnectInfo(addr)| addr.ip())
 }
 
 #[cfg(test)]
@@ -310,8 +340,8 @@ mod tests {
     use super::*;
     use axum::body::Body;
 
-    fn key_for(req: &Request, proxies: usize) -> String {
-        format!("ip:{}", client_ip(req, proxies))
+    fn parsed_ip(raw: &str) -> Option<IpAddr> {
+        Some(raw.parse().unwrap())
     }
 
     #[test]
@@ -320,8 +350,8 @@ mod tests {
             .header("x-forwarded-for", "198.51.100.1, 10.0.0.1, 10.0.0.2")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(key_for(&req, 2), "ip:198.51.100.1");
-        assert_eq!(key_for(&req, 1), "ip:10.0.0.1");
+        assert_eq!(client_ip(&req, 2), parsed_ip("198.51.100.1"));
+        assert_eq!(client_ip(&req, 1), parsed_ip("10.0.0.1"));
     }
 
     #[test]
@@ -333,7 +363,7 @@ mod tests {
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 443))));
 
-        assert_eq!(key_for(&req, 2), "ip:203.0.113.9");
+        assert_eq!(client_ip(&req, 2), parsed_ip("203.0.113.9"));
     }
 
     #[test]
@@ -346,7 +376,7 @@ mod tests {
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 443))));
 
-        assert_eq!(key_for(&req, 0), "ip:203.0.113.9");
+        assert_eq!(client_ip(&req, 0), parsed_ip("203.0.113.9"));
     }
 
     #[test]
@@ -355,7 +385,7 @@ mod tests {
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 10], 443))));
 
-        assert_eq!(key_for(&req, 0), "ip:203.0.113.10");
+        assert_eq!(client_ip(&req, 0), parsed_ip("203.0.113.10"));
     }
 
     fn build_req(method: Method, path: &str) -> Request {
@@ -381,10 +411,10 @@ mod tests {
         let scope_head = state
             .select_limiter_and_scope(&build_req(Method::HEAD, "/mybucket/key"))
             .1;
-        assert_eq!(scope_get_root, "default");
-        assert_eq!(scope_bucket, "default");
-        assert_eq!(scope_object, "default");
-        assert_eq!(scope_head, "default");
+        assert_eq!(scope_get_root, LimitScope::Default);
+        assert_eq!(scope_bucket, LimitScope::Default);
+        assert_eq!(scope_object, LimitScope::Default);
+        assert_eq!(scope_head, LimitScope::Default);
     }
 
     #[test]
@@ -401,13 +431,13 @@ mod tests {
             state
                 .select_limiter_and_scope(&build_req(Method::HEAD, "/bucket/key"))
                 .1,
-            "object"
+            LimitScope::Object
         );
         assert_eq!(
             state
                 .select_limiter_and_scope(&build_req(Method::HEAD, "/bucket"))
                 .1,
-            "bucket"
+            LimitScope::Bucket
         );
     }
 
@@ -425,20 +455,20 @@ mod tests {
             state
                 .select_limiter_and_scope(&build_req(Method::GET, "/"))
                 .1,
-            "list_buckets"
+            LimitScope::ListBuckets
         );
         assert_eq!(
             state
                 .select_limiter_and_scope(&build_req(Method::GET, "/bucket"))
                 .1,
-            "default",
+            LimitScope::Default,
             "bucket_ops not configured ⇒ shared default scope"
         );
         assert_eq!(
             state
                 .select_limiter_and_scope(&build_req(Method::GET, "/bucket/key"))
                 .1,
-            "object",
+            LimitScope::Object,
             "object_ops configured ⇒ its own scope"
         );
     }
@@ -446,38 +476,61 @@ mod tests {
     #[test]
     fn token_bucket_allows_burst_up_to_capacity() {
         let limiter = TokenBucketLimiter::new(RateLimitSetting::new(3, 60));
-        assert!(limiter.check("k").is_ok());
-        assert!(limiter.check("k").is_ok());
-        assert!(limiter.check("k").is_ok());
-        assert!(limiter.check("k").is_err());
+        let key = LimiterKey {
+            scope: LimitScope::Default,
+            ip: parsed_ip("192.0.2.1"),
+        };
+        assert!(limiter.check(key).is_ok());
+        assert!(limiter.check(key).is_ok());
+        assert!(limiter.check(key).is_ok());
+        assert!(limiter.check(key).is_err());
     }
 
     #[test]
     fn token_bucket_refills_over_time() {
         let limiter = TokenBucketLimiter::new(RateLimitSetting::new(60, 60));
+        let key = LimiterKey {
+            scope: LimitScope::Default,
+            ip: parsed_ip("192.0.2.2"),
+        };
         for _ in 0..60 {
-            assert!(limiter.check("k").is_ok());
+            assert!(limiter.check(key).is_ok());
         }
-        assert!(limiter.check("k").is_err());
+        assert!(limiter.check(key).is_err());
         {
-            let mut state = limiter.state.lock();
-            let entry = state.entries.get_mut("k").unwrap();
+            let mut state = limiter.shards[TokenBucketLimiter::shard_index(&key)].lock();
+            let entry = state.entries.get_mut(&key).unwrap();
             entry.last_refill -= Duration::from_secs(2);
         }
-        assert!(limiter.check("k").is_ok());
-        assert!(limiter.check("k").is_ok());
-        assert!(limiter.check("k").is_err());
+        assert!(limiter.check(key).is_ok());
+        assert!(limiter.check(key).is_ok());
+        assert!(limiter.check(key).is_err());
     }
 
     #[test]
     fn sweep_removes_full_entries() {
         let limiter = TokenBucketLimiter::new(RateLimitSetting::new(10, 1));
         let far_past = Instant::now() - (SWEEP_MIN_INTERVAL + Duration::from_secs(60));
+        let seed = LimiterKey {
+            scope: LimitScope::Default,
+            ip: parsed_ip("198.51.100.10"),
+        };
+        let shard_index = TokenBucketLimiter::shard_index(&seed);
         {
-            let mut state = limiter.state.lock();
-            for i in 0..(SWEEP_ENTRY_THRESHOLD + 1024) {
+            let mut state = limiter.shards[shard_index].lock();
+            for _ in 0..(SHARD_SWEEP_ENTRY_THRESHOLD + 32) {
+                let key = (1u32..)
+                    .map(|n| LimiterKey {
+                        scope: LimitScope::Default,
+                        ip: Some(IpAddr::V4(std::net::Ipv4Addr::from(n))),
+                    })
+                    .find(|key| {
+                        TokenBucketLimiter::shard_index(key) == shard_index
+                            && !state.entries.contains_key(key)
+                    })
+                    .unwrap();
                 state.entries.insert(
-                    format!("idle-{}", i),
+                    key,
                     BucketEntry {
                         tokens: 0.0,
                         last_refill: far_past,
@@ -486,16 +539,37 @@ mod tests {
             }
             state.last_sweep = far_past;
         }
-        let seeded = limiter.state.lock().entries.len();
-        assert_eq!(seeded, SWEEP_ENTRY_THRESHOLD + 1024);
+        let seeded = limiter.shards[shard_index].lock().entries.len();
+        assert_eq!(seeded, SHARD_SWEEP_ENTRY_THRESHOLD + 32);
 
-        assert!(limiter.check("fresh").is_ok());
+        assert!(limiter.check(seed).is_ok());
 
-        let remaining = limiter.state.lock().entries.len();
+        let remaining = limiter.shards[shard_index].lock().entries.len();
         assert_eq!(
             remaining, 1,
             "expected sweep to leave only the fresh entry, got {}",
             remaining
         );
+    }
+
+    #[test]
+    fn limiter_distributes_clients_across_shards() {
+        let limiter = TokenBucketLimiter::new(RateLimitSetting::new(10, 60));
+        let mut used = std::collections::HashSet::new();
+        for value in 1..=128u32 {
+            let key = LimiterKey {
+                scope: LimitScope::Object,
+                ip: Some(IpAddr::V4(std::net::Ipv4Addr::from(value))),
+            };
+            used.insert(TokenBucketLimiter::shard_index(&key));
+            limiter.check(key).unwrap();
+        }
+        assert!(used.len() > 1);
+        let populated = limiter
+            .shards
+            .iter()
+            .filter(|shard| !shard.lock().entries.is_empty())
+            .count();
+        assert_eq!(populated, used.len());
     }
 }

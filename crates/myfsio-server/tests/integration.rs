@@ -4950,6 +4950,156 @@ async fn test_virtual_host_bucket_routes_to_s3_object_handlers() {
 }
 
 #[tokio::test]
+async fn test_virtual_host_multi_segment_key_stays_in_host_bucket() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/vh-main", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/vh-victim", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/vh-victim/planted.txt")
+                .header("host", "vh-main.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("multi segment body"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let victim_list = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-victim?list-type=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(victim_list.status(), StatusCode::OK);
+    let victim_body = String::from_utf8(
+        victim_list
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !victim_body.contains("planted.txt"),
+        "virtual-host request must never write into the path-named bucket"
+    );
+
+    let host_get = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-main/vh-victim/planted.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        host_get.status(),
+        StatusCode::OK,
+        "the object must land under the Host-derived bucket with the full path as key"
+    );
+
+    let self_prefix_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/vh-main/nested.txt")
+                .header("host", "vh-main.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("self prefix body"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(self_prefix_put.status(), StatusCode::OK);
+
+    let self_prefix_get = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-main/vh-main/nested.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(self_prefix_get.status(), StatusCode::OK);
+    let self_prefix_body = self_prefix_get
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert_eq!(&self_prefix_body[..], b"self prefix body");
+
+    let tag_put = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/vh-victim/planted.txt?tagging")
+                .header("host", "vh-main.localhost")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(
+                    "<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet></Tagging>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tag_put.status(),
+        StatusCode::OK,
+        "subresource queries must survive virtual-host dispatch"
+    );
+
+    let tag_get = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/vh-main/vh-victim/planted.txt?tagging",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tag_get.status(), StatusCode::OK);
+    let tag_body = String::from_utf8(
+        tag_get
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        tag_body.contains("<Key>k</Key>"),
+        "tagging written via virtual host must be readable path-style"
+    );
+}
+
+#[tokio::test]
 async fn test_bucket_tagging() {
     let (app, _tmp) = test_app();
 
@@ -5591,6 +5741,452 @@ async fn test_public_bucket_policy_allows_anonymous_reads() {
 }
 
 #[tokio::test]
+async fn test_narrow_policy_action_does_not_grant_whole_class() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/narrow-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let put_object = Request::builder()
+        .method(Method::PUT)
+        .uri("/narrow-bucket/data.txt")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from("tagged payload"))
+        .unwrap();
+    let put_resp = app.clone().oneshot(put_object).await.unwrap();
+    assert_eq!(put_resp.status(), StatusCode::OK);
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:GetObjectTagging",
+          "Resource": "arn:aws:s3:::narrow-bucket/*"
+        }
+      ]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/narrow-bucket?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let tagging_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/narrow-bucket/data.txt?tagging")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tagging_resp.status(),
+        StatusCode::OK,
+        "the exact granted action must be allowed"
+    );
+
+    let object_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/narrow-bucket/data.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        object_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tagging-only grant must not authorize GetObject"
+    );
+
+    let acl_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/narrow-bucket/data.txt?acl")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        acl_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tagging-only grant must not authorize other read-class subresources"
+    );
+}
+
+#[tokio::test]
+async fn test_iam_exact_action_reaches_middleware_without_coarse_expansion() {
+    const NARROW_ACCESS_KEY: &str = "AKIANARROWACTION0000";
+    const NARROW_SECRET_KEY: &str = "narrow-action-secret-key";
+    let (app, _tmp) = test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            {
+                "user_id": "u-narrow",
+                "display_name": "narrow",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": NARROW_ACCESS_KEY,
+                    "secret_key": NARROW_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{
+                    "bucket": "iam-narrow",
+                    "actions": ["s3:GetObjectTagging"],
+                    "prefix": "*"
+                }]
+            }
+        ]
+    }));
+
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(Method::PUT, "/iam-narrow", Body::empty()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                "/iam-narrow/item",
+                Body::from("payload")
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let narrow_request = |uri: &'static str| {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header("x-access-key", NARROW_ACCESS_KEY)
+            .header("x-secret-key", NARROW_SECRET_KEY)
+            .body(Body::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        app.clone()
+            .oneshot(narrow_request("/iam-narrow/item?tagging"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.oneshot(narrow_request("/iam-narrow/item"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn test_multi_delete_authorizes_each_object_resource() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/multi-policy", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/multi-policy/delete-me.txt",
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Allow",
+        "Principal": "*",
+        "Action": "s3:DeleteObject",
+        "Resource": "arn:aws:s3:::multi-policy/*"
+      }]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/multi-policy?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let delete_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/multi-policy?delete")
+                .header("content-type", "application/xml")
+                .body(Body::from(
+                    "<Delete><Object><Key>delete-me.txt</Key></Object></Delete>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), StatusCode::OK);
+    let delete_body = String::from_utf8(
+        delete_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(delete_body.contains("<Key>delete-me.txt</Key>"));
+    assert!(!delete_body.contains("<Error>"));
+
+    let get_resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/multi-policy/delete-me.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_copy_source_header_does_not_bypass_subresource_auth() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/copy-auth", Body::empty()))
+        .await
+        .unwrap();
+    let seed = Request::builder()
+        .method(Method::PUT)
+        .uri("/copy-auth/src.txt")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from("source object"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(seed).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": ["s3:GetObject", "s3:PutObject"],
+          "Resource": "arn:aws:s3:::copy-auth/*"
+        }
+      ]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-auth?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let copy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-auth/dst.txt")
+                .header("x-amz-copy-source", "/copy-auth/src.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        copy_resp.status(),
+        StatusCode::OK,
+        "a plain CopyObject must still be authorized by the copy grant"
+    );
+
+    let retention_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-auth/src.txt?retention")
+                .header("x-amz-copy-source", "/copy-auth/src.txt")
+                .header("content-type", "application/xml")
+                .body(Body::from(
+                    "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retention_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a copy grant plus a bogus copy-source header must not authorize PutObjectRetention"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_part_copy_authorizes_source_read() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/upc-src", Body::empty()))
+        .await
+        .unwrap();
+    let seed = Request::builder()
+        .method(Method::PUT)
+        .uri("/upc-src/private.bin")
+        .header("x-access-key", TEST_ACCESS_KEY)
+        .header("x-secret-key", TEST_SECRET_KEY)
+        .body(Body::from("private source data"))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(seed).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/upc-dst", Body::empty()))
+        .await
+        .unwrap();
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:PutObject",
+          "Resource": "arn:aws:s3:::upc-dst/*"
+        }
+      ]
+    }"#;
+    let policy_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/upc-dst?policy")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(policy_resp.status(), StatusCode::NO_CONTENT);
+
+    let init = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/upc-dst/target.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(init.status(), StatusCode::OK);
+    let init_body = String::from_utf8(
+        init.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = init_body
+        .split("<UploadId>")
+        .nth(1)
+        .unwrap()
+        .split("</UploadId>")
+        .next()
+        .unwrap();
+
+    let upc = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/upc-dst/target.bin?uploadId={}&partNumber=1",
+                    upload_id
+                ))
+                .header("x-amz-copy-source", "/upc-src/private.bin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        upc.status(),
+        StatusCode::FORBIDDEN,
+        "UploadPartCopy must authorize a read of the copy source"
+    );
+}
+
+#[tokio::test]
 async fn test_bucket_root_with_trailing_slash_works() {
     let (app, _tmp) = test_app();
 
@@ -6084,6 +6680,335 @@ async fn test_select_object_content_rejects_non_xml_content_type() {
     .unwrap();
     assert!(body.contains("<Code>InvalidRequest</Code>"));
     assert!(body.contains("Content-Type must be application/xml or text/xml"));
+}
+
+#[tokio::test]
+async fn test_select_object_content_aggregates_and_real_bytes_scanned() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-agg", Body::empty()))
+        .await
+        .unwrap();
+
+    let csv_body = "name,age\nalice,30\nbob,40\ncarol,25\n";
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-agg/people.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(csv_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT COUNT(*) AS c, SUM(age) AS total FROM S3Object</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><JSON /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-agg/people.csv?select&select-type=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_select_events(&body);
+
+    let mut records = String::new();
+    let mut stats = String::new();
+    for (name, payload) in &events {
+        if name == "Records" {
+            records.push_str(&String::from_utf8_lossy(payload));
+        } else if name == "Stats" {
+            stats = String::from_utf8_lossy(payload).into_owned();
+        }
+    }
+    let row: serde_json::Value = serde_json::from_str(records.trim()).unwrap();
+    assert_eq!(row["c"], serde_json::json!(3));
+    assert_eq!(row["total"], serde_json::json!(95));
+    assert!(
+        stats.contains(&format!("<BytesScanned>{}</BytesScanned>", csv_body.len())),
+        "stats should report real bytes scanned: {}",
+        stats
+    );
+    assert!(events.iter().any(|(name, _)| name == "End"));
+}
+
+#[tokio::test]
+async fn test_select_object_content_json_lines_input_with_limit() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-jsonl", Body::empty()))
+        .await
+        .unwrap();
+
+    let jsonl = "{\"id\":1,\"tag\":\"keep\"}\n{\"id\":2,\"tag\":\"drop\"}\n{\"id\":3,\"tag\":\"keep\"}\n{\"id\":4,\"tag\":\"keep\"}\n";
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-jsonl/rows.jsonl")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from(jsonl))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT id FROM S3Object WHERE tag = 'keep' LIMIT 2</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><JSON><Type>LINES</Type></JSON></InputSerialization>
+  <OutputSerialization><JSON /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-jsonl/rows.jsonl?select&select-type=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_select_events(&body);
+    let mut records = String::new();
+    for (name, payload) in &events {
+        if name == "Records" {
+            records.push_str(&String::from_utf8_lossy(payload));
+        }
+    }
+    assert_eq!(records, "{\"id\":1}\n{\"id\":3}\n");
+}
+
+#[tokio::test]
+async fn test_select_object_content_rejects_invalid_sql_upfront() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-badsql", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-badsql/file.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("a,b\n1,2\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for expression in [
+        "DROP TABLE S3Object",
+        "SELECT * FROM S3Object ORDER BY a",
+        "SELECT a FROM S3Object GROUP BY a",
+        "SELECT * FROM read_csv_auto('/etc/passwd')",
+        "SELECT 1; SELECT 2",
+    ] {
+        let select_xml = format!(
+            r#"
+<SelectObjectContentRequest>
+  <Expression>{}</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><CSV /></OutputSerialization>
+</SelectObjectContentRequest>
+"#,
+            expression
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sel-badsql/file.csv?select")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header("content-type", "application/xml")
+                    .body(Body::from(select_xml))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject: {}",
+            expression
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_select_object_content_rejects_invalid_serialization_options() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-badser", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-badser/file.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("a,b\n1,2\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    for (input_xml, output_xml) in [
+        (
+            "<CSV><FileHeaderInfo>BOGUS</FileHeaderInfo></CSV>",
+            "<CSV />",
+        ),
+        ("<JSON><Type>XML</Type></JSON>", "<JSON />"),
+        (
+            "<CompressionType>GZIP</CompressionType><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV>",
+            "<CSV />",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo><FieldDelimiter>ab</FieldDelimiter></CSV>",
+            "<CSV />",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo><RecordDelimiter>;</RecordDelimiter></CSV>",
+            "<CSV />",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV>",
+            "<CSV><QuoteFields>SOMETIMES</QuoteFields></CSV>",
+        ),
+        (
+            "<CSV><FileHeaderInfo>USE</FileHeaderInfo><QuoteEscapeCharacter>\\</QuoteEscapeCharacter></CSV>",
+            "<CSV />",
+        ),
+    ] {
+        let select_xml = format!(
+            r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT * FROM S3Object</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization>{}</InputSerialization>
+  <OutputSerialization>{}</OutputSerialization>
+</SelectObjectContentRequest>
+"#,
+            input_xml, output_xml
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/sel-badser/file.csv?select")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header("content-type", "application/xml")
+                    .body(Body::from(select_xml))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject input={} output={}",
+            input_xml,
+            output_xml
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_select_object_content_csv_output_from_csv_input() {
+    let (app, _tmp) = test_app();
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/sel-csvout", Body::empty()))
+        .await
+        .unwrap();
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/sel-csvout/data.csv")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .body(Body::from("city,pop\naustin,42\n\"a,b\",7\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let select_xml = r#"
+<SelectObjectContentRequest>
+  <Expression>SELECT city, pop FROM S3Object</Expression>
+  <ExpressionType>SQL</ExpressionType>
+  <InputSerialization><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV></InputSerialization>
+  <OutputSerialization><CSV /></OutputSerialization>
+</SelectObjectContentRequest>
+"#;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sel-csvout/data.csv?select&select-type=2")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(select_xml))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_select_events(&body);
+    let mut records = String::new();
+    for (name, payload) in &events {
+        if name == "Records" {
+            records.push_str(&String::from_utf8_lossy(payload));
+        }
+    }
+    assert_eq!(records, "austin,42\n\"a,b\",7\n");
 }
 
 #[tokio::test]
@@ -6582,6 +7507,457 @@ async fn test_app_encrypted() -> (axum::Router, tempfile::TempDir) {
         .expect("encryption initialization should succeed");
     let app = myfsio_server::create_router(state);
     (app, tmp)
+}
+
+async fn test_app_encrypted_small_parts() -> (axum::Router, tempfile::TempDir) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{ "bucket": "*", "actions": ["*"], "prefix": "*" }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        iam_config_path: iam_path.join("iam.json"),
+        encryption_enabled: true,
+        kms_enabled: true,
+        ui_enabled: false,
+        multipart_min_part_size: 1,
+        multipart_object_layout: "segments".to_string(),
+        allow_legacy_header_auth: true,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
+    let app = myfsio_server::create_router(state);
+    (app, tmp)
+}
+
+#[tokio::test]
+async fn test_sse_multipart_never_uses_segments_layout() {
+    let (app, tmp) = test_app_encrypted_small_parts().await;
+
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/enc-mpu", Body::empty()))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/enc-mpu/big.bin?uploads")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-server-side-encryption", "AES256")
+                .header("x-amz-tagging", "team=storage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .and_then(|s| s.split("</UploadId>").next())
+        .expect("upload id")
+        .to_string();
+
+    let part_a = "A".repeat(4096);
+    let part_b = "B".repeat(4096);
+    let mut etags = Vec::new();
+    for (n, data) in [(1, &part_a), (2, &part_b)] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!(
+                        "/enc-mpu/big.bin?partNumber={}&uploadId={}",
+                        n, upload_id
+                    ))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from(data.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        etags.push(
+            resp.headers()
+                .get("etag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        etags[0], etags[1]
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/enc-mpu/big.bin?uploadId={}", upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(complete))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption")
+            .and_then(|value| value.to_str().ok()),
+        Some("AES256")
+    );
+    let complete_body = String::from_utf8(body_bytes(resp).await.to_vec()).unwrap();
+    assert!(complete_body.contains("-2"), "{complete_body}");
+
+    let meta_dir = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("enc-mpu")
+        .join("meta");
+    let mut committed_metadata = None;
+    for entry in std::fs::read_dir(&meta_dir).unwrap().flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
+            let sidecar: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+            if sidecar
+                .get("metadata")
+                .and_then(|value| value.get("x-amz-encryption-nonce"))
+                .is_some()
+            {
+                committed_metadata = sidecar.get("metadata").cloned();
+            }
+        }
+    }
+    let committed_metadata = committed_metadata.expect("encrypted object sidecar");
+    assert!(committed_metadata
+        .get("x-amz-encrypted-data-key")
+        .and_then(serde_json::Value::as_str)
+        .is_some());
+    assert!(
+        committed_metadata.get("__segments__").is_none(),
+        "an encrypted multipart object must never use the segments layout"
+    );
+    assert!(committed_metadata
+        .get("__pending_sse_algorithm__")
+        .is_none());
+    assert!(committed_metadata
+        .get("__pending_sse_kms_key_id__")
+        .is_none());
+    assert!(committed_metadata.get("__pending_tagging__").is_none());
+    let raw = std::fs::read(tmp.path().join("enc-mpu").join("big.bin")).unwrap();
+    assert_ne!(raw, format!("{}{}", part_a, part_b).as_bytes());
+    assert_eq!(
+        committed_metadata
+            .get("__size__")
+            .and_then(|value| value.as_str()),
+        Some(raw.len().to_string().as_str())
+    );
+    assert!(committed_metadata
+        .get("__etag__")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|etag| etag.ends_with("-2")));
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/enc-mpu/big.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), 8192);
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        format!("{}{}", part_a, part_b)
+    );
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/enc-mpu/big.bin?tagging",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(body_bytes(resp).await.to_vec()).unwrap();
+    assert!(body.contains("<Key>team</Key>"));
+    assert!(body.contains("<Value>storage</Value>"));
+
+    let plain_upload_id = {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/enc-mpu/plain.bin?uploads")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        body.split("<UploadId>")
+            .nth(1)
+            .and_then(|s| s.split("</UploadId>").next())
+            .expect("upload id")
+            .to_string()
+    };
+    let mut plain_etags = Vec::new();
+    for (n, data) in [(1, &part_a), (2, &part_b)] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!(
+                        "/enc-mpu/plain.bin?partNumber={}&uploadId={}",
+                        n, plain_upload_id
+                    ))
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .body(Body::from(data.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        plain_etags.push(
+            resp.headers()
+                .get("etag")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+        plain_etags[0], plain_etags[1]
+    );
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/enc-mpu/plain.bin?uploadId={}", plain_upload_id))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/xml")
+                .body(Body::from(complete))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut plain_sidecar = String::new();
+    for entry in std::fs::read_dir(&meta_dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json")
+            && path.to_string_lossy().contains("plain.bin")
+        {
+            plain_sidecar.push_str(&std::fs::read_to_string(&path).unwrap());
+        }
+    }
+    assert!(
+        plain_sidecar.contains("__segments__"),
+        "control: an unencrypted multipart object of this size must use the segments \
+         layout, otherwise the assertion above is vacuous: {}",
+        plain_sidecar
+    );
+}
+
+#[tokio::test]
+async fn test_sse_kms_multipart_commits_ciphertext_and_final_metadata_once() {
+    let (app, tmp) = test_app_encrypted_small_parts().await;
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/kms-mpu", Body::empty()))
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/myfsio/kms/keys",
+            Body::from(r#"{"Description":"multipart"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let key_response: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+    let key_id = key_response.get("KeyId").unwrap().as_str().unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/kms-mpu/object.bin?uploads")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-server-side-encryption", "aws:kms")
+                .header("x-amz-server-side-encryption-aws-kms-key-id", key_id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upload_body = body_bytes(resp).await;
+    let upload_id = extract_upload_id(std::str::from_utf8(&upload_body).unwrap());
+    let first = b"kms-first".to_vec();
+    let second = b"kms-second".to_vec();
+    let mut etags = Vec::new();
+    for (part_number, body) in [(1, first.clone()), (2, second.clone())] {
+        let resp = app
+            .clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/kms-mpu/object.bin?partNumber={part_number}&uploadId={upload_id}"),
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        etags.push(etag_from_response(&resp));
+    }
+    let completion = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+        etags[0], etags[1]
+    );
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            &format!("/kms-mpu/object.bin?uploadId={upload_id}"),
+            Body::from(completion),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption")
+            .and_then(|value| value.to_str().ok()),
+        Some("aws:kms")
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-amz-server-side-encryption-aws-kms-key-id")
+            .and_then(|value| value.to_str().ok()),
+        Some(key_id)
+    );
+
+    let mut plaintext = first;
+    plaintext.extend_from_slice(&second);
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/kms-mpu/object.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_bytes(resp).await, plaintext);
+    let raw = std::fs::read(tmp.path().join("kms-mpu").join("object.bin")).unwrap();
+    assert_ne!(raw, plaintext);
+    let mut final_metadata = None;
+    let meta_dir = tmp
+        .path()
+        .join(".myfsio.sys")
+        .join("buckets")
+        .join("kms-mpu")
+        .join("meta");
+    for entry in std::fs::read_dir(meta_dir).unwrap().flatten() {
+        let sidecar: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+        if sidecar
+            .get("metadata")
+            .and_then(|metadata| metadata.get("x-amz-encryption-key-id"))
+            .is_some()
+        {
+            final_metadata = sidecar.get("metadata").cloned();
+        }
+    }
+    let final_metadata = final_metadata.unwrap();
+    assert_eq!(
+        final_metadata
+            .get("x-amz-encryption-key-id")
+            .and_then(serde_json::Value::as_str),
+        Some(key_id)
+    );
+    assert!(final_metadata.get("__pending_sse_algorithm__").is_none());
+    assert!(final_metadata.get("__pending_sse_kms_key_id__").is_none());
+    assert!(final_metadata.get("__segments__").is_none());
+    assert!(final_metadata
+        .get("__etag__")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|etag| etag.ends_with("-2")));
+    assert_eq!(
+        final_metadata
+            .get("__size__")
+            .and_then(serde_json::Value::as_str),
+        Some(raw.len().to_string().as_str())
+    );
 }
 
 #[tokio::test]
@@ -10190,6 +11566,97 @@ async fn test_cluster_overview_matches_peer_inbound_access_key_not_outbound_conn
     );
 }
 
+#[tokio::test]
+async fn test_peer_signature_replay_is_rejected_after_app_state_restart() {
+    const PEER_ACCESS_KEY: &str = "AKIADURABLEPEER00000";
+    const PEER_SECRET_KEY: &str = "durable-peer-secret-key";
+    let tmp = tempfile::tempdir().unwrap();
+    let iam_dir = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_dir).unwrap();
+    let iam_path = iam_dir.join("iam.json");
+    std::fs::write(
+        &iam_path,
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-durable-peer",
+                "display_name": "durable-peer",
+                "enabled": true,
+                "peer_site_id": "peer-site",
+                "access_keys": [{
+                    "access_key": PEER_ACCESS_KEY,
+                    "secret_key": PEER_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": []
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        iam_config_path: iam_path,
+        region: "us-east-1".to_string(),
+        peer_sigv4_timestamp_tolerance_secs: 60,
+        replication_healer_enabled: false,
+        ui_enabled: false,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let request_time = chrono::Utc::now() + chrono::Duration::seconds(30);
+    let amz_date = request_time.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_stamp = request_time.format("%Y%m%d").to_string();
+    let path = "/myfsio/admin/cluster/overview";
+    let payload_hash = myfsio_auth::sigv4::sha256_hex(b"");
+    let canonical_headers = format!(
+        "host:localhost\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        payload_hash, amz_date
+    );
+    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let canonical_request = format!(
+        "GET\n{}\n\n{}\n{}\n{}",
+        path, canonical_headers, signed_headers, payload_hash
+    );
+    let scope = format!("{}/us-east-1/s3/aws4_request", date_stamp);
+    let string_to_sign =
+        myfsio_auth::sigv4::build_string_to_sign(&amz_date, &scope, &canonical_request);
+    let signing_key =
+        myfsio_auth::sigv4::derive_signing_key(PEER_SECRET_KEY, &date_stamp, "us-east-1", "s3");
+    let signature = myfsio_auth::sigv4::compute_signature(&signing_key, &string_to_sign);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+        PEER_ACCESS_KEY, scope, signed_headers, signature
+    );
+    let request = || {
+        Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .header("host", "localhost")
+            .header("x-amz-content-sha256", payload_hash.clone())
+            .header("x-amz-date", amz_date.clone())
+            .header("authorization", authorization.clone())
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let first_state = myfsio_server::state::AppState::new(config.clone());
+    let first = myfsio_server::create_router(first_state)
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let restarted_state = myfsio_server::state::AppState::new(config);
+    assert!(request_time >= restarted_state.boot_time_utc);
+    let replay = myfsio_server::create_router(restarted_state)
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+}
+
 async fn test_app_sse_c() -> (axum::Router, tempfile::TempDir) {
     test_app_sse_c_with_min(1).await
 }
@@ -11695,6 +13162,80 @@ async fn test_explicit_lock_headers_override_bucket_default() {
 }
 
 #[tokio::test]
+async fn test_copy_object_lock_headers_override_bucket_default() {
+    let (app, _tmp) = test_app();
+    for bucket in ["copy-lock-source", "copy-lock-destination"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/{}", bucket),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+    }
+    enable_versioning(&app, "copy-lock-destination").await;
+    assert_eq!(
+        put_object_lock_config(&app, "copy-lock-destination", DEFAULT_LOCK_XML).await,
+        StatusCode::OK
+    );
+    app.clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/copy-lock-source/source.txt",
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/copy-lock-destination/copied.txt")
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("x-amz-copy-source", "/copy-lock-source/source.txt")
+                .header("x-amz-object-lock-legal-hold", "ON")
+                .header("x-amz-object-lock-mode", "COMPLIANCE")
+                .header(
+                    "x-amz-object-lock-retain-until-date",
+                    "2099-01-01T00:00:00Z",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (status, body) = object_retention_body(&app, "copy-lock-destination", "copied.txt").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("<Mode>COMPLIANCE</Mode>") && body.contains("2099-01-01"),
+        "copy request retention must win over the bucket default, got {}",
+        body
+    );
+
+    let response = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/copy-lock-destination/copied.txt?legal-hold",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_string(response).await;
+    assert!(
+        body.contains("<Status>ON</Status>"),
+        "copy request legal hold must be stored, got {}",
+        body
+    );
+}
+
+#[tokio::test]
 async fn test_multipart_complete_inherits_bucket_default_retention() {
     let (app, _tmp) = test_app();
     app.clone()
@@ -12550,7 +14091,7 @@ async fn test_post_form_rejects_oversized_non_file_field() {
 }
 
 #[tokio::test]
-async fn test_post_form_accepts_a_large_file_field() {
+async fn test_post_form_accepts_a_large_file_field_with_any_ascii_casing() {
     let (app, _tmp) = test_app();
 
     app.clone()
@@ -12558,46 +14099,52 @@ async fn test_post_form_accepts_a_large_file_field() {
         .await
         .unwrap();
 
-    let boundary = "----FileOkBoundary";
-    let fields = post_form_auth_fields("large.bin");
     let payload = vec![3u8; 3 * 1024 * 1024];
-    let body = multipart_form_body(boundary, &fields, Some(("file", &payload)));
+    for (field_name, key, boundary) in [
+        ("file", "lowercase.bin", "----LowercaseFileBoundary"),
+        ("File", "uppercase.bin", "----UppercaseFileBoundary"),
+    ] {
+        let fields = post_form_auth_fields(key);
+        let body = multipart_form_body(boundary, &fields, Some((field_name, &payload)));
 
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/form-file-ok")
-                .header("x-access-key", TEST_ACCESS_KEY)
-                .header("x-secret-key", TEST_SECRET_KEY)
-                .header(
-                    "content-type",
-                    format!("multipart/form-data; boundary={}", boundary),
-                )
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/form-file-ok")
+                    .header("x-access-key", TEST_ACCESS_KEY)
+                    .header("x-secret-key", TEST_SECRET_KEY)
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={}", boundary),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(
-        resp.status().is_success(),
-        "a file field well over the per-field text cap must still upload, got {}",
-        resp.status()
-    );
+        assert!(
+            resp.status().is_success(),
+            "a {} field over the text cap must upload, got {}",
+            field_name,
+            resp.status()
+        );
 
-    let resp = app
-        .oneshot(signed_request(
-            Method::GET,
-            "/form-file-ok/large.bin",
-            Body::empty(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(bytes.len(), payload.len());
+        let resp = app
+            .clone()
+            .oneshot(signed_request(
+                Method::GET,
+                &format!("/form-file-ok/{}", key),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.len(), payload.len());
+    }
 }
 
 #[tokio::test]

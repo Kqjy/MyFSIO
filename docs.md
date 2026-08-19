@@ -127,7 +127,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `900` | Allowed request time skew for regular SigV4 |
 | `STRICT_STREAMING_SIGV4` | `true` | Validate streaming SigV4 chunk chains, the final zero-length chunk, and signed trailers. `false` accepts invalid chunk signatures as a compatibility escape hatch but still verifies checksum trailers |
 | `PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS` | `60` | Stricter time skew enforced for peer-credential SigV4 requests |
-| `PEER_NONCE_CACHE_SIZE` | `10000` | Capacity of the in-memory replay-detection LRU for peer requests |
+| `PEER_NONCE_CACHE_SIZE` | `10000` | Capacity of the in-memory fast-path replay cache for peer requests; the durable nonce set remains authoritative |
 | `ALLOW_LEGACY_HEADER_AUTH` | `false` | When `true`, accepts the legacy `x-access-key`/`x-secret-key` header pair. Default is off; SigV4 is preferred. Peer credentials are SigV4-only regardless of this flag |
 | `PEER_REQUIRE_HTTPS` | `false` | When `true`, peer endpoint registration rejects non-`https://` URLs. The server logs a startup warning if any registered peer uses `http://` and this flag is unset |
 | `MYFSIO_CLUSTER_PSK` | unset | Pre-shared key enabling `/myfsio/admin/peer/*` (inbound relay) and `/myfsio/admin/relay/*` (outbound dispatch). Same value required on every node. When unset, Phase 3 federation is disabled |
@@ -145,6 +145,7 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `DISPLAY_TIMEZONE` | `UTC` | Timezone used by UI date formatting |
 | `REQUEST_BODY_TIMEOUT_SECONDS` | `300` | Idle timeout between request-body reads; stalled uploads receive `400 RequestTimeout` |
 | `UPLOAD_STREAM_BUFFER_BYTES` | `8388608` | In-memory buffer between client stream and disk writer for uploads (8 MiB); `0` disables |
+| `READ_VERIFY_MODE` | `off` | `off` serves unencrypted reads without verification; `abort` verifies eligible full-object reads while streaming and aborts/quarantines on mismatch |
 | `MULTIPART_MIN_PART_SIZE` | `5242880` | Minimum part size enforced where applicable (5 MiB) |
 | `MULTIPART_OBJECT_LAYOUT` | `segments` | How completed multipart objects are stored: `segments` keeps part files and completes in O(metadata) (recommended, especially on HDD/ext4); `concat` assembles one file like older releases. Affects new completes only; both layouts stay readable. Note: binaries older than this feature cannot read `segments` objects |
 | `METADATA_LAYOUT` | `sidecar` | How object metadata is written: `sidecar` writes one `.__myfsio_meta__<name>.json` file per object (O(1) metadata updates, no shared rewrite); `index` keeps appending to the legacy per-directory `_index.json` (every update rewrites the whole directory index). Affects writes only; both layouts stay readable forever, and sidecars always take precedence over index entries. Note: binaries older than this feature cannot read sidecar metadata |
@@ -158,6 +159,8 @@ These values are taken from `crates/myfsio-server/src/config.rs`.
 | `OBJECT_TAG_LIMIT` | `50` | Maximum tags per object |
 
 The web UI uses 1024-byte binary units consistently and labels them `KiB`, `MiB`, `GiB`, `TiB`, and `PiB`. Presigned-link custom expiry values must be whole seconds; empty or non-numeric values are rejected, and any server-side bound adjustment is shown in the dialog.
+
+`READ_VERIFY_MODE=abort` hashes current, full-object, unencrypted GETs while their bodies stream when the stored ETag is a 32-hex MD5 for the stored bytes. A final mismatch aborts the response before its declared `Content-Length` is satisfied, logs an error, and sends the object through the integrity scanner's quarantine and peer-recovery path. Range and `partNumber` reads, archived `versionId` reads, multipart/composite ETags in both concat and segments layouts, segmented objects, and objects with missing or non-MD5 ETags remain unverified. The derived `integrity_verified.json` index cannot extend coverage because it stores file identity and the existing ETag, not a reusable whole-object digest. SSE-S3, SSE-KMS, and SSE-C reads retain their existing per-chunk AES-GCM authentication and do not use this verifier. The default is `off`, which performs no hashing or verifier allocation; HDD-backed deployments should leave it off unless the per-GET MD5 cost is acceptable.
 
 ### Credential and secret files
 
@@ -218,6 +221,7 @@ These limits gate S3 object data reads and writes only. Admin and UI requests, H
 | `INTEGRITY_BATCH_SIZE` | `10000` | Max objects scanned per cycle |
 | `INTEGRITY_HEAL_CONCURRENCY` | `1` | Max concurrent heal tasks per cycle |
 | `INTEGRITY_SCAN_PACING_MS` | `0` | Optional delay between scanned objects |
+| `INTEGRITY_REVERIFY_DAYS` | `30` | Re-hash unchanged objects after this many days; `0` disables checksum caching |
 | `INTEGRITY_QUARANTINE_RETENTION_DAYS` | `7` | How long to retain quarantined files (cleaned up by GC) |
 | `LIFECYCLE_ENABLED` | `false` | Start the lifecycle worker |
 | `METRICS_HISTORY_ENABLED` | `false` | Persist system metrics snapshots |
@@ -323,7 +327,9 @@ List with `GET /myfsio/admin/peer-credentials`; revoke with `DELETE /myfsio/admi
 
 #### Replay protection
 
-Peer SigV4 requests are subject to a **60-second** clock-skew window (`PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS`) and an in-memory `(access_key, signature)` LRU dedupe (`PEER_NONCE_CACHE_SIZE`). To prevent same-second false-positives, the server's outbound `peer_admin` client adds a unique signed `x-myfsio-nonce` header to every request, so two simultaneous overview pulls produce distinct signatures.
+Peer SigV4 requests are subject to a **60-second** clock-skew window (`PEER_SIGV4_TIMESTAMP_TOLERANCE_SECONDS`). Accepted `(access_key, signature)` nonces are persisted under `.myfsio.sys/config/peer_request_nonces.json`, atomically replaced and fsynced before the request proceeds, and pruned to that window. The in-memory LRU (`PEER_NONCE_CACHE_SIZE`) is only a fast path, so restart and cache-eviction floods do not reopen the local replay window. To prevent same-second false-positives, the server's outbound `peer_admin` client adds a unique signed `x-myfsio-nonce` header to every request, so two simultaneous overview pulls produce distinct signatures.
+
+Replay protection is node-local; replicas do not share nonce state, so the same signed request can still be replayed once against different nodes that share peer credentials.
 
 #### Migrating existing deployments
 
@@ -441,6 +447,8 @@ data/
 Notable files:
 
 - With the default `MULTIPART_OBJECT_LAYOUT=segments`, completed multipart key paths are sparse stubs; the bytes live in the matching `segments/<upload_id>/seg-NNNNN` directory.
+- Active multipart uploads keep immutable base metadata in `manifest.json` and publish each successful part through a separately fsynced `part-NNNNN.json` record. Readers merge legacy manifest parts with these records, with the per-part record taking precedence, so pre-upgrade and mixed uploads remain completable without rewriting an ever-growing manifest for every part.
+- A whole-object server-side copy of an unencrypted segmented object creates a destination-owned segment directory and hard-links the immutable source segments into it. The destination retains the multipart composite ETag, matching MinIO behavior, and falls back to streaming copy when hard-linking is unavailable.
 - With the default `METADATA_LAYOUT=sidecar`, each object's metadata lives in its own `meta/<dirs>/.__myfsio_meta__<name>.json` file (over-long names fall back to a SHA-256-derived filename; the real entry name is embedded in the JSON as `__entry_name__`). Deployments upgraded from older releases keep their `_index.json` files readable forever; a sidecar always wins over an index entry for the same object.
 - With the default `LISTING_INDEX_ENABLED=true`, each bucket keeps a derived listing index under `.myfsio.sys/buckets/<bucket>/listing/` (`snapshot.json` + generation-numbered `journal.<gen>.jsonl` files). Compaction rotates to a new journal under the index lock, then builds and installs the covering snapshot in the backend-owned background worker. Snapshot format 3 records the covered high-water generation plus live-object, live-logical-byte, version, version-logical-byte, and delete-marker counters. Generation-fenced version mutations replay with the listing journal, while crash-left journals already covered by the snapshot are ignored. Older snapshot formats are discarded and rebuilt from authoritative sidecars and version records. Deleting the listing directory is always safe and simply triggers a rebuild on the next listing (or via `--rebuild-listing`).
 - Enabled replication rules keep pending puts, deletes, and delete markers in a per-bucket durable ledger under `.myfsio.sys/buckets/<bucket>/replication/`. Each pending upsert is fsynced before the object sidecar is marked `PENDING` and before worker enqueue; remote success is recorded before the sidecar becomes `COMPLETED` and the ledger ack is fsynced. Startup replays this ledger without listing objects or reading sidecars. A bucket with no ledger files is migrated once by scanning sidecars, while corrupt or oversized ledger state triggers the same recovery scan. Normal healer passes replay ledger entries and failure records only. Set `REPLICATION_FULL_RECONCILE_INTERVAL_HOURS` above `0` only when an additional low-frequency consistency scan is desired.
@@ -457,7 +465,7 @@ Existing deployments need no migration: the server reads sidecars first, then `_
 myfsio-server --migrate-meta
 ```
 
-Run it with the server stopped. It walks every bucket's `meta/` tree, writes one sidecar per index entry (skipping entries that already have a valid sidecar), and deletes each `_index.json` only after all of its entries were written successfully. Corrupt indexes and unreadable sidecars are reported and left in place. Re-running is safe.
+Run it with the server stopped. It first runs a preflight scan of every `_index.json` (counting entries and reporting corrupt indexes or sidecar-name collisions) and aborts without changing anything if problems are found. It then walks every bucket's `meta/` tree and writes one sidecar per index entry, skipping entries that already have a valid sidecar. Once every entry of an index has a good sidecar, that `_index.json` is renamed to `_index.json.migrated` as a rollback backup — nothing is deleted. To roll back, delete the new sidecars and rename the backups back; delete the `.migrated` backups once satisfied. Corrupt indexes and unreadable sidecars are reported and left in place. Re-running is safe and resumes where an interrupted run stopped.
 
 **Warning:** once metadata exists in sidecar form — via `--migrate-meta` or simply by writing objects with a `METADATA_LAYOUT=sidecar` (default) server — older `myfsio-server` binaries cannot read that metadata. There is no rollback tool; do not downgrade past this feature after migrating. Setting `METADATA_LAYOUT=index` restores legacy-format *writes* for new objects but does not convert existing sidecars back.
 
@@ -466,6 +474,10 @@ A corrupt `_index.json` or sidecar now **fails closed**: affected objects return
 ### Durability model
 
 MyFSIO has an explicit durability deviation from Amazon S3 compatibility. PUT object file contents are fsynced before MyFSIO acknowledges the request. Namespace durability for the rename and directory entry remains platform-dependent. On Windows, directory fsync is a no-op, so the namespace portion of that durability sequence does not receive the same guarantee as it does on platforms that support directory fsync.
+
+A completed multipart upload in the default `segments` layout receives the same treatment: every part file is fsynced when it is uploaded, and the complete fsyncs the segment files' directory entries, the new segment directory's own entry, and the sparse stub before acknowledging. A failed fsync fails the CompleteMultipartUpload (which remains retryable) rather than acknowledging an upload whose namespace entries may not survive power loss.
+
+A PUT, CopyObject, or CompleteMultipartUpload that fails mid-commit (a crash between the data rename and the metadata publication) is reconciled at the next startup. Each commit stages its metadata sidecar to `.myfsio.sys/tmp/` before the data rename — the staged file and its directory entry are both fsynced, and the record carries the destination bucket and key plus the data file's exact nanosecond timestamp as a filesystem identity — so a staged sidecar that survives a crash is a durable record of the interrupted commit. A runtime failure after the data rename likewise retains the record, and additionally marks the object corrupted on the spot so the running process fails reads closed instead of serving the new bytes under the old metadata (if even that marking fails, the server exits rather than violate old-or-new atomicity). Garbage collection never touches these records; only recovery removes them. At every startup, before any background worker runs, the server scans the records: when the live data verifiably belongs to the interrupted commit (a nanosecond identity that distinguishes it from the previously published write, the recorded size, plus segment-stub verification for multipart objects), the staged sidecar is published, the commit's remaining bookkeeping is replayed (archived null-version purge, replaced-segment release, delete-marker clearing), and the object is enqueued for replication through the durable pending ledger so replication targets converge — the record is removed only after the ledger entry is confirmed, so a repeat crash or a failed enqueue simply retries at the next boot. Otherwise the record is discarded and the previously published state remains authoritative. When an overwrite's old and new states record identical sizes and timestamps (possible on filesystems with coarse timestamp granularity), recovery hashes the live data to attribute it — but only for unencrypted, non-multipart objects whose ETags are digests of the stored bytes; anything it cannot attribute is marked corrupted so reads fail closed until the object is overwritten or repaired, rather than serving bytes under metadata that may not describe them. If the staged records themselves cannot be examined (an unreadable file, a failed stat, a failed publish), the server refuses to start rather than serving objects in an unknown state. In every case the interrupted request itself was reported as failed to the client.
 
 An acknowledged DELETE that is still within the filesystem journal-commit window can be affected by a hard crash such as power loss or a kernel panic. This limitation does not apply to an ordinary process restart. After a hard crash, one of three states can remain:
 
@@ -535,10 +547,11 @@ INTEGRITY_BATCH_SIZE=10000
 INTEGRITY_AUTO_HEAL=false
 INTEGRITY_DRY_RUN=false
 INTEGRITY_HEAL_CONCURRENCY=1
+INTEGRITY_REVERIFY_DAYS=30
 INTEGRITY_QUARANTINE_RETENTION_DAYS=7
 ```
 
-The checksum phase verifies single-part objects against their stored MD5 and multipart objects against a recomputed composite ETag, reading either the segment files or the concatenated body according to the `__part_sizes__` manifest. Objects the scanner cannot verify are counted rather than accused: `encrypted_objects_unverifiable` for server-side-encrypted objects, and `multipart_objects_unverifiable` for multipart objects completed before `__part_sizes__` existed. A read failure that indicates damaged content (short read, trailing bytes, wrong segment size) is reported as `corrupted_object`; any other IO failure is reported in `errors` and the object is left alone.
+The checksum phase verifies single-part objects against their stored MD5 and multipart objects against a recomputed composite ETag, reading either the segment files or the concatenated body according to the `__part_sizes__` manifest. Clean non-segmented objects are recorded in the derived per-bucket `integrity_verified.json` index and skipped while size, mtime, and stored ETag remain unchanged, until `INTEGRITY_REVERIFY_DAYS` expires. Objects the scanner cannot verify are counted rather than accused: `encrypted_objects_unverifiable` for server-side-encrypted objects, and `multipart_objects_unverifiable` for multipart objects completed before `__part_sizes__` existed. A read failure that indicates damaged content (short read, trailing bytes, wrong segment size) is reported as `corrupted_object`; any other IO failure is reported in `errors` and the object is left alone.
 
 When `INTEGRITY_AUTO_HEAL=true` (and `INTEGRITY_DRY_RUN=false`), each scan ends with a heal phase that processes the issues it just recorded. For `corrupted_object` the bad bytes are renamed into `data/.myfsio.sys/quarantine/<bucket>/<ts>/<key>` and the heal logic tries, in order:
 
@@ -551,7 +564,7 @@ Poisoned entries whose live object is gone are re-reported on every scan as `poi
 
 Subsequent reads (`GET`, `HEAD`, `CopyObject` source) on a poisoned key return `422 ObjectCorrupted` instead of serving rotted bytes; the response includes an `x-amz-error-code: ObjectCorrupted` header so HEAD callers (which receive no body) can still detect the condition. Replication push skips poisoned keys; the checksum phase skips poisoned keys instead of re-flagging them as corrupt. Overwriting the key with a fresh `PUT` clears the poison.
 
-`stale_version`, `etag_cache_inconsistency`, and `phantom_metadata` issues are healed locally (move-to-quarantine, rebuild cache, drop entry); `orphaned_object` is reported only. A metadata key that does not resolve to a path inside its bucket is reported as `invalid_metadata_key` and never touched.
+`stale_version` and `phantom_metadata` issues are healed locally (move-to-quarantine and drop entry); `orphaned_object` is reported only. A metadata key that does not resolve to a path inside its bucket is reported as `invalid_metadata_key` and never touched.
 
 Override per-invocation by passing `auto_heal` / `dry_run` to `POST /myfsio/admin/integrity/run`. Setting both requests a heal preview: the scan runs, every issue is classified as healable or not, and nothing is modified — reported as `issues_would_heal` and the per-type `would_heal` count. The response and history records include a `heal_stats` map keyed by issue type with `{found, healed, poisoned, peer_mismatch, peer_unavailable, verify_failed, failed, skipped, would_heal}`. History is at `data/.myfsio.sys/config/integrity_history.json`; if it cannot be written the error is surfaced on the System page instead of being silently dropped.
 
@@ -662,15 +675,20 @@ If either listener task ends on its own — a listener error or a panic — the 
 Recommended update flow:
 
 1. Stop the running service.
-2. Back up `data/.myfsio.sys/config/`.
-3. Build or download the new Rust binary.
-4. Run `myfsio-server --check-config` against the target environment.
-5. Start the service and verify `/myfsio/health`.
+2. Back up `data/.myfsio.sys/config/` (credentials, policies, connections, the format marker).
+3. If you may need to roll back across a release that changes the on-disk layout (`METADATA_LAYOUT`, `MULTIPART_OBJECT_LAYOUT` — see `format.json`), also back up `data/.myfsio.sys/buckets/` or take a full `data/` backup. Older binaries cannot read sidecar metadata or segments-layout objects, and there is no in-place downgrade: rolling back a layout change means restoring the pre-upgrade backup.
+4. Build or download the new Rust binary.
+5. Run `myfsio-server --check-config` against the target environment.
+6. Start the service and verify `/myfsio/health`.
 
-Example backup:
+Example backups:
 
 ```bash
 cp -r data/.myfsio.sys/config config-backup
+```
+
+```bash
+cp -r data data-backup
 ```
 
 Health check:
@@ -727,6 +745,18 @@ The Rust server exposes:
 
 `CompleteMultipartUpload` includes `x-amz-version-id` on the response when the completed object has a version id.
 
+### S3 Select
+
+`POST /<bucket>/<key>?select&select-type=2` (SelectObjectContent) runs on a purpose-built streaming engine — SQL is parsed with sqlparser-rs and validated against the supported subset before any data is read, then rows stream through an interpreter one at a time. There is no embedded database and no whole-object buffering: input is read incrementally (CSV and JSON never touch a temp file, even for multipart `segments`-layout objects), `Records` events are emitted as 64 KiB chunks while the scan is still running, and the former 256 MB whole-query engine memory cap is gone — object size no longer matters, only record size. Individual records are bounded so a pathological input cannot buffer unbounded memory: a CSV record may be at most 4 MiB, a JSON `LINES` value at most 16 MiB, and a JSON `DOCUMENT` body at most 128 MiB (each a superset of the old engine's 2 MiB CSV line and 16 MiB JSON object limits); an oversized record aborts the scan with an in-stream error.
+
+Supported SQL: single `SELECT` over `S3Object` (case-insensitive, optional alias; other table names, table functions, and wildcard qualifiers that are not the table or its alias are rejected), projections with aliases, `WHERE`, `LIMIT`, the aggregates `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`, `LIKE`/`ILIKE` (with `ESCAPE`), `BETWEEN`, `IN`, `IS [NOT] NULL`, `CASE` (both forms), `CAST` to int/float/string/boolean, arithmetic and `||` concatenation, and the scalar functions `LOWER`, `UPPER`, `TRIM`/`LTRIM`/`RTRIM`, `CHAR_LENGTH`/`CHARACTER_LENGTH`/`LENGTH`, `SUBSTRING`, `COALESCE`, `NULLIF`, `ABS`, `CEIL`/`CEILING`, `FLOOR`, `ROUND`. Everything else — `GROUP BY`, `ORDER BY`, `DISTINCT`, `OFFSET`, joins, subqueries, `WITH`, table functions, unknown functions — is rejected with `400 InvalidRequest` at parse time, before the response stream starts. The engine is allow-by-construction: only the validated AST is interpreted, so there is no SQL string ever handed to an execution layer.
+
+Inputs are CSV (`FileHeaderInfo` `USE` reads header names; `IGNORE` skips the header row and names columns `_1`..`_N`; `NONE` names them `_1`..`_N` with no skip), JSON (`LINES` and `DOCUMENT`, including nested field paths like `s.user.name`), and Parquet. CSV fields are typed by per-field inference (canonical integers, floats, `true`/`false`, empty ⇒ NULL) and comparisons coerce leniently between numeric strings and numbers. Outputs are CSV (quoted as needed, or always with `QuoteFields` `ALWAYS`) and JSON (one object per row, projection order preserved, missing fields omitted).
+
+Serialization options are validated up front instead of being silently coerced: `FileHeaderInfo` must be `USE`/`IGNORE`/`NONE`, JSON `Type` must be `DOCUMENT`/`LINES`, `FieldDelimiter`/`QuoteCharacter`/`Comments` must be single ASCII characters (`Comments` skips lines starting with that character), and `QuoteFields` must be `ALWAYS`/`ASNEEDED`. Unsupported combinations return `400 InvalidRequest` rather than potentially wrong records: any `CompressionType` other than `NONE`, an input CSV `RecordDelimiter` other than `\n`/`\r\n`, and a `QuoteEscapeCharacter` different from the quote character.
+
+Select now works on SSE-S3 and SSE-KMS objects for CSV and JSON input — the scan streams through the same decrypting data plane as `GET`, and SSE-C objects are supported when the request carries the customer key headers. Parquet input still requires an unencrypted object (`400 InvalidRequest` otherwise) because the reader needs seekable access. The `Stats` event reports real `BytesScanned`/`BytesProcessed` (input bytes consumed) instead of `0`. Errors detected after streaming has begun (for example malformed CSV or JSON mid-object) arrive as an event-stream `error` message rather than an HTTP error, matching AWS behavior.
+
 ### Authorization and request validation
 
 - **Per-key authorization on bulk delete.** `POST /<bucket>?delete` authorizes every key in the request body individually, not just the bucket. A principal whose IAM policy is scoped to a prefix can no longer delete keys outside it; unauthorized keys come back as `AccessDenied` entries in the `DeleteResult` while authorized keys still succeed.
@@ -736,8 +766,11 @@ The Rust server exposes:
 
   Two bucket selectors that authorization did not previously recognize at all now have their own IAM actions instead of falling through to the method default (`create_bucket` on PUT): `?ownershipControls` requires `ownership_controls` and `?publicAccessBlock` requires `public_access_block`. Grant these explicitly to any non-admin principal that manages those settings.
 - **Governance-retention bypass is a permission, not a header.** `x-amz-bypass-governance-retention: true` is only honored for an admin principal or for a principal granted the `bypass_governance` IAM action (or `s3:BypassGovernanceRetention` in a bucket policy) on the bucket and key being modified. An unauthorized caller, including an anonymous one on a public bucket, is treated as if the header were absent: a `GOVERNANCE`-locked object then refuses the delete, overwrite or retention change, while unlocked objects are unaffected. This is enforced on `DeleteObject`, versioned deletes, `POST /<bucket>?delete` (per key, so a prefix-scoped policy applies key by key), `PutObject`, `CopyObject`, POST form uploads, `CompleteMultipartUpload` and `PutObjectRetention`. `COMPLIANCE` retention remains absolute and no permission overrides it. The web UI never bypasses governance retention.
+- **A narrow S3 action grant no longer authorizes its whole method class.** Authorization now carries the exact S3 action a request maps to (for example `s3:GetObjectTagging` for `GET /<bucket>/<key>?tagging`, `s3:GetObjectAcl` for `?acl`, `s3:PutObjectTagging` for a tagging write) and matches it against the policy's `Action` when the policy names a specific `s3:*` action. Previously every action was first collapsed to a coarse internal verb (`read`/`write`/`delete`/…), so a policy granting only `s3:GetObjectTagging` also authorized `GetObject`, `GetObjectAcl` and every other read-class operation on the same resource. A bucket policy that names an exact action is now scoped to that action; wildcards (`s3:*`, `s3:Get*`) and the coarse internal names still behave as before, and IAM user policies (which grant coarse actions) are unchanged. Method-family aliases are treated as equivalent to their data action — `s3:HeadObject`≡`s3:GetObject`, `s3:UploadPart`/`s3:CopyObject`≡`s3:PutObject`, `s3:GetObjectVersion`≡`s3:GetObject`, `s3:ListParts`≡`s3:ListMultipartUploadParts` — so a `GetObject` grant still covers the HEAD and multipart-read paths as AWS does.
 - **A prefix-scoped wildcard policy is no longer an admin policy.** A principal is admin only when a policy grants `"bucket": "*"` with `"actions": ["*"]` and an unrestricted prefix (`"*"` or empty). Previously the prefix was ignored, so `{"bucket": "*", "actions": ["*"], "prefix": "home/"}` (a legitimate "everything under this prefix, in any bucket" grant) produced an admin principal that skipped every later check, including its own prefix scoping and admin-only APIs. Such a principal is now evaluated by the normal policy loop and stays confined to its prefix.
 - **Bucket-policy resource keys match case-sensitively.** S3 object keys are case-sensitive, so the key segment of a `Resource` ARN is compared case-sensitively: `arn:aws:s3:::b/public/*` matches `public/x` but not `PUBLIC/secret`. The bucket segment stays case-insensitive, since a policy may spell the bucket name in mixed case, and `Action` matching stays case-insensitive as AWS does.
+- **Case-aliased object keys fail closed on a case-insensitive filesystem.** S3 keys are case-sensitive, but Windows/NTFS (and macOS by default) resolve paths case-insensitively, so `temp/secret` and `TEMP/secret` would name the same file on disk while a prefix-scoped policy treats them as distinct — a principal confined to `temp/` could otherwise read or overwrite another principal's `TEMP/secret`. On startup the backend probes whether its storage filesystem is case-insensitive; when it is, object reads, metadata reads and mutations, object-lock updates, archived-version operations, and prefix-directory listings verify that the real on-disk casing of the key matches the request and return `NoSuchKey` when it does not, and a `PutObject`/copy/multipart-complete whose key differs only by case from existing content is rejected with `InvalidKey` rather than silently overwriting it. On a case-sensitive filesystem (typical Linux `ext4`/`xfs`) the probe finds nothing to guard and the checks are skipped.
+- **Virtual-host addressing is resolved before routing, preserving the subresource.** When a request's `Host` header names an existing bucket (`<bucket>.<host>`), the URI is rewritten to path style (`/<key>` ⇒ `/<bucket>/<key>`) in one middleware ahead of routing, carrying the original query string with it. Previously the rewrite happened partly in per-handler fallbacks that dropped the query and re-dispatched with a cleared subresource, so a virtual-host request could be authorized as one operation and executed as another, and a multi-segment key was split so the first path segment was treated as the bucket. Registered website-hosting domains (when `WEBSITE_HOSTING_ENABLED`) keep GET and HEAD requests on the website path instead of rewriting them.
 - **Bucket policies fail closed on unsupported clauses.** `Condition`, `NotPrincipal`, `NotAction`, and `NotResource` are not evaluated by this server. `PutBucketPolicy` (and the UI policy editor) now reject statements containing them with `InvalidArgument`. For policies already stored, a matching `Allow` carrying such a clause grants nothing, and a `Deny` carrying one denies. Previously these clauses were silently ignored, so a restrictive-looking policy could be permissive.
 - **Presigned URLs must sign their `x-amz-*` headers.** A presigned request carrying an `x-amz-*` header that is not listed in `X-Amz-SignedHeaders` is rejected with `SignatureDoesNotMatch`. This prevents a URL bearer from adding `x-amz-copy-source`, `x-amz-acl`, `x-amz-bypass-governance-retention`, SSE, or user-metadata headers the signer never authorized. Only `x-amz-content-sha256`, `x-amz-date`, and `x-amz-decoded-content-length` are exempt, since they affect body framing only. SDKs that attach unsigned checksum headers to presigned PUTs will need to include them in the signature, as they already must against AWS.
 - **Reserved metadata keys are dropped.** User metadata keys beginning with `__` or `x-amz-` collide with internal storage and encryption metadata and are discarded on PutObject, CopyObject, POST form uploads, UI multipart initiation, and objects pulled from a peer. Ordinary `x-amz-meta-<name>` metadata is unaffected.
@@ -786,3 +819,54 @@ For a route-level view, inspect:
 
 - `crates/myfsio-server/src/lib.rs`
 - `crates/myfsio-server/src/handlers/`
+
+## 16. IAM Policy Reference
+
+IAM users and their policies live in the file named by `IAM_CONFIG` (default `.myfsio.sys/config/iam.json`) and are managed from the UI at `/ui/iam` or the `/myfsio/admin/iam/...` API. Each user carries a list of policy statements; every statement grants (never denies) a set of actions on a bucket scope:
+
+```json
+{
+  "bucket": "my-bucket",
+  "prefix": "reports/*",
+  "actions": ["list", "read", "write"]
+}
+```
+
+- `bucket` — an exact bucket name, or `"*"` for every bucket. Partial wildcards (`my-*`) are not supported.
+- `prefix` — object-key scope for object-level actions. Empty or `"*"` means all keys; anything else is a leading-prefix match (a trailing `*` is allowed and ignored, so `reports/` and `reports/*` are equivalent). The prefix does not constrain bucket-level actions.
+- `actions` — the action names below, `"*"` for everything, or a namespace wildcard such as `iam:*` / `system:*`.
+
+Authorization is default-deny: a request is allowed if the user is enabled, not expired, and **any** statement matches the bucket, the action, and (for object operations) the key. Grants from a bucket policy or ACL are evaluated in addition to IAM — an explicit bucket-policy `Deny` always wins.
+
+### Admin
+
+A user is an **admin** exactly when one statement is `{"bucket": "*", "actions": ["*"]}` with an unrestricted prefix (`"*"` or empty). Admins skip all further authorization and are the only principals who can use the management-only UI/admin surfaces: IAM administration, connections, sites and peer credentials, website domains, replication wizards, metrics settings, and the audit log. A policy that merely lists every named action is *not* an admin policy — it grants exactly those actions and nothing else.
+
+### Data actions
+
+| Action | Grants |
+|--------|--------|
+| `list` | Bucket listings (`GET /<bucket>`, ListObjectsV2, `?versions`, `?uploads`, `?location`) and seeing the bucket in the UI |
+| `read` | `GET`/`HEAD` object, `?attributes`, S3 Select, presigned downloads |
+| `write` | `PUT`/`POST` object, multipart uploads, copy destinations, object tagging/ACL writes |
+| `delete` | `DELETE` object and per-key authorization inside `POST /<bucket>?delete` |
+| `create_bucket` | `PUT /<bucket>` and the UI Create Bucket action |
+| `delete_bucket` | `DELETE /<bucket>` and the UI Delete Bucket action |
+| `bypass_governance` | Honoring `x-amz-bypass-governance-retention` on the bucket/key |
+
+### Bucket configuration actions
+
+Each bucket subresource requires its own action: `share` (ACLs, `?acl`), `policy` (`?policy`, `?policyStatus`), `replication`, `lifecycle`, `cors`, `versioning`, `tagging`, `encryption`, `quota`, `object_lock` (incl. `?retention` and `?legal-hold`), `notification`, `logging`, `website`, `ownership_controls` (`?ownershipControls`), and `public_access_block` (`?publicAccessBlock`).
+
+### Namespaced actions
+
+- `iam:<op>` — delegated IAM reads/maintenance on the admin API: `iam:list_users`, `iam:get_user`, `iam:get_policy`, `iam:create_key`, `iam:delete_key`, `iam:disable_user`. `iam:*` grants the namespace.
+- `system:<op>` — maintenance endpoints and their UI buttons: `system:gc_read`, `system:gc_run`, `system:integrity_read`, `system:integrity_run`. `system:*` grants the namespace.
+
+Namespaced and system-level actions are evaluated without a bucket, so they must appear in a statement whose `bucket` is `"*"` (statement prefix is ignored for them).
+
+### Web UI parity
+
+The UI enforces the same actions as the S3 API for bucket-scoped operations: creating and deleting buckets (`create_bucket` / `delete_bucket`) and every bucket-configuration card on the bucket detail page — versioning, encryption (still requires `ENCRYPTION_ENABLED`), quota, website, bucket policy, ACLs (`share`), CORS, lifecycle, and the replication tab (`replication`). The corresponding buttons, forms, and tabs are hidden or shown read-only when the permission is absent, and the endpoints themselves return `403` with the missing action named. Earlier releases required full admin for all of these UI surfaces even when the IAM policy granted the actions; the S3 API honored the policy all along.
+
+Server-wide management surfaces remain admin-only regardless of policy actions: IAM administration pages, saved connections, sites and peer credentials, website-domain mappings, metrics settings, the replication wizard, and the audit log.

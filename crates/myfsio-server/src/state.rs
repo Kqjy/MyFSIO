@@ -14,6 +14,7 @@ use crate::services::integrity::IntegrityService;
 use crate::services::metrics::MetricsService;
 use crate::services::peer_admin::PeerAdminClient;
 use crate::services::peer_fetch::PeerFetcher;
+use crate::services::peer_nonce::PeerNonceStore;
 use crate::services::replication::ReplicationManager;
 use crate::services::s3_client::ClientOptions;
 use crate::services::site_registry::SiteRegistry;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub kms: Option<Arc<KmsService>>,
     pub gc: Option<Arc<GcService>>,
     pub integrity: Option<Arc<IntegrityService>>,
+    pub read_integrity: Option<Arc<IntegrityService>>,
     pub metrics: Option<Arc<MetricsService>>,
     pub system_metrics: Option<Arc<SystemMetricsService>>,
     pub site_registry: Option<Arc<SiteRegistry>>,
@@ -52,6 +54,8 @@ pub struct AppState {
     pub cluster_overview_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub cluster_aggregate_cache: Arc<Mutex<Option<(Instant, Value)>>>,
     pub peer_request_nonces: Arc<Mutex<LruCache<String, Instant>>>,
+    pub peer_nonce_store: Arc<PeerNonceStore>,
+    pub boot_time_utc: chrono::DateTime<chrono::Utc>,
     pub relay_idempotency_cache: Arc<Mutex<LruCache<String, RelayIdempotencyEntry>>>,
     pub relay_idempotency_inflight:
         Arc<Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -66,30 +70,35 @@ pub struct RelayIdempotencyEntry {
     pub request_fingerprint: String,
 }
 
+pub fn build_storage_backend(config: &ServerConfig) -> Arc<FsStorageBackend> {
+    Arc::new(FsStorageBackend::new_with_config(
+        config.storage_root.clone(),
+        FsStorageBackendConfig {
+            object_key_max_length_bytes: config.object_key_max_length_bytes,
+            object_cache_max_size: config.object_cache_max_size,
+            bucket_config_cache_ttl: Duration::from_secs_f64(
+                config.bucket_config_cache_ttl_seconds,
+            ),
+            stream_chunk_size: config.stream_chunk_size,
+            multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
+                &config.multipart_object_layout,
+            ),
+            metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
+                &config.metadata_layout,
+            ),
+            listing_index_enabled: config.listing_index_enabled,
+            ..FsStorageBackendConfig::default()
+        },
+    ))
+}
+
 impl AppState {
     pub fn new(config: ServerConfig) -> Self {
-        let storage = Arc::new(FsStorageBackend::new_with_config(
-            config.storage_root.clone(),
-            FsStorageBackendConfig {
-                object_key_max_length_bytes: config.object_key_max_length_bytes,
-                object_cache_max_size: config.object_cache_max_size,
-                bucket_config_cache_ttl: Duration::from_secs_f64(
-                    config.bucket_config_cache_ttl_seconds,
-                ),
-                stream_chunk_size: config.stream_chunk_size,
-                multipart_layout: myfsio_storage::fs_backend::MultipartLayout::from_env_str(
-                    &config.multipart_object_layout,
-                ),
-                metadata_layout: myfsio_storage::fs_backend::MetadataLayout::from_env_str(
-                    &config.metadata_layout,
-                ),
-                listing_index_enabled: config.listing_index_enabled,
-                ..FsStorageBackendConfig::default()
-            },
-        ));
-        let iam = Arc::new(IamService::new_with_secret(
+        let storage = build_storage_backend(&config);
+        let iam = Arc::new(IamService::new_with_filesystem(
             config.iam_config_path.clone(),
             config.secret_key.clone(),
+            storage.case_insensitive_fs(),
         ));
 
         let gc = if config.gc_enabled {
@@ -280,7 +289,9 @@ impl AppState {
             )))
         };
 
-        let integrity = if config.integrity_enabled {
+        let integrity_service = if config.integrity_enabled
+            || config.read_verify_mode == crate::config::ReadVerifyMode::Abort
+        {
             Some(Arc::new(IntegrityService::new(
                 storage.clone(),
                 &config.storage_root,
@@ -292,12 +303,20 @@ impl AppState {
                     heal_concurrency: config.integrity_heal_concurrency,
                     scan_pacing_ms: config.integrity_scan_pacing_ms,
                     quarantine_retention_days: config.integrity_quarantine_retention_days,
+                    reverify_days: config.integrity_reverify_days,
                 },
                 integrity_peer_fetcher,
             )))
         } else {
             None
         };
+        let integrity = config
+            .integrity_enabled
+            .then(|| integrity_service.clone())
+            .flatten();
+        let read_integrity = (config.read_verify_mode == crate::config::ReadVerifyMode::Abort)
+            .then(|| integrity_service.clone())
+            .flatten();
 
         let templates = init_templates(&config.templates_dir, &config.display_timezone);
         let access_logging = Arc::new(AccessLoggingService::new(&config.storage_root));
@@ -309,6 +328,10 @@ impl AppState {
         ));
         let nonce_cap = NonZeroUsize::new(config.peer_nonce_cache_size.max(1))
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
+        let peer_nonce_store = Arc::new(PeerNonceStore::new(
+            &config.storage_root,
+            config.peer_sigv4_timestamp_tolerance_secs,
+        ));
         let idemp_cap = NonZeroUsize::new(config.relay_idempotency_cache_size.max(1))
             .unwrap_or_else(|| NonZeroUsize::new(10_000).unwrap());
         let audit_log = Arc::new(AuditLog::new(
@@ -328,6 +351,7 @@ impl AppState {
             kms: None,
             gc,
             integrity,
+            read_integrity,
             metrics,
             system_metrics,
             site_registry,
@@ -343,6 +367,9 @@ impl AppState {
             cluster_overview_cache: Arc::new(Mutex::new(None)),
             cluster_aggregate_cache: Arc::new(Mutex::new(None)),
             peer_request_nonces: Arc::new(Mutex::new(LruCache::new(nonce_cap))),
+            peer_nonce_store,
+            boot_time_utc: chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+                .unwrap_or_else(chrono::Utc::now),
             relay_idempotency_cache: Arc::new(Mutex::new(LruCache::new(idemp_cap))),
             relay_idempotency_inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
             audit_log,

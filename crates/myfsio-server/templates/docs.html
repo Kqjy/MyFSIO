@@ -1892,6 +1892,7 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
               <tr><td><code>INTEGRITY_DRY_RUN</code></td><td><code>false</code></td><td>When auto-heal is requested, report eligible heal actions without changing files</td></tr>
               <tr><td><code>INTEGRITY_HEAL_CONCURRENCY</code></td><td><code>1</code></td><td>Maximum concurrent heal tasks</td></tr>
               <tr><td><code>INTEGRITY_SCAN_PACING_MS</code></td><td><code>0</code></td><td>Optional pause after each 100 inspected entries</td></tr>
+              <tr><td><code>INTEGRITY_REVERIFY_DAYS</code></td><td><code>30</code></td><td>Re-hash unchanged objects after this many days; <code>0</code> disables checksum caching</td></tr>
               <tr><td><code>INTEGRITY_QUARANTINE_RETENTION_DAYS</code></td><td><code>7</code></td><td>Minimum quarantine age before GC cleanup; entries still awaiting recovery are retained</td></tr>
             </tbody>
           </table>
@@ -1914,7 +1915,6 @@ curl "{{ api_base }}/myfsio/admin/gc/history?limit=10" \
               <tr><td><strong>Orphaned objects</strong></td><td>File exists without metadata entry</td><td>Reported only; no automatic heal</td></tr>
               <tr><td><strong>Phantom metadata</strong></td><td>Index entry exists but file is missing</td><td>Remove stale entry from index</td></tr>
               <tr><td><strong>Stale versions</strong></td><td>Manifest without data or vice versa</td><td>Move stale version files to quarantine</td></tr>
-              <tr><td><strong>ETag cache</strong></td><td><code>etag_index.json</code> differs from metadata</td><td>Rewrite the affected key entry in <code>etag_index.json</code></td></tr>
             </tbody>
           </table>
         </div>

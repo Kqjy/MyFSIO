@@ -50,7 +50,7 @@ fn require_admin(principal: &Principal) -> Option<Response> {
 }
 
 fn require_iam_action(state: &AppState, principal: &Principal, action: &str) -> Option<Response> {
-    if !state.iam.authorize(principal, None, action, None) {
+    if !state.iam.authorize(principal, None, action, None, None) {
         return Some(json_error(
             "AccessDenied",
             &format!("Requires {} permission", action),
@@ -903,7 +903,7 @@ pub async fn check_bidirectional_status(
                 );
             }
         }
-        crate::services::peer_admin::PeerAdminStatus::Unauthorized(_detail) => {
+        crate::services::peer_admin::PeerAdminStatus::Unauthorized { .. } => {
             result["remote_status"] = serde_json::json!({
                 "reachable": true,
                 "admin_access_denied": true,
@@ -1721,47 +1721,27 @@ async fn collect_peer_overviews(state: &AppState) -> Vec<serde_json::Value> {
             .and_then(|id| state.connections.get(id));
         let client_ref = client.clone();
         futs.push(async move {
-            let (status, data, error) = match conn {
-                Some(c) => match client_ref
-                    .fetch_admin_status(
-                        &c.endpoint_url,
-                        "/myfsio/admin/cluster/overview?local_only=1",
-                        &c,
-                    )
-                    .await
-                {
-                    crate::services::peer_admin::PeerAdminStatus::Ok(v) => {
-                        ("ok", v, serde_json::Value::Null)
-                    }
-                    crate::services::peer_admin::PeerAdminStatus::Unauthorized(detail) => (
-                        "unauthorized",
-                        serde_json::Value::Null,
-                        serde_json::Value::String(detail),
-                    ),
-                    crate::services::peer_admin::PeerAdminStatus::HttpError { status, detail } => (
-                        "error",
-                        serde_json::Value::Null,
-                        serde_json::Value::String(if detail.is_empty() {
-                            format!("peer returned status {}", status)
-                        } else {
-                            format!("peer returned status {} — {}", status, detail)
-                        }),
-                    ),
-                    crate::services::peer_admin::PeerAdminStatus::InvalidJson(detail) => (
-                        "error",
-                        serde_json::Value::Null,
-                        serde_json::Value::String(detail),
-                    ),
-                    crate::services::peer_admin::PeerAdminStatus::Unreachable(detail) => (
-                        "unreachable",
-                        serde_json::Value::Null,
-                        serde_json::Value::String(detail),
-                    ),
-                },
-                None => (
-                    "unreachable",
+            let outcome = match conn {
+                Some(c) => {
+                    client_ref
+                        .fetch_admin_status(
+                            &c.endpoint_url,
+                            "/myfsio/admin/cluster/overview?local_only=1",
+                            &c,
+                        )
+                        .await
+                }
+                None => crate::services::peer_admin::PeerAdminStatus::Unreachable(
+                    "no connection configured".to_string(),
+                ),
+            };
+            let (status, data, error, error_info) = match outcome.into_result() {
+                Ok(v) => ("ok", v, serde_json::Value::Null, serde_json::Value::Null),
+                Err(failure) => (
+                    failure.legacy_status(),
                     serde_json::Value::Null,
-                    serde_json::Value::String("no connection configured".to_string()),
+                    serde_json::Value::String(failure.message()),
+                    serde_json::to_value(&failure).unwrap_or(serde_json::Value::Null),
                 ),
             };
             serde_json::json!({
@@ -1773,6 +1753,7 @@ async fn collect_peer_overviews(state: &AppState) -> Vec<serde_json::Value> {
                 "status": status,
                 "data": data,
                 "error": error,
+                "error_info": error_info,
             })
         });
     }

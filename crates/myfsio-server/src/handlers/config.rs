@@ -60,7 +60,7 @@ fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
         .into_response()
 }
 
-fn custom_xml_error(status: StatusCode, code: &str, message: &str) -> Response {
+pub(crate) fn custom_xml_error(status: StatusCode, code: &str, message: &str) -> Response {
     use myfsio_common::error::S3ErrorCode::*;
     let mapped = match code {
         "AccessDenied" => Some(AccessDenied),
@@ -1080,6 +1080,18 @@ pub async fn put_object_lock(state: &AppState, bucket: &str, body: Body) -> Resp
     }
 
     let value = serde_json::Value::String(body_str);
+    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
+        config.object_lock = Some(value);
+    })
+    .await
+}
+
+pub async fn set_object_lock_enabled_default(state: &AppState, bucket: &str) -> Response {
+    let value = serde_json::Value::String(
+        "<ObjectLockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>"
+            .to_string(),
+    );
     mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
         config.object_lock = Some(value);
     })

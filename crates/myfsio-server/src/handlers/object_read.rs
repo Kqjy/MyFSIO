@@ -1,11 +1,14 @@
 use axum::body::Body;
 use axum::http::HeaderMap;
 use axum::response::Response;
+use md5::{Digest, Md5};
 use myfsio_common::types::ObjectMeta;
 use myfsio_crypto::encryption::EncryptionMetadata;
 use myfsio_storage::error::StorageError;
 use myfsio_storage::traits::{AsyncReadStream, RangeHint, SnapshotSource, StorageEngine};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::io::ReaderStream;
 
@@ -41,6 +44,147 @@ pub(crate) enum ObjectReadError {
     Rejected(Response),
     RangeNotSatisfiable(u64),
     Internal(String),
+}
+
+struct ReadVerification {
+    expected: [u8; 16],
+    context: ReadCorruptionContext,
+}
+
+struct ReadCorruptionContext {
+    integrity: std::sync::Arc<crate::services::integrity::IntegrityService>,
+    bucket: String,
+    key: String,
+    expected_etag: String,
+}
+
+struct VerifyOnRead {
+    inner: AsyncReadStream,
+    hasher: Md5,
+    expected: [u8; 16],
+    tail: Option<u8>,
+    pending_error: Option<std::io::Error>,
+    finished: bool,
+    failed: bool,
+    context: Option<ReadCorruptionContext>,
+}
+
+impl VerifyOnRead {
+    fn new(inner: AsyncReadStream, verification: ReadVerification) -> Self {
+        Self {
+            inner,
+            hasher: Md5::new(),
+            expected: verification.expected,
+            tail: None,
+            pending_error: None,
+            finished: false,
+            failed: false,
+            context: Some(verification.context),
+        }
+    }
+
+    fn accept_bytes(&mut self, buf: &mut ReadBuf<'_>, before: usize) -> bool {
+        let end = buf.filled().len();
+        let last = buf.filled()[end - 1];
+        self.hasher.update(&buf.filled()[before..end]);
+        if let Some(previous) = self.tail.replace(last) {
+            let filled = buf.filled_mut();
+            filled.copy_within(before..end - 1, before + 1);
+            filled[before] = previous;
+        } else {
+            buf.set_filled(end - 1);
+        }
+        buf.filled().len() > before
+    }
+
+    fn report_mismatch(&mut self, actual: [u8; 16]) {
+        self.failed = true;
+        let Some(context) = self.context.take() else {
+            return;
+        };
+        let actual_etag = hex::encode(actual);
+        tracing::error!(
+            bucket = context.bucket,
+            key = context.key,
+            expected_etag = context.expected_etag,
+            actual_etag,
+            "READ_VERIFY_MODE=abort detected object corruption; aborting the response body"
+        );
+        tokio::spawn(async move {
+            context
+                .integrity
+                .handle_read_corruption(
+                    &context.bucket,
+                    &context.key,
+                    &context.expected_etag,
+                    &actual_etag,
+                )
+                .await;
+        });
+    }
+
+    fn mismatch_error() -> std::io::Error {
+        std::io::Error::other("object checksum mismatch detected during read")
+    }
+}
+
+impl AsyncRead for VerifyOnRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if buf.remaining() == 0 || this.finished {
+            return Poll::Ready(Ok(()));
+        }
+        if this.failed {
+            return Poll::Ready(Err(Self::mismatch_error()));
+        }
+        if let Some(error) = this.pending_error.take() {
+            return Poll::Ready(Err(error));
+        }
+
+        loop {
+            let before = buf.filled().len();
+            match this.inner.as_mut().poll_read(cx, buf) {
+                Poll::Ready(Ok(())) => {
+                    if buf.filled().len() > before {
+                        if this.accept_bytes(buf, before) {
+                            return Poll::Ready(Ok(()));
+                        }
+                        continue;
+                    }
+                    let actual: [u8; 16] = std::mem::take(&mut this.hasher).finalize().into();
+                    if actual != this.expected {
+                        this.report_mismatch(actual);
+                        return Poll::Ready(Err(Self::mismatch_error()));
+                    }
+                    this.finished = true;
+                    if let Some(tail) = this.tail.take() {
+                        buf.put_slice(&[tail]);
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Err(error)) => {
+                    if buf.filled().len() > before {
+                        let produced = this.accept_bytes(buf, before);
+                        if produced {
+                            this.pending_error = Some(error);
+                            return Poll::Ready(Ok(()));
+                        }
+                    }
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Pending => {
+                    if buf.filled().len() > before && this.accept_bytes(buf, before) {
+                        return Poll::Ready(Ok(()));
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_range_hint(range_str: &str) -> Option<RangeHint> {
@@ -113,6 +257,7 @@ pub(crate) async fn serve_object_data(
     snapshot: ObjectSnapshot,
     range: Option<&str>,
     sse_c_headers: &HeaderMap,
+    verification_target: Option<(&str, &str)>,
 ) -> Result<ServedObject, ObjectReadError> {
     let ObjectSnapshot { meta, source, link } = snapshot;
     let enc_info = EncryptionMetadata::from_metadata(&meta.internal_metadata);
@@ -160,6 +305,7 @@ pub(crate) async fn serve_object_data(
                     total,
                     window,
                     Some(enc_info.algorithm),
+                    None,
                 ));
             }
 
@@ -200,6 +346,7 @@ pub(crate) async fn serve_object_data(
                 window,
                 permit,
                 Some(enc_info.algorithm),
+                None,
             )
             .await
         }
@@ -219,9 +366,11 @@ pub(crate) async fn serve_object_data(
                 }
             };
             let permit = acquire_read_permit(state, &link).await?;
+            let verification = read_verification(state, &meta, window, verification_target);
             match source {
                 SnapshotSource::LinkedFile(_) => {
-                    serve_file_window(state, link, meta, total, window, permit, None).await
+                    serve_file_window(state, link, meta, total, window, permit, None, verification)
+                        .await
                 }
                 segments => {
                     let (start, length) = match window {
@@ -233,7 +382,14 @@ pub(crate) async fn serve_object_data(
                         Err(e) => return Err(ObjectReadError::Storage(StorageError::Io(e))),
                     };
                     Ok(served_object(
-                        state, reader, permit, meta, total, window, None,
+                        state,
+                        reader,
+                        permit,
+                        meta,
+                        total,
+                        window,
+                        None,
+                        verification,
                     ))
                 }
             }
@@ -272,6 +428,7 @@ async fn serve_file_window(
     window: Option<(u64, u64)>,
     permit: Option<OwnedSemaphorePermit>,
     encryption_algorithm: Option<String>,
+    verification: Option<ReadVerification>,
 ) -> Result<ServedObject, ObjectReadError> {
     let mut file = match open_self_deleting(path.clone()).await {
         Ok(file) => file,
@@ -299,6 +456,7 @@ async fn serve_file_window(
         total,
         window,
         encryption_algorithm,
+        verification,
     ))
 }
 
@@ -310,8 +468,13 @@ fn served_object(
     total: u64,
     window: Option<(u64, u64)>,
     encryption_algorithm: Option<String>,
+    verification: Option<ReadVerification>,
 ) -> ServedObject {
     let reader = attach_read_permit(reader, permit);
+    let reader = match verification {
+        Some(verification) => Box::pin(VerifyOnRead::new(reader, verification)) as AsyncReadStream,
+        None => reader,
+    };
     let stream_cap = state.config.stream_chunk_size.max(64 * 1024);
     let body = Body::from_stream(ReaderStream::with_capacity(reader, stream_cap));
     let content_length = match window {
@@ -326,4 +489,36 @@ fn served_object(
         range: window,
         encryption_algorithm,
     }
+}
+
+fn read_verification(
+    state: &AppState,
+    meta: &ObjectMeta,
+    window: Option<(u64, u64)>,
+    target: Option<(&str, &str)>,
+) -> Option<ReadVerification> {
+    if state.config.read_verify_mode != crate::config::ReadVerifyMode::Abort || window.is_some() {
+        return None;
+    }
+    if meta
+        .internal_metadata
+        .contains_key(myfsio_storage::segments::META_KEY_SEGMENTS)
+    {
+        return None;
+    }
+    let (bucket, key) = target?;
+    let expected_etag = meta.etag.as_deref()?;
+    let mut expected = [0u8; 16];
+    if expected_etag.len() != 32 || hex::decode_to_slice(expected_etag, &mut expected).is_err() {
+        return None;
+    }
+    Some(ReadVerification {
+        expected,
+        context: ReadCorruptionContext {
+            integrity: state.read_integrity.as_ref()?.clone(),
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            expected_etag: expected_etag.to_string(),
+        },
+    })
 }

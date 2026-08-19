@@ -1,8 +1,10 @@
 pub mod config;
 pub mod embedded;
+pub mod format_marker;
 pub mod handlers;
 pub mod middleware;
 pub mod s3_response;
+pub mod select_engine;
 pub mod services;
 pub mod session;
 pub mod state;
@@ -28,7 +30,36 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/buckets",
             get(ui_pages::buckets_overview).post(ui_pages::create_bucket),
         )
+        .route("/ui/buckets/create", post(ui_pages::create_bucket))
         .route("/ui/buckets/{bucket_name}", get(ui_pages::bucket_detail))
+        .route(
+            "/ui/buckets/{bucket_name}/delete",
+            post(ui_pages::delete_bucket),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/replication",
+            post(ui_pages::update_bucket_replication),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/versioning",
+            post(ui_pages::update_bucket_versioning),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/quota",
+            post(ui_pages::update_bucket_quota),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/encryption",
+            post(ui_pages::update_bucket_encryption),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/policy",
+            post(ui_pages::update_bucket_policy),
+        )
+        .route(
+            "/ui/buckets/{bucket_name}/website",
+            post(ui_pages::update_bucket_website),
+        )
         .route(
             "/ui/buckets/{bucket_name}/upload",
             post(ui_api::upload_object),
@@ -300,39 +331,14 @@ pub fn create_ui_router(state: state::AppState) -> Router {
             "/ui/website-domains/{domain}/delete",
             post(ui_pages::delete_website_domain),
         )
+        .route(
+            "/ui/website-domains/{domain}/dns-check",
+            get(ui_pages::website_domain_dns_check),
+        )
         .route("/ui/replication/new", get(ui_pages::replication_wizard))
         .route(
             "/ui/replication/create",
             post(ui_pages::create_peer_replication_rules_from_query),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/replication",
-            post(ui_pages::update_bucket_replication),
-        )
-        .route("/ui/buckets/create", post(ui_pages::create_bucket))
-        .route(
-            "/ui/buckets/{bucket_name}/delete",
-            post(ui_pages::delete_bucket),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/versioning",
-            post(ui_pages::update_bucket_versioning),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/quota",
-            post(ui_pages::update_bucket_quota),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/encryption",
-            post(ui_pages::update_bucket_encryption),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/policy",
-            post(ui_pages::update_bucket_policy),
-        )
-        .route(
-            "/ui/buckets/{bucket_name}/website",
-            post(ui_pages::update_bucket_website),
         )
         .route(
             "/ui/sites/peers/{site_id}/replication-rules",
@@ -761,7 +767,7 @@ pub fn create_router(state: state::AppState) -> Router {
     let request_body_timeout =
         std::time::Duration::from_secs(state.config.request_body_timeout_secs);
 
-    api_router
+    let routed = api_router
         .merge(admin_router)
         .merge(admin_peer_router)
         .layer(axum::middleware::from_fn(middleware::server_header))
@@ -775,7 +781,14 @@ pub fn create_router(state: state::AppState) -> Router {
         .layer(tower_http::timeout::RequestBodyTimeoutLayer::new(
             request_body_timeout,
         ))
-        .with_state(state)
+        .with_state(state.clone());
+
+    Router::new()
+        .fallback_service(routed)
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            middleware::virtual_host_rewrite_layer,
+        ))
 }
 
 fn cors_layer(config: &config::ServerConfig) -> tower_http::cors::CorsLayer {

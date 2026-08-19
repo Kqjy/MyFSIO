@@ -15,7 +15,7 @@ use md5::{Digest, Md5};
 use parking_lot::Condvar;
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{mpsc, Arc};
@@ -35,14 +35,48 @@ pub const META_KEY_PART_SIZES: &str = "__part_sizes__";
 pub const SIDECAR_FILE_PREFIX: &str = ".__myfsio_meta__";
 pub const SIDECAR_FILE_EXT: &str = ".json";
 pub const SIDECAR_ENTRY_NAME_FIELD: &str = "__entry_name__";
+pub const SIDECAR_COMMIT_BUCKET_FIELD: &str = "__commit_bucket__";
+pub const SIDECAR_COMMIT_KEY_FIELD: &str = "__commit_key__";
+pub const META_KEY_COMMIT_MTIME_NS: &str = "__commit_mtime_ns__";
 pub const META_KEY_UNREADABLE: &str = "__meta_unreadable__";
 const SIDECAR_MAX_FILE_NAME_BYTES: usize = 255;
+
+#[derive(Debug, Default, Clone)]
+pub struct StagedCommitRecovery {
+    pub published: Vec<RecoveredCommit>,
+    pub discarded: usize,
+    pub poisoned: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveredCommit {
+    pub bucket: String,
+    pub key: String,
+    pub staged_path: PathBuf,
+}
+
+enum StagedCommitOutcome {
+    Published {
+        bucket: String,
+        key: String,
+        etag: String,
+    },
+    Discarded {
+        reason: &'static str,
+    },
+    Poisoned {
+        bucket: String,
+        key: String,
+        detail: String,
+    },
+}
 
 const STORAGE_MANAGED_METADATA_KEYS: &[&str] = &[
     "__etag__",
     "__size__",
     "__last_modified__",
     "__version_id__",
+    META_KEY_COMMIT_MTIME_NS,
     META_KEY_CORRUPTED,
     META_KEY_CORRUPTED_AT,
     META_KEY_CORRUPTION_DETAIL,
@@ -61,60 +95,10 @@ pub enum IntegrityQuarantineOutcome {
 pub enum OpenedObjectContent {
     Single(std::fs::File),
     Segmented {
-        files: Vec<(std::fs::File, u64)>,
+        source: crate::segments::LazySegmentSource,
         total: u64,
         base_offset: u64,
     },
-}
-
-impl OpenedObjectContent {
-    async fn into_range_stream(
-        self,
-        start: u64,
-        len: Option<u64>,
-    ) -> std::io::Result<AsyncReadStream> {
-        match self {
-            OpenedObjectContent::Single(file) => {
-                use tokio::io::{AsyncReadExt, AsyncSeekExt};
-                let mut file = tokio::fs::File::from_std(file);
-                if start > 0 {
-                    file.seek(std::io::SeekFrom::Start(start)).await?;
-                }
-                Ok(match len {
-                    Some(n) => Box::pin(file.take(n)),
-                    None => Box::pin(file),
-                })
-            }
-            OpenedObjectContent::Segmented {
-                files,
-                total,
-                base_offset,
-            } => {
-                crate::traits::SnapshotSource::Segments {
-                    files,
-                    total,
-                    base_offset,
-                }
-                .into_range_stream(start, len)
-                .await
-            }
-        }
-    }
-
-    fn into_snapshot_source(self, link_path: PathBuf) -> crate::traits::SnapshotSource {
-        match self {
-            OpenedObjectContent::Single(_) => crate::traits::SnapshotSource::LinkedFile(link_path),
-            OpenedObjectContent::Segmented {
-                files,
-                total,
-                base_offset,
-            } => crate::traits::SnapshotSource::Segments {
-                files,
-                total,
-                base_offset,
-            },
-        }
-    }
 }
 
 fn parse_md5_hex(s: &str) -> Option<[u8; 16]> {
@@ -160,6 +144,12 @@ pub fn metadata_is_corrupted(meta: &HashMap<String, String>) -> bool {
     meta.get(META_KEY_CORRUPTED)
         .map(|v| v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+pub fn metadata_has_pending_sse(meta: &HashMap<String, String>) -> bool {
+    meta.contains_key(MULTIPART_PENDING_SSE_ALG)
+        || meta.contains_key(MULTIPART_PENDING_SSE_KMS_KEY)
+        || meta.contains_key(MULTIPART_PENDING_SSE_C_KEY)
 }
 
 pub fn metadata_corruption_detail(meta: &HashMap<String, String>) -> String {
@@ -316,6 +306,14 @@ struct ShallowCacheEntry {
 }
 
 const OBJECT_LOCK_STRIPES: usize = 2048;
+
+#[derive(Debug, Default)]
+pub struct MetaMigrationPreflight {
+    pub index_files: usize,
+    pub entries: usize,
+    pub corrupt: Vec<String>,
+    pub collisions: Vec<String>,
+}
 
 #[derive(Debug, Default)]
 pub struct MetaMigrationReport {
@@ -518,6 +516,8 @@ fn compact_listing_index_work(
             sealed.cutoff_generation,
             Uuid::new_v4()
         ));
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::listing_index::hit_failpoint(&sealed.listing_dir, "listing:snapshot-write")?;
         crate::listing_index::write_snapshot_temp(&temp_path, &snapshot)?;
 
         let install_started = {
@@ -583,6 +583,8 @@ fn wait_after_listing_compaction_seal(control: &ListingCompactionTestControl, bu
 
 pub struct FsStorageBackend {
     root: PathBuf,
+    canonical_root: Option<PathBuf>,
+    case_insensitive_fs: bool,
     object_key_max_length_bytes: usize,
     object_cache_max_size: usize,
     stream_chunk_size: usize,
@@ -606,10 +608,89 @@ pub struct FsStorageBackend {
     list_rebuild_locks: DashMap<String, Arc<Mutex<()>>>,
     shallow_rebuild_locks: DashMap<(String, PathBuf, String), Arc<Mutex<()>>>,
     list_cache_ttl: std::time::Duration,
+    tmp_dir_durable: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     listing_full_builds: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     stats_full_walks: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ManifestPart {
+    etag: String,
+    size: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct MultipartManifest {
+    object_key: String,
+    metadata: HashMap<String, String>,
+    parts: BTreeMap<u32, ManifestPart>,
+}
+
+#[derive(Debug)]
+pub struct PreparedMultipartUpload {
+    pub object_key: String,
+    pub plaintext_path: PathBuf,
+    pub composite_etag: String,
+    pub plaintext_size: u64,
+    pub part_sizes: Vec<u64>,
+    pub metadata: HashMap<String, String>,
+    bucket: String,
+    upload_id: String,
+    selected_parts: Vec<(u32, String, u64)>,
+}
+
+impl MultipartManifest {
+    fn read_sync(manifest_path: &Path) -> StorageResult<Self> {
+        let content = std::fs::read_to_string(manifest_path).map_err(StorageError::Io)?;
+        let mut manifest: Self = serde_json::from_str(&content).map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "multipart manifest {} is malformed and cannot be trusted for completion: {}",
+                    manifest_path.display(),
+                    e
+                ),
+            ))
+        })?;
+        let upload_dir = manifest_path.parent().ok_or_else(|| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "multipart manifest has no parent directory",
+            ))
+        })?;
+        let entries = std::fs::read_dir(upload_dir).map_err(StorageError::Io)?;
+        for entry in entries {
+            let entry = entry.map_err(StorageError::Io)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(part_number) = Self::part_record_number(&name) else {
+                continue;
+            };
+            let content = std::fs::read_to_string(entry.path()).map_err(StorageError::Io)?;
+            let part = serde_json::from_str::<ManifestPart>(&content).map_err(|error| {
+                StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "multipart part record {} is malformed and cannot be trusted: {}",
+                        entry.path().display(),
+                        error
+                    ),
+                ))
+            })?;
+            manifest.parts.insert(part_number, part);
+        }
+        Ok(manifest)
+    }
+
+    fn part_record_number(name: &str) -> Option<u32> {
+        let number = name.strip_prefix("part-")?.strip_suffix(".json")?;
+        if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        number.parse().ok()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -655,8 +736,10 @@ impl FsStorageBackend {
             .map(|_| RwLock::new(()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let backend = Self {
+        let mut backend = Self {
             root,
+            canonical_root: None,
+            case_insensitive_fs: false,
             object_key_max_length_bytes: config.object_key_max_length_bytes,
             object_cache_max_size: config.object_cache_max_size,
             stream_chunk_size,
@@ -682,13 +765,135 @@ impl FsStorageBackend {
             list_rebuild_locks: DashMap::new(),
             shallow_rebuild_locks: DashMap::new(),
             list_cache_ttl: std::time::Duration::from_secs(5),
+            tmp_dir_durable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             listing_full_builds: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             stats_full_walks: std::sync::atomic::AtomicUsize::new(0),
         };
         backend.ensure_system_roots();
+        backend.canonical_root = std::fs::canonicalize(&backend.root).ok();
+        backend.case_insensitive_fs = backend.probe_case_insensitive_fs();
         backend
+    }
+
+    fn probe_case_insensitive_fs(&self) -> bool {
+        let dir = self.tmp_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let name = format!(".case-probe-{}", Uuid::new_v4().simple());
+        let lower = dir.join(&name);
+        let upper = dir.join(name.to_ascii_uppercase());
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lower)
+            .is_err()
+        {
+            return true;
+        }
+        let insensitive = upper.exists();
+        let _ = std::fs::remove_file(&lower);
+        insensitive
+    }
+
+    pub fn case_insensitive_fs(&self) -> bool {
+        self.case_insensitive_fs
+    }
+
+    fn verify_disk_casing(&self, expected: &Path) -> StorageResult<bool> {
+        if !self.case_insensitive_fs {
+            return Ok(true);
+        }
+        let mut probe = expected;
+        let existing = loop {
+            if !probe.starts_with(&self.root) {
+                return Ok(false);
+            }
+            if probe == self.root.as_path() {
+                return Ok(true);
+            }
+            match std::fs::symlink_metadata(probe) {
+                Ok(_) => break probe,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => match probe.parent() {
+                    Some(parent) => probe = parent,
+                    None => return Ok(true),
+                },
+                Err(err) => return Err(StorageError::Io(err)),
+            }
+        };
+        let canonical_root = match &self.canonical_root {
+            Some(path) => path.clone(),
+            None => std::fs::canonicalize(&self.root).map_err(StorageError::Io)?,
+        };
+        let canonical = std::fs::canonicalize(existing).map_err(StorageError::Io)?;
+        let expected_rel = match existing.strip_prefix(&self.root) {
+            Ok(rel) => rel,
+            Err(_) => return Ok(false),
+        };
+        let actual_rel = match canonical.strip_prefix(&canonical_root) {
+            Ok(rel) => rel,
+            Err(_) => return Ok(false),
+        };
+        let mut expected_parts = expected_rel.components();
+        let mut actual_parts = actual_rel.components();
+        loop {
+            match (expected_parts.next(), actual_parts.next()) {
+                (Some(e), Some(a)) => {
+                    if e.as_os_str() != a.as_os_str() {
+                        return Ok(false);
+                    }
+                }
+                (None, None) => return Ok(true),
+                _ => return Ok(false),
+            }
+        }
+    }
+
+    fn guard_object_casing(&self, bucket_name: &str, object_key: &str) -> StorageResult<()> {
+        if !self.case_insensitive_fs {
+            return Ok(());
+        }
+        let live_path = self.object_live_path(bucket_name, object_key);
+        let live_ok = self.verify_disk_casing(&live_path)?;
+        let metadata_ok = if std::fs::symlink_metadata(&live_path).is_ok() {
+            true
+        } else {
+            let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, object_key);
+            self.verify_disk_casing(&sidecar_path)?
+                && self.verify_disk_casing(&self.legacy_metadata_file(bucket_name, object_key))?
+        };
+        if live_ok && metadata_ok {
+            return Ok(());
+        }
+        Err(StorageError::ObjectNotFound {
+            bucket: bucket_name.to_string(),
+            key: object_key.to_string(),
+        })
+    }
+
+    fn guard_versioned_key_casing(&self, bucket_name: &str, object_key: &str) -> StorageResult<()> {
+        let live_ok = self.verify_disk_casing(&self.object_live_path(bucket_name, object_key))?;
+        let version_ok = self.verify_disk_casing(&self.version_dir(bucket_name, object_key))?;
+        if live_ok && version_ok {
+            Ok(())
+        } else {
+            Err(StorageError::ObjectNotFound {
+                bucket: bucket_name.to_string(),
+                key: object_key.to_string(),
+            })
+        }
+    }
+
+    fn purge_meta_read_cache_for_bucket(&self, bucket_name: &str) {
+        let mut cache = self.meta_read_cache.lock();
+        let stale: Vec<(String, String)> = cache
+            .iter()
+            .filter(|((bucket, _), _)| bucket == bucket_name)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            cache.pop(&key);
+        }
     }
 
     pub fn shutdown_listing_compactor(&self) {
@@ -903,6 +1108,16 @@ impl FsStorageBackend {
                 detail: metadata_corruption_detail(&stored_meta),
             });
         }
+        if metadata_has_pending_sse(&stored_meta) {
+            return Err(StorageError::ObjectCorrupted {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+                detail: "server-side encryption was requested for this multipart upload but \
+                         never finalized; the stored bytes cannot be served safely because \
+                         their encryption state is unknown"
+                    .to_string(),
+            });
+        }
         let mut obj = ObjectMeta::new(key.to_string(), meta.len(), lm);
         obj.etag = stored_meta.get("__etag__").cloned();
         obj.content_type = stored_meta.get("__content_type__").cloned();
@@ -1033,35 +1248,74 @@ impl FsStorageBackend {
             None => (0, set.sizes.len().saturating_sub(1), 0),
         };
 
-        let mut files = Vec::with_capacity(last.saturating_sub(first) + 1);
+        let mut paths = Vec::with_capacity(last.saturating_sub(first) + 1);
         if !set.sizes.is_empty() {
             for i in first..=last {
                 let size = set.sizes[i];
                 let seg_path = set.seg_path(i);
-                let seg_file = std::fs::File::open(&seg_path).map_err(|e| {
-                    corrupted(format!(
-                        "segment file {} is unreadable: {}",
-                        seg_path.display(),
-                        e
-                    ))
-                })?;
-                let seg_len = seg_file.metadata().map_err(StorageError::Io)?.len();
-                if seg_len != size {
-                    return Err(corrupted(format!(
-                        "segment file {} has size {} but manifest says {}",
-                        seg_path.display(),
-                        seg_len,
-                        size
-                    )));
-                }
-                files.push((seg_file, size));
+                paths.push((seg_path, size));
             }
         }
+        let source = crate::segments::LazySegmentSource::open_first(
+            crate::segments::SegmentPaths::new(paths),
+        )
+        .map_err(|error| corrupted(error.to_string()))?;
         Ok(OpenedObjectContent::Segmented {
-            files,
+            source,
             total: header.total,
             base_offset,
         })
+    }
+
+    fn snapshot_segmented_content_sync(
+        &self,
+        stub_path: &Path,
+        link_path: &Path,
+        source: crate::segments::LazySegmentSource,
+        total: u64,
+        base_offset: u64,
+    ) -> StorageResult<crate::traits::SnapshotSource> {
+        let _ = std::fs::remove_file(link_path);
+        let _ = std::fs::remove_dir_all(link_path);
+        let link_result = (|| -> std::io::Result<Vec<(PathBuf, u64)>> {
+            std::fs::create_dir_all(link_path)?;
+            std::fs::hard_link(stub_path, link_path.join("stub"))?;
+            let segment_dir = link_path.join("segments");
+            std::fs::create_dir(&segment_dir)?;
+            let mut linked = Vec::with_capacity(source.paths().entries().len());
+            for (ordinal, (path, size)) in source.paths().entries().iter().enumerate() {
+                let target = segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                std::fs::hard_link(path, &target)?;
+                linked.push((target, *size));
+            }
+            Ok(linked)
+        })();
+        match link_result {
+            Ok(linked) => {
+                let (_, eager) = source.into_parts();
+                let paths =
+                    crate::segments::SegmentPaths::with_cleanup(linked, link_path.to_path_buf());
+                Ok(crate::traits::SnapshotSource::Segments {
+                    source: crate::segments::LazySegmentSource::from_parts(paths, eager),
+                    total,
+                    base_offset,
+                })
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(link_path);
+                tracing::warn!(
+                    path = %link_path.display(),
+                    error = %error,
+                    "hard-linking a segmented snapshot failed; retaining eager handles"
+                );
+                let files = source.into_eager_files().map_err(StorageError::Io)?;
+                Ok(crate::traits::SnapshotSource::EagerSegments {
+                    files,
+                    total,
+                    base_offset,
+                })
+            }
+        }
     }
 
     fn release_segment_dir(&self, bucket: &str, segment_id: &str) {
@@ -1098,20 +1352,26 @@ impl FsStorageBackend {
     fn object_path(&self, bucket_name: &str, object_key: &str) -> StorageResult<PathBuf> {
         self.validate_key(object_key)?;
         let encoded = fs_encode_key(object_key);
-        if object_key.ends_with('/') {
+        let path = if object_key.ends_with('/') {
             let trimmed = encoded.trim_end_matches('/');
-            Ok(self
-                .bucket_path(bucket_name)
+            self.bucket_path(bucket_name)
                 .join(trimmed)
-                .join(DIR_MARKER_FILE))
+                .join(DIR_MARKER_FILE)
         } else {
             let direct = self.bucket_path(bucket_name).join(&encoded);
             if direct.is_dir() {
-                Ok(direct.join(KEY_DATA_MARKER_FILE))
+                direct.join(KEY_DATA_MARKER_FILE)
             } else {
-                Ok(direct)
+                direct
             }
+        };
+        if !self.verify_disk_casing(&path)? {
+            return Err(StorageError::ObjectNotFound {
+                bucket: bucket_name.to_string(),
+                key: object_key.to_string(),
+            });
         }
+        Ok(path)
     }
 
     fn object_live_path(&self, bucket_name: &str, object_key: &str) -> PathBuf {
@@ -1677,6 +1937,31 @@ impl FsStorageBackend {
         result
     }
 
+    fn part_record_path(upload_dir: &Path, part_number: u32) -> PathBuf {
+        upload_dir.join(format!("part-{:05}.json", part_number))
+    }
+
+    fn publish_part_record_sync(
+        &self,
+        upload_dir: &Path,
+        part_number: u32,
+        etag: &str,
+        size: u64,
+    ) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "mpu:part-record-write")?;
+        let record = serde_json::to_value(ManifestPart {
+            etag: etag.to_string(),
+            size,
+        })
+        .map_err(std::io::Error::other)?;
+        Self::atomic_write_json_sync(
+            &Self::part_record_path(upload_dir, part_number),
+            &record,
+            true,
+        )
+    }
+
     fn read_index_entry_sync(
         &self,
         bucket_name: &str,
@@ -1758,6 +2043,8 @@ impl FsStorageBackend {
         key: &str,
         entry: &HashMap<String, Value>,
     ) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "metadata:rewrite")?;
         if Self::entry_marks_unreadable_metadata(entry) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1832,6 +2119,8 @@ impl FsStorageBackend {
     }
 
     fn delete_index_entry_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "delete:metadata-remove")?;
         let (index_path, entry_name) = self.index_file_for_key(bucket_name, key);
         let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, key);
         if sidecar_path.exists() {
@@ -1894,6 +2183,89 @@ impl FsStorageBackend {
                 err
             );
         }
+    }
+
+    pub fn preflight_meta_migration(&self) -> MetaMigrationPreflight {
+        let mut preflight = MetaMigrationPreflight::default();
+        let buckets_root = self.system_buckets_root();
+        let Ok(buckets) = std::fs::read_dir(&buckets_root) else {
+            return preflight;
+        };
+        for bucket_entry in buckets.flatten() {
+            let meta_root = bucket_entry.path().join(BUCKET_META_DIR);
+            if !meta_root.is_dir() {
+                continue;
+            }
+            let mut stack = vec![meta_root];
+            while let Some(dir) = stack.pop() {
+                let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                    preflight
+                        .corrupt
+                        .push(format!("unreadable directory {}", dir.display()));
+                    continue;
+                };
+                let mut index_path = None;
+                for dirent in read_dir.flatten() {
+                    let path = dirent.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if dirent.file_name() == INDEX_FILE {
+                        index_path = Some(path);
+                    }
+                }
+                let Some(index_path) = index_path else {
+                    continue;
+                };
+                preflight.index_files += 1;
+                let index: HashMap<String, Value> = match std::fs::read_to_string(&index_path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
+                {
+                    Ok(index) => index,
+                    Err(err) => {
+                        preflight
+                            .corrupt
+                            .push(format!("{}: {}", index_path.display(), err));
+                        continue;
+                    }
+                };
+                let mut names_in_dir: HashMap<String, String> = HashMap::new();
+                for entry_name in index.keys() {
+                    preflight.entries += 1;
+                    let sidecar_name = Self::sidecar_file_name(entry_name);
+                    if let Some(previous) =
+                        names_in_dir.insert(sidecar_name.clone(), entry_name.clone())
+                    {
+                        preflight.collisions.push(format!(
+                            "{}: entries '{}' and '{}' both map to sidecar {}",
+                            index_path.display(),
+                            previous,
+                            entry_name,
+                            sidecar_name
+                        ));
+                    }
+                    let sidecar_path = dir.join(&sidecar_name);
+                    if sidecar_path.exists() {
+                        let matches = std::fs::read_to_string(&sidecar_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<HashMap<String, Value>>(&s).ok())
+                            .and_then(|existing| {
+                                Self::sidecar_entry_name_from_file(&sidecar_name, &existing)
+                            })
+                            .is_some_and(|name| name == *entry_name);
+                        if !matches {
+                            preflight.collisions.push(format!(
+                                "{}: existing sidecar {} does not belong to entry '{}'",
+                                index_path.display(),
+                                sidecar_name,
+                                entry_name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        preflight
     }
 
     pub fn migrate_meta_indexes_to_sidecars(&self) -> MetaMigrationReport {
@@ -2012,6 +2384,17 @@ impl FsStorageBackend {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            #[cfg(any(test, feature = "failpoints"))]
+            if let Err(err) = crate::failpoints::hit(&self.root, "migrate:sidecar-write") {
+                all_ok = false;
+                report.failures.push(format!(
+                    "{}: failed writing sidecar for {}: {}",
+                    index_path.display(),
+                    entry_name,
+                    err
+                ));
+                continue;
+            }
             match self.write_sidecar_file(&sidecar_path, entry_name, &entry_map) {
                 Ok(()) => report.entries_written += 1,
                 Err(err) => {
@@ -2027,12 +2410,16 @@ impl FsStorageBackend {
         }
         if all_ok {
             Self::fsync_dir_best_effort(dir);
-            match std::fs::remove_file(index_path) {
-                Ok(()) => report.index_files_migrated += 1,
+            let backup_path = index_path.with_file_name(format!("{}.migrated", INDEX_FILE));
+            match std::fs::rename(index_path, &backup_path) {
+                Ok(()) => {
+                    Self::fsync_dir_best_effort(dir);
+                    report.index_files_migrated += 1;
+                }
                 Err(err) => {
                     report.index_files_failed += 1;
                     report.failures.push(format!(
-                        "{}: sidecars written but index removal failed: {}",
+                        "{}: sidecars written but moving the index aside failed: {}",
                         index_path.display(),
                         err
                     ));
@@ -2100,6 +2487,112 @@ impl FsStorageBackend {
         Ok(())
     }
 
+    fn stage_live_metadata_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        metadata: &HashMap<String, String>,
+        tags: Option<&[Tag]>,
+    ) -> std::io::Result<PathBuf> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "put:stage-sidecar")?;
+        let (_, entry_name) = self.sidecar_file_for_key(bucket_name, key);
+        let meta_value = serde_json::to_value(metadata).map_err(std::io::Error::other)?;
+        let mut entry = serde_json::Map::new();
+        entry.insert("metadata".to_string(), meta_value);
+        if let Some(tags) = tags {
+            if !tags.is_empty() {
+                entry.insert(
+                    "tags".to_string(),
+                    serde_json::to_value(tags).map_err(std::io::Error::other)?,
+                );
+            }
+        }
+        entry.insert(
+            SIDECAR_ENTRY_NAME_FIELD.to_string(),
+            Value::String(entry_name),
+        );
+        entry.insert(
+            SIDECAR_COMMIT_BUCKET_FIELD.to_string(),
+            Value::String(bucket_name.to_string()),
+        );
+        entry.insert(
+            SIDECAR_COMMIT_KEY_FIELD.to_string(),
+            Value::String(key.to_string()),
+        );
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir)?;
+        if !self
+            .tmp_dir_durable
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let chain_result = (|| -> std::io::Result<()> {
+                Self::fsync_dir(&tmp_dir)?;
+                if let Some(parent) = tmp_dir.parent() {
+                    Self::fsync_dir(parent)?;
+                    if let Some(grandparent) = parent.parent() {
+                        Self::fsync_dir(grandparent)?;
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(err) = chain_result {
+                self.tmp_dir_durable
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                return Err(err);
+            }
+        }
+        let staged_path = tmp_dir.join(format!("{}.sidecar-stage", Uuid::new_v4()));
+        let write_result = (|| -> std::io::Result<()> {
+            let file = std::fs::File::create(&staged_path)?;
+            let mut writer = std::io::BufWriter::new(file);
+            serde_json::to_writer(&mut writer, &Value::Object(entry))
+                .map_err(std::io::Error::other)?;
+            let file = writer.into_inner()?;
+            file.sync_all()?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "put:stage-dir-fsync")?;
+            Self::fsync_dir(&tmp_dir)?;
+            Ok(())
+        })();
+        match write_result {
+            Ok(()) => Ok(staged_path),
+            Err(err) => {
+                let _ = std::fs::remove_file(&staged_path);
+                Err(err)
+            }
+        }
+    }
+
+    fn publish_staged_metadata_sync(
+        &self,
+        bucket_name: &str,
+        key: &str,
+        staged_path: &Path,
+    ) -> std::io::Result<()> {
+        let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, key);
+        if let Some(parent) = sidecar_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        {
+            let lock = self.get_meta_index_lock(&sidecar_path.to_string_lossy());
+            let _guard = lock.lock();
+            std::fs::rename(staged_path, &sidecar_path)?;
+            if let Some(parent) = sidecar_path.parent() {
+                Self::fsync_dir(parent)?;
+            }
+        }
+        let old_meta = self
+            .bucket_meta_root(bucket_name)
+            .join(format!("{}.meta.json", key));
+        if old_meta.exists() {
+            let _ = std::fs::remove_file(&old_meta);
+        }
+        let cache_key = (bucket_name.to_string(), key.to_string());
+        self.meta_read_cache.lock().pop(&cache_key);
+        Ok(())
+    }
+
     fn write_live_metadata_entry_sync(
         &self,
         bucket_name: &str,
@@ -2133,6 +2626,11 @@ impl FsStorageBackend {
     {
         self.require_bucket(bucket_name)?;
         self.validate_key(key)?;
+        if version_id.is_some() {
+            self.guard_versioned_key_casing(bucket_name, key)?;
+        } else {
+            self.guard_object_casing(bucket_name, key)?;
+        }
 
         let Some(version_id) = version_id else {
             let mut metadata = self.read_metadata_sync(bucket_name, key);
@@ -2176,10 +2674,9 @@ impl FsStorageBackend {
                 ));
             }
         }
-        let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
-        let tmp = manifest_path.with_extension("json.tmp");
-        std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
-        std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "metadata:version-rewrite").map_err(StorageError::Io)?;
+        Self::atomic_write_json_sync(&manifest_path, &record, true).map_err(StorageError::Io)?;
         self.invalidate_bucket_caches(bucket_name);
         Ok(())
     }
@@ -2203,6 +2700,7 @@ impl FsStorageBackend {
     pub async fn delete_object_metadata_entry(&self, bucket: &str, key: &str) -> StorageResult<()> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).write();
+            self.guard_object_casing(bucket, key)?;
             self.delete_metadata_sync(bucket, key)
                 .map_err(StorageError::Io)?;
             if self.listing_index_enabled {
@@ -2467,11 +2965,15 @@ impl FsStorageBackend {
 
         let chunk_size = self.stream_chunk_size;
         let drain_tmp = tmp_path.clone();
+        #[cfg(any(test, feature = "failpoints"))]
+        let fp_root = self.root.clone();
 
         let drain_result = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
             use std::io::{BufWriter, Read, Write};
             let mut reader = tokio_util::io::SyncIoBridge::new(stream);
             let file = std::fs::File::create(&drain_tmp).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "put:stage-data-write").map_err(StorageError::Io)?;
             let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
             let mut hasher = Md5::new();
             let mut total: u64 = 0;
@@ -2488,6 +2990,8 @@ impl FsStorageBackend {
             let file = writer
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "put:stage-data-sync").map_err(StorageError::Io)?;
             file.sync_all().map_err(StorageError::Io)?;
             Ok((format!("{:x}", hasher.finalize()), total))
         })
@@ -2557,6 +3061,224 @@ impl FsStorageBackend {
         });
         if result.is_err() {
             let _ = tokio::fs::remove_file(prepared_tmp).await;
+        }
+        result
+    }
+
+    pub async fn prepare_multipart_for_transform(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        parts: &[PartInfo],
+    ) -> StorageResult<PreparedMultipartUpload> {
+        let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        if !manifest_path.exists() {
+            return Err(StorageError::UploadNotFound(upload_id.to_string()));
+        }
+
+        let tmp_dir = self.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
+        let plaintext_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+        let plaintext_path_owned = plaintext_path.clone();
+        let upload_dir_owned = upload_dir.clone();
+        let manifest_path_owned = manifest_path.clone();
+        let part_infos = parts.to_vec();
+        let chunk_size = self.stream_chunk_size;
+        let upload_lock =
+            self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+        #[cfg(any(test, feature = "failpoints"))]
+        let fp_root = self.root.clone();
+
+        let assemble = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let _guard = upload_lock.lock();
+            let manifest = MultipartManifest::read_sync(&manifest_path_owned)?;
+            let mut output =
+                std::fs::File::create(&plaintext_path_owned).map_err(StorageError::Io)?;
+            let mut digest_concat = Vec::with_capacity(part_infos.len() * 16);
+            let mut total_size = 0u64;
+            let mut part_sizes = Vec::with_capacity(part_infos.len());
+            let mut selected_parts = Vec::with_capacity(part_infos.len());
+            let mut buffer = vec![0u8; chunk_size];
+
+            for part_info in &part_infos {
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&fp_root, "mpu:during-assembly")
+                    .map_err(StorageError::Io)?;
+                let part_file =
+                    upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
+                let file_size = std::fs::metadata(&part_file)
+                    .map_err(StorageError::Io)?
+                    .len();
+                let manifest_part =
+                    manifest.parts.get(&part_info.part_number).ok_or_else(|| {
+                        StorageError::InvalidObjectKey(format!(
+                            "Part {} not found",
+                            part_info.part_number
+                        ))
+                    })?;
+                let mut input = std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                let mut copied = 0u64;
+                let mut hasher = Md5::new();
+                loop {
+                    let count = input.read(&mut buffer).map_err(StorageError::Io)?;
+                    if count == 0 {
+                        break;
+                    }
+                    output
+                        .write_all(&buffer[..count])
+                        .map_err(StorageError::Io)?;
+                    hasher.update(&buffer[..count]);
+                    copied += count as u64;
+                }
+                if copied != file_size || file_size != manifest_part.size {
+                    return Err(StorageError::Internal(format!(
+                        "Part {} changed while completing the multipart upload",
+                        part_info.part_number
+                    )));
+                }
+                let digest =
+                    parse_md5_hex(&manifest_part.etag).unwrap_or_else(|| hasher.finalize().into());
+                digest_concat.extend_from_slice(&digest);
+                total_size += file_size;
+                part_sizes.push(file_size);
+                selected_parts.push((
+                    part_info.part_number,
+                    manifest_part.etag.clone(),
+                    manifest_part.size,
+                ));
+            }
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "mpu:assembly-sync").map_err(StorageError::Io)?;
+            output.sync_all().map_err(StorageError::Io)?;
+            let mut composite_hasher = Md5::new();
+            composite_hasher.update(&digest_concat);
+            let composite_etag = format!("{:x}-{}", composite_hasher.finalize(), part_infos.len());
+            Ok::<_, StorageError>((
+                manifest,
+                composite_etag,
+                total_size,
+                part_sizes,
+                selected_parts,
+            ))
+        })
+        .await;
+
+        let (manifest, composite_etag, plaintext_size, part_sizes, selected_parts) = match assemble
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_file(&plaintext_path);
+                return Err(error);
+            }
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => {
+                let _ = std::fs::remove_file(&plaintext_path);
+                return Err(StorageError::Io(std::io::Error::other(join)));
+            }
+        };
+
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(error) = crate::failpoints::hit(&self.root, "mpu:after-assembly") {
+            let _ = std::fs::remove_file(&plaintext_path);
+            return Err(StorageError::Io(error));
+        }
+
+        let mut metadata = manifest.metadata;
+        metadata.insert(
+            META_KEY_PART_SIZES.to_string(),
+            encode_part_sizes(&part_sizes),
+        );
+        Ok(PreparedMultipartUpload {
+            object_key: manifest.object_key,
+            plaintext_path,
+            composite_etag,
+            plaintext_size,
+            part_sizes,
+            metadata,
+            bucket: bucket.to_string(),
+            upload_id: upload_id.to_string(),
+            selected_parts,
+        })
+    }
+
+    pub async fn commit_transformed_multipart(
+        &self,
+        prepared: &PreparedMultipartUpload,
+        transformed_path: &Path,
+        stored_size: u64,
+        metadata: HashMap<String, String>,
+        mut options: crate::traits::PutCommitOptions,
+    ) -> StorageResult<ObjectMeta> {
+        if metadata_has_pending_sse(&metadata)
+            || metadata.contains_key(crate::segments::META_KEY_SEGMENTS)
+        {
+            return Err(StorageError::InvalidArgument(
+                "transformed multipart metadata is not final".to_string(),
+            ));
+        }
+        if prepared.bucket.is_empty()
+            || prepared.upload_id.is_empty()
+            || transformed_path.parent() != Some(self.tmp_dir().as_path())
+        {
+            return Err(StorageError::InvalidArgument(
+                "prepared multipart data must live in the storage tmp directory".to_string(),
+            ));
+        }
+        let upload_dir = self.multipart_upload_dir(&prepared.bucket, &prepared.upload_id)?;
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        let upload_lock =
+            self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+        options.etag_override = Some(prepared.composite_etag.clone());
+
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "mpu:before-commit").map_err(StorageError::Io)?;
+
+        let result = run_blocking(|| {
+            let _upload_guard = upload_lock.lock();
+            if !manifest_path.exists() {
+                return Err(StorageError::UploadNotFound(prepared.upload_id.clone()));
+            }
+            let manifest = MultipartManifest::read_sync(&manifest_path)?;
+            if manifest.object_key != prepared.object_key {
+                return Err(StorageError::UploadNotFound(prepared.upload_id.clone()));
+            }
+            for (part_number, etag, size) in &prepared.selected_parts {
+                let Some(current) = manifest.parts.get(part_number) else {
+                    return Err(StorageError::PreconditionFailed(format!(
+                        "Part {} changed while completing the multipart upload",
+                        part_number
+                    )));
+                };
+                if current.etag != *etag || current.size != *size {
+                    return Err(StorageError::PreconditionFailed(format!(
+                        "Part {} changed while completing the multipart upload",
+                        part_number
+                    )));
+                }
+            }
+            let quota_lock = self.quota_lock_if_configured(&prepared.bucket);
+            let _quota_guard = quota_lock.as_ref().map(|lock| lock.lock());
+            let _object_guard = self
+                .get_object_lock(&prepared.bucket, &prepared.object_key)
+                .write();
+            self.finalize_put_sync(
+                &prepared.bucket,
+                &prepared.object_key,
+                transformed_path,
+                prepared.composite_etag.clone(),
+                stored_size,
+                Some(metadata),
+                &options,
+            )
+        });
+
+        if result.is_ok() {
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "mpu:after-commit").map_err(StorageError::Io)?;
+            let _guard = upload_lock.lock();
+            let _ = std::fs::remove_dir_all(upload_dir);
         }
         result
     }
@@ -2668,6 +3390,8 @@ impl FsStorageBackend {
         }
         let config_path = self.bucket_config_path(bucket_name);
         let json_val = serde_json::to_value(config).map_err(std::io::Error::other)?;
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "bucket:config-write")?;
         Self::atomic_write_json_sync(&config_path, &json_val, true)?;
         if config.policy.is_none() {
             self.remove_legacy_bucket_policy_sync(bucket_name)?;
@@ -2705,32 +3429,34 @@ impl FsStorageBackend {
         Ok(config)
     }
 
-    fn check_bucket_contents_sync(&self, bucket_path: &Path) -> (bool, bool, bool) {
+    fn check_bucket_contents_sync(
+        &self,
+        bucket_path: &Path,
+    ) -> std::io::Result<(bool, bool, bool)> {
         let bucket_name = bucket_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let has_objects = Self::dir_has_files(bucket_path, Some(INTERNAL_FOLDERS));
-        let has_versions = Self::dir_has_files(&self.bucket_versions_root(&bucket_name), None)
-            || Self::dir_has_files(&self.legacy_versions_root(&bucket_name), None);
-        let has_multipart = Self::dir_has_files(&self.multipart_bucket_root(&bucket_name), None)
-            || Self::dir_has_files(&self.legacy_multipart_root(&bucket_name), None);
+        let has_objects = Self::dir_has_files(bucket_path, Some(INTERNAL_FOLDERS))?;
+        let has_versions = Self::dir_has_files(&self.bucket_versions_root(&bucket_name), None)?
+            || Self::dir_has_files(&self.legacy_versions_root(&bucket_name), None)?;
+        let has_multipart = Self::dir_has_files(&self.multipart_bucket_root(&bucket_name), None)?
+            || Self::dir_has_files(&self.legacy_multipart_root(&bucket_name), None)?;
 
-        (has_objects, has_versions, has_multipart)
+        Ok((has_objects, has_versions, has_multipart))
     }
 
-    fn dir_has_files(dir: &Path, skip_dirs: Option<&[&str]>) -> bool {
-        if !dir.exists() {
-            return false;
-        }
+    fn dir_has_files(dir: &Path, skip_dirs: Option<&[&str]>) -> std::io::Result<bool> {
         let mut stack = vec![dir.to_path_buf()];
         while let Some(current) = stack.pop() {
             let entries = match std::fs::read_dir(&current) {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
             };
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = entry?;
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 if current == dir {
@@ -2742,22 +3468,25 @@ impl FsStorageBackend {
                 }
                 let ft = match entry.file_type() {
                     Ok(ft) => ft,
-                    Err(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
                 };
                 if ft.is_file() {
-                    return true;
+                    return Ok(true);
                 }
                 if ft.is_dir() {
                     stack.push(entry.path());
                 }
             }
         }
-        false
+        Ok(false)
     }
 
-    fn remove_tree(path: &Path) {
-        if path.exists() {
-            let _ = std::fs::remove_dir_all(path);
+    fn remove_tree(path: &Path) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
         }
     }
 
@@ -2804,6 +3533,8 @@ impl FsStorageBackend {
         if !source.exists() {
             return Ok(None);
         }
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "version:archive-write")?;
 
         let version_dir = self.version_dir(bucket_name, key);
         std::fs::create_dir_all(&version_dir)?;
@@ -2823,6 +3554,9 @@ impl FsStorageBackend {
         };
 
         let data_path = version_dir.join(format!("{}.bin", version_id));
+        if data_path.exists() {
+            Self::safe_unlink(&data_path)?;
+        }
         let source_meta = source.metadata()?;
 
         let stub_header = if metadata.contains_key(crate::segments::META_KEY_SEGMENTS) {
@@ -2891,7 +3625,11 @@ impl FsStorageBackend {
         }
 
         let manifest_path = version_dir.join(format!("{}.json", version_id));
-        Self::atomic_write_json_sync(&manifest_path, &record, true)?;
+        if let Err(error) = Self::atomic_write_json_sync(&manifest_path, &record, true) {
+            let _ = Self::safe_unlink(&data_path);
+            Self::cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
+            return Err(error);
+        }
 
         Ok(Some(VersionMutation {
             version_id,
@@ -3003,6 +3741,8 @@ impl FsStorageBackend {
     }
 
     fn write_delete_marker_sync(&self, bucket_name: &str, key: &str) -> std::io::Result<String> {
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "delete:marker-write")?;
         let version_dir = self.version_dir(bucket_name, key);
         std::fs::create_dir_all(&version_dir)?;
         let now = Utc::now();
@@ -3160,6 +3900,7 @@ impl FsStorageBackend {
     ) -> StorageResult<(Value, PathBuf)> {
         self.require_bucket(bucket_name)?;
         self.validate_key(key)?;
+        self.guard_versioned_key_casing(bucket_name, key)?;
         Self::validate_version_id(bucket_name, key, version_id)?;
 
         if let Some(record_and_path) =
@@ -4008,6 +4749,473 @@ impl FsStorageBackend {
         Ok(buckets.len())
     }
 
+    pub fn recover_staged_commits_sync(&self) -> std::io::Result<StagedCommitRecovery> {
+        let mut summary = StagedCommitRecovery::default();
+        let entries = match std::fs::read_dir(self.tmp_dir()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(summary),
+            Err(err) => return Err(err),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "commit recovery could not enumerate the staged-commit directory: {}",
+                        err
+                    ),
+                )
+            })?;
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".sidecar-stage")
+            {
+                continue;
+            }
+            let staged_path = entry.path();
+            match self.recover_one_staged_commit_sync(&staged_path) {
+                Ok(StagedCommitOutcome::Published { bucket, key, etag }) => {
+                    tracing::warn!(
+                        bucket,
+                        key,
+                        etag,
+                        "recovered an interrupted object commit: the data file was already \
+                         renamed into place, so its staged metadata sidecar has been published; \
+                         the intent is retained until replication is enqueued"
+                    );
+                    summary.published.push(RecoveredCommit {
+                        bucket,
+                        key,
+                        staged_path,
+                    });
+                }
+                Ok(StagedCommitOutcome::Discarded { reason }) => {
+                    summary.discarded += 1;
+                    tracing::info!(
+                        staged = %staged_path.display(),
+                        reason,
+                        "discarded a staged sidecar left by an interrupted commit; the previous \
+                         object state remains authoritative"
+                    );
+                }
+                Ok(StagedCommitOutcome::Poisoned {
+                    bucket,
+                    key,
+                    detail,
+                }) => {
+                    summary.poisoned += 1;
+                    tracing::error!(
+                        bucket,
+                        key,
+                        detail,
+                        "an interrupted commit could not be attributed to either write; the \
+                         object has been marked corrupted so reads fail closed until it is \
+                         overwritten or repaired, and the staged sidecar remains in tmp for \
+                         inspection"
+                    );
+                }
+                Err(err) => {
+                    return Err(std::io::Error::new(
+                        err.kind(),
+                        format!(
+                            "commit recovery could not process staged sidecar {}: {}; refusing \
+                             to serve until the staged commits can be examined",
+                            staged_path.display(),
+                            err
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    fn recover_one_staged_commit_sync(
+        &self,
+        staged_path: &Path,
+    ) -> std::io::Result<StagedCommitOutcome> {
+        let discard = |reason: &'static str| -> std::io::Result<StagedCommitOutcome> {
+            std::fs::remove_file(staged_path)?;
+            Ok(StagedCommitOutcome::Discarded { reason })
+        };
+        let content = std::fs::read_to_string(staged_path)?;
+        let Ok(entry) = serde_json::from_str::<HashMap<String, Value>>(&content) else {
+            return discard("the staged sidecar is not valid JSON");
+        };
+        let bucket = entry
+            .get(SIDECAR_COMMIT_BUCKET_FIELD)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let key = entry
+            .get(SIDECAR_COMMIT_KEY_FIELD)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let (Some(bucket), Some(key)) = (bucket, key) else {
+            return discard(
+                "the staged sidecar predates commit recovery and records no destination",
+            );
+        };
+        if validation::validate_bucket_name(&bucket).is_some() {
+            return discard("the staged sidecar records an invalid bucket name");
+        }
+        if self.validate_key(&key).is_err() {
+            return discard("the staged sidecar records an invalid object key");
+        }
+        if !self.bucket_path(&bucket).is_dir() {
+            return discard("the destination bucket no longer exists");
+        }
+        let Some(metadata) = entry.get("metadata").and_then(Value::as_object) else {
+            return discard("the staged sidecar has no metadata object");
+        };
+        let staged_meta_str = |field: &str| -> Option<String> {
+            metadata
+                .get(field)
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        };
+        let etag = staged_meta_str("__etag__").unwrap_or_default();
+        let (Some(expected_size), Some(expected_mtime)) = (
+            staged_meta_str("__size__").and_then(|s| s.parse::<u64>().ok()),
+            staged_meta_str("__last_modified__").and_then(|s| s.parse::<f64>().ok()),
+        ) else {
+            return discard("the staged sidecar records no size or modification time");
+        };
+
+        let staged_mtime_ns =
+            staged_meta_str(META_KEY_COMMIT_MTIME_NS).and_then(|s| s.parse::<u128>().ok());
+
+        let live = self.object_live_path(&bucket, &key);
+        let live_meta = match std::fs::metadata(&live) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return discard("the data file was never renamed into place");
+            }
+            Err(err) => {
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "commit recovery could not inspect the live data for {}/{}: {}",
+                        bucket, key, err
+                    ),
+                ));
+            }
+        };
+        let live_mtime_duration = live_meta
+            .modified()
+            .and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map_err(std::io::Error::other)
+            })
+            .map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "commit recovery could not read the live data's timestamp for {}/{}: {}",
+                        bucket, key, err
+                    ),
+                )
+            })?;
+        let existing = self.read_index_entry_sync(&bucket, &key);
+        let existing_commit_ns = existing
+            .as_ref()
+            .and_then(|e| e.get("metadata"))
+            .and_then(Value::as_object)
+            .and_then(|m| m.get(META_KEY_COMMIT_MTIME_NS))
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<u128>().ok());
+        let precise_identity = match staged_mtime_ns {
+            Some(staged_ns) => {
+                if staged_ns != live_mtime_duration.as_nanos() {
+                    return discard("the live data does not carry the staged commit's timestamp");
+                }
+                match (&existing, existing_commit_ns) {
+                    (None, _) => true,
+                    (Some(_), Some(previous_ns)) => previous_ns != staged_ns,
+                    (Some(_), None) => false,
+                }
+            }
+            None => {
+                let live_mtime = live_mtime_duration.as_secs_f64();
+                if (live_mtime - expected_mtime).abs() >= 1e-3 {
+                    return discard("the live data does not carry the staged commit's timestamp");
+                }
+                false
+            }
+        };
+        if live_meta.len() != expected_size {
+            return self.poison_torn_commit(
+                bucket,
+                key,
+                format!(
+                    "interrupted commit: the live data carries the staged commit's timestamp \
+                     but its size ({}) does not match the staged size ({})",
+                    live_meta.len(),
+                    expected_size
+                ),
+            );
+        }
+        if let Some(seg_id) = metadata
+            .get(crate::segments::META_KEY_SEGMENTS)
+            .and_then(Value::as_str)
+        {
+            let stub_matches = matches!(
+                crate::segments::read_stub_header(&live),
+                Ok(Some(ref header)) if header.segment_id == seg_id && header.etag == etag
+            );
+            if !stub_matches {
+                return self.poison_torn_commit(
+                    bucket,
+                    key,
+                    "interrupted commit: the live data matches the staged commit's timestamp \
+                     and size but is not the expected segment stub"
+                        .to_string(),
+                );
+            }
+            return self.publish_recovered_commit(bucket, key, etag, &entry, existing);
+        }
+        let existing_meta = existing
+            .as_ref()
+            .and_then(|e| e.get("metadata"))
+            .and_then(Value::as_object);
+        let existing_mtime = existing_meta
+            .and_then(|m| m.get("__last_modified__"))
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<f64>().ok());
+        let existing_size = existing_meta
+            .and_then(|m| m.get("__size__"))
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<u64>().ok());
+        let existing_etag = existing_meta
+            .and_then(|m| m.get("__etag__"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let indistinguishable = existing_mtime
+            .is_some_and(|mtime| (mtime - expected_mtime).abs() < 1e-3)
+            && existing_size == Some(expected_size);
+        if indistinguishable && !precise_identity {
+            let etag_is_stored_digest =
+                |candidate: &str, meta: Option<&serde_json::Map<String, Value>>| {
+                    !candidate.contains('-')
+                        && !meta.is_some_and(|m| m.contains_key("x-amz-server-side-encryption"))
+                };
+            let hashable = etag_is_stored_digest(&etag, Some(metadata))
+                && existing_etag
+                    .as_deref()
+                    .is_some_and(|e| etag_is_stored_digest(e, existing_meta));
+            if !hashable {
+                return self.poison_torn_commit(
+                    bucket,
+                    key,
+                    "interrupted commit: the live data cannot be attributed to either write \
+                     (no filesystem identity recorded and the etags are not stored-byte \
+                     digests)"
+                        .to_string(),
+                );
+            }
+            let actual = myfsio_crypto::hashing::md5_file(&live)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if actual == etag {
+                return self.publish_recovered_commit(bucket, key, etag, &entry, existing);
+            }
+            if existing_etag.as_deref() == Some(actual.as_str()) {
+                return discard("the live data hashes to the previously published object");
+            }
+            return self.poison_torn_commit(
+                bucket,
+                key,
+                "interrupted commit: the live data hashes to neither the staged commit nor \
+                 the previously published metadata"
+                    .to_string(),
+            );
+        }
+        self.publish_recovered_commit(bucket, key, etag, &entry, existing)
+    }
+
+    fn publish_recovered_commit(
+        &self,
+        bucket: String,
+        key: String,
+        etag: String,
+        entry: &HashMap<String, Value>,
+        existing: Option<HashMap<String, Value>>,
+    ) -> std::io::Result<StagedCommitOutcome> {
+        let staged_metadata = entry
+            .get("metadata")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let bucket_config = self.read_bucket_config_sync(&bucket);
+        if bucket_config.unreadable {
+            return Err(std::io::Error::other(format!(
+                "the configuration for bucket '{}' is unreadable, so the interrupted commit's \
+                 versioning behaviour cannot be replayed",
+                bucket
+            )));
+        }
+        let versioning_status = bucket_config.versioning_status();
+        let existing_meta = existing
+            .as_ref()
+            .and_then(|e| e.get("metadata"))
+            .and_then(Value::as_object);
+        let old_segments = existing_meta
+            .and_then(|m| m.get(crate::segments::META_KEY_SEGMENTS))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let old_version_id = existing_meta
+            .and_then(|m| m.get("__version_id__"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        {
+            let (sidecar_path, entry_name) = self.sidecar_file_for_key(&bucket, &key);
+            let mut sidecar_entry = entry.clone();
+            sidecar_entry.insert(
+                SIDECAR_ENTRY_NAME_FIELD.to_string(),
+                Value::String(entry_name),
+            );
+            let json_val = serde_json::to_value(&sidecar_entry).map_err(std::io::Error::other)?;
+            let lock = self.get_meta_index_lock(&sidecar_path.to_string_lossy());
+            let _guard = lock.lock();
+            Self::atomic_write_json_sync(&sidecar_path, &json_val, true)?;
+        }
+        let old_meta = self
+            .bucket_meta_root(&bucket)
+            .join(format!("{}.meta.json", key));
+        if old_meta.exists() {
+            let _ = std::fs::remove_file(&old_meta);
+        }
+        self.meta_read_cache
+            .lock()
+            .pop(&(bucket.clone(), key.clone()));
+        if matches!(versioning_status, VersioningStatus::Suspended) {
+            self.purge_archived_null_version_sync(&bucket, &key)?;
+        }
+        let release_old = match versioning_status {
+            VersioningStatus::Disabled => true,
+            VersioningStatus::Suspended => old_version_id.is_empty() || old_version_id == "null",
+            VersioningStatus::Enabled => false,
+        };
+        if release_old {
+            if let Some(old_seg) = old_segments {
+                let staged_seg = staged_metadata
+                    .get(crate::segments::META_KEY_SEGMENTS)
+                    .and_then(Value::as_str);
+                if staged_seg != Some(old_seg.as_str()) {
+                    self.release_segment_dir(&bucket, &old_seg);
+                }
+            }
+        }
+        self.invalidate_bucket_caches(&bucket);
+        if versioning_status.is_active() {
+            self.clear_delete_marker_sync(&bucket, &key);
+        }
+        Ok(StagedCommitOutcome::Published { bucket, key, etag })
+    }
+
+    pub fn finish_recovered_commit_sync(&self, staged_path: &Path) -> std::io::Result<()> {
+        if staged_path.parent() != Some(self.tmp_dir().as_path()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a recovered commit intent must live in the storage tmp directory",
+            ));
+        }
+        match std::fs::remove_file(staged_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn poison_object_metadata_sync(
+        &self,
+        bucket: &str,
+        key: &str,
+        detail: &str,
+    ) -> std::io::Result<()> {
+        let mut metadata = self.read_metadata_sync(bucket, key);
+        metadata.insert(META_KEY_CORRUPTED.to_string(), "true".to_string());
+        metadata.insert(META_KEY_CORRUPTED_AT.to_string(), Utc::now().to_rfc3339());
+        metadata.insert(META_KEY_CORRUPTION_DETAIL.to_string(), detail.to_string());
+        self.write_live_metadata_entry_sync(bucket, key, &metadata)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        self.meta_read_cache
+            .lock()
+            .pop(&(bucket.to_string(), key.to_string()));
+        self.invalidate_bucket_caches(bucket);
+        Ok(())
+    }
+
+    fn poison_torn_commit(
+        &self,
+        bucket: String,
+        key: String,
+        detail: String,
+    ) -> std::io::Result<StagedCommitOutcome> {
+        self.poison_object_metadata_sync(&bucket, &key, &detail)?;
+        Ok(StagedCommitOutcome::Poisoned {
+            bucket,
+            key,
+            detail,
+        })
+    }
+
+    pub async fn poison_object_if_version_matches(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected_version_id: Option<&str>,
+        detail: &str,
+    ) -> StorageResult<bool> {
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).write();
+            let current = self.read_metadata_sync(bucket, key);
+            if current.is_empty() {
+                return Ok(false);
+            }
+            let current_version = current.get("__version_id__").map(String::as_str);
+            if current_version != expected_version_id {
+                return Ok(false);
+            }
+            self.poison_object_metadata_sync(bucket, key, detail)
+                .map_err(StorageError::Io)?;
+            Ok(true)
+        })
+    }
+
+    fn handle_torn_runtime_commit(&self, bucket: &str, key: &str, staged: &Path, cause: &str) {
+        let detail = format!(
+            "interrupted commit: metadata publication failed after the data rename ({})",
+            cause
+        );
+        match self.poison_object_metadata_sync(bucket, key, &detail) {
+            Ok(()) => {
+                tracing::error!(
+                    bucket,
+                    key,
+                    staged = %staged.display(),
+                    cause,
+                    "object data was committed but its metadata could not be published; the \
+                     object is marked corrupted so reads fail closed, and the retained commit \
+                     intent will be reconciled at the next startup"
+                );
+            }
+            Err(poison_err) => {
+                tracing::error!(
+                    bucket,
+                    key,
+                    staged = %staged.display(),
+                    cause,
+                    error = %poison_err,
+                    "object data was committed but its metadata can neither be published nor \
+                     poisoned; terminating to preserve old-or-new atomicity — the retained \
+                     commit intent will be reconciled at the next startup"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     fn get_full_listing_sync(&self, bucket_name: &str) -> StorageResult<Arc<Vec<ListCacheEntry>>> {
         if let Some(entry) = self.list_cache.get(bucket_name) {
             let (cached, cached_at) = entry.value();
@@ -4368,6 +5576,17 @@ impl FsStorageBackend {
             }
         };
 
+        if !rel_dir.as_os_str().is_empty()
+            && !self.verify_disk_casing(&self.bucket_path(bucket_name).join(&rel_dir))?
+        {
+            return Ok(ShallowListResult {
+                objects: Vec::new(),
+                common_prefixes: Vec::new(),
+                is_truncated: false,
+                next_continuation_token: None,
+            });
+        }
+
         let cached = self.get_shallow_sync(bucket_name, &rel_dir, &params.delimiter)?;
 
         let (file_start, file_end) = slice_range_for_prefix(&cached.files, |o| &o.key, prefix);
@@ -4456,6 +5675,13 @@ impl FsStorageBackend {
         let etag = options.etag_override.clone().unwrap_or(etag);
         self.require_bucket(bucket_name)?;
         let bucket_root = self.bucket_path(bucket_name);
+        if !self.verify_disk_casing(&self.object_live_path(bucket_name, key))? {
+            return Err(StorageError::InvalidObjectKey(format!(
+                "Object key '{}' collides with existing content whose path differs only by \
+                 letter case; the storage filesystem is case-insensitive and cannot hold both",
+                key
+            )));
+        }
         self.ensure_writable_parents_sync(&bucket_root, key)
             .map_err(StorageError::Io)?;
         let destination = self.object_live_path(bucket_name, key);
@@ -4652,7 +5878,6 @@ impl FsStorageBackend {
         }
 
         let abort_commit = |e: std::io::Error| {
-            let _ = std::fs::remove_file(tmp_path);
             self.rollback_failed_commit_sync(
                 bucket_name,
                 key,
@@ -4662,13 +5887,16 @@ impl FsStorageBackend {
             StorageError::Io(e)
         };
 
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(&self.root, "put:after-archive").map_err(abort_commit)?;
+
         let file_meta = std::fs::metadata(tmp_path).map_err(abort_commit)?;
-        let mtime = file_meta
+        let mtime_duration = file_meta
             .modified()
             .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+        let mtime = mtime_duration.map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let mtime_ns = mtime_duration.map(|d| d.as_nanos());
 
         let new_version_id = match versioning_status {
             VersioningStatus::Enabled => Some(Self::new_version_id_sync()),
@@ -4688,16 +5916,88 @@ impl FsStorageBackend {
         internal_meta.insert("__etag__".to_string(), etag.clone());
         internal_meta.insert("__size__".to_string(), new_size.to_string());
         internal_meta.insert("__last_modified__".to_string(), mtime.to_string());
+        if let Some(ns) = mtime_ns {
+            internal_meta.insert(META_KEY_COMMIT_MTIME_NS.to_string(), ns.to_string());
+        }
         if let Some(ref vid) = new_version_id {
             internal_meta.insert("__version_id__".to_string(), vid.clone());
         }
 
-        self.write_metadata_sync(bucket_name, key, &internal_meta)
-            .map_err(abort_commit)?;
-
-        std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
-        if let Some(parent) = destination.parent() {
-            Self::fsync_dir(parent).map_err(StorageError::Io)?;
+        match self.metadata_layout {
+            MetadataLayout::Sidecar => {
+                let staged = self
+                    .stage_live_metadata_sync(
+                        bucket_name,
+                        key,
+                        &internal_meta,
+                        options.tags.as_deref(),
+                    )
+                    .map_err(abort_commit)?;
+                #[cfg(any(test, feature = "failpoints"))]
+                if let Err(err) = crate::failpoints::hit(&self.root, "put:before-data-rename") {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err(abort_commit(err));
+                }
+                if let Err(err) = std::fs::rename(tmp_path, &destination) {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err(abort_commit(err));
+                }
+                if let Some(parent) = destination.parent() {
+                    if let Err(err) = Self::fsync_dir(parent) {
+                        if self
+                            .publish_staged_metadata_sync(bucket_name, key, &staged)
+                            .is_err()
+                        {
+                            self.handle_torn_runtime_commit(
+                                bucket_name,
+                                key,
+                                &staged,
+                                "the data directory fsync and the sidecar publish both failed",
+                            );
+                        }
+                        return Err(StorageError::Io(err));
+                    }
+                }
+                #[cfg(any(test, feature = "failpoints"))]
+                if let Err(err) = crate::failpoints::hit(&self.root, "put:before-publish-sidecar") {
+                    self.handle_torn_runtime_commit(
+                        bucket_name,
+                        key,
+                        &staged,
+                        "an injected publish failure",
+                    );
+                    return Err(StorageError::Io(err));
+                }
+                if let Err(err) = self.publish_staged_metadata_sync(bucket_name, key, &staged) {
+                    self.handle_torn_runtime_commit(bucket_name, key, &staged, &err.to_string());
+                    return Err(StorageError::Io(err));
+                }
+            }
+            MetadataLayout::Index => {
+                let mut entry = HashMap::new();
+                entry.insert(
+                    "metadata".to_string(),
+                    serde_json::to_value(&internal_meta)
+                        .map_err(std::io::Error::other)
+                        .map_err(abort_commit)?,
+                );
+                if let Some(tags) = options.tags.as_deref() {
+                    if !tags.is_empty() {
+                        entry.insert(
+                            "tags".to_string(),
+                            serde_json::to_value(tags)
+                                .map_err(std::io::Error::other)
+                                .map_err(abort_commit)?,
+                        );
+                    }
+                }
+                self.write_index_entry_sync(bucket_name, key, &entry)
+                    .map_err(abort_commit)?;
+                std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
+                if let Some(parent) = destination.parent() {
+                    Self::fsync_dir(parent).map_err(StorageError::Io)?;
+                }
+            }
         }
 
         if matches!(versioning_status, VersioningStatus::Suspended) {
@@ -4804,6 +6104,22 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         if let Some(parent) = bucket_path.parent() {
             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
         }
+        let rebuild_lock = self.get_list_rebuild_lock(name);
+        let _rebuild_guard = rebuild_lock.lock();
+
+        if bucket_path.exists() {
+            return Err(StorageError::BucketAlreadyExists(name.to_string()));
+        }
+
+        self.discard_listing_index_locked_sync(name);
+        Self::remove_tree(&self.system_bucket_root(name)).map_err(StorageError::Io)?;
+        Self::remove_tree(&self.multipart_bucket_root(name)).map_err(StorageError::Io)?;
+        self.remove_legacy_bucket_policy_sync(name)
+            .map_err(StorageError::Io)?;
+        self.bucket_config_cache.remove(name);
+        self.invalidate_bucket_caches(name);
+        self.purge_meta_read_cache_for_bucket(name);
+
         match std::fs::create_dir(&bucket_path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -4811,14 +6127,18 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
             Err(err) => return Err(StorageError::Io(err)),
         }
-        std::fs::create_dir_all(self.system_bucket_root(name)).map_err(StorageError::Io)?;
+        if let Err(err) = std::fs::create_dir_all(self.system_bucket_root(name)) {
+            let _ = std::fs::remove_dir(&bucket_path);
+            return Err(StorageError::Io(err));
+        }
         Ok(())
     }
 
     async fn delete_bucket(&self, name: &str) -> StorageResult<()> {
         let bucket_path = self.require_bucket(name)?;
-        let (has_objects, has_versions, has_multipart) =
-            self.check_bucket_contents_sync(&bucket_path);
+        let (has_objects, has_versions, has_multipart) = self
+            .check_bucket_contents_sync(&bucket_path)
+            .map_err(StorageError::Io)?;
         if has_objects {
             return Err(StorageError::BucketNotEmpty(name.to_string()));
         }
@@ -4836,12 +6156,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let rebuild_lock = self.get_list_rebuild_lock(name);
         let _rebuild_guard = rebuild_lock.lock();
         self.discard_listing_index_locked_sync(name);
-        Self::remove_tree(&bucket_path);
-        Self::remove_tree(&self.system_bucket_root(name));
-        Self::remove_tree(&self.multipart_bucket_root(name));
+        Self::remove_tree(&bucket_path).map_err(StorageError::Io)?;
+        Self::remove_tree(&self.system_bucket_root(name)).map_err(StorageError::Io)?;
+        Self::remove_tree(&self.multipart_bucket_root(name)).map_err(StorageError::Io)?;
+        self.remove_legacy_bucket_policy_sync(name)
+            .map_err(StorageError::Io)?;
 
         self.bucket_config_cache.remove(name);
         self.invalidate_bucket_caches(name);
+        self.purge_meta_read_cache_for_bucket(name);
 
         Ok(())
     }
@@ -4877,8 +6200,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         key: &str,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
-        let (obj, content) = run_blocking(|| self.open_object_for_read_sync(bucket, key, None))?;
-        let stream = content
+        let link = self.tmp_dir().join(format!("read-{}", Uuid::new_v4()));
+        let (obj, source) = self.snapshot_object_to_link(bucket, key, &link).await?;
+        let stream = source
             .into_range_stream(0, None)
             .await
             .map_err(StorageError::Io)?;
@@ -4898,12 +6222,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 .and_then(|l| l.checked_sub(1))
                 .and_then(|l| start.checked_add(l)),
         };
-        let (obj, content) =
-            run_blocking(|| self.open_object_for_read_sync(bucket, key, Some(hint)))?;
+        let link = self.tmp_dir().join(format!("read-{}", Uuid::new_v4()));
+        let (obj, source) = self
+            .snapshot_object_to_link_windowed(bucket, key, &link, Some(hint))
+            .await?;
         if start > obj.size {
             return Err(StorageError::InvalidRange);
         }
-        let stream = content
+        let stream = source
             .into_range_stream(start, len)
             .await
             .map_err(StorageError::Io)?;
@@ -4954,7 +6280,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let (obj, content) = self.open_object_for_read_locked_sync(bucket, key, window)?;
                 match content {
                     OpenedObjectContent::Single(_) => {
-                        let path = self.object_path(bucket, key)?;
+                        let path = self.object_live_path(bucket, key);
                         if let Some(parent) = link_owned.parent() {
                             std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
                         }
@@ -4962,7 +6288,21 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         std::fs::hard_link(&path, &link_owned).map_err(StorageError::Io)?;
                         Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
                     }
-                    segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
+                    OpenedObjectContent::Segmented {
+                        source,
+                        total,
+                        base_offset,
+                    } => {
+                        let path = self.object_live_path(bucket, key);
+                        let snapshot = self.snapshot_segmented_content_sync(
+                            &path,
+                            &link_owned,
+                            source,
+                            total,
+                            base_offset,
+                        )?;
+                        Ok((obj, snapshot))
+                    }
                 }
             },
         )
@@ -4993,7 +6333,22 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         std::fs::hard_link(&data_path, &link_owned).map_err(StorageError::Io)?;
                         Ok((obj, crate::traits::SnapshotSource::LinkedFile(link_owned)))
                     }
-                    segmented => Ok((obj, segmented.into_snapshot_source(link_owned))),
+                    OpenedObjectContent::Segmented {
+                        source,
+                        total,
+                        base_offset,
+                    } => {
+                        let (_, data_path) =
+                            self.read_version_record_sync(bucket, key, version_id)?;
+                        let snapshot = self.snapshot_segmented_content_sync(
+                            &data_path,
+                            &link_owned,
+                            source,
+                            total,
+                            base_offset,
+                        )?;
+                        Ok((obj, snapshot))
+                    }
                 }
             },
         )
@@ -5009,22 +6364,21 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let (_, content) = self.open_object_for_read_locked_sync(bucket, key, None)?;
             match content {
                 OpenedObjectContent::Single(_) => {
-                    let path = self.object_path(bucket, key)?;
+                    let path = self.object_live_path(bucket, key);
                     if std::fs::hard_link(&path, &dest_owned).is_err() {
                         std::fs::copy(&path, &dest_owned).map_err(StorageError::Io)?;
                     }
                     Ok(())
                 }
-                OpenedObjectContent::Segmented { files, .. } => {
+                OpenedObjectContent::Segmented { source, .. } => {
                     let mut out = std::fs::File::create(&dest_owned).map_err(StorageError::Io)?;
-                    for (mut file, expected) in files {
-                        let copied =
-                            std::io::copy(&mut file, &mut out).map_err(StorageError::Io)?;
-                        if copied != expected {
-                            return Err(StorageError::Internal(
-                                "segment changed while materializing object".to_string(),
-                            ));
-                        }
+                    let expected = source.paths().total();
+                    let mut reader = crate::segments::LazyOpenSegmentsRead::new(source);
+                    let copied = std::io::copy(&mut reader, &mut out).map_err(StorageError::Io)?;
+                    if copied != expected {
+                        return Err(StorageError::Internal(
+                            "segment changed while materializing object".to_string(),
+                        ));
                     }
                     Ok(())
                 }
@@ -5142,9 +6496,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         key: &str,
         version_id: &str,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
-        let (obj, content) =
-            run_blocking(|| self.open_version_for_read_sync(bucket, key, version_id, None))?;
-        let stream = content
+        let link = self.tmp_dir().join(format!("read-{}", Uuid::new_v4()));
+        let (obj, source) = self
+            .snapshot_object_version_to_link(bucket, key, version_id, &link)
+            .await?;
+        let stream = source
             .into_range_stream(0, None)
             .await
             .map_err(StorageError::Io)?;
@@ -5159,19 +6515,20 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         start: u64,
         len: Option<u64>,
     ) -> StorageResult<(ObjectMeta, AsyncReadStream)> {
-        let (obj, content) = run_blocking(|| {
-            let hint = crate::traits::RangeHint {
-                start: Some(start),
-                end: len
-                    .and_then(|l| l.checked_sub(1))
-                    .and_then(|l| start.checked_add(l)),
-            };
-            self.open_version_for_read_sync(bucket, key, version_id, Some(hint))
-        })?;
+        let hint = crate::traits::RangeHint {
+            start: Some(start),
+            end: len
+                .and_then(|l| l.checked_sub(1))
+                .and_then(|l| start.checked_add(l)),
+        };
+        let link = self.tmp_dir().join(format!("read-{}", Uuid::new_v4()));
+        let (obj, source) = self
+            .snapshot_object_version_to_link_windowed(bucket, key, version_id, &link, Some(hint))
+            .await?;
         if start > obj.size {
             return Err(StorageError::InvalidRange);
         }
-        let stream = content
+        let stream = source
             .into_range_stream(start, len)
             .await
             .map_err(StorageError::Io)?;
@@ -5242,6 +6599,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     ) -> StorageResult<Option<HashMap<String, String>>> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).read();
+            self.require_bucket(bucket)?;
+            self.validate_key(key)?;
+            self.guard_versioned_key_casing(bucket, key)?;
             let (manifest_path, _) = self.version_record_paths(bucket, key, "null");
             if !manifest_path.is_file() {
                 return Ok(None);
@@ -5271,6 +6631,20 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 )));
             }
             let versioning_status = bucket_config.versioning_status();
+
+            if path.exists() {
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "delete:data-remove")
+                    .map_err(StorageError::Io)?;
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "delete:metadata-remove")
+                    .map_err(StorageError::Io)?;
+            }
+            if versioning_status.is_active() {
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "delete:marker-write")
+                    .map_err(StorageError::Io)?;
+            }
 
             if versioning_status.is_active() {
                 let mut version_mutations = Vec::new();
@@ -5365,6 +6739,10 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 self.release_segment_dir(bucket, seg_id);
             }
             Self::safe_unlink(&path).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            if let Err(err) = crate::failpoints::hit(&self.root, "delete:before-meta-remove") {
+                return Err(StorageError::Io(err));
+            }
             self.delete_metadata_sync(bucket, key)
                 .map_err(StorageError::Io)?;
 
@@ -5390,6 +6768,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _guard = self.get_object_lock(bucket, key).write();
             let bucket_path = self.require_bucket(bucket)?;
             self.validate_key(key)?;
+            self.guard_versioned_key_casing(bucket, key)?;
             Self::validate_version_id(bucket, key, version_id)?;
 
             let live_path = self.object_live_path(bucket, key);
@@ -5407,6 +6786,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     {
                         return Err(StorageError::ObjectLocked(message));
                     }
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&self.root, "delete-version:data-remove")
+                        .map_err(StorageError::Io)?;
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&self.root, "delete-version:metadata-remove")
+                        .map_err(StorageError::Io)?;
                     if let Some(seg_id) = metadata.get(crate::segments::META_KEY_SEGMENTS) {
                         self.release_segment_dir(bucket, seg_id);
                     }
@@ -5487,13 +6872,18 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     }
                 }
             }
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "delete-version:data-remove")
+                .map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "delete-version:metadata-remove")
+                .map_err(StorageError::Io)?;
             if let Some(seg_id) = version_record
                 .as_ref()
                 .and_then(|record| record.get("segment_id").and_then(Value::as_str))
             {
                 self.release_segment_dir(bucket, seg_id);
             }
-
             Self::safe_unlink(&data_path).map_err(StorageError::Io)?;
             Self::safe_unlink(&manifest_path).map_err(StorageError::Io)?;
             let versions_root = self.bucket_versions_root(bucket);
@@ -5540,23 +6930,104 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let tmp_dir = self.tmp_dir();
         std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
         let tmp_path = tmp_dir.join(format!("{}.tmp", Uuid::new_v4()));
+        self.require_bucket(dst_bucket)?;
+        let new_segment_id = Uuid::new_v4().simple().to_string();
+        let new_segment_dir = self.segments_bucket_root(dst_bucket).join(&new_segment_id);
 
         let copy_res = run_blocking(
-            || -> StorageResult<(String, u64, HashMap<String, String>)> {
+            || -> StorageResult<(String, u64, HashMap<String, String>, bool)> {
                 let _src_guard = self.get_object_lock(src_bucket, src_key).read();
                 let (obj, content) =
                     self.open_object_for_read_locked_sync(src_bucket, src_key, None)?;
 
                 use std::io::{BufReader, BufWriter, Read, Write};
+                let mut src_metadata = obj.internal_metadata;
                 let mut reader: Box<dyn Read> = match content {
                     OpenedObjectContent::Single(file) => {
                         Box::new(BufReader::with_capacity(chunk_size, file))
                     }
-                    OpenedObjectContent::Segmented { files, .. } => {
-                        Box::new(crate::segments::OpenSegmentsRead::new(files))
+                    OpenedObjectContent::Segmented { source, .. } => {
+                        let source_etag = obj.etag.clone().filter(|etag| is_multipart_etag(etag));
+                        let can_link = source_etag.is_some()
+                            && !myfsio_crypto::encryption::EncryptionMetadata::is_encrypted(
+                                &src_metadata,
+                            );
+                        if can_link {
+                            #[cfg(any(test, feature = "failpoints"))]
+                            crate::failpoints::hit(&self.root, "put:stage-data-write")
+                                .map_err(StorageError::Io)?;
+                            std::fs::create_dir_all(&new_segment_dir).map_err(StorageError::Io)?;
+                            let mut link_error = None;
+                            for (ordinal, (path, _)) in source.paths().entries().iter().enumerate()
+                            {
+                                let target = new_segment_dir
+                                    .join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                                if let Err(error) = std::fs::hard_link(path, target) {
+                                    link_error = Some(error);
+                                    break;
+                                }
+                            }
+                            if let Some(error) = link_error {
+                                let _ = std::fs::remove_dir_all(&new_segment_dir);
+                                tracing::warn!(
+                                    src_bucket,
+                                    src_key,
+                                    dst_bucket,
+                                    dst_key,
+                                    error = %error,
+                                    "hard-linking segmented CopyObject data failed; streaming fallback selected"
+                                );
+                            } else {
+                                let sizes: Vec<u64> = source
+                                    .paths()
+                                    .entries()
+                                    .iter()
+                                    .map(|(_, size)| *size)
+                                    .collect();
+                                let etag = source_etag.expect("link path requires an etag");
+                                let header = crate::segments::StubHeader::new(
+                                    new_segment_id.clone(),
+                                    sizes.clone(),
+                                    etag.clone(),
+                                );
+                                if let Err(error) = crate::segments::write_stub(&tmp_path, &header)
+                                {
+                                    let _ = std::fs::remove_dir_all(&new_segment_dir);
+                                    return Err(StorageError::Io(error));
+                                }
+                                let fsync_result = (|| -> std::io::Result<()> {
+                                    Self::fsync_dir(&new_segment_dir)?;
+                                    if let Some(parent) = new_segment_dir.parent() {
+                                        Self::fsync_dir(parent)?;
+                                        if let Some(grandparent) = parent.parent() {
+                                            Self::fsync_dir(grandparent)?;
+                                        }
+                                    }
+                                    Ok(())
+                                })();
+                                if let Err(error) = fsync_result {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    let _ = std::fs::remove_dir_all(&new_segment_dir);
+                                    return Err(StorageError::Io(error));
+                                }
+                                src_metadata.insert(
+                                    crate::segments::META_KEY_SEGMENTS.to_string(),
+                                    new_segment_id.clone(),
+                                );
+                                src_metadata.insert(
+                                    META_KEY_PART_SIZES.to_string(),
+                                    encode_part_sizes(&sizes),
+                                );
+                                return Ok((etag, obj.size, src_metadata, true));
+                            }
+                        }
+                        Box::new(crate::segments::LazyOpenSegmentsRead::new(source))
                     }
                 };
                 let tmp_file = std::fs::File::create(&tmp_path).map_err(StorageError::Io)?;
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "put:stage-data-write")
+                    .map_err(StorageError::Io)?;
                 let mut writer = BufWriter::with_capacity(chunk_size * 4, tmp_file);
                 let mut hasher = Md5::new();
                 let mut buf = vec![0u8; chunk_size];
@@ -5571,18 +7042,30 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     total += n as u64;
                 }
                 writer.flush().map_err(StorageError::Io)?;
+                let file = writer
+                    .into_inner()
+                    .map_err(|error| StorageError::Io(error.into_error()))?;
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&self.root, "put:stage-data-sync")
+                    .map_err(StorageError::Io)?;
+                file.sync_all().map_err(StorageError::Io)?;
 
-                let mut src_metadata = obj.internal_metadata;
                 src_metadata.remove(crate::segments::META_KEY_SEGMENTS);
                 src_metadata.remove(META_KEY_PART_SIZES);
-                Ok((format!("{:x}", hasher.finalize()), total, src_metadata))
+                Ok((
+                    format!("{:x}", hasher.finalize()),
+                    total,
+                    src_metadata,
+                    false,
+                ))
             },
         );
 
-        let (etag, new_size, src_metadata) = match copy_res {
+        let (etag, new_size, src_metadata, linked_segments) = match copy_res {
             Ok(v) => v,
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_dir_all(&new_segment_dir);
                 return Err(e);
             }
         };
@@ -5604,6 +7087,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
         if finalize.is_err() {
             let _ = std::fs::remove_file(&tmp_path);
+            if linked_segments {
+                let live_owns_segments =
+                    crate::segments::read_stub_header(&self.object_live_path(dst_bucket, dst_key))
+                        .ok()
+                        .flatten()
+                        .is_some_and(|header| header.segment_id == new_segment_id);
+                if !live_owns_segments {
+                    let _ = std::fs::remove_dir_all(&new_segment_dir);
+                }
+            }
         }
         finalize
     }
@@ -5613,10 +7106,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         key: &str,
     ) -> StorageResult<HashMap<String, String>> {
-        Ok(run_blocking(|| {
+        run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).read();
-            self.read_metadata_sync(bucket, key)
-        }))
+            self.guard_object_casing(bucket, key)?;
+            Ok(self.read_metadata_sync(bucket, key))
+        })
     }
 
     async fn put_object_metadata(
@@ -5627,6 +7121,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
     ) -> StorageResult<()> {
         run_blocking(|| {
             let _guard = self.get_object_lock(bucket, key).write();
+            self.guard_object_casing(bucket, key)?;
             let mut entry = self.read_index_entry_sync(bucket, key).unwrap_or_default();
             let meta_map: serde_json::Map<String, Value> = metadata
                 .iter()
@@ -5652,6 +7147,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _guard = self.get_object_lock(bucket, key).write();
             self.require_bucket(bucket)?;
             self.validate_key(key)?;
+            self.guard_versioned_key_casing(bucket, key)?;
             Self::validate_version_id(bucket, key, version_id)?;
 
             if self
@@ -5695,10 +7191,11 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     ));
                 }
             }
-            let new_content = serde_json::to_string_pretty(&record).map_err(StorageError::Json)?;
-            let tmp = manifest_path.with_extension("json.tmp");
-            std::fs::write(&tmp, new_content.as_bytes()).map_err(StorageError::Io)?;
-            std::fs::rename(&tmp, &manifest_path).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "metadata:version-rewrite")
+                .map_err(StorageError::Io)?;
+            Self::atomic_write_json_sync(&manifest_path, &record, true)
+                .map_err(StorageError::Io)?;
             self.invalidate_bucket_caches(bucket);
             Ok(())
         })
@@ -5781,7 +7278,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         });
 
         let manifest_path = upload_dir.join(MANIFEST_FILE);
-        Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
+        #[cfg(any(test, feature = "failpoints"))]
+        let write_result = crate::failpoints::hit(&self.root, "mpu:manifest-write")
+            .and_then(|()| Self::atomic_write_json_sync(&manifest_path, &manifest, true));
+        #[cfg(not(any(test, feature = "failpoints")))]
+        let write_result = Self::atomic_write_json_sync(&manifest_path, &manifest, true);
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_dir_all(&upload_dir);
+            return Err(StorageError::Io(error));
+        }
 
         Ok(upload_id)
     }
@@ -5800,14 +7305,18 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         }
 
         let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
-        let tmp_file = upload_dir.join(format!("part-{:05}.part.tmp", part_number));
+        let tmp_file = upload_dir.join(format!("part-{:05}.{}.tmp", part_number, Uuid::new_v4()));
 
         let chunk_size = self.stream_chunk_size;
         let tmp_file_owned = tmp_file.clone();
+        #[cfg(any(test, feature = "failpoints"))]
+        let fp_root = self.root.clone();
         let drain_res = tokio::task::spawn_blocking(move || -> StorageResult<(String, u64)> {
             use std::io::{BufWriter, Read, Write};
             let mut reader = tokio_util::io::SyncIoBridge::new(stream);
             let file = std::fs::File::create(&tmp_file_owned).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "mpu:part-write").map_err(StorageError::Io)?;
             let mut writer = BufWriter::with_capacity(chunk_size * 4, file);
             let mut hasher = Md5::new();
             let mut part_size: u64 = 0;
@@ -5824,6 +7333,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let file = writer
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&fp_root, "mpu:part-sync").map_err(StorageError::Io)?;
             file.sync_all().map_err(StorageError::Io)?;
             Ok((format!("{:x}", hasher.finalize()), part_size))
         })
@@ -5841,30 +7352,20 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
         };
 
-        tokio::fs::rename(&tmp_file, &part_file)
-            .await
-            .map_err(StorageError::Io)?;
-
         let lock_path = upload_dir.join(".manifest.lock");
         let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
         let _guard = lock.lock();
-
-        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let mut manifest: Value =
-            serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
-
-        if let Some(parts) = manifest.get_mut("parts").and_then(|p| p.as_object_mut()) {
-            parts.insert(
-                part_number.to_string(),
-                serde_json::json!({
-                    "etag": etag,
-                    "size": part_size,
-                    "filename": format!("part-{:05}.part", part_number),
-                }),
-            );
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(error) = crate::failpoints::hit(&self.root, "mpu:part-publish") {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
         }
-
-        Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
+        if let Err(error) = std::fs::rename(&tmp_file, &part_file) {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
+        }
+        self.publish_part_record_sync(&upload_dir, part_number, &etag, part_size)
+            .map_err(StorageError::Io)?;
 
         Ok(etag)
     }
@@ -5886,7 +7387,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         }
 
         let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
-        let tmp_file = upload_dir.join(format!("part-{:05}.part.tmp", part_number));
+        let tmp_file = upload_dir.join(format!("part-{:05}.{}.tmp", part_number, Uuid::new_v4()));
         let chunk_size = self.stream_chunk_size;
         let src_version_id = src_version_id.map(str::to_string);
 
@@ -5933,7 +7434,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     Box::new(std::io::BufReader::with_capacity(chunk_size, file))
                 }
                 OpenedObjectContent::Segmented {
-                    files, base_offset, ..
+                    source,
+                    base_offset,
+                    ..
                 } => {
                     let rel_start = start.checked_sub(base_offset).ok_or_else(|| {
                         StorageError::Internal(
@@ -5941,12 +7444,16 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         )
                     })?;
                     Box::new(
-                        crate::segments::OpenSegmentsRead::with_window(files, rel_start, length)
-                            .map_err(StorageError::Io)?,
+                        crate::segments::LazyOpenSegmentsRead::with_window(
+                            source, rel_start, length,
+                        )
+                        .map_err(StorageError::Io)?,
                     )
                 }
             };
             let dst = std::fs::File::create(&tmp_file).map_err(StorageError::Io)?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "mpu:part-write").map_err(StorageError::Io)?;
             let mut dst = BufWriter::with_capacity(chunk_size * 4, dst);
             let mut hasher = Md5::new();
             let mut remaining = length;
@@ -5970,6 +7477,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let dst = dst
                 .into_inner()
                 .map_err(|e| StorageError::Io(e.into_error()))?;
+            #[cfg(any(test, feature = "failpoints"))]
+            crate::failpoints::hit(&self.root, "mpu:part-sync").map_err(StorageError::Io)?;
             dst.sync_all().map_err(StorageError::Io)?;
             Ok((format!("{:x}", hasher.finalize()), length, last_modified))
         });
@@ -5982,30 +7491,20 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             }
         };
 
-        tokio::fs::rename(&tmp_file, &part_file)
-            .await
-            .map_err(StorageError::Io)?;
-
         let lock_path = upload_dir.join(".manifest.lock");
         let lock = self.get_meta_index_lock(&lock_path.to_string_lossy());
         let _guard = lock.lock();
-
-        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let mut manifest: Value =
-            serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
-
-        if let Some(parts) = manifest.get_mut("parts").and_then(|p| p.as_object_mut()) {
-            parts.insert(
-                part_number.to_string(),
-                serde_json::json!({
-                    "etag": etag,
-                    "size": length,
-                    "filename": format!("part-{:05}.part", part_number),
-                }),
-            );
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(error) = crate::failpoints::hit(&self.root, "mpu:part-publish") {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
         }
-
-        Self::atomic_write_json_sync(&manifest_path, &manifest, true).map_err(StorageError::Io)?;
+        if let Err(error) = std::fs::rename(&tmp_file, &part_file) {
+            let _ = std::fs::remove_file(&tmp_file);
+            return Err(StorageError::Io(error));
+        }
+        self.publish_part_record_sync(&upload_dir, part_number, &etag, length)
+            .map_err(StorageError::Io)?;
 
         Ok((etag, last_modified))
     }
@@ -6023,20 +7522,14 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let manifest: Value =
-            serde_json::from_str(&manifest_content).map_err(StorageError::Json)?;
-
-        let object_key = manifest
-            .get("object_key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| StorageError::Internal("Missing object_key in manifest".to_string()))?
-            .to_string();
-
-        let metadata: HashMap<String, String> = manifest
-            .get("metadata")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let manifest = MultipartManifest::read_sync(&manifest_path)?;
+        let object_key = manifest.object_key.clone();
+        let metadata: HashMap<String, String> = manifest.metadata.clone();
+        if metadata_has_pending_sse(&metadata) {
+            return Err(StorageError::InvalidArgument(
+                "pending-SSE multipart uploads require transformed completion".to_string(),
+            ));
+        }
 
         let tmp_dir = self.tmp_dir();
         std::fs::create_dir_all(&tmp_dir).map_err(StorageError::Io)?;
@@ -6046,11 +7539,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         let part_infos: Vec<PartInfo> = parts.to_vec();
         let upload_dir_owned = upload_dir.clone();
         let tmp_path_owned = tmp_path.clone();
-        let manifest_parts = manifest
-            .get("parts")
-            .and_then(|p| p.as_object())
-            .cloned()
-            .unwrap_or_default();
+        let manifest_parts = manifest.parts.clone();
 
         let segments_allowed = self.multipart_layout == MultipartLayout::Segments
             && part_infos.len() >= 2
@@ -6059,9 +7548,12 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             && !metadata.contains_key(MULTIPART_PENDING_SSE_C_KEY)
             && !metadata.contains_key(MPU_SSE_C_MARKER);
         let segment_dir = self.segments_bucket_root(bucket).join(upload_id);
+        let segment_dir_after = segment_dir.clone();
         let segment_id = upload_id.to_string();
         let upload_lock =
             self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+        #[cfg(any(test, feature = "failpoints"))]
+        let fp_root = self.root.clone();
 
         let assemble_res = tokio::task::spawn_blocking(
             move || -> StorageResult<(String, u64, Vec<u64>, Option<String>)> {
@@ -6070,32 +7562,34 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 let mut total_size: u64 = 0;
                 let mut part_sizes: Vec<u64> = Vec::with_capacity(part_infos.len());
 
-                for part_info in &part_infos {
+                for (ordinal, part_info) in part_infos.iter().enumerate() {
                     let part_file =
                         upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
-                    if !part_file.exists() {
+                    let seg_file =
+                        segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                    let source_file = if part_file.exists() {
+                        part_file
+                    } else if segments_allowed && seg_file.is_file() {
+                        seg_file
+                    } else {
                         return Err(StorageError::InvalidObjectKey(format!(
                             "Part {} not found",
                             part_info.part_number
                         )));
-                    }
-                    let file_size = std::fs::metadata(&part_file)
+                    };
+                    let file_size = std::fs::metadata(&source_file)
                         .map_err(StorageError::Io)?
                         .len();
-                    let manifest_entry = manifest_parts.get(&part_info.part_number.to_string());
-                    let manifest_etag = manifest_entry
-                        .and_then(|e| e.get("etag"))
-                        .and_then(|v| v.as_str());
-                    let manifest_size = manifest_entry
-                        .and_then(|e| e.get("size"))
-                        .and_then(|v| v.as_u64());
+                    let manifest_entry = manifest_parts.get(&part_info.part_number);
+                    let manifest_etag = manifest_entry.map(|e| e.etag.as_str());
+                    let manifest_size = manifest_entry.map(|e| e.size);
                     match (manifest_etag.and_then(parse_md5_hex), manifest_size) {
                         (Some(digest), Some(size)) if size == file_size => {
                             md5_digest_concat.extend_from_slice(&digest);
                         }
                         _ => {
                             let reader =
-                                std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                                std::fs::File::open(&source_file).map_err(StorageError::Io)?;
                             let mut reader = std::io::BufReader::with_capacity(chunk_size, reader);
                             let mut part_hasher = Md5::new();
                             let mut buf = vec![0u8; chunk_size];
@@ -6120,6 +7614,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                 if part_infos.len() == 1 {
                     let part_file = upload_dir_owned
                         .join(format!("part-{:05}.part", part_infos[0].part_number));
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&fp_root, "mpu:assembly-move")
+                        .map_err(StorageError::Io)?;
                     if std::fs::rename(&part_file, &tmp_path_owned).is_err() {
                         std::fs::copy(&part_file, &tmp_path_owned).map_err(StorageError::Io)?;
                     }
@@ -6136,9 +7633,17 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                             .join(format!("part-{:05}.part", part_info.part_number));
                         let seg_file =
                             segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                        #[cfg(any(test, feature = "failpoints"))]
+                        if let Err(error) = crate::failpoints::hit(&fp_root, "mpu:segment-move") {
+                            move_err = Some(error);
+                            break;
+                        }
                         match std::fs::rename(&part_file, &seg_file) {
                             Ok(()) => moved.push((seg_file, part_file)),
                             Err(e) => {
+                                if seg_file.is_file() && !part_file.exists() {
+                                    continue;
+                                }
                                 move_err = Some(e);
                                 break;
                             }
@@ -6157,23 +7662,59 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         part_sizes.clone(),
                         etag.clone(),
                     );
-                    if let Err(e) = crate::segments::write_stub(&tmp_path_owned, &header) {
+                    #[cfg(any(test, feature = "failpoints"))]
+                    let stub_result = crate::failpoints::hit(&fp_root, "mpu:segment-stub-write")
+                        .and_then(|()| crate::segments::write_stub(&tmp_path_owned, &header));
+                    #[cfg(not(any(test, feature = "failpoints")))]
+                    let stub_result = crate::segments::write_stub(&tmp_path_owned, &header);
+                    if let Err(e) = stub_result {
                         for (seg_file, part_file) in moved.into_iter().rev() {
                             let _ = std::fs::rename(&seg_file, &part_file);
                         }
                         let _ = std::fs::remove_dir(&segment_dir);
                         return Err(StorageError::Io(e));
                     }
-                    Self::fsync_dir_best_effort(&segment_dir);
+                    let fsync_result = (|| -> std::io::Result<()> {
+                        #[cfg(any(test, feature = "failpoints"))]
+                        crate::failpoints::hit(&fp_root, "mpu:segment-dir-fsync")?;
+                        Self::fsync_dir(&segment_dir)?;
+                        if let Some(parent) = segment_dir.parent() {
+                            Self::fsync_dir(parent)?;
+                            if let Some(grandparent) = parent.parent() {
+                                Self::fsync_dir(grandparent)?;
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(e) = fsync_result {
+                        let _ = std::fs::remove_file(&tmp_path_owned);
+                        for (seg_file, part_file) in moved.into_iter().rev() {
+                            let _ = std::fs::rename(&seg_file, &part_file);
+                        }
+                        let _ = std::fs::remove_dir(&segment_dir);
+                        return Err(StorageError::Io(e));
+                    }
                     return Ok((etag, total_size, part_sizes, Some(segment_id)));
                 }
 
                 let mut out_file =
                     std::fs::File::create(&tmp_path_owned).map_err(StorageError::Io)?;
-                for (part_info, expected) in part_infos.iter().zip(&part_sizes) {
+                for (ordinal, (part_info, expected)) in
+                    part_infos.iter().zip(&part_sizes).enumerate()
+                {
                     let part_file =
                         upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
-                    let mut src = std::fs::File::open(&part_file).map_err(StorageError::Io)?;
+                    let seg_file =
+                        segment_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                    let source_file = if part_file.exists() {
+                        part_file
+                    } else {
+                        seg_file
+                    };
+                    let mut src = std::fs::File::open(&source_file).map_err(StorageError::Io)?;
+                    #[cfg(any(test, feature = "failpoints"))]
+                    crate::failpoints::hit(&fp_root, "mpu:during-assembly")
+                        .map_err(StorageError::Io)?;
                     let copied =
                         std::io::copy(&mut src, &mut out_file).map_err(StorageError::Io)?;
                     if copied != *expected {
@@ -6183,6 +7724,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                         )));
                     }
                 }
+                #[cfg(any(test, feature = "failpoints"))]
+                crate::failpoints::hit(&fp_root, "mpu:assembly-sync").map_err(StorageError::Io)?;
                 out_file.sync_all().map_err(StorageError::Io)?;
                 Ok((etag, total_size, part_sizes, None))
             },
@@ -6213,6 +7756,22 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             );
         }
 
+        #[cfg(any(test, feature = "failpoints"))]
+        if let Err(err) = crate::failpoints::hit(&self.root, "mpu:before-finalize") {
+            let _ = std::fs::remove_file(&tmp_path);
+            if let Some(ref seg_id) = segmented_as {
+                let seg_dir = self.segments_bucket_root(bucket).join(seg_id);
+                for (ordinal, part_info) in parts.iter().enumerate() {
+                    let seg_file =
+                        seg_dir.join(crate::segments::SegmentSet::seg_file_name(ordinal));
+                    let part_file =
+                        upload_dir.join(format!("part-{:05}.part", part_info.part_number));
+                    let _ = std::fs::rename(&seg_file, &part_file);
+                }
+                let _ = std::fs::remove_dir(&seg_dir);
+            }
+            return Err(StorageError::Io(err));
+        }
         let result = run_blocking(|| {
             let quota_lock = self.quota_lock_if_configured(bucket);
             let _quota_guard = quota_lock.as_ref().map(|lock| lock.lock());
@@ -6231,6 +7790,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         match result {
             Ok(obj) => {
                 let _ = std::fs::remove_dir_all(&upload_dir);
+                if segmented_as.is_none() {
+                    let _ = std::fs::remove_dir_all(&segment_dir_after);
+                }
                 Ok(obj)
             }
             Err(e) => {
@@ -6261,6 +7823,9 @@ impl crate::traits::StorageEngine for FsStorageBackend {
 
     async fn abort_multipart(&self, bucket: &str, upload_id: &str) -> StorageResult<()> {
         let upload_dir = self.multipart_upload_dir(bucket, upload_id)?;
+        let upload_lock =
+            self.get_meta_index_lock(&upload_dir.join(".manifest.lock").to_string_lossy());
+        let _guard = upload_lock.lock();
         if upload_dir.exists() {
             std::fs::remove_dir_all(&upload_dir).map_err(StorageError::Io)?;
         }
@@ -6274,29 +7839,19 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let manifest: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
+        let manifest = MultipartManifest::read_sync(&manifest_path)?;
 
-        let mut parts = Vec::new();
-        if let Some(Value::Object(parts_map)) = manifest.get("parts") {
-            for (num_str, info) in parts_map {
-                let part_number: u32 = num_str.parse().unwrap_or(0);
-                let etag = info
-                    .get("etag")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let size = info.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                parts.push(PartMeta {
-                    part_number,
-                    etag,
-                    size,
-                    last_modified: None,
-                });
-            }
-        }
+        let parts = manifest
+            .parts
+            .into_iter()
+            .map(|(part_number, info)| PartMeta {
+                part_number,
+                etag: info.etag,
+                size: info.size,
+                last_modified: None,
+            })
+            .collect();
 
-        parts.sort_by_key(|p| p.part_number);
         Ok(parts)
     }
 
@@ -6356,18 +7911,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         if !manifest_path.exists() {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
-        let content = std::fs::read_to_string(&manifest_path).map_err(StorageError::Io)?;
-        let manifest: Value = serde_json::from_str(&content).map_err(StorageError::Json)?;
-        let metadata = manifest
-            .get("metadata")
-            .and_then(Value::as_object)
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect::<HashMap<String, String>>()
-            })
-            .unwrap_or_default();
-        Ok(metadata)
+        let manifest = MultipartManifest::read_sync(&manifest_path)?;
+        Ok(manifest.metadata)
     }
 
     async fn get_multipart_part_path(
@@ -6443,6 +7988,8 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         key: &str,
     ) -> StorageResult<Vec<VersionInfo>> {
         self.require_bucket(bucket)?;
+        self.validate_key(key)?;
+        self.guard_versioned_key_casing(bucket, key)?;
         let version_dir = self.version_dir(bucket, key);
         if !version_dir.exists() {
             return Ok(Vec::new());
@@ -6625,6 +8172,213 @@ mod tests {
         (dir, backend)
     }
 
+    fn filesystem_stress_test_guard() -> impl Drop {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        struct Guard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+        impl Drop for Guard {
+            fn drop(&mut self) {}
+        }
+        Guard(
+            LOCK.get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    #[test]
+    fn disk_casing_verification_fails_closed_outside_root() {
+        let (dir, mut backend) = create_test_backend();
+        backend.case_insensitive_fs = true;
+        let outside = dir.path().parent().unwrap().join("outside-case-probe");
+        assert!(!backend.verify_disk_casing(&outside).unwrap());
+    }
+
+    #[tokio::test]
+    async fn case_aliased_keys_fail_closed_on_case_insensitive_fs() {
+        let (_dir, backend) = create_test_backend();
+        if !backend.case_insensitive_fs {
+            return;
+        }
+        backend.create_bucket("case-guard").await.unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"victim data".to_vec()));
+        backend
+            .put_object("case-guard", "Docs/secret.txt", stream, None)
+            .await
+            .unwrap();
+
+        let err = backend
+            .get_object_metadata("case-guard", "docs/secret.txt")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::ObjectNotFound { .. }),
+            "aliased metadata read must be NotFound, got {err:?}"
+        );
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"attacker".to_vec()));
+        let err = backend
+            .put_object("case-guard", "docs/secret.txt", stream, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidObjectKey(_)),
+            "aliased overwrite must be rejected, got {err:?}"
+        );
+
+        let err = backend
+            .update_object_legal_hold("case-guard", "DOCS/secret.txt", None, true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::ObjectNotFound { .. }),
+            "aliased metadata mutation must be NotFound, got {err:?}"
+        );
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"sibling".to_vec()));
+        let err = backend
+            .put_object("case-guard", "Docs/SECRET.txt", stream, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidObjectKey(_)),
+            "sibling file differing only by case must be rejected, got {err:?}"
+        );
+
+        let meta = backend
+            .get_object_metadata("case-guard", "Docs/secret.txt")
+            .await
+            .unwrap();
+        assert!(
+            !meta.is_empty(),
+            "exact-cased object must remain readable and intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn case_aliased_version_ops_fail_closed() {
+        let (_dir, backend) = create_test_backend();
+        if !backend.case_insensitive_fs {
+            return;
+        }
+        backend.create_bucket("case-ver").await.unwrap();
+        backend
+            .set_versioning_status("case-ver", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "case-ver", "Vault/item", b"v1").await;
+        put_listing_object(&backend, "case-ver", "Vault/item", b"v2").await;
+
+        let versions = backend
+            .list_object_versions("case-ver", "Vault/item")
+            .await
+            .unwrap();
+        let list_err = backend
+            .list_object_versions("case-ver", "vault/item")
+            .await
+            .unwrap_err();
+        assert!(matches!(list_err, StorageError::ObjectNotFound { .. }));
+        let archived = versions
+            .iter()
+            .find(|v| !v.is_latest)
+            .expect("expected an archived version");
+        let vid = archived.version_id.clone();
+
+        let read_err = backend
+            .get_object_version_metadata("case-ver", "vault/item", &vid)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(read_err, StorageError::ObjectNotFound { .. }),
+            "aliased version metadata read must be NotFound, got {read_err:?}"
+        );
+
+        let del_err = backend
+            .delete_object_version_checked("case-ver", "VAULT/item", &vid, false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(del_err, StorageError::ObjectNotFound { .. }),
+            "aliased version delete must be NotFound, got {del_err:?}"
+        );
+
+        backend
+            .get_object_version_metadata("case-ver", "Vault/item", &vid)
+            .await
+            .expect("exact-cased version metadata must remain readable");
+
+        backend
+            .delete_object_checked("case-ver", "Vault/item", false)
+            .await
+            .unwrap();
+        let archived_only_err = backend
+            .get_object_version_metadata("case-ver", "vault/item", &vid)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(archived_only_err, StorageError::ObjectNotFound { .. }),
+            "aliased archived-only version read must be NotFound, got {archived_only_err:?}"
+        );
+        let mutation_err = backend
+            .put_object_version_metadata("case-ver", "vault/item", &vid, &HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(mutation_err, StorageError::ObjectNotFound { .. }));
+        backend
+            .get_object_version_metadata("case-ver", "Vault/item", &vid)
+            .await
+            .expect("exact-cased archived version must remain readable after live delete");
+    }
+
+    #[tokio::test]
+    async fn recreated_bucket_does_not_inherit_prior_state() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("reborn").await.unwrap();
+        backend
+            .set_versioning_status("reborn", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        std::fs::remove_dir_all(backend.bucket_path("reborn")).unwrap();
+        assert!(backend.system_bucket_root("reborn").exists());
+        let versions_dir = backend.system_bucket_root("reborn").join("versions");
+        std::fs::create_dir_all(&versions_dir).unwrap();
+        std::fs::write(versions_dir.join("stale.bin"), b"old tenant").unwrap();
+        std::fs::create_dir_all(backend.multipart_bucket_root("reborn")).unwrap();
+        let legacy_policy_path = backend.legacy_bucket_policies_path();
+        std::fs::create_dir_all(legacy_policy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_policy_path,
+            serde_json::json!({
+                "policies": {
+                    "reborn": {
+                        "Version": "2012-10-17",
+                        "Statement": []
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        backend.create_bucket("reborn").await.unwrap();
+
+        assert!(
+            !versions_dir.exists(),
+            "stale archived versions must be purged on bucket recreation"
+        );
+        assert!(!backend.multipart_bucket_root("reborn").exists());
+        let config = backend.get_bucket_config("reborn").await.unwrap();
+        assert_eq!(
+            config.versioning_status(),
+            VersioningStatus::Disabled,
+            "recreated bucket must not inherit the prior bucket's configuration"
+        );
+        assert!(config.policy.is_none());
+        let legacy_policy: Value =
+            serde_json::from_str(&std::fs::read_to_string(legacy_policy_path).unwrap()).unwrap();
+        assert!(legacy_policy["policies"].get("reborn").is_none());
+    }
+
     fn create_listing_backend(
         root: PathBuf,
         enabled: bool,
@@ -6795,6 +8549,2292 @@ mod tests {
         let mut body = Vec::new();
         stream.read_to_end(&mut body).await.unwrap();
         assert_eq!(body, b"v1");
+    }
+
+    #[tokio::test]
+    async fn metadata_publish_is_the_commit_point_for_puts() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("commit-order").await.unwrap();
+        put_listing_object(&backend, "commit-order", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("commit-order", "obj.bin")
+            .await
+            .unwrap();
+
+        let mut new_meta = HashMap::new();
+        new_meta.insert("__etag__".to_string(), "newetag".to_string());
+        new_meta.insert("__size__".to_string(), "2".to_string());
+        let staged = backend
+            .stage_live_metadata_sync("commit-order", "obj.bin", &new_meta, None)
+            .unwrap();
+
+        let next_tmp = backend.tmp_dir().join("next.tmp");
+        std::fs::write(&next_tmp, b"v2").unwrap();
+        let destination = backend.object_live_path("commit-order", "obj.bin");
+        std::fs::rename(&next_tmp, &destination).unwrap();
+
+        let mid = backend
+            .get_object_metadata("commit-order", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            mid.get("__etag__"),
+            before.get("__etag__"),
+            "readers must keep seeing the previous metadata until the sidecar is published"
+        );
+
+        backend
+            .publish_staged_metadata_sync("commit-order", "obj.bin", &staged)
+            .unwrap();
+        let after = backend
+            .get_object_metadata("commit-order", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), Some(&"newetag".to_string()));
+        assert!(!staged.exists());
+    }
+
+    #[tokio::test]
+    async fn successful_put_leaves_no_staged_sidecar_files() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("stage-clean").await.unwrap();
+        put_listing_object(&backend, "stage-clean", "obj.bin", b"data").await;
+
+        let (sidecar_path, _) = backend.sidecar_file_for_key("stage-clean", "obj.bin");
+        assert!(sidecar_path.is_file(), "the sidecar must be published");
+
+        let strays: Vec<_> = std::fs::read_dir(backend.tmp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".sidecar-stage"))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "no staged sidecar files may remain after a successful put"
+        );
+    }
+
+    fn failpoint_test_guard() -> impl Drop {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        struct Guard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                crate::failpoints::clear_all();
+            }
+        }
+        Guard(
+            LOCK.get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn staged_sidecar_count(backend: &FsStorageBackend) -> usize {
+        std::fs::read_dir(backend.tmp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".sidecar-stage"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn ordinary_tmp_count(backend: &FsStorageBackend) -> usize {
+        std::fs::read_dir(backend.tmp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        name.ends_with(".tmp") && !name.ends_with(".sidecar-stage")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn assert_storage_full<T>(result: StorageResult<T>) {
+        match result {
+            Err(StorageError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::StorageFull)
+            }
+            Err(error) => panic!("expected StorageFull I/O error, got {error}"),
+            Ok(_) => panic!("expected StorageFull I/O error, got success"),
+        }
+    }
+
+    async fn object_bytes(backend: &FsStorageBackend, bucket: &str, key: &str) -> Vec<u8> {
+        let (_, mut stream) = backend.get_object(bucket, key).await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        body
+    }
+
+    async fn listed_keys(backend: &FsStorageBackend, bucket: &str) -> Vec<String> {
+        backend
+            .list_objects(bucket, &ListParams::default())
+            .await
+            .unwrap()
+            .objects
+            .into_iter()
+            .map(|object| object.key)
+            .collect()
+    }
+
+    async fn create_multipart_with_parts(
+        backend: &FsStorageBackend,
+        bucket: &str,
+        key: &str,
+        sizes: &[usize],
+    ) -> (String, Vec<PartInfo>, Vec<u8>) {
+        let upload_id = backend.initiate_multipart(bucket, key, None).await.unwrap();
+        let mut parts = Vec::new();
+        let mut expected = Vec::new();
+        for (index, size) in sizes.iter().copied().enumerate() {
+            let body = vec![b'A' + index as u8; size];
+            expected.extend_from_slice(&body);
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+            let etag = backend
+                .upload_part(bucket, &upload_id, index as u32 + 1, stream)
+                .await
+                .unwrap();
+            parts.push(PartInfo {
+                part_number: index as u32 + 1,
+                etag,
+            });
+        }
+        (upload_id, parts, expected)
+    }
+
+    #[tokio::test]
+    async fn storage_full_put_fsops_preserve_previous_object_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-put").await.unwrap();
+        put_listing_object(&backend, "enospc-put", "obj.bin", b"old").await;
+        assert_eq!(listed_keys(&backend, "enospc-put").await, ["obj.bin"]);
+
+        for name in [
+            "put:stage-data-write",
+            "put:stage-data-sync",
+            "put:stage-sidecar",
+            "put:stage-dir-fsync",
+            "put:before-data-rename",
+        ] {
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new".to_vec()));
+            let result = backend
+                .put_object("enospc-put", "obj.bin", stream, None)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            assert_eq!(
+                object_bytes(&backend, "enospc-put", "obj.bin").await,
+                b"old"
+            );
+            assert_eq!(listed_keys(&backend, "enospc-put").await, ["obj.bin"]);
+            assert_eq!(staged_sidecar_count(&backend), 0);
+            assert_eq!(ordinary_tmp_count(&backend), 0);
+
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new".to_vec()));
+            backend
+                .put_object("enospc-put", "obj.bin", stream, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                object_bytes(&backend, "enospc-put", "obj.bin").await,
+                b"new"
+            );
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"old".to_vec()));
+            backend
+                .put_object("enospc-put", "obj.bin", stream, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_version_archive_preserves_live_version_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-version").await.unwrap();
+        backend
+            .set_versioning_status("enospc-version", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "enospc-version", "obj.bin", b"old-version").await;
+        let before = backend
+            .get_object_metadata("enospc-version", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "version:archive-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new-version".to_vec()));
+        let result = backend
+            .put_object("enospc-version", "obj.bin", stream, None)
+            .await;
+        crate::failpoints::clear(&backend.root, "version:archive-write");
+        assert_storage_full(result);
+        assert_eq!(
+            object_bytes(&backend, "enospc-version", "obj.bin").await,
+            b"old-version"
+        );
+        let after = backend
+            .get_object_metadata("enospc-version", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__version_id__"), before.get("__version_id__"));
+        assert_eq!(
+            backend
+                .list_object_versions("enospc-version", "obj.bin")
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new-version".to_vec()));
+        backend
+            .put_object("enospc-version", "obj.bin", stream, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            object_bytes(&backend, "enospc-version", "obj.bin").await,
+            b"new-version"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_full_delete_fsops_preserve_object_listing_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-delete").await.unwrap();
+
+        for name in ["delete:data-remove", "delete:metadata-remove"] {
+            put_listing_object(&backend, "enospc-delete", "obj.bin", b"old").await;
+            assert_eq!(listed_keys(&backend, "enospc-delete").await, ["obj.bin"]);
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend.delete_object("enospc-delete", "obj.bin").await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            assert_eq!(
+                object_bytes(&backend, "enospc-delete", "obj.bin").await,
+                b"old"
+            );
+            assert_eq!(listed_keys(&backend, "enospc-delete").await, ["obj.bin"]);
+            backend
+                .delete_object("enospc-delete", "obj.bin")
+                .await
+                .unwrap();
+            assert!(listed_keys(&backend, "enospc-delete").await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_metadata_rewrite_preserves_metadata_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-meta").await.unwrap();
+        let mut original = HashMap::new();
+        original.insert("color".to_string(), "blue".to_string());
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"body".to_vec()));
+        backend
+            .put_object("enospc-meta", "obj.bin", stream, Some(original.clone()))
+            .await
+            .unwrap();
+
+        let mut replacement = original.clone();
+        replacement.insert("color".to_string(), "green".to_string());
+        crate::failpoints::set(
+            &backend.root,
+            "metadata:rewrite",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .put_object_metadata("enospc-meta", "obj.bin", &replacement)
+            .await;
+        crate::failpoints::clear(&backend.root, "metadata:rewrite");
+        assert_storage_full(result);
+        let after = backend
+            .get_object_metadata("enospc-meta", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("blue"));
+        assert_eq!(
+            object_bytes(&backend, "enospc-meta", "obj.bin").await,
+            b"body"
+        );
+        assert_eq!(listed_keys(&backend, "enospc-meta").await, ["obj.bin"]);
+
+        backend
+            .put_object_metadata("enospc-meta", "obj.bin", &replacement)
+            .await
+            .unwrap();
+        let after = backend
+            .get_object_metadata("enospc-meta", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("green"));
+    }
+
+    #[tokio::test]
+    async fn storage_full_version_metadata_rewrite_preserves_record_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-version-meta").await.unwrap();
+        backend
+            .set_versioning_status("enospc-version-meta", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        let mut original = HashMap::new();
+        original.insert("color".to_string(), "blue".to_string());
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"old".to_vec()));
+        backend
+            .put_object(
+                "enospc-version-meta",
+                "obj.bin",
+                stream,
+                Some(original.clone()),
+            )
+            .await
+            .unwrap();
+        put_listing_object(&backend, "enospc-version-meta", "obj.bin", b"new").await;
+        let archived = backend
+            .list_object_versions("enospc-version-meta", "obj.bin")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|version| !version.is_latest)
+            .unwrap();
+        let mut replacement = original.clone();
+        replacement.insert("color".to_string(), "green".to_string());
+
+        crate::failpoints::set(
+            &backend.root,
+            "metadata:version-rewrite",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .put_object_version_metadata(
+                "enospc-version-meta",
+                "obj.bin",
+                &archived.version_id,
+                &replacement,
+            )
+            .await;
+        crate::failpoints::clear(&backend.root, "metadata:version-rewrite");
+        assert_storage_full(result);
+        let after = backend
+            .get_object_version_metadata("enospc-version-meta", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("blue"));
+        let (_, mut stream) = backend
+            .get_object_version("enospc-version-meta", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"old");
+
+        backend
+            .put_object_version_metadata(
+                "enospc-version-meta",
+                "obj.bin",
+                &archived.version_id,
+                &replacement,
+            )
+            .await
+            .unwrap();
+        let after = backend
+            .get_object_version_metadata("enospc-version-meta", "obj.bin", &archived.version_id)
+            .await
+            .unwrap();
+        assert_eq!(after.get("color").map(String::as_str), Some("green"));
+    }
+
+    #[tokio::test]
+    async fn storage_full_bucket_config_write_preserves_config_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-config").await.unwrap();
+        crate::failpoints::set(
+            &backend.root,
+            "bucket:config-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .set_versioning_status("enospc-config", VersioningStatus::Enabled)
+            .await;
+        crate::failpoints::clear(&backend.root, "bucket:config-write");
+        assert_storage_full(result);
+        assert_eq!(
+            backend
+                .get_versioning_status("enospc-config")
+                .await
+                .unwrap(),
+            VersioningStatus::Disabled
+        );
+
+        backend
+            .set_versioning_status("enospc-config", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .get_versioning_status("enospc-config")
+                .await
+                .unwrap(),
+            VersioningStatus::Enabled
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_full_version_delete_preserves_archived_version_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend
+            .create_bucket("enospc-version-delete")
+            .await
+            .unwrap();
+        backend
+            .set_versioning_status("enospc-version-delete", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        for (index, name) in [
+            "delete-version:data-remove",
+            "delete-version:metadata-remove",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("obj-{index}.bin");
+            put_listing_object(&backend, "enospc-version-delete", &key, b"old").await;
+            put_listing_object(&backend, "enospc-version-delete", &key, b"new").await;
+            let archived = backend
+                .list_object_versions("enospc-version-delete", &key)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|version| !version.is_latest)
+                .unwrap();
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend
+                .delete_object_version_checked(
+                    "enospc-version-delete",
+                    &key,
+                    &archived.version_id,
+                    false,
+                )
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            let (_, mut stream) = backend
+                .get_object_version("enospc-version-delete", &key, &archived.version_id)
+                .await
+                .unwrap();
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body).await.unwrap();
+            assert_eq!(body, b"old");
+            assert_eq!(
+                object_bytes(&backend, "enospc-version-delete", &key).await,
+                b"new"
+            );
+
+            backend
+                .delete_object_version_checked(
+                    "enospc-version-delete",
+                    &key,
+                    &archived.version_id,
+                    false,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                backend
+                    .get_object_version("enospc-version-delete", &key, &archived.version_id,)
+                    .await,
+                Err(StorageError::VersionNotFound { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_delete_marker_preserves_live_version_and_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-marker").await.unwrap();
+        backend
+            .set_versioning_status("enospc-marker", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "enospc-marker", "obj.bin", b"old").await;
+
+        crate::failpoints::set(
+            &backend.root,
+            "delete:marker-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend.delete_object("enospc-marker", "obj.bin").await;
+        crate::failpoints::clear(&backend.root, "delete:marker-write");
+        assert_storage_full(result);
+        assert_eq!(
+            object_bytes(&backend, "enospc-marker", "obj.bin").await,
+            b"old"
+        );
+        assert_eq!(listed_keys(&backend, "enospc-marker").await, ["obj.bin"]);
+
+        backend
+            .delete_object("enospc-marker", "obj.bin")
+            .await
+            .unwrap();
+        assert!(matches!(
+            backend.get_object("enospc-marker", "obj.bin").await,
+            Err(StorageError::DeleteMarker { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_full_listing_index_degrades_to_rebuild_without_phantoms() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-listing").await.unwrap();
+        put_listing_object(&backend, "enospc-listing", "old.bin", b"old").await;
+
+        crate::failpoints::set(
+            &backend.root,
+            "listing:snapshot-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend.rebuild_listing_index_sync("enospc-listing");
+        crate::failpoints::clear(&backend.root, "listing:snapshot-write");
+        assert_storage_full(result);
+        assert_eq!(listed_keys(&backend, "enospc-listing").await, ["old.bin"]);
+
+        let listing_dir = backend.bucket_listing_dir("enospc-listing");
+        assert!(listing_dir.join("snapshot.json").is_file());
+        crate::failpoints::set(
+            &backend.root,
+            "listing:journal-append",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        put_listing_object(&backend, "enospc-listing", "new.bin", b"new").await;
+        crate::failpoints::clear(&backend.root, "listing:journal-append");
+        let mut keys = listed_keys(&backend, "enospc-listing").await;
+        keys.sort();
+        assert_eq!(keys, ["new.bin", "old.bin"]);
+        assert_eq!(
+            object_bytes(&backend, "enospc-listing", "old.bin").await,
+            b"old"
+        );
+        assert_eq!(
+            object_bytes(&backend, "enospc-listing", "new.bin").await,
+            b"new"
+        );
+
+        put_listing_object(&backend, "enospc-listing", "new.bin", b"new").await;
+        assert_eq!(listed_keys(&backend, "enospc-listing").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn storage_full_multipart_manifest_and_part_writes_are_retryable_and_abortable() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-mpu-part").await.unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:manifest-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .initiate_multipart("enospc-mpu-part", "manifest.bin", None)
+            .await;
+        crate::failpoints::clear(&backend.root, "mpu:manifest-write");
+        assert_storage_full(result);
+        assert_eq!(
+            std::fs::read_dir(backend.multipart_bucket_root("enospc-mpu-part"))
+                .map(|entries| entries.flatten().count())
+                .unwrap_or(0),
+            0
+        );
+        let upload_id = backend
+            .initiate_multipart("enospc-mpu-part", "manifest.bin", None)
+            .await
+            .unwrap();
+        backend
+            .abort_multipart("enospc-mpu-part", &upload_id)
+            .await
+            .unwrap();
+
+        for (index, name) in [
+            "mpu:part-write",
+            "mpu:part-sync",
+            "mpu:part-publish",
+            "mpu:part-record-write",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("retry-{index}.bin");
+            let upload_id = backend
+                .initiate_multipart("enospc-mpu-part", &key, None)
+                .await
+                .unwrap();
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"part-body".to_vec()));
+            let result = backend
+                .upload_part("enospc-mpu-part", &upload_id, 1, stream)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            let upload_dir = backend
+                .multipart_upload_dir("enospc-mpu-part", &upload_id)
+                .unwrap();
+            assert!(upload_dir.is_dir());
+            assert_eq!(
+                std::fs::read_dir(&upload_dir)
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                    .count(),
+                0
+            );
+            backend
+                .list_parts("enospc-mpu-part", &upload_id)
+                .await
+                .unwrap();
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"part-body".to_vec()));
+            backend
+                .upload_part("enospc-mpu-part", &upload_id, 1, stream)
+                .await
+                .unwrap();
+            assert_eq!(
+                backend
+                    .list_parts("enospc-mpu-part", &upload_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            backend
+                .abort_multipart("enospc-mpu-part", &upload_id)
+                .await
+                .unwrap();
+            assert!(!upload_dir.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_full_multipart_assembly_sites_preserve_old_object_and_upload() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("enospc-mpu-complete").await.unwrap();
+
+        for (index, (name, sizes)) in [
+            ("mpu:assembly-move", vec![512]),
+            ("mpu:during-assembly", vec![512, 512]),
+            ("mpu:assembly-sync", vec![512, 512]),
+            ("mpu:segment-move", vec![3072, 3072]),
+            ("mpu:segment-stub-write", vec![3072, 3072]),
+            ("mpu:segment-dir-fsync", vec![3072, 3072]),
+            ("mpu:before-finalize", vec![3072, 3072]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = format!("target-{index}.bin");
+            put_listing_object(&backend, "enospc-mpu-complete", &key, b"old").await;
+            let (upload_id, parts, expected) =
+                create_multipart_with_parts(&backend, "enospc-mpu-complete", &key, &sizes).await;
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend
+                .complete_multipart("enospc-mpu-complete", &upload_id, &parts)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            assert_eq!(
+                object_bytes(&backend, "enospc-mpu-complete", &key).await,
+                b"old"
+            );
+            assert!(listed_keys(&backend, "enospc-mpu-complete")
+                .await
+                .contains(&key));
+            assert_eq!(
+                backend
+                    .list_parts("enospc-mpu-complete", &upload_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                sizes.len()
+            );
+            backend
+                .complete_multipart("enospc-mpu-complete", &upload_id, &parts)
+                .await
+                .unwrap();
+            assert_eq!(
+                object_bytes(&backend, "enospc-mpu-complete", &key).await,
+                expected
+            );
+
+            let abort_key = format!("abort-{index}.bin");
+            let (abort_id, abort_parts, _) =
+                create_multipart_with_parts(&backend, "enospc-mpu-complete", &abort_key, &sizes)
+                    .await;
+            crate::failpoints::set(
+                &backend.root,
+                name,
+                crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+            );
+            let result = backend
+                .complete_multipart("enospc-mpu-complete", &abort_id, &abort_parts)
+                .await;
+            crate::failpoints::clear(&backend.root, name);
+            assert_storage_full(result);
+            backend
+                .abort_multipart("enospc-mpu-complete", &abort_id)
+                .await
+                .unwrap();
+            assert!(!backend
+                .multipart_upload_dir("enospc-mpu-complete", &abort_id)
+                .unwrap()
+                .exists());
+            assert!(!backend
+                .segments_bucket_root("enospc-mpu-complete")
+                .join(&abort_id)
+                .exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_error_during_sidecar_stage_aborts_the_put_cleanly() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("fp-stage").await.unwrap();
+        put_listing_object(&backend, "fp-stage", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-stage", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:stage-sidecar",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+        let result = backend
+            .put_object("fp-stage", "obj.bin", stream, None)
+            .await;
+        crate::failpoints::clear(&backend.root, "put:stage-sidecar");
+        assert!(result.is_err(), "a failed sidecar stage must fail the put");
+
+        let after = backend
+            .get_object_metadata("fp-stage", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        let (_, mut stream) = backend.get_object("fp-stage", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v1");
+        assert_eq!(staged_sidecar_count(&backend), 0);
+    }
+
+    #[tokio::test]
+    async fn crash_before_data_rename_leaves_the_old_object_intact() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-crash1").await.unwrap();
+        put_listing_object(&backend, "fp-crash1", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-crash1", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:before-data-rename",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+            crashed
+                .put_object("fp-crash1", "obj.bin", stream, None)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:before-data-rename");
+        assert!(
+            join.unwrap_err().is_panic(),
+            "the failpoint must simulate a crash"
+        );
+
+        let after = backend
+            .get_object_metadata("fp-crash1", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        let (_, mut stream) = backend.get_object("fp-crash1", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(
+            body, b"v1",
+            "a crash before the data rename must not change the object"
+        );
+
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.discarded, 1,
+            "recovery must discard the staged sidecar because the data was never renamed"
+        );
+        assert!(recovery.published.is_empty());
+        assert_eq!(staged_sidecar_count(&backend), 0);
+        let after_recovery = backend
+            .get_object_metadata("fp-crash1", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after_recovery.get("__etag__"), before.get("__etag__"));
+    }
+
+    #[tokio::test]
+    async fn crash_before_sidecar_publish_is_repaired_by_commit_recovery() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-crash2").await.unwrap();
+        put_listing_object(&backend, "fp-crash2", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-crash2", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:before-publish-sidecar",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+            crashed
+                .put_object("fp-crash2", "obj.bin", stream, None)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:before-publish-sidecar");
+        assert!(
+            join.unwrap_err().is_panic(),
+            "the failpoint must simulate a crash"
+        );
+
+        let after = backend
+            .get_object_metadata("fp-crash2", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            after.get("__etag__"),
+            before.get("__etag__"),
+            "the previous sidecar must still be authoritative"
+        );
+        let (_, mut stream) = backend.get_object("fp-crash2", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(
+            body, b"v2",
+            "the committed data rename survives the crash; the torn state is new data \
+             under the previous metadata, detectable as an etag mismatch"
+        );
+        assert_eq!(
+            staged_sidecar_count(&backend),
+            1,
+            "the staged sidecar must survive the crash as the commit intent record"
+        );
+
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.published.len(),
+            1,
+            "recovery must publish the staged sidecar for data that was already renamed"
+        );
+        assert_eq!(recovery.poisoned, 0);
+        assert_eq!(
+            staged_sidecar_count(&backend),
+            1,
+            "the commit intent must survive until replication has been enqueued"
+        );
+        backend
+            .finish_recovered_commit_sync(&recovery.published[0].staged_path)
+            .unwrap();
+        assert_eq!(staged_sidecar_count(&backend), 0);
+        let repaired = backend
+            .get_object_metadata("fp-crash2", "obj.bin")
+            .await
+            .unwrap();
+        assert_ne!(
+            repaired.get("__etag__"),
+            before.get("__etag__"),
+            "the recovered metadata must describe the new bytes"
+        );
+        let (_, mut stream) = backend.get_object("fp-crash2", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v2");
+    }
+
+    #[tokio::test]
+    async fn crash_mid_delete_leaves_a_detectable_ghost() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-del").await.unwrap();
+        put_listing_object(&backend, "fp-del", "obj.bin", b"v1").await;
+
+        crate::failpoints::set(
+            &backend.root,
+            "delete:before-meta-remove",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join =
+            tokio::spawn(async move { crashed.delete_object("fp-del", "obj.bin").await }).await;
+        crate::failpoints::clear(&backend.root, "delete:before-meta-remove");
+        assert!(join.unwrap_err().is_panic());
+
+        let meta = backend
+            .get_object_metadata("fp-del", "obj.bin")
+            .await
+            .unwrap();
+        assert!(
+            meta.contains_key("__etag__"),
+            "the sidecar must survive so the half-deleted object fails loudly"
+        );
+        assert!(
+            backend.get_object("fp-del", "obj.bin").await.is_err(),
+            "the data is gone; the ghost must error on read, not serve garbage"
+        );
+
+        backend.delete_object("fp-del", "obj.bin").await.unwrap();
+        let cleaned = backend.get_object_metadata("fp-del", "obj.bin").await;
+        assert!(
+            cleaned.map(|m| !m.contains_key("__etag__")).unwrap_or(true),
+            "a repeated delete must clear the ghost's sidecar"
+        );
+    }
+
+    #[tokio::test]
+    async fn crash_before_concat_mpu_finalize_is_retryable() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-mpu-c").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("fp-mpu-c", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 1024]));
+        backend
+            .upload_part("fp-mpu-c", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 512]));
+        backend
+            .upload_part("fp-mpu-c", &upload_id, 2, part2)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:before-finalize",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let crashed_upload = upload_id.clone();
+        let crashed_parts = parts.clone();
+        let join = tokio::spawn(async move {
+            crashed
+                .complete_multipart("fp-mpu-c", &crashed_upload, &crashed_parts)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "mpu:before-finalize");
+        assert!(join.unwrap_err().is_panic());
+        assert!(
+            backend.get_object("fp-mpu-c", "obj.bin").await.is_err(),
+            "no object may be visible after a crash before the commit"
+        );
+
+        let obj = backend
+            .complete_multipart("fp-mpu-c", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(
+            obj.size, 1536,
+            "the concat path keeps its parts; retrying the complete must succeed"
+        );
+        let (_, mut stream) = backend.get_object("fp-mpu-c", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body.len(), 1536);
+    }
+
+    #[tokio::test]
+    async fn transformed_mpu_precondition_failure_preserves_object_upload_and_temps() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("mpu-transform-cond").await.unwrap();
+        put_listing_object(&backend, "mpu-transform-cond", "obj.bin", b"old").await;
+
+        let mut pending = HashMap::new();
+        pending.insert(MULTIPART_PENDING_SSE_ALG.to_string(), "AES256".to_string());
+        let upload_id = backend
+            .initiate_multipart("mpu-transform-cond", "obj.bin", Some(pending))
+            .await
+            .unwrap();
+        let first: AsyncReadStream = Box::pin(std::io::Cursor::new(b"new-".to_vec()));
+        let first_etag = backend
+            .upload_part("mpu-transform-cond", &upload_id, 1, first)
+            .await
+            .unwrap();
+        let second: AsyncReadStream = Box::pin(std::io::Cursor::new(b"body".to_vec()));
+        let second_etag = backend
+            .upload_part("mpu-transform-cond", &upload_id, 2, second)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: first_etag,
+            },
+            PartInfo {
+                part_number: 2,
+                etag: second_etag,
+            },
+        ];
+        let ordinary = backend
+            .complete_multipart("mpu-transform-cond", &upload_id, &parts)
+            .await;
+        assert!(matches!(ordinary, Err(StorageError::InvalidArgument(_))));
+        let prepared = backend
+            .prepare_multipart_for_transform("mpu-transform-cond", &upload_id, &parts)
+            .await
+            .unwrap();
+        let transformed = backend.allocate_prepared_tmp_path().unwrap();
+        std::fs::copy(&prepared.plaintext_path, &transformed).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&transformed)
+            .unwrap()
+            .sync_all()
+            .unwrap();
+        let transformed_size = std::fs::metadata(&transformed).unwrap().len();
+        let mut final_metadata = prepared.metadata.clone();
+        final_metadata.remove(MULTIPART_PENDING_SSE_ALG);
+        let result = backend
+            .commit_transformed_multipart(
+                &prepared,
+                &transformed,
+                transformed_size,
+                final_metadata.clone(),
+                crate::traits::PutCommitOptions {
+                    conditions: crate::traits::PutConditions {
+                        if_match: Some("not-the-old-etag".to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(StorageError::PreconditionFailed(_))));
+        assert!(prepared.plaintext_path.is_file());
+        assert!(transformed.is_file());
+        assert!(backend
+            .multipart_upload_dir("mpu-transform-cond", &upload_id)
+            .unwrap()
+            .join("part-00001.part")
+            .is_file());
+        let (_, mut old_stream) = backend
+            .get_object("mpu-transform-cond", "obj.bin")
+            .await
+            .unwrap();
+        let mut old_body = Vec::new();
+        old_stream.read_to_end(&mut old_body).await.unwrap();
+        assert_eq!(old_body, b"old");
+
+        let committed = backend
+            .commit_transformed_multipart(
+                &prepared,
+                &transformed,
+                transformed_size,
+                final_metadata,
+                crate::traits::PutCommitOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.etag.as_deref(),
+            Some(prepared.composite_etag.as_str())
+        );
+        assert!(!backend
+            .multipart_upload_dir("mpu-transform-cond", &upload_id)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_file(&prepared.plaintext_path);
+    }
+
+    #[tokio::test]
+    async fn transformed_mpu_assembly_failpoints_preserve_the_upload() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("mpu-transform-fp").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("mpu-transform-fp", "obj.bin", None)
+            .await
+            .unwrap();
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"payload".to_vec()));
+        let etag = backend
+            .upload_part("mpu-transform-fp", &upload_id, 1, stream)
+            .await
+            .unwrap();
+        let parts = vec![PartInfo {
+            part_number: 1,
+            etag,
+        }];
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:during-assembly",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        assert!(backend
+            .prepare_multipart_for_transform("mpu-transform-fp", &upload_id, &parts)
+            .await
+            .is_err());
+        crate::failpoints::clear(&backend.root, "mpu:during-assembly");
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:after-assembly",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let crashed_upload = upload_id.clone();
+        let crashed_parts = parts.clone();
+        let join = tokio::spawn(async move {
+            crashed
+                .prepare_multipart_for_transform(
+                    "mpu-transform-fp",
+                    &crashed_upload,
+                    &crashed_parts,
+                )
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "mpu:after-assembly");
+        assert!(join.unwrap_err().is_panic());
+        assert!(backend
+            .multipart_upload_dir("mpu-transform-fp", &upload_id)
+            .unwrap()
+            .join("part-00001.part")
+            .is_file());
+        let prepared = backend
+            .prepare_multipart_for_transform("mpu-transform-fp", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&prepared.plaintext_path).unwrap(), b"payload");
+        let _ = std::fs::remove_file(&prepared.plaintext_path);
+    }
+
+    #[tokio::test]
+    async fn crash_before_segments_mpu_finalize_is_recovered_on_retry() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-mpu-s").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("fp-mpu-s", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 3072]));
+        backend
+            .upload_part("fp-mpu-s", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 3072]));
+        backend
+            .upload_part("fp-mpu-s", &upload_id, 2, part2)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:before-finalize",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let crashed_upload = upload_id.clone();
+        let crashed_parts = parts.clone();
+        let join = tokio::spawn(async move {
+            crashed
+                .complete_multipart("fp-mpu-s", &crashed_upload, &crashed_parts)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "mpu:before-finalize");
+        assert!(join.unwrap_err().is_panic());
+
+        assert!(
+            backend.get_object("fp-mpu-s", "obj.bin").await.is_err(),
+            "no object may be visible after a crash before the commit"
+        );
+        let segment_dir = backend.segments_bucket_root("fp-mpu-s").join(&upload_id);
+        assert!(
+            segment_dir.is_dir(),
+            "the moved parts survive as the segment set"
+        );
+
+        let obj = backend
+            .complete_multipart("fp-mpu-s", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(
+            obj.size, 6144,
+            "retrying the complete must recover the already-moved parts"
+        );
+        let meta = backend
+            .get_object_metadata("fp-mpu-s", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            meta.get(crate::segments::META_KEY_SEGMENTS),
+            Some(&upload_id)
+        );
+        let (_, mut stream) = backend.get_object("fp-mpu-s", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        let mut expected = vec![b'A'; 3072];
+        expected.extend_from_slice(&vec![b'B'; 3072]);
+        assert_eq!(body, expected);
+    }
+
+    #[tokio::test]
+    async fn segment_dir_fsync_failure_fails_the_complete_and_retry_succeeds() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("fp-mpu-f").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("fp-mpu-f", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 3072]));
+        backend
+            .upload_part("fp-mpu-f", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 3072]));
+        backend
+            .upload_part("fp-mpu-f", &upload_id, 2, part2)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:segment-dir-fsync",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .complete_multipart("fp-mpu-f", &upload_id, &parts)
+            .await;
+        crate::failpoints::clear(&backend.root, "mpu:segment-dir-fsync");
+        assert!(
+            result.is_err(),
+            "a failed segment-directory fsync must fail the complete instead of \
+             acknowledging an upload whose namespace entries may not be durable"
+        );
+        assert!(
+            backend.get_object("fp-mpu-f", "obj.bin").await.is_err(),
+            "no object may be visible after the failed complete"
+        );
+        let segment_dir = backend.segments_bucket_root("fp-mpu-f").join(&upload_id);
+        assert!(
+            !segment_dir.exists(),
+            "the failed complete must roll the parts back out of the segment directory"
+        );
+
+        let obj = backend
+            .complete_multipart("fp-mpu-f", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(obj.size, 6144, "retrying the complete must succeed");
+        let (_, mut stream) = backend.get_object("fp-mpu-f", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body.len(), 6144);
+    }
+
+    #[tokio::test]
+    async fn recovery_discards_staged_sidecars_without_a_destination() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("rec-legacy").await.unwrap();
+        put_listing_object(&backend, "rec-legacy", "obj.bin", b"v1").await;
+
+        let tmp_dir = backend.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let staged = tmp_dir.join("legacy.sidecar-stage");
+        std::fs::write(
+            &staged,
+            serde_json::json!({
+                "metadata": {"__etag__": "\"deadbeef\"", "__size__": "2"},
+                "__entry_name__": "obj.bin"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(recovery.discarded, 1);
+        assert!(recovery.published.is_empty());
+        assert!(!staged.exists());
+        let meta = backend
+            .get_object_metadata("rec-legacy", "obj.bin")
+            .await
+            .unwrap();
+        assert!(
+            meta.get("__etag__").is_some_and(|e| e != "\"deadbeef\""),
+            "a destination-less staged sidecar must never be published"
+        );
+    }
+
+    fn write_crafted_stage(
+        backend: &FsStorageBackend,
+        name: &str,
+        bucket: &str,
+        key: &str,
+        etag: &str,
+        size: u64,
+        mtime: &str,
+        extra_meta: &[(&str, &str)],
+    ) -> PathBuf {
+        let (_, entry_name) = backend.sidecar_file_for_key(bucket, key);
+        let tmp_dir = backend.tmp_dir();
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let staged = tmp_dir.join(format!("{}.sidecar-stage", name));
+        let mut meta = serde_json::Map::new();
+        meta.insert("__etag__".to_string(), Value::String(etag.to_string()));
+        meta.insert("__size__".to_string(), Value::String(size.to_string()));
+        meta.insert(
+            "__last_modified__".to_string(),
+            Value::String(mtime.to_string()),
+        );
+        for (k, v) in extra_meta {
+            meta.insert(k.to_string(), Value::String(v.to_string()));
+        }
+        std::fs::write(
+            &staged,
+            serde_json::json!({
+                "metadata": meta,
+                "__entry_name__": entry_name,
+                "__commit_bucket__": bucket,
+                "__commit_key__": key
+            })
+            .to_string(),
+        )
+        .unwrap();
+        staged
+    }
+
+    #[tokio::test]
+    async fn recovery_hashes_indistinguishable_overwrites_to_the_surviving_write() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("rec-hash").await.unwrap();
+        put_listing_object(&backend, "rec-hash", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("rec-hash", "obj.bin")
+            .await
+            .unwrap();
+        let live = backend.object_live_path("rec-hash", "obj.bin");
+        let live_len = std::fs::metadata(&live).unwrap().len();
+        let mtime = before.get("__last_modified__").cloned().unwrap();
+
+        let staged = write_crafted_stage(
+            &backend,
+            "collision-lost",
+            "rec-hash",
+            "obj.bin",
+            "0000000000000000000000000000feed",
+            live_len,
+            &mtime,
+            &[],
+        );
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.discarded, 1,
+            "when the live data hashes to the published object, the staged commit lost"
+        );
+        assert!(recovery.published.is_empty());
+        assert_eq!(recovery.poisoned, 0);
+        assert!(!staged.exists());
+        let after = backend
+            .get_object_metadata("rec-hash", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+
+        let real_etag = before.get("__etag__").cloned().unwrap();
+        write_crafted_stage(
+            &backend,
+            "collision-won",
+            "rec-hash",
+            "obj.bin",
+            &real_etag,
+            live_len,
+            &mtime,
+            &[("x-amz-meta-recovered", "yes")],
+        );
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.published.len(),
+            1,
+            "when the live data hashes to the staged commit, its sidecar must be published"
+        );
+        let after = backend
+            .get_object_metadata("rec-hash", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(
+            after.get("x-amz-meta-recovered").map(String::as_str),
+            Some("yes")
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_poisons_unattributable_commits_so_reads_fail_closed() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("rec-poison").await.unwrap();
+        put_listing_object(&backend, "rec-poison", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("rec-poison", "obj.bin")
+            .await
+            .unwrap();
+        let live = backend.object_live_path("rec-poison", "obj.bin");
+        let live_len = std::fs::metadata(&live).unwrap().len();
+        let mtime = before.get("__last_modified__").cloned().unwrap();
+
+        let staged = write_crafted_stage(
+            &backend,
+            "torn",
+            "rec-poison",
+            "obj.bin",
+            "0000000000000000000000000000feed",
+            live_len + 7,
+            &mtime,
+            &[],
+        );
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.poisoned, 1,
+            "a commit that cannot be attributed to either write must be poisoned"
+        );
+        assert!(recovery.published.is_empty());
+        assert!(
+            staged.exists(),
+            "the poisoned commit's staged sidecar must remain for inspection"
+        );
+        let after = backend.read_metadata_sync("rec-poison", "obj.bin");
+        assert_eq!(
+            after.get(META_KEY_CORRUPTED).map(String::as_str),
+            Some("true"),
+            "the object must be marked corrupted so reads fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_publishes_same_etag_commits_with_differing_metadata() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("rec-samect").await.unwrap();
+        put_listing_object(&backend, "rec-samect", "obj.bin", b"same-bytes").await;
+        let before = backend
+            .get_object_metadata("rec-samect", "obj.bin")
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        crate::failpoints::set(
+            &backend.root,
+            "put:before-publish-sidecar",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"same-bytes".to_vec()));
+            crashed
+                .put_object("rec-samect", "obj.bin", stream, None)
+                .await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:before-publish-sidecar");
+        assert!(join.unwrap_err().is_panic());
+
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.published.len(),
+            1,
+            "a same-content overwrite carries new commit metadata (for encrypted objects the \
+             data key and nonce) and must be published, not discarded on etag equality"
+        );
+        let after = backend
+            .get_object_metadata("rec-samect", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        assert_ne!(
+            after.get("__last_modified__"),
+            before.get("__last_modified__"),
+            "the recovered metadata must be the staged commit's, not the previous write's"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_releases_segments_replaced_by_an_interrupted_overwrite() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("rec-seg").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("rec-seg", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 3072]));
+        backend
+            .upload_part("rec-seg", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 3072]));
+        backend
+            .upload_part("rec-seg", &upload_id, 2, part2)
+            .await
+            .unwrap();
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+        backend
+            .complete_multipart("rec-seg", &upload_id, &parts)
+            .await
+            .unwrap();
+        let segment_dir = backend.segments_bucket_root("rec-seg").join(&upload_id);
+        assert!(segment_dir.is_dir());
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:before-publish-sidecar",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"plain-v2".to_vec()));
+            crashed.put_object("rec-seg", "obj.bin", stream, None).await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:before-publish-sidecar");
+        assert!(join.unwrap_err().is_panic());
+
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(recovery.published.len(), 1);
+        assert!(
+            !segment_dir.exists(),
+            "recovery must replay the release of the replaced segment directory"
+        );
+        let (_, mut stream) = backend.get_object("rec-seg", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"plain-v2");
+    }
+
+    #[tokio::test]
+    async fn injected_stage_dir_fsync_failure_aborts_the_put_cleanly() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("fp-stagedir").await.unwrap();
+        put_listing_object(&backend, "fp-stagedir", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-stagedir", "obj.bin")
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:stage-dir-fsync",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+        let result = backend
+            .put_object("fp-stagedir", "obj.bin", stream, None)
+            .await;
+        crate::failpoints::clear(&backend.root, "put:stage-dir-fsync");
+        assert!(
+            result.is_err(),
+            "a failed intent-directory fsync must fail the put before any data is renamed"
+        );
+
+        let after = backend
+            .get_object_metadata("fp-stagedir", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__etag__"), before.get("__etag__"));
+        let (_, mut stream) = backend.get_object("fp-stagedir", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v1");
+        assert_eq!(staged_sidecar_count(&backend), 0);
+    }
+
+    fn live_ns(backend: &FsStorageBackend, bucket: &str, key: &str) -> (u64, u128, String) {
+        let live = backend.object_live_path(bucket, key);
+        let meta = std::fs::metadata(&live).unwrap();
+        let ns = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mtime = backend
+            .read_metadata_sync(bucket, key)
+            .get("__last_modified__")
+            .cloned()
+            .unwrap();
+        (meta.len(), ns, mtime)
+    }
+
+    fn alter_recorded_commit_ns(
+        backend: &FsStorageBackend,
+        bucket: &str,
+        key: &str,
+        new_ns: Option<u128>,
+    ) {
+        let mut meta = backend.read_metadata_sync(bucket, key);
+        match new_ns {
+            Some(ns) => {
+                meta.insert(META_KEY_COMMIT_MTIME_NS.to_string(), ns.to_string());
+            }
+            None => {
+                meta.remove(META_KEY_COMMIT_MTIME_NS);
+            }
+        }
+        backend
+            .write_live_metadata_entry_sync(bucket, key, &meta)
+            .unwrap();
+        backend
+            .meta_read_cache
+            .lock()
+            .pop(&(bucket.to_string(), key.to_string()));
+    }
+
+    #[tokio::test]
+    async fn recovery_attributes_undigestable_commits_only_when_identities_differ() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("rec-enc").await.unwrap();
+        put_listing_object(&backend, "rec-enc", "attributed.bin", b"ciphertext-a").await;
+        put_listing_object(&backend, "rec-enc", "collided.bin", b"ciphertext-b").await;
+        put_listing_object(&backend, "rec-enc", "unknown.bin", b"ciphertext-c").await;
+
+        let (len_a, ns_a, mtime_a) = live_ns(&backend, "rec-enc", "attributed.bin");
+        alter_recorded_commit_ns(&backend, "rec-enc", "attributed.bin", Some(ns_a - 777));
+        write_crafted_stage(
+            &backend,
+            "enc-attributed",
+            "rec-enc",
+            "attributed.bin",
+            "0000000000000000000000000000cafe",
+            len_a,
+            &mtime_a,
+            &[
+                ("x-amz-server-side-encryption", "AES256"),
+                (META_KEY_COMMIT_MTIME_NS, &ns_a.to_string()),
+            ],
+        );
+
+        let (len_b, ns_b, mtime_b) = live_ns(&backend, "rec-enc", "collided.bin");
+        write_crafted_stage(
+            &backend,
+            "enc-collided",
+            "rec-enc",
+            "collided.bin",
+            "0000000000000000000000000000cafe",
+            len_b,
+            &mtime_b,
+            &[
+                ("x-amz-server-side-encryption", "AES256"),
+                (META_KEY_COMMIT_MTIME_NS, &ns_b.to_string()),
+            ],
+        );
+
+        let (len_c, ns_c, mtime_c) = live_ns(&backend, "rec-enc", "unknown.bin");
+        alter_recorded_commit_ns(&backend, "rec-enc", "unknown.bin", None);
+        write_crafted_stage(
+            &backend,
+            "enc-unknown",
+            "rec-enc",
+            "unknown.bin",
+            "0000000000000000000000000000cafe",
+            len_c,
+            &mtime_c,
+            &[
+                ("x-amz-server-side-encryption", "AES256"),
+                (META_KEY_COMMIT_MTIME_NS, &ns_c.to_string()),
+            ],
+        );
+
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.published.len(),
+            1,
+            "the filesystem identity attributes the live data only when it differs from the \
+             previously recorded commit identity"
+        );
+        assert_eq!(
+            recovery.poisoned, 2,
+            "a timestamp equal to the previous commit's, or a previous commit with no recorded \
+             identity, is ambiguous and the opaque-etag object must be poisoned"
+        );
+        let after_a = backend.read_metadata_sync("rec-enc", "attributed.bin");
+        assert_eq!(
+            after_a
+                .get("x-amz-server-side-encryption")
+                .map(String::as_str),
+            Some("AES256")
+        );
+        assert!(!after_a.contains_key(META_KEY_CORRUPTED));
+        let after_b = backend.read_metadata_sync("rec-enc", "collided.bin");
+        assert_eq!(
+            after_b.get(META_KEY_CORRUPTED).map(String::as_str),
+            Some("true")
+        );
+        let after_c = backend.read_metadata_sync("rec-enc", "unknown.bin");
+        assert_eq!(
+            after_c.get(META_KEY_CORRUPTED).map(String::as_str),
+            Some("true")
+        );
+        backend
+            .finish_recovered_commit_sync(&recovery.published[0].staged_path)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_publish_failure_poisons_the_object_and_recovery_heals_it() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("fp-torn").await.unwrap();
+        put_listing_object(&backend, "fp-torn", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-torn", "obj.bin")
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        crate::failpoints::set(
+            &backend.root,
+            "put:before-publish-sidecar",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2-longer".to_vec()));
+        let result = backend.put_object("fp-torn", "obj.bin", stream, None).await;
+        crate::failpoints::clear(&backend.root, "put:before-publish-sidecar");
+        assert!(result.is_err(), "the torn commit must fail the request");
+
+        assert_eq!(
+            staged_sidecar_count(&backend),
+            1,
+            "the commit intent must be retained after a runtime publish failure"
+        );
+        let poisoned = backend.read_metadata_sync("fp-torn", "obj.bin");
+        assert_eq!(
+            poisoned.get(META_KEY_CORRUPTED).map(String::as_str),
+            Some("true"),
+            "the torn object must fail closed instead of serving new bytes under old metadata"
+        );
+
+        let recovery = backend.recover_staged_commits_sync().unwrap();
+        assert_eq!(
+            recovery.published.len(),
+            1,
+            "recovery must attribute the live data to the retained intent and heal the object"
+        );
+        let healed = backend.read_metadata_sync("fp-torn", "obj.bin");
+        assert!(!healed.contains_key(META_KEY_CORRUPTED));
+        assert_ne!(healed.get("__etag__"), before.get("__etag__"));
+        let (_, mut stream) = backend.get_object("fp-torn", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v2-longer");
+        backend
+            .finish_recovered_commit_sync(&recovery.published[0].staged_path)
+            .unwrap();
+        assert_eq!(staged_sidecar_count(&backend), 0);
+    }
+
+    fn storm_keys() -> Vec<String> {
+        (0..40)
+            .map(|i| match i % 3 {
+                0 => format!("a/k{:02}", i),
+                1 => format!("a/b/k{:02}", i),
+                _ => format!("c/k{:02}", i),
+            })
+            .collect()
+    }
+
+    fn storm_rng_next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 16
+    }
+
+    async fn audit_storm_bucket(backend: &FsStorageBackend, bucket: &str) {
+        let params = myfsio_common::types::ListParams {
+            max_keys: 1000,
+            ..Default::default()
+        };
+        let listed = backend.list_objects(bucket, &params).await.unwrap();
+        assert!(!listed.is_truncated, "audit listing must not be truncated");
+        let indexed: Vec<(String, Option<String>, u64)> = listed
+            .objects
+            .iter()
+            .map(|o| (o.key.clone(), o.etag.clone(), o.size))
+            .collect();
+
+        backend.invalidate_all_listing_indexes_sync().unwrap();
+        let rebuilt = backend.list_objects(bucket, &params).await.unwrap();
+        let walked: Vec<(String, Option<String>, u64)> = rebuilt
+            .objects
+            .iter()
+            .map(|o| (o.key.clone(), o.etag.clone(), o.size))
+            .collect();
+        assert_eq!(
+            indexed, walked,
+            "the incremental listing index must match a from-scratch rebuild"
+        );
+
+        for obj in &listed.objects {
+            let (sidecar_path, _) = backend.sidecar_file_for_key(bucket, &obj.key);
+            assert!(
+                sidecar_path.is_file(),
+                "listed object {} must have a metadata sidecar",
+                obj.key
+            );
+            let (meta, mut stream) = backend
+                .get_object(bucket, &obj.key)
+                .await
+                .unwrap_or_else(|e| panic!("listed object {} must be readable: {}", obj.key, e));
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body).await.unwrap();
+            assert_eq!(
+                body.len() as u64,
+                obj.size,
+                "size mismatch between listing and data for {}",
+                obj.key
+            );
+            let mut hasher = Md5::new();
+            hasher.update(&body);
+            let body_md5 = format!("{:x}", hasher.finalize());
+            if let Some(ref etag) = meta.etag {
+                if !etag.contains('-') {
+                    assert_eq!(
+                        etag, &body_md5,
+                        "etag must match content md5 for {}",
+                        obj.key
+                    );
+                }
+            }
+        }
+
+        let listed_keys: std::collections::HashSet<String> =
+            listed.objects.iter().map(|o| o.key.clone()).collect();
+        let bucket_root = backend.bucket_path(bucket);
+        let mut stack = vec![bucket_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                let ft = entry.file_type().unwrap();
+                if ft.is_dir() {
+                    stack.push(path);
+                } else if ft.is_file() {
+                    let rel = path
+                        .strip_prefix(&bucket_root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    assert!(
+                        listed_keys.contains(&rel),
+                        "data file {} on disk is not listed (orphan)",
+                        rel
+                    );
+                }
+            }
+        }
+
+        for entry in std::fs::read_dir(backend.tmp_dir()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                !name.ends_with(".sidecar-stage") && !name.ends_with(".tmp"),
+                "temp file {} must not survive the storm",
+                name
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_put_delete_list_storm_preserves_invariants() {
+        let _stress = filesystem_stress_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("storm").await.unwrap();
+
+        const WORKERS: usize = 16;
+        const OPS: usize = 250;
+        let keys = std::sync::Arc::new(storm_keys());
+
+        let mut handles = Vec::new();
+        for worker in 0..WORKERS {
+            let backend = backend.clone();
+            let keys = keys.clone();
+            handles.push(tokio::spawn(async move {
+                let mut rng: u64 = 0x9E3779B97F4A7C15u64.wrapping_mul(worker as u64 + 1);
+                for op in 0..OPS {
+                    let roll = storm_rng_next(&mut rng);
+                    let key = &keys[(roll % keys.len() as u64) as usize];
+                    match (roll >> 8) % 10 {
+                        0..=5 => {
+                            let body = format!("w{worker}-o{op}-{key}").into_bytes();
+                            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+                            backend
+                                .put_object("storm", key, stream, None)
+                                .await
+                                .unwrap();
+                        }
+                        6 | 7 => {
+                            backend.delete_object("storm", key).await.unwrap();
+                        }
+                        8 => {
+                            let params = myfsio_common::types::ListParams {
+                                prefix: Some("a/".to_string()),
+                                max_keys: 1000,
+                                ..Default::default()
+                            };
+                            backend.list_objects("storm", &params).await.unwrap();
+                        }
+                        _ => match backend.get_object("storm", key).await {
+                            Ok((_, mut stream)) => {
+                                let mut body = Vec::new();
+                                stream.read_to_end(&mut body).await.unwrap();
+                            }
+                            Err(StorageError::ObjectNotFound { .. }) => {}
+                            Err(e) => panic!("unexpected get error under load: {e}"),
+                        },
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        audit_storm_bucket(&backend, "storm").await;
+
+        let stats = backend.bucket_stats("storm").await.unwrap();
+        let params = myfsio_common::types::ListParams {
+            max_keys: 1000,
+            ..Default::default()
+        };
+        let listed = backend.list_objects("storm", &params).await.unwrap();
+        assert_eq!(
+            stats.objects,
+            listed.objects.len() as u64,
+            "bucket stats object count must match the listing"
+        );
+        assert_eq!(
+            stats.bytes,
+            listed.objects.iter().map(|o| o.size).sum::<u64>(),
+            "bucket stats byte count must match the listing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_versioned_storm_preserves_invariants() {
+        let _stress = filesystem_stress_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("storm-ver").await.unwrap();
+        backend
+            .set_versioning_status("storm-ver", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        const WORKERS: usize = 12;
+        const OPS: usize = 120;
+        let keys: std::sync::Arc<Vec<String>> =
+            std::sync::Arc::new((0..12).map(|i| format!("v/k{:02}", i)).collect());
+
+        let mut handles = Vec::new();
+        for worker in 0..WORKERS {
+            let backend = backend.clone();
+            let keys = keys.clone();
+            handles.push(tokio::spawn(async move {
+                let mut rng: u64 = 0xD1B54A32D192ED03u64.wrapping_mul(worker as u64 + 1);
+                for op in 0..OPS {
+                    let roll = storm_rng_next(&mut rng);
+                    let key = &keys[(roll % keys.len() as u64) as usize];
+                    match (roll >> 8) % 10 {
+                        0..=4 => {
+                            let body = format!("vw{worker}-o{op}-{key}").into_bytes();
+                            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+                            backend
+                                .put_object("storm-ver", key, stream, None)
+                                .await
+                                .unwrap();
+                        }
+                        5 | 6 => {
+                            backend.delete_object("storm-ver", key).await.unwrap();
+                        }
+                        7 => {
+                            backend
+                                .list_object_versions("storm-ver", key)
+                                .await
+                                .unwrap();
+                        }
+                        _ => match backend.get_object("storm-ver", key).await {
+                            Ok((_, mut stream)) => {
+                                let mut body = Vec::new();
+                                stream.read_to_end(&mut body).await.unwrap();
+                            }
+                            Err(StorageError::ObjectNotFound { .. }) => {}
+                            Err(StorageError::DeleteMarker { .. }) => {}
+                            Err(e) => panic!("unexpected get error under load: {e}"),
+                        },
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        audit_storm_bucket(&backend, "storm-ver").await;
+
+        for key in keys.iter() {
+            let versions = backend
+                .list_object_versions("storm-ver", key)
+                .await
+                .unwrap();
+            let mut seen = std::collections::HashSet::new();
+            for version in &versions {
+                assert!(
+                    seen.insert(version.version_id.clone()),
+                    "duplicate version id {} for {}",
+                    version.version_id,
+                    key
+                );
+            }
+            assert!(
+                versions.iter().filter(|v| v.is_latest).count() <= 1,
+                "at most one version of {} may be latest",
+                key
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn partially_moved_mpu_parts_are_recovered_on_complete() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("fp-mpu-p").await.unwrap();
+
+        let upload_id = backend
+            .initiate_multipart("fp-mpu-p", "obj.bin", None)
+            .await
+            .unwrap();
+        let part1: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'A'; 3072]));
+        backend
+            .upload_part("fp-mpu-p", &upload_id, 1, part1)
+            .await
+            .unwrap();
+        let part2: AsyncReadStream = Box::pin(std::io::Cursor::new(vec![b'B'; 3072]));
+        backend
+            .upload_part("fp-mpu-p", &upload_id, 2, part2)
+            .await
+            .unwrap();
+
+        let upload_dir = backend
+            .multipart_upload_dir("fp-mpu-p", &upload_id)
+            .unwrap();
+        let segment_dir = backend.segments_bucket_root("fp-mpu-p").join(&upload_id);
+        std::fs::create_dir_all(&segment_dir).unwrap();
+        std::fs::rename(
+            upload_dir.join("part-00001.part"),
+            segment_dir.join(crate::segments::SegmentSet::seg_file_name(0)),
+        )
+        .unwrap();
+
+        let parts = vec![
+            PartInfo {
+                part_number: 1,
+                etag: String::new(),
+            },
+            PartInfo {
+                part_number: 2,
+                etag: String::new(),
+            },
+        ];
+        let obj = backend
+            .complete_multipart("fp-mpu-p", &upload_id, &parts)
+            .await
+            .unwrap();
+        assert_eq!(
+            obj.size, 6144,
+            "a complete interrupted mid-move must succeed with mixed part sources"
+        );
+        let (_, mut stream) = backend.get_object("fp-mpu-p", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        let mut expected = vec![b'A'; 3072];
+        expected.extend_from_slice(&vec![b'B'; 3072]);
+        assert_eq!(body, expected);
+    }
+
+    #[tokio::test]
+    async fn crash_after_version_archival_preserves_the_live_object() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("fp-arch").await.unwrap();
+        backend
+            .set_versioning_status("fp-arch", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_listing_object(&backend, "fp-arch", "obj.bin", b"v1").await;
+        let before = backend
+            .get_object_metadata("fp-arch", "obj.bin")
+            .await
+            .unwrap();
+        let original_vid = before.get("__version_id__").cloned().unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "put:after-archive",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crashed = backend.clone();
+        let join = tokio::spawn(async move {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v2".to_vec()));
+            crashed.put_object("fp-arch", "obj.bin", stream, None).await
+        })
+        .await;
+        crate::failpoints::clear(&backend.root, "put:after-archive");
+        assert!(join.unwrap_err().is_panic());
+
+        let after = backend
+            .get_object_metadata("fp-arch", "obj.bin")
+            .await
+            .unwrap();
+        assert_eq!(after.get("__version_id__"), Some(&original_vid));
+        let (_, mut stream) = backend.get_object("fp-arch", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(body, b"v1");
+        for version in backend
+            .list_object_versions("fp-arch", "obj.bin")
+            .await
+            .unwrap()
+        {
+            assert_eq!(
+                version.version_id, original_vid,
+                "a crash after archival must not surface a version id that was never committed"
+            );
+        }
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"v3".to_vec()));
+        let committed = backend
+            .put_object("fp-arch", "obj.bin", stream, None)
+            .await
+            .unwrap();
+        assert_ne!(committed.version_id.as_deref(), Some(original_vid.as_str()));
+        let (_, mut stream) = backend.get_object("fp-arch", "obj.bin").await.unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).await.unwrap();
+        assert_eq!(
+            body, b"v3",
+            "the next put after the crash must commit normally"
+        );
     }
 
     #[tokio::test]
@@ -8085,6 +12125,95 @@ mod tests {
         assert_eq!(parse_part_sizes(raw).unwrap(), vec![1024u64, 512u64]);
     }
 
+    #[tokio::test]
+    async fn multipart_part_records_are_constant_size_and_merge_with_legacy_manifest() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("record-bucket").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("record-bucket", "mixed.bin", None)
+            .await
+            .unwrap();
+        let upload_dir = backend
+            .multipart_upload_dir("record-bucket", &upload_id)
+            .unwrap();
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        let original_manifest = std::fs::read(&manifest_path).unwrap();
+
+        let first = b"record-one".to_vec();
+        let second = b"legacy-two".to_vec();
+        let first_etag = backend
+            .upload_part(
+                "record-bucket",
+                &upload_id,
+                1,
+                Box::pin(std::io::Cursor::new(first.clone())),
+            )
+            .await
+            .unwrap();
+        let second_etag = backend
+            .upload_part(
+                "record-bucket",
+                &upload_id,
+                2,
+                Box::pin(std::io::Cursor::new(second.clone())),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), original_manifest);
+        assert!(FsStorageBackend::part_record_path(&upload_dir, 1).is_file());
+        assert!(FsStorageBackend::part_record_path(&upload_dir, 2).is_file());
+
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["parts"]["1"] = serde_json::json!({
+            "etag": "00000000000000000000000000000000",
+            "size": 999,
+            "filename": "part-00001.part"
+        });
+        manifest["parts"]["2"] = serde_json::json!({
+            "etag": second_etag.clone(),
+            "size": second.len(),
+            "filename": "part-00002.part"
+        });
+        FsStorageBackend::atomic_write_json_sync(&manifest_path, &manifest, true).unwrap();
+        std::fs::remove_file(FsStorageBackend::part_record_path(&upload_dir, 2)).unwrap();
+
+        let listed = backend
+            .list_parts("record-bucket", &upload_id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].etag, first_etag);
+        assert_eq!(listed[0].size, first.len() as u64);
+        assert_eq!(listed[1].etag, second_etag);
+        assert_eq!(listed[1].size, second.len() as u64);
+
+        let completed = backend
+            .complete_multipart(
+                "record-bucket",
+                &upload_id,
+                &[
+                    PartInfo {
+                        part_number: 1,
+                        etag: first_etag,
+                    },
+                    PartInfo {
+                        part_number: 2,
+                        etag: second_etag,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.size, (first.len() + second.len()) as u64);
+        let (_, stream) = backend
+            .get_object("record-bucket", "mixed.bin")
+            .await
+            .unwrap();
+        assert_eq!(read_stream_to_end(stream).await, [first, second].concat());
+    }
+
     async fn read_stream_to_end(mut stream: AsyncReadStream) -> Vec<u8> {
         let mut out = Vec::new();
         stream.read_to_end(&mut out).await.unwrap();
@@ -8191,6 +12320,82 @@ mod tests {
             .find(|o| o.key == "v.bin")
             .expect("listed");
         assert_eq!(entry.size, full.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn segmented_snapshot_links_survive_source_delete_and_clean_up() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("snap-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let full: Vec<u8> = parts_data.concat();
+        seed_segmented_object(&backend, "snap-bkt", "source.bin", &parts_data).await;
+        let snapshot_path = dir.path().join("segment-snapshot");
+
+        let (_, source) = backend
+            .snapshot_object_to_link("snap-bkt", "source.bin", &snapshot_path)
+            .await
+            .unwrap();
+        assert!(snapshot_path.join("stub").is_file());
+        assert!(snapshot_path.join("segments").is_dir());
+        backend
+            .delete_object("snap-bkt", "source.bin")
+            .await
+            .unwrap();
+
+        let stream = source.into_range_stream(0, None).await.unwrap();
+        assert_eq!(read_stream_to_end(stream).await, full);
+        assert!(!snapshot_path.exists());
+    }
+
+    #[tokio::test]
+    async fn segmented_snapshot_defers_later_size_validation_until_stream_reaches_it() {
+        use tokio::io::AsyncReadExt;
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("lazy-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let (segment_id, _) =
+            seed_segmented_object(&backend, "lazy-bkt", "source.bin", &parts_data).await;
+        let second_segment = backend
+            .segments_bucket_root("lazy-bkt")
+            .join(segment_id)
+            .join(crate::segments::SegmentSet::seg_file_name(1));
+        std::fs::write(&second_segment, b"short").unwrap();
+        let snapshot_path = dir.path().join("lazy-snapshot");
+
+        let (_, source) = backend
+            .snapshot_object_to_link("lazy-bkt", "source.bin", &snapshot_path)
+            .await
+            .unwrap();
+        let mut stream = source.into_range_stream(0, None).await.unwrap();
+        let mut first = vec![0u8; parts_data[0].len()];
+        stream.read_exact(&mut first).await.unwrap();
+        assert_eq!(first, parts_data[0]);
+        let error = stream.read_to_end(&mut Vec::new()).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn segmented_snapshot_rejects_first_size_mismatch_before_stream_creation() {
+        let (dir, backend) = create_test_backend();
+        backend.create_bucket("eager-bkt").await.unwrap();
+        let parts_data = segmented_parts();
+        let (segment_id, _) =
+            seed_segmented_object(&backend, "eager-bkt", "source.bin", &parts_data).await;
+        let first_segment = backend
+            .segments_bucket_root("eager-bkt")
+            .join(segment_id)
+            .join(crate::segments::SegmentSet::seg_file_name(0));
+        std::fs::write(first_segment, b"short").unwrap();
+        let snapshot_path = dir.path().join("eager-snapshot");
+
+        match backend
+            .snapshot_object_to_link("eager-bkt", "source.bin", &snapshot_path)
+            .await
+        {
+            Err(StorageError::ObjectCorrupted { .. }) => {}
+            Err(error) => panic!("expected ObjectCorrupted, got {error}"),
+            Ok(_) => panic!("expected ObjectCorrupted, got a snapshot"),
+        }
     }
 
     #[tokio::test]
@@ -8333,33 +12538,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_segmented_copy_object_produces_single_file() {
+    async fn test_segmented_copy_object_hard_links_new_segment_set() {
         let (_dir, backend) = create_test_backend();
         backend.create_bucket("segcp-bkt").await.unwrap();
         let parts_data = segmented_parts();
         let full: Vec<u8> = parts_data.concat();
-        seed_segmented_object(&backend, "segcp-bkt", "src.bin", &parts_data).await;
+        let (source_segment_id, source_meta) =
+            seed_segmented_object(&backend, "segcp-bkt", "src.bin", &parts_data).await;
 
         let copied = backend
             .copy_object("segcp-bkt", "src.bin", "segcp-bkt", "dst.bin")
             .await
             .unwrap();
         assert_eq!(copied.size, full.len() as u64);
+        assert_eq!(copied.etag, source_meta.etag);
 
         let dst_meta = backend
             .get_object_metadata("segcp-bkt", "dst.bin")
             .await
             .unwrap();
-        assert!(!dst_meta.contains_key(crate::segments::META_KEY_SEGMENTS));
-        assert!(!dst_meta.contains_key(META_KEY_PART_SIZES));
+        let destination_segment_id = dst_meta
+            .get(crate::segments::META_KEY_SEGMENTS)
+            .expect("copied object must own a segment set");
+        assert_ne!(destination_segment_id, &source_segment_id);
+        assert_eq!(
+            parse_part_sizes(dst_meta.get(META_KEY_PART_SIZES).unwrap()).unwrap(),
+            parts_data
+                .iter()
+                .map(|part| part.len() as u64)
+                .collect::<Vec<_>>()
+        );
+
+        let source_segment = backend
+            .segments_bucket_root("segcp-bkt")
+            .join(&source_segment_id)
+            .join(crate::segments::SegmentSet::seg_file_name(0));
+        let destination_segment = backend
+            .segments_bucket_root("segcp-bkt")
+            .join(destination_segment_id)
+            .join(crate::segments::SegmentSet::seg_file_name(0));
+        let mut changed = parts_data[0].clone();
+        changed[0] ^= 0xff;
+        std::fs::write(&source_segment, &changed).unwrap();
+        assert_eq!(std::fs::read(&destination_segment).unwrap(), changed);
+        std::fs::write(&source_segment, &parts_data[0]).unwrap();
 
         let (_, stream) = backend.get_object("segcp-bkt", "dst.bin").await.unwrap();
         assert_eq!(read_stream_to_end(stream).await, full);
 
         let dst_path = backend.object_path("segcp-bkt", "dst.bin").unwrap();
-        assert!(crate::segments::read_stub_header(&dst_path)
+        let header = crate::segments::read_stub_header(&dst_path)
             .unwrap()
-            .is_none());
+            .expect("destination must be a segment stub");
+        assert_eq!(header.segment_id, destination_segment_id.as_str());
+        assert_eq!(header.etag, copied.etag.unwrap());
     }
 
     #[tokio::test]
@@ -10140,6 +14372,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (dir, backend) = create_test_backend();
         let root = dir.path().to_path_buf();
         let backend = StdArc::new(backend);
@@ -10226,6 +14459,7 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tokio::io::AsyncReadExt;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("snap-bkt").await.unwrap();
@@ -10298,6 +14532,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("range-bkt").await.unwrap();
@@ -10382,6 +14617,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("mp-bkt").await.unwrap();
@@ -10472,6 +14708,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("contend").await.unwrap();
@@ -10533,6 +14770,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc as StdArc;
 
+        let _stress = filesystem_stress_test_guard();
         let (_dir, backend) = create_test_backend();
         let backend = StdArc::new(backend);
         backend.create_bucket("race-bucket").await.unwrap();
@@ -10885,6 +15123,12 @@ mod tests {
         assert!(root_index.is_file());
         assert!(sub_index.is_file());
 
+        let preflight = index_backend.preflight_meta_migration();
+        assert_eq!(preflight.index_files, 2);
+        assert_eq!(preflight.entries, 3);
+        assert!(preflight.corrupt.is_empty());
+        assert!(preflight.collisions.is_empty());
+
         let report = index_backend.migrate_meta_indexes_to_sidecars();
         assert_eq!(report.index_files_migrated, 2);
         assert_eq!(report.index_files_failed, 0);
@@ -10892,6 +15136,15 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(!root_index.exists());
         assert!(!sub_index.exists());
+        assert!(
+            root_index
+                .with_file_name(format!("{}.migrated", INDEX_FILE))
+                .is_file(),
+            "the migrated index must be kept as a rollback backup"
+        );
+        assert!(sub_index
+            .with_file_name(format!("{}.migrated", INDEX_FILE))
+            .is_file());
 
         let sidecar_backend = FsStorageBackend::new(dir.path().to_path_buf());
         for key in ["a.txt", "sub/b.txt", "sub/c.txt"] {
@@ -10920,9 +15173,137 @@ mod tests {
         std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
         std::fs::write(&index_path, b"][").unwrap();
 
+        let preflight = backend.preflight_meta_migration();
+        assert_eq!(preflight.corrupt.len(), 1, "{:?}", preflight.corrupt);
+        assert!(index_path.is_file(), "preflight must not modify anything");
+
         let report = backend.migrate_meta_indexes_to_sidecars();
         assert_eq!(report.index_files_failed, 1);
         assert!(index_path.is_file(), "corrupt index must be preserved");
+    }
+
+    fn index_layout_backend() -> (tempfile::TempDir, FsStorageBackend) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig {
+                metadata_layout: MetadataLayout::Index,
+                ..FsStorageBackendConfig::default()
+            },
+        );
+        (dir, backend)
+    }
+
+    #[tokio::test]
+    async fn migration_interrupted_by_crash_is_resumable() {
+        let _fp = failpoint_test_guard();
+        let (dir, index_backend) = index_layout_backend();
+        index_backend.create_bucket("mig-crash").await.unwrap();
+        let keys = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        for key in keys {
+            let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"m".to_vec()));
+            index_backend
+                .put_object("mig-crash", key, data, None)
+                .await
+                .unwrap();
+        }
+        let index_path = index_backend.bucket_meta_root("mig-crash").join(INDEX_FILE);
+        assert!(index_path.is_file());
+
+        crate::failpoints::set(
+            &index_backend.root,
+            "migrate:sidecar-write",
+            crate::failpoints::FailAction::Panic,
+        );
+        let crash_backend = FsStorageBackend::new_with_config(
+            dir.path().to_path_buf(),
+            FsStorageBackendConfig {
+                metadata_layout: MetadataLayout::Sidecar,
+                ..FsStorageBackendConfig::default()
+            },
+        );
+        let join =
+            tokio::task::spawn_blocking(move || crash_backend.migrate_meta_indexes_to_sidecars())
+                .await;
+        crate::failpoints::clear(&index_backend.root, "migrate:sidecar-write");
+        assert!(
+            join.unwrap_err().is_panic(),
+            "the failpoint must simulate a crash"
+        );
+        assert!(
+            index_path.is_file(),
+            "a crash mid-migration must leave the index in place"
+        );
+
+        for key in keys {
+            let stored = index_backend
+                .get_object_metadata("mig-crash", key)
+                .await
+                .unwrap();
+            assert!(
+                stored.contains_key("__etag__"),
+                "metadata for {} must stay readable after an interrupted migration",
+                key
+            );
+        }
+
+        let resume_backend = FsStorageBackend::new(dir.path().to_path_buf());
+        let report = resume_backend.migrate_meta_indexes_to_sidecars();
+        assert_eq!(report.index_files_migrated, 1);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(!index_path.is_file());
+        assert!(index_path
+            .with_file_name(format!("{}.migrated", INDEX_FILE))
+            .is_file());
+        for key in keys {
+            let stored = resume_backend
+                .get_object_metadata("mig-crash", key)
+                .await
+                .unwrap();
+            assert!(stored.contains_key("__etag__"));
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_write_failures_keep_the_index_serving() {
+        let _fp = failpoint_test_guard();
+        let (_dir, index_backend) = index_layout_backend();
+        index_backend.create_bucket("mig-fail").await.unwrap();
+        for key in ["x.txt", "y.txt"] {
+            let data: AsyncReadStream = Box::pin(std::io::Cursor::new(b"m".to_vec()));
+            index_backend
+                .put_object("mig-fail", key, data, None)
+                .await
+                .unwrap();
+        }
+        let index_path = index_backend.bucket_meta_root("mig-fail").join(INDEX_FILE);
+
+        crate::failpoints::set(
+            &index_backend.root,
+            "migrate:sidecar-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::Other),
+        );
+        let report = index_backend.migrate_meta_indexes_to_sidecars();
+        crate::failpoints::clear(&index_backend.root, "migrate:sidecar-write");
+        assert_eq!(report.index_files_migrated, 0);
+        assert_eq!(report.index_files_failed, 1);
+        assert!(!report.failures.is_empty());
+        assert!(
+            index_path.is_file(),
+            "write failures must leave the index serving reads"
+        );
+
+        for key in ["x.txt", "y.txt"] {
+            let stored = index_backend
+                .get_object_metadata("mig-fail", key)
+                .await
+                .unwrap();
+            assert!(stored.contains_key("__etag__"));
+        }
+
+        let retry = index_backend.migrate_meta_indexes_to_sidecars();
+        assert_eq!(retry.index_files_migrated, 1);
+        assert!(retry.failures.is_empty(), "{:?}", retry.failures);
     }
 
     #[tokio::test]

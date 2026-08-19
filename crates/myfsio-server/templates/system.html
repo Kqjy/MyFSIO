@@ -341,11 +341,10 @@
                   {% set i2 = exec.result.orphaned_objects | default(value=0) %}
                   {% set i3 = exec.result.phantom_metadata | default(value=0) %}
                   {% set i4 = exec.result.stale_versions | default(value=0) %}
-                  {% set i5 = exec.result.etag_cache_inconsistencies | default(value=0) %}
-                  {% set i6 = exec.result.legacy_metadata_drifts | default(value=0) %}
-                  {% set i7 = exec.result.poisoned_objects | default(value=0) %}
-                  {% set i8 = exec.result.invalid_metadata_keys | default(value=0) %}
-                  {% set total_issues = i1 + i2 + i3 + i4 + i5 + i6 + i7 + i8 %}
+                  {% set i5 = exec.result.legacy_metadata_drifts | default(value=0) %}
+                  {% set i6 = exec.result.poisoned_objects | default(value=0) %}
+                  {% set i7 = exec.result.invalid_metadata_keys | default(value=0) %}
+                  {% set total_issues = i1 + i2 + i3 + i4 + i5 + i6 + i7 %}
                   {% if total_issues > 0 %}
                   <span class="text-danger fw-medium">{{ total_issues }}</span>
                   {% else %}
@@ -504,7 +503,7 @@
         var r = exec.result || {};
         var issues = (r.corrupted_objects || 0) + (r.orphaned_objects || 0) +
           (r.phantom_metadata || 0) + (r.stale_versions || 0) +
-          (r.etag_cache_inconsistencies || 0) + (r.legacy_metadata_drifts || 0) +
+          (r.legacy_metadata_drifts || 0) +
           (r.poisoned_objects || 0) + (r.invalid_metadata_keys || 0);
         var issueHtml = issues > 0
           ? '<span class="text-danger fw-medium">' + issues + '</span>'
@@ -722,7 +721,7 @@
 
     var totalIssues = (data.corrupted_objects || 0) + (data.orphaned_objects || 0) +
                        (data.phantom_metadata || 0) + (data.stale_versions || 0) +
-                       (data.etag_cache_inconsistencies || 0) + (data.legacy_metadata_drifts || 0) +
+                       (data.legacy_metadata_drifts || 0) +
                        (data.poisoned_objects || 0) + (data.invalid_metadata_keys || 0);
 
     var prefix = dryRun ? '[Dry Run] ' : (autoHeal ? '[Heal] ' : '');
@@ -749,7 +748,6 @@
       if (data.orphaned_objects) lines.push('Orphaned objects: ' + data.orphaned_objects);
       if (data.phantom_metadata) lines.push('Phantom metadata: ' + data.phantom_metadata);
       if (data.stale_versions) lines.push('Stale versions: ' + data.stale_versions);
-      if (data.etag_cache_inconsistencies) lines.push('ETag inconsistencies: ' + data.etag_cache_inconsistencies);
       if (data.legacy_metadata_drifts) lines.push('Legacy metadata drifts: ' + data.legacy_metadata_drifts);
       if (data.poisoned_objects) lines.push('Awaiting recovery: ' + data.poisoned_objects);
       if (data.invalid_metadata_keys) lines.push('Invalid metadata keys: ' + data.invalid_metadata_keys);
