@@ -36,11 +36,30 @@ window.IAMManagement = (function() {
     bucketadmin: [{ bucket: '*', actions: ['list', 'read', 'write', 'delete', 'share', 'policy', 'create_bucket', 'delete_bucket', 'versioning', 'tagging', 'encryption', 'cors', 'lifecycle', 'quota', 'object_lock', 'notification', 'logging', 'website', 'replication'] }]
   };
 
+  function isDenyPolicy(p) {
+    return String(p.effect || 'Allow').toLowerCase() === 'deny';
+  }
+
   function isAdminUser(policies) {
     if (!policies || !policies.length) return false;
+    if (policies.some(isDenyPolicy)) return false;
     return policies.some(function(p) {
-      return p.bucket === '*' && p.actions && p.actions.indexOf('*') >= 0;
+      var prefix = (p.prefix === undefined || p.prefix === null) ? '*' : String(p.prefix).trim();
+      var conditional = p.condition && typeof p.condition === 'object';
+      return p.bucket === '*' && p.actions && p.actions.indexOf('*') >= 0 &&
+        (prefix === '' || prefix === '*') && !conditional;
     });
+  }
+
+  function policyBadgeLabel(p) {
+    var label = getBucketLabel(p.bucket) + ' \u00b7 ' + getPermissionLevel(p.actions);
+    if (isDenyPolicy(p)) label = 'Deny \u00b7 ' + label;
+    if (p.condition && typeof p.condition === 'object') label += ' \u00b7 conditional';
+    return label;
+  }
+
+  function policyBadgeClass(p) {
+    return 'iam-perm-badge' + (isDenyPolicy(p) ? ' text-danger' : '');
   }
 
   function getPermissionLevel(actions) {
@@ -435,12 +454,10 @@ window.IAMManagement = (function() {
     var policyBadges = '';
     if (policies && policies.length > 0) {
       policyBadges = policies.map(function(p) {
-        var bucketLabel = getBucketLabel(p.bucket);
-        var permLevel = getPermissionLevel(p.actions);
-        return '<span class="iam-perm-badge">' +
+        return '<span class="' + policyBadgeClass(p) + '">' +
           '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
           '<path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>' +
-          '</svg>' + window.UICore.escapeHtml(bucketLabel) + ' &middot; ' + window.UICore.escapeHtml(permLevel) + '</span>';
+          '</svg>' + window.UICore.escapeHtml(policyBadgeLabel(p)) + '</span>';
       }).join('');
     } else {
       policyBadges = '<span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>';
@@ -681,12 +698,10 @@ window.IAMManagement = (function() {
               var badgeContainer = cardEl ? cardEl.querySelector('[data-policy-badges]') : null;
               if (badgeContainer && data.policies) {
                 var badges = data.policies.map(function(p) {
-                  var bl = getBucketLabel(p.bucket);
-                  var pl = getPermissionLevel(p.actions);
-                  return '<span class="iam-perm-badge">' +
+                  return '<span class="' + policyBadgeClass(p) + '">' +
                     '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="me-1" viewBox="0 0 16 16">' +
                     '<path d="M2.522 5H2a.5.5 0 0 0-.494.574l1.372 9.149A1.5 1.5 0 0 0 4.36 16h7.278a1.5 1.5 0 0 0 1.483-1.277l1.373-9.149A.5.5 0 0 0 14 5h-.522A5.5 5.5 0 0 0 2.522 5zm1.005 0a4.5 4.5 0 0 1 8.945 0H3.527z"/>' +
-                    '</svg>' + window.UICore.escapeHtml(bl) + ' &middot; ' + window.UICore.escapeHtml(pl) + '</span>';
+                    '</svg>' + window.UICore.escapeHtml(policyBadgeLabel(p)) + '</span>';
                 }).join('');
                 badgeContainer.innerHTML = badges || '<span class="badge bg-secondary bg-opacity-10 text-secondary">No policies</span>';
               }

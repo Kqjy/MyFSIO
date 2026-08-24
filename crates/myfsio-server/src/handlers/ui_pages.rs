@@ -865,24 +865,12 @@ pub async fn iam_dashboard(
             .as_ref()
             .and_then(|d| d.get("expires_at").cloned())
             .unwrap_or(Value::Null);
-        let is_admin = policies
-            .as_array()
+        let is_admin = serde_json::from_value::<Vec<myfsio_auth::iam::IamPolicy>>(policies.clone())
             .map(|items| {
-                items.iter().any(|policy| {
-                    let bucket_wildcard = policy
-                        .get("bucket")
-                        .and_then(|v| v.as_str())
-                        .map(|b| b == "*")
-                        .unwrap_or(false);
-                    if !bucket_wildcard {
-                        return false;
-                    }
-                    policy
-                        .get("actions")
-                        .and_then(|value| value.as_array())
-                        .map(|actions| actions.iter().any(|action| action.as_str() == Some("*")))
-                        .unwrap_or(false)
-                })
+                items
+                    .iter()
+                    .any(myfsio_auth::iam::IamPolicy::is_unconditional_full_grant)
+                    && !items.iter().any(myfsio_auth::iam::IamPolicy::is_deny)
             })
             .unwrap_or(false);
         let expires_dt = expires_at.as_str().and_then(|value| {
@@ -951,8 +939,10 @@ fn parse_policies(raw: &str) -> Result<Vec<myfsio_auth::iam::IamPolicy>, String>
     if trimmed.is_empty() {
         return Ok(vec![]);
     }
-    serde_json::from_str::<Vec<myfsio_auth::iam::IamPolicy>>(trimmed)
-        .map_err(|e| format!("Invalid policies JSON: {}", e))
+    let policies = serde_json::from_str::<Vec<myfsio_auth::iam::IamPolicy>>(trimmed)
+        .map_err(|e| format!("Invalid policies JSON: {}", e))?;
+    myfsio_auth::iam::validate_policies(&policies)?;
+    Ok(policies)
 }
 
 fn normalize_expires_at(raw: Option<String>) -> Result<Option<String>, String> {
@@ -4318,11 +4308,24 @@ pub async fn update_bucket_policy(
                 return Redirect::to(&redirect_url).into_response();
             }
         };
-        if let Some(clause) = crate::handlers::config::policy_unsupported_clause(&policy) {
+        if form.policy_document.len() > crate::handlers::config::BUCKET_POLICY_MAX_BYTES {
             let message = format!(
-                "Policy statements containing '{}' are not supported by this server",
-                clause
+                "Bucket policy exceeds the maximum size of {} bytes",
+                crate::handlers::config::BUCKET_POLICY_MAX_BYTES
             );
+            if wants_json {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+            return Redirect::to(&redirect_url).into_response();
+        }
+        if let Err(reason) = crate::handlers::config::validate_bucket_policy(&policy, &bucket_name)
+        {
+            let message = format!("Invalid bucket policy: {}", reason);
             if wants_json {
                 return (
                     StatusCode::BAD_REQUEST,

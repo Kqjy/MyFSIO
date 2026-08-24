@@ -1,3 +1,4 @@
+use crate::policy::{evaluate_condition_checked, validate_condition, RequestContext};
 use chrono::{DateTime, Utc};
 use myfsio_common::types::{Principal, PrincipalKind};
 use parking_lot::{Mutex, RwLock};
@@ -128,7 +129,12 @@ pub const LEGACY_FULL_ACCESS_ACTIONS: &[&str] = &[
 ];
 
 fn normalize_legacy_full_access(policy: IamPolicy) -> IamPolicy {
-    if policy.bucket != "*" || policy.prefix != "*" || policy.actions.iter().any(|a| a == "*") {
+    if policy.bucket != "*"
+        || policy.prefix != "*"
+        || policy.is_deny()
+        || policy.condition.is_some()
+        || policy.actions.iter().any(|a| a == "*")
+    {
         return policy;
     }
     if !policy.actions.iter().any(|a| a == "iam:*") {
@@ -143,6 +149,8 @@ fn normalize_legacy_full_access(policy: IamPolicy) -> IamPolicy {
         bucket: policy.bucket,
         prefix: policy.prefix,
         actions: vec!["*".to_string()],
+        effect: policy.effect,
+        condition: policy.condition,
     }
 }
 
@@ -170,10 +178,78 @@ pub struct IamPolicy {
     pub actions: Vec<String>,
     #[serde(default = "default_prefix")]
     pub prefix: String,
+    #[serde(default = "default_effect", skip_serializing_if = "is_default_effect")]
+    pub effect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<serde_json::Value>,
 }
 
 fn default_prefix() -> String {
     "*".to_string()
+}
+
+fn default_effect() -> String {
+    "Allow".to_string()
+}
+
+fn is_default_effect(effect: &str) -> bool {
+    effect.trim().eq_ignore_ascii_case("allow")
+}
+
+impl IamPolicy {
+    pub fn allow(bucket: &str, actions: &[&str]) -> Self {
+        Self {
+            bucket: bucket.to_string(),
+            actions: actions.iter().map(|a| a.to_string()).collect(),
+            prefix: default_prefix(),
+            effect: default_effect(),
+            condition: None,
+        }
+    }
+
+    pub fn is_deny(&self) -> bool {
+        self.effect.trim().eq_ignore_ascii_case("deny")
+    }
+
+    pub fn is_unconditional_full_grant(&self) -> bool {
+        !self.is_deny()
+            && self.condition.as_ref().is_none_or(|c| c.is_null())
+            && self.bucket.trim() == "*"
+            && self.actions.iter().any(|a| a == "*")
+            && (self.prefix.trim() == "*" || self.prefix.trim().is_empty())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let effect = self.effect.trim();
+        if !effect.eq_ignore_ascii_case("allow") && !effect.eq_ignore_ascii_case("deny") {
+            return Err(format!(
+                "Policy effect must be Allow or Deny, got {:?}",
+                self.effect
+            ));
+        }
+        if self.bucket.trim().is_empty() {
+            return Err("Policy bucket must not be empty".to_string());
+        }
+        if self.actions.is_empty() {
+            return Err("Policy must list at least one action".to_string());
+        }
+        if self.actions.iter().any(|a| a.trim().is_empty()) {
+            return Err("Policy actions must not be empty strings".to_string());
+        }
+        if let Some(condition) = self.condition.as_ref().filter(|c| !c.is_null()) {
+            validate_condition(condition)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_policies(policies: &[IamPolicy]) -> Result<(), String> {
+    for (index, policy) in policies.iter().enumerate() {
+        policy
+            .validate()
+            .map_err(|err| format!("Policy statement {}: {}", index + 1, err))?;
+    }
+    Ok(())
 }
 
 struct IamState {
@@ -467,11 +543,11 @@ impl IamService {
             ));
         }
 
-        let is_admin = user.policies.iter().any(|p| {
-            p.bucket == "*"
-                && p.actions.iter().any(|a| a == "*")
-                && (p.prefix.trim() == "*" || p.prefix.trim().is_empty())
-        });
+        let is_admin = user
+            .policies
+            .iter()
+            .any(IamPolicy::is_unconditional_full_grant)
+            && !user.policies.iter().any(IamPolicy::is_deny);
 
         Some(Principal {
             access_key: access_key.to_string(),
@@ -616,6 +692,26 @@ impl IamService {
         requested_s3_action: Option<&str>,
         object_key: Option<&str>,
     ) -> bool {
+        let ctx = RequestContext::for_principal(Some(principal));
+        self.authorize_with_context(
+            principal,
+            bucket_name,
+            action,
+            requested_s3_action,
+            object_key,
+            &ctx,
+        )
+    }
+
+    pub fn authorize_with_context(
+        &self,
+        principal: &Principal,
+        bucket_name: Option<&str>,
+        action: &str,
+        requested_s3_action: Option<&str>,
+        object_key: Option<&str>,
+        ctx: &RequestContext,
+    ) -> bool {
         self.reload_if_needed();
 
         if principal.is_admin {
@@ -661,6 +757,12 @@ impl IamService {
                     PrefixMatch::Miss => continue,
                 }
             }
+            if !statement_condition_applies(policy, ctx) {
+                continue;
+            }
+            if policy.is_deny() {
+                return false;
+            }
             allowed = true;
         }
 
@@ -672,6 +774,17 @@ impl IamService {
         principal: &Principal,
         action: &str,
         requested_s3_action: Option<&str>,
+    ) -> bool {
+        let ctx = RequestContext::for_principal(Some(principal));
+        self.authorize_any_bucket_with_context(principal, action, requested_s3_action, &ctx)
+    }
+
+    pub fn authorize_any_bucket_with_context(
+        &self,
+        principal: &Principal,
+        action: &str,
+        requested_s3_action: Option<&str>,
+        ctx: &RequestContext,
     ) -> bool {
         self.reload_if_needed();
 
@@ -702,9 +815,33 @@ impl IamService {
             }
         }
 
-        user.policies
-            .iter()
-            .any(|policy| action_matches(&policy.actions, &normalized_action, requested_s3_action))
+        let mut allowed = false;
+        for policy in &user.policies {
+            if !action_matches(&policy.actions, &normalized_action, requested_s3_action) {
+                continue;
+            }
+            if !statement_condition_applies(policy, ctx) {
+                continue;
+            }
+            if policy.is_deny() {
+                return false;
+            }
+            allowed = true;
+        }
+        allowed
+    }
+
+    pub fn user_conditions_reference(&self, principal: &Principal, key_prefix: &str) -> bool {
+        self.reload_if_needed();
+        let state = self.state.read();
+        let Some(user) = state.user_records.get(&principal.user_id) else {
+            return false;
+        };
+        user.policies.iter().any(|policy| {
+            policy.condition.as_ref().is_some_and(|condition| {
+                crate::policy::condition_references_key_prefix(condition, key_prefix)
+            })
+        })
     }
 
     pub fn export_config(&self, mask_secrets: bool) -> serde_json::Value {
@@ -1008,11 +1145,7 @@ impl IamService {
                     status: "active".to_string(),
                     created_at: Some(chrono::Utc::now().to_rfc3339()),
                 }],
-                policies: vec![IamPolicy {
-                    bucket: "*".to_string(),
-                    actions: vec!["*".to_string()],
-                    prefix: "*".to_string(),
-                }],
+                policies: vec![IamPolicy::allow("*", &["*"])],
                 peer_site_id: None,
             }],
         };
@@ -1061,11 +1194,7 @@ impl IamService {
                     status: "active".to_string(),
                     created_at: Some(chrono::Utc::now().to_rfc3339()),
                 }],
-                policies: vec![IamPolicy {
-                    bucket: "*".to_string(),
-                    actions: vec!["*".to_string()],
-                    prefix: "*".to_string(),
-                }],
+                policies: vec![IamPolicy::allow("*", &["*"])],
                 peer_site_id: None,
             }],
         };
@@ -1090,6 +1219,7 @@ impl IamService {
 
         let user_id = format!("u-{}", uuid::Uuid::new_v4().simple());
         let resolved_policies = policies.unwrap_or_default();
+        validate_policies(&resolved_policies)?;
 
         self.mutate_config(|config| {
             if config
@@ -1192,6 +1322,7 @@ impl IamService {
         identifier: &str,
         policies: Vec<IamPolicy>,
     ) -> Result<(), String> {
+        validate_policies(&policies)?;
         self.mutate_config(|config| {
             let user = config
                 .users
@@ -1237,9 +1368,22 @@ impl IamService {
     }
 }
 
+fn statement_condition_applies(policy: &IamPolicy, ctx: &RequestContext) -> bool {
+    let Some(condition) = policy.condition.as_ref().filter(|c| !c.is_null()) else {
+        return true;
+    };
+    match evaluate_condition_checked(condition, ctx) {
+        Ok(matched) => matched,
+        Err(_) => policy.is_deny(),
+    }
+}
+
 fn bucket_matches(policy_bucket: &str, bucket: &str) -> bool {
     let pb = policy_bucket.trim().to_ascii_lowercase();
-    pb == "*" || pb == bucket
+    if pb == "*" || pb == bucket {
+        return true;
+    }
+    (pb.contains('*') || pb.contains('?')) && crate::s3_action::wildcard_match(bucket, &pb)
 }
 
 fn action_matches(
@@ -1277,6 +1421,15 @@ fn prefix_match(policy_prefix: &str, object_key: &str, case_insensitive_fs: bool
         return PrefixMatch::Exact;
     }
     let base = p.trim_end_matches('*');
+    if base.contains('*') || base.contains('?') {
+        if crate::s3_action::wildcard_match_case_sensitive(object_key, p) {
+            return PrefixMatch::Exact;
+        }
+        if case_insensitive_fs && crate::s3_action::wildcard_match(object_key, p) {
+            return PrefixMatch::CaseAlias;
+        }
+        return PrefixMatch::Miss;
+    }
     if object_key.starts_with(base) {
         return PrefixMatch::Exact;
     }
@@ -1933,5 +2086,296 @@ mod tests {
         empty.flush().unwrap();
         let svc = IamService::new(empty.path().to_path_buf());
         assert!(svc.get_principal("SCOPED_KEY").unwrap().is_admin);
+    }
+
+    fn policies_user_json(policies: serde_json::Value) -> String {
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-cond",
+                "display_name": "cond-user",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": "COND_KEY",
+                    "secret_key": "cond-secret",
+                    "status": "active"
+                }],
+                "policies": policies
+            }]
+        })
+        .to_string()
+    }
+
+    fn service_with(policies: serde_json::Value) -> (IamService, tempfile::NamedTempFile) {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(policies_user_json(policies).as_bytes())
+            .unwrap();
+        tmp.flush().unwrap();
+        let svc = IamService::new(tmp.path().to_path_buf());
+        (svc, tmp)
+    }
+
+    #[test]
+    fn explicit_deny_overrides_allow_and_clears_admin() {
+        let (svc, _tmp) = service_with(serde_json::json!([
+            {"bucket": "*", "actions": ["*"], "prefix": "*"},
+            {"bucket": "secrets", "actions": ["read", "write", "delete"], "effect": "Deny"}
+        ]));
+        let principal = svc.get_principal("COND_KEY").unwrap();
+        assert!(!principal.is_admin);
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("a")
+        ));
+        assert!(svc.authorize(
+            &principal,
+            Some("secrets"),
+            "list",
+            Some("s3:ListBucket"),
+            None
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("secrets"),
+            "read",
+            Some("s3:GetObject"),
+            Some("a")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("secrets"),
+            "delete",
+            Some("s3:DeleteObject"),
+            Some("a")
+        ));
+    }
+
+    #[test]
+    fn deny_with_prefix_only_blocks_that_prefix() {
+        let (svc, _tmp) = service_with(serde_json::json!([
+            {"bucket": "docs", "actions": ["read", "write"]},
+            {"bucket": "docs", "actions": ["write"], "prefix": "locked/", "effect": "deny"}
+        ]));
+        let principal = svc.get_principal("COND_KEY").unwrap();
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "write",
+            Some("s3:PutObject"),
+            Some("open/x")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "write",
+            Some("s3:PutObject"),
+            Some("locked/x")
+        ));
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("locked/x")
+        ));
+    }
+
+    #[test]
+    fn bucket_and_prefix_globs() {
+        let (svc, _tmp) = service_with(serde_json::json!([
+            {"bucket": "logs-*", "actions": ["read"], "prefix": "*/public/*"}
+        ]));
+        let principal = svc.get_principal("COND_KEY").unwrap();
+        assert!(svc.authorize(
+            &principal,
+            Some("logs-2026"),
+            "read",
+            Some("s3:GetObject"),
+            Some("app/public/a.txt")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("logs-2026"),
+            "read",
+            Some("s3:GetObject"),
+            Some("app/private/a.txt")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("archive"),
+            "read",
+            Some("s3:GetObject"),
+            Some("app/public/a.txt")
+        ));
+        assert!(svc.authorize(
+            &principal,
+            Some("logs-2026"),
+            "read",
+            Some("s3:GetObject"),
+            None
+        ));
+    }
+
+    #[test]
+    fn conditions_gate_iam_statements() {
+        let (svc, _tmp) = service_with(serde_json::json!([
+            {
+                "bucket": "docs",
+                "actions": ["read"],
+                "condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
+            },
+            {
+                "bucket": "docs",
+                "actions": ["write"],
+                "effect": "Deny",
+                "condition": {"Bool": {"aws:SecureTransport": "false"}}
+            },
+            {"bucket": "docs", "actions": ["write"]}
+        ]));
+        let principal = svc.get_principal("COND_KEY").unwrap();
+
+        let mut inside = RequestContext::for_principal(Some(&principal));
+        inside.set("aws:SourceIp", "10.1.2.3");
+        inside.set("aws:SecureTransport", "true");
+        assert!(svc.authorize_with_context(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("k"),
+            &inside
+        ));
+        assert!(svc.authorize_with_context(
+            &principal,
+            Some("docs"),
+            "write",
+            Some("s3:PutObject"),
+            Some("k"),
+            &inside
+        ));
+
+        let mut outside = RequestContext::for_principal(Some(&principal));
+        outside.set("aws:SourceIp", "203.0.113.9");
+        outside.set("aws:SecureTransport", "false");
+        assert!(!svc.authorize_with_context(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("k"),
+            &outside
+        ));
+        assert!(!svc.authorize_with_context(
+            &principal,
+            Some("docs"),
+            "write",
+            Some("s3:PutObject"),
+            Some("k"),
+            &outside
+        ));
+
+        let bare = RequestContext::for_principal(Some(&principal));
+        assert!(!svc.authorize_with_context(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("k"),
+            &bare
+        ));
+        assert!(svc.authorize_with_context(
+            &principal,
+            Some("docs"),
+            "write",
+            Some("s3:PutObject"),
+            Some("k"),
+            &bare
+        ));
+        assert!(svc.user_conditions_reference(&principal, "aws:sourceip"));
+        assert!(!svc.user_conditions_reference(&principal, "s3:existingobjecttag/"));
+    }
+
+    #[test]
+    fn invalid_stored_condition_denies_on_deny_and_skips_on_allow() {
+        let (svc, _tmp) = service_with(serde_json::json!([
+            {"bucket": "docs", "actions": ["read", "write"]},
+            {"bucket": "docs", "actions": ["write"], "effect": "Deny", "condition": {"Bogus": {"k": "v"}}},
+            {"bucket": "docs", "actions": ["delete"], "condition": {"Bogus": {"k": "v"}}}
+        ]));
+        let principal = svc.get_principal("COND_KEY").unwrap();
+        assert!(svc.authorize(
+            &principal,
+            Some("docs"),
+            "read",
+            Some("s3:GetObject"),
+            Some("k")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "write",
+            Some("s3:PutObject"),
+            Some("k")
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("docs"),
+            "delete",
+            Some("s3:DeleteObject"),
+            Some("k")
+        ));
+    }
+
+    #[test]
+    fn conditional_full_grant_is_not_admin() {
+        let (svc, _tmp) = service_with(serde_json::json!([
+            {"bucket": "*", "actions": ["*"], "condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}}
+        ]));
+        let principal = svc.get_principal("COND_KEY").unwrap();
+        assert!(!principal.is_admin);
+        let mut inside = RequestContext::for_principal(Some(&principal));
+        inside.set("aws:SourceIp", "10.9.9.9");
+        assert!(svc.authorize_with_context(
+            &principal,
+            Some("any"),
+            "delete",
+            Some("s3:DeleteBucket"),
+            None,
+            &inside
+        ));
+        assert!(!svc.authorize(
+            &principal,
+            Some("any"),
+            "delete",
+            Some("s3:DeleteBucket"),
+            None
+        ));
+    }
+
+    #[test]
+    fn policy_validation_rejects_bad_effect_and_condition() {
+        let bad_effect: IamPolicy = serde_json::from_value(serde_json::json!({
+            "bucket": "docs", "actions": ["read"], "effect": "Maybe"
+        }))
+        .unwrap();
+        assert!(bad_effect.validate().is_err());
+        let bad_condition: IamPolicy = serde_json::from_value(serde_json::json!({
+            "bucket": "docs", "actions": ["read"], "condition": {"Nope": {"aws:SourceIp": "1.2.3.4"}}
+        }))
+        .unwrap();
+        assert!(bad_condition.validate().is_err());
+        let ok: IamPolicy = serde_json::from_value(serde_json::json!({
+            "bucket": "docs", "actions": ["read"], "effect": "deny",
+            "condition": {"StringLike": {"s3:prefix": "x/*"}}
+        }))
+        .unwrap();
+        assert!(ok.validate().is_ok());
+        assert!(ok.is_deny());
+        let serialized = serde_json::to_value(IamPolicy::allow("docs", &["read"])).unwrap();
+        assert!(serialized.get("effect").is_none());
+        assert!(serialized.get("condition").is_none());
     }
 }

@@ -771,7 +771,7 @@ Select now works on SSE-S3 and SSE-KMS objects for CSV and JSON input — the sc
 - **Bucket-policy resource keys match case-sensitively.** S3 object keys are case-sensitive, so the key segment of a `Resource` ARN is compared case-sensitively: `arn:aws:s3:::b/public/*` matches `public/x` but not `PUBLIC/secret`. The bucket segment stays case-insensitive, since a policy may spell the bucket name in mixed case, and `Action` matching stays case-insensitive as AWS does.
 - **Case-aliased object keys fail closed on a case-insensitive filesystem.** S3 keys are case-sensitive, but Windows/NTFS (and macOS by default) resolve paths case-insensitively, so `temp/secret` and `TEMP/secret` would name the same file on disk while a prefix-scoped policy treats them as distinct — a principal confined to `temp/` could otherwise read or overwrite another principal's `TEMP/secret`. On startup the backend probes whether its storage filesystem is case-insensitive; when it is, object reads, metadata reads and mutations, object-lock updates, archived-version operations, and prefix-directory listings verify that the real on-disk casing of the key matches the request and return `NoSuchKey` when it does not, and a `PutObject`/copy/multipart-complete whose key differs only by case from existing content is rejected with `InvalidKey` rather than silently overwriting it. On a case-sensitive filesystem (typical Linux `ext4`/`xfs`) the probe finds nothing to guard and the checks are skipped.
 - **Virtual-host addressing is resolved before routing, preserving the subresource.** When a request's `Host` header names an existing bucket (`<bucket>.<host>`), the URI is rewritten to path style (`/<key>` ⇒ `/<bucket>/<key>`) in one middleware ahead of routing, carrying the original query string with it. Previously the rewrite happened partly in per-handler fallbacks that dropped the query and re-dispatched with a cleared subresource, so a virtual-host request could be authorized as one operation and executed as another, and a multi-segment key was split so the first path segment was treated as the bucket. Registered website-hosting domains (when `WEBSITE_HOSTING_ENABLED`) keep GET and HEAD requests on the website path instead of rewriting them.
-- **Bucket policies fail closed on unsupported clauses.** `Condition`, `NotPrincipal`, `NotAction`, and `NotResource` are not evaluated by this server. `PutBucketPolicy` (and the UI policy editor) now reject statements containing them with `InvalidArgument`. For policies already stored, a matching `Allow` carrying such a clause grants nothing, and a `Deny` carrying one denies. Previously these clauses were silently ignored, so a restrictive-looking policy could be permissive.
+- **Bucket policies evaluate `Condition`, `NotPrincipal`, `NotAction`, and `NotResource`.** Earlier releases rejected these clauses on `PutBucketPolicy` and failed closed on stored ones. They are now evaluated with AWS semantics (see [Bucket Policy Reference](#17-bucket-policy-reference)). `PutBucketPolicy` and the UI editor validate the whole document — unknown statement fields, unknown condition operators, malformed CIDRs, resources that name another bucket, both `Action` and `NotAction` in one statement, or a document over 20 KB are rejected with `400 MalformedPolicy`. A stored statement whose condition the server cannot evaluate (unknown operator) never matches.
 - **Presigned URLs must sign their `x-amz-*` headers.** A presigned request carrying an `x-amz-*` header that is not listed in `X-Amz-SignedHeaders` is rejected with `SignatureDoesNotMatch`. This prevents a URL bearer from adding `x-amz-copy-source`, `x-amz-acl`, `x-amz-bypass-governance-retention`, SSE, or user-metadata headers the signer never authorized. Only `x-amz-content-sha256`, `x-amz-date`, and `x-amz-decoded-content-length` are exempt, since they affect body framing only. SDKs that attach unsigned checksum headers to presigned PUTs will need to include them in the signature, as they already must against AWS.
 - **Reserved metadata keys are dropped.** User metadata keys beginning with `__` or `x-amz-` collide with internal storage and encryption metadata and are discarded on PutObject, CopyObject, POST form uploads, UI multipart initiation, and objects pulled from a peer. Ordinary `x-amz-meta-<name>` metadata is unaffected.
 - **A ranged GET of an SSE-C object validates the customer key like any other read.** `GET` with a `Range` header (or `partNumber`) on an SSE-C object returns `400 InvalidRequest` when the `x-amz-server-side-encryption-customer-*` headers are absent and `403 AccessDenied` when the supplied key does not match the one the object was written with — the same responses the whole-object `GET` has always returned. Previously only the whole-object path checked, so a ranged read failed inside the decryptor and surfaced as `500 InternalError` carrying an internal error string.
@@ -822,25 +822,31 @@ For a route-level view, inspect:
 
 ## 16. IAM Policy Reference
 
-IAM users and their policies live in the file named by `IAM_CONFIG` (default `.myfsio.sys/config/iam.json`) and are managed from the UI at `/ui/iam` or the `/myfsio/admin/iam/...` API. Each user carries a list of policy statements; every statement grants (never denies) a set of actions on a bucket scope:
+IAM users and their policies live in the file named by `IAM_CONFIG` (default `.myfsio.sys/config/iam.json`) and are managed from the UI at `/ui/iam` or the `/myfsio/admin/iam/...` API. Each user carries a list of policy statements; every statement grants or denies a set of actions on a bucket scope:
 
 ```json
 {
   "bucket": "my-bucket",
   "prefix": "reports/*",
-  "actions": ["list", "read", "write"]
+  "actions": ["list", "read", "write"],
+  "effect": "Allow",
+  "condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
 }
 ```
 
-- `bucket` — an exact bucket name, or `"*"` for every bucket. Partial wildcards (`my-*`) are not supported.
-- `prefix` — object-key scope for object-level actions. Empty or `"*"` means all keys; anything else is a leading-prefix match (a trailing `*` is allowed and ignored, so `reports/` and `reports/*` are equivalent). The prefix does not constrain bucket-level actions.
-- `actions` — the action names below, `"*"` for everything, or a namespace wildcard such as `iam:*` / `system:*`.
+- `bucket` — an exact bucket name, `"*"` for every bucket, or a glob (`logs-*`, `tenant-?-data`; `*` and `?` only, matched case-insensitively).
+- `prefix` — object-key scope for object-level actions. Empty or `"*"` means all keys; a plain prefix with an optional trailing `*` is a leading-prefix match (`reports/` ≡ `reports/*`); a value with a `*` or `?` elsewhere (`*/public/*`, `img-??.png`) is a case-sensitive glob over the whole key. The prefix does not constrain bucket-level actions.
+- `actions` — the action names below, `"*"` for everything, a namespace wildcard such as `iam:*` / `system:*`, or AWS-style names (`s3:GetObject`, `s3:Get*`). An exact `s3:` name grants only that operation (plus its method aliases — `s3:GetObject` covers HEAD and `GetObjectVersion`); coarse names grant their whole class.
+- `effect` — `Allow` (default, omitted when saved) or `Deny`. An explicit Deny wins over every Allow, exactly as in AWS.
+- `condition` — optional AWS-style condition block, evaluated with the same operators and keys as bucket policies (see [Conditions](#conditions)). A statement whose condition is false is skipped, whether it is an Allow or a Deny.
 
-Authorization is default-deny: a request is allowed if the user is enabled, not expired, and **any** statement matches the bucket, the action, and (for object operations) the key. Grants from a bucket policy or ACL are evaluated in addition to IAM — an explicit bucket-policy `Deny` always wins.
+Authorization is default-deny: a request is allowed if the user is enabled, not expired, no matching `Deny` statement applies, and **any** `Allow` statement matches the bucket, the action, the key (for object operations), and its condition. Grants from a bucket policy or ACL are evaluated in addition to IAM — an explicit bucket-policy `Deny` always wins. Statements are validated on save (UI and admin API): an unknown `effect` or an invalid `condition` is rejected.
+
+Web UI requests carry only principal-derived condition keys (`aws:username`, `aws:userid`, `aws:CurrentTime`, …), not request-derived ones like `aws:SourceIp`, so an Allow conditioned on `aws:SourceIp` grants nothing through the UI and a `NotIpAddress` Deny denies there.
 
 ### Admin
 
-A user is an **admin** exactly when one statement is `{"bucket": "*", "actions": ["*"]}` with an unrestricted prefix (`"*"` or empty). Admins skip all further authorization and are the only principals who can use the management-only UI/admin surfaces: IAM administration, connections, sites and peer credentials, website domains, replication wizards, metrics settings, and the audit log. A policy that merely lists every named action is *not* an admin policy — it grants exactly those actions and nothing else.
+A user is an **admin** exactly when one statement is `{"bucket": "*", "actions": ["*"]}` with an unrestricted prefix (`"*"` or empty), no `condition`, and the user has no `Deny` statements at all. Admins skip all further authorization and are the only principals who can use the management-only UI/admin surfaces: IAM administration, connections, sites and peer credentials, website domains, replication wizards, metrics settings, and the audit log. A policy that merely lists every named action is *not* an admin policy — it grants exactly those actions and nothing else; adding a `Deny` or a `condition` to a full grant turns the user into a regular (if broadly permitted) principal whose requests are evaluated statement by statement.
 
 ### Data actions
 
@@ -870,3 +876,103 @@ Namespaced and system-level actions are evaluated without a bucket, so they must
 The UI enforces the same actions as the S3 API for bucket-scoped operations: creating and deleting buckets (`create_bucket` / `delete_bucket`) and every bucket-configuration card on the bucket detail page — versioning, encryption (still requires `ENCRYPTION_ENABLED`), quota, website, bucket policy, ACLs (`share`), CORS, lifecycle, and the replication tab (`replication`). The corresponding buttons, forms, and tabs are hidden or shown read-only when the permission is absent, and the endpoints themselves return `403` with the missing action named. Earlier releases required full admin for all of these UI surfaces even when the IAM policy granted the actions; the S3 API honored the policy all along.
 
 Server-wide management surfaces remain admin-only regardless of policy actions: IAM administration pages, saved connections, sites and peer credentials, website-domain mappings, metrics settings, the replication wizard, and the audit log.
+
+## 17. Bucket Policy Reference
+
+Bucket policies use the AWS JSON policy language and are set with `PUT /<bucket>?policy`, the UI policy editor, or the Private/Public presets. A request is allowed when IAM allows it **or** a bucket-policy statement allows it **or** a bucket ACL grant covers it — unless any bucket-policy statement explicitly denies it, in which case the request fails with `AccessDenied` regardless of IAM (admin principals included, if the Deny's `Principal` matches them).
+
+### Supported elements
+
+| Element | Notes |
+|---------|-------|
+| `Version` | Optional; `2012-10-17` or `2008-10-17` |
+| `Id`, `Sid` | Optional, free-form |
+| `Effect` | `Allow` or `Deny` (required) |
+| `Principal` / `NotPrincipal` | `"*"`, `{"AWS": "*"}`, an access key, a user id (`u-…`), or an IAM-style ARN `arn:aws:iam::<any-account>:user/<name>` where `<name>` matches the user id, display name, or access key (globs allowed). `arn:aws:iam::<any-account>:root` matches every authenticated user. `{"CanonicalUser": …}` is an alias for the same forms; `Service` and `Federated` principals are rejected on save. Exactly one of the two is required |
+| `Action` / `NotAction` | `*`, `s3:*`, exact S3 actions (`s3:GetObject`), globs (`s3:Get*`), or the coarse internal names (`read`, `write`, …). Exact names are scoped to that operation plus its method aliases. Exactly one of the two is required |
+| `Resource` / `NotResource` | `"*"`, `arn:aws:s3:::<bucket>` for bucket-level operations, or `arn:aws:s3:::<bucket>/<key-pattern>` for object-level ones. The bucket segment must name the policy's own bucket (globs accepted); the key segment is a case-sensitive glob. Policy variables (`${aws:username}`, `${aws:userid}`, `${*}`, `${?}`, `${$}`) are substituted. Exactly one of the two is required |
+| `Condition` | See below. Optional |
+
+Anything else — unknown statement fields, `Principal` types other than the ones above, resources outside the bucket, a document over 20 KB — is rejected on `PutBucketPolicy` with `400 MalformedPolicy`.
+
+### Conditions
+
+A `Condition` block is a map of operator → condition key → value(s). All operators must be true; within an operator all keys must match; within a key, a positive operator matches if **any** listed value matches and a negated operator (`StringNotEquals`, `NotIpAddress`, …) only if **none** do. A missing request key fails positive operators and satisfies negated ones; append `IfExists` to make a positive operator pass when the key is absent. Prefix an operator with `ForAnyValue:` / `ForAllValues:` for multi-valued keys (`aws:TagKeys`, `s3:RequestObjectTagKeys`). `Null` tests key presence (`"true"` = must be absent).
+
+A stored condition the evaluator cannot interpret (unknown operator, empty block, empty value list) makes a `Deny` statement deny and an `Allow` statement grant nothing; `PutBucketPolicy` rejects such documents up front. An unresolvable policy variable (for example `${aws:username}` on an anonymous request) makes the statement not match, for negated operators too.
+
+Operators: `StringEquals`, `StringNotEquals`, `StringEqualsIgnoreCase`, `StringNotEqualsIgnoreCase`, `StringLike`, `StringNotLike`, `NumericEquals` / `NotEquals` / `LessThan` / `LessThanEquals` / `GreaterThan` / `GreaterThanEquals`, `DateEquals` / `NotEquals` / `LessThan` / `LessThanEquals` / `GreaterThan` / `GreaterThanEquals` (RFC 3339 or epoch seconds), `Bool`, `BinaryEquals`, `IpAddress`, `NotIpAddress` (IPv4/IPv6 CIDR or single address; IPv4-mapped IPv6 is normalised), `ArnEquals`, `ArnLike`, `ArnNotEquals`, `ArnNotLike`, `Null`. Operator names are case-insensitive; an unknown operator is rejected on save and never matches if already stored.
+
+Condition keys populated per request (keys are case-insensitive):
+
+| Key | Value |
+|-----|-------|
+| `aws:SourceIp` | Client IP after `NUM_TRUSTED_PROXIES` resolution (`X-Forwarded-For` / `X-Real-IP` behind a trusted proxy, else the socket peer). Absent when unknown, so an `IpAddress` Allow grants nothing without a resolvable client IP |
+| `aws:SecureTransport` | `true` when the request arrived over TLS or, behind a trusted proxy, with `X-Forwarded-Proto: https`; otherwise `false` |
+| `aws:CurrentTime`, `aws:EpochTime` | Request time (RFC 3339 / epoch seconds) |
+| `aws:username`, `aws:userid`, `aws:PrincipalArn`, `aws:PrincipalType`, `aws:PrincipalAccount` | Display name, user id, `arn:aws:iam::myfsio:user/<user-id>`, `User` or `Anonymous`, `myfsio` |
+| `myfsio:accesskey` | Access key used to sign the request |
+| `aws:Referer`, `aws:UserAgent`, `aws:RequestedRegion` | Request headers / configured `AWS_REGION` |
+| `aws:TagKeys`, `aws:RequestTag/<key>`, `s3:RequestObjectTagKeys`, `s3:RequestObjectTag/<key>` | From the `x-amz-tagging` header on the request |
+| `s3:ExistingObjectTag/<key>` | Tags already stored on the target object (loaded only when a policy references the key; absent for a key that does not exist yet; a storage error while loading them fails the request with `AccessDenied`) |
+| `s3:prefix`, `s3:delimiter`, `s3:max-keys`, `s3:VersionId` | Query parameters of the request |
+| `s3:x-amz-*` | Every `x-amz-*` request header, e.g. `s3:x-amz-acl`, `s3:x-amz-server-side-encryption`, `s3:x-amz-copy-source`, `s3:x-amz-storage-class`, `s3:x-amz-metadata-directive` |
+| `s3:object-lock-mode`, `s3:object-lock-retain-until-date`, `s3:object-lock-legal-hold` | From the corresponding `x-amz-object-lock-*` headers |
+| `s3:authType`, `s3:signatureversion`, `s3:signatureAge` | `REST-HEADER` / `REST-QUERY-STRING`, `AWS4-HMAC-SHA256`, milliseconds since the signed `X-Amz-Date` |
+
+Condition keys that are not listed are simply absent. Requests made through the web UI carry only the principal and time keys.
+
+Both `aws:SourceIp` and `aws:SecureTransport` trust forwarding headers purely on `NUM_TRUSTED_PROXIES`. Only set it when clients cannot reach the server except through that proxy (bind `HOST` to the proxy's interface or firewall the port); a directly reachable server with `NUM_TRUSTED_PROXIES>0` lets any caller forge both keys.
+
+### Public detection
+
+`GET /<bucket>?policyStatus` and the UI treat a policy as public when an `Allow` statement names `Principal: "*"` (or uses `NotPrincipal`) without a condition that pins the caller — `aws:SourceIp`, `aws:userid`, `aws:username`, `aws:PrincipalArn`, `myfsio:accesskey`, and the other AWS source/principal keys, with a positive operator and a value other than `*` / `0.0.0.0/0`. A `Referer` or `SecureTransport` condition does not make a policy private.
+
+### Examples
+
+Allow a user to manage only their home prefix:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::myfsio:user/*"},
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::team",
+      "Condition": {"StringLike": {"s3:prefix": "home/${aws:username}/*"}}
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::myfsio:user/*"},
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::team/home/${aws:username}/*"
+    }
+  ]
+}
+```
+
+Public reads from an office network only, and refuse plaintext writes:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::assets/*",
+      "Condition": {"IpAddress": {"aws:SourceIp": ["203.0.113.0/24", "2001:db8::/32"]}}
+    },
+    {
+      "Effect": "Deny",
+      "Principal": "*",
+      "NotAction": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::assets", "arn:aws:s3:::assets/*"],
+      "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+    }
+  ]
+}
+```

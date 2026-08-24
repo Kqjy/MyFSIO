@@ -4,6 +4,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use chrono::{NaiveDateTime, Utc};
+use myfsio_auth::policy::{self, RequestContext};
 use myfsio_auth::s3_action::{wildcard_match, wildcard_match_case_sensitive};
 use myfsio_auth::sigv4;
 use myfsio_common::error::{S3Error, S3ErrorCode};
@@ -17,6 +18,16 @@ use crate::middleware::sha_body::{is_hex_sha256, Sha256VerifyBody};
 use crate::services::acl::acl_from_bucket_config;
 use crate::services::peer_nonce::NonceRecordOutcome;
 use crate::state::AppState;
+
+tokio::task_local! {
+    pub(crate) static REQUEST_CONTEXT: RequestContext;
+}
+
+pub(crate) fn current_request_context(principal: Option<&Principal>) -> RequestContext {
+    REQUEST_CONTEXT
+        .try_with(|ctx| ctx.clone())
+        .unwrap_or_else(|_| RequestContext::for_principal(principal))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StreamingPayloadVariant {
@@ -567,20 +578,25 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
         let auth_path = path.clone();
 
         match try_auth(&state, &req) {
-            AuthResult::NoAuth => match authorize_request(
-                &state,
-                None,
-                &method,
-                &auth_path,
-                &query,
-                copy_source.as_deref(),
-            )
-            .await
-            {
-                Ok(()) => next.run(req).await,
-                Err(err) => error_response(err, &auth_path),
-            },
+            AuthResult::NoAuth => {
+                let ctx = build_request_context(&state, &req, None);
+                match authorize_request(
+                    &state,
+                    None,
+                    &method,
+                    &auth_path,
+                    &query,
+                    copy_source.as_deref(),
+                    &ctx,
+                )
+                .await
+                {
+                    Ok(()) => REQUEST_CONTEXT.scope(ctx, next.run(req)).await,
+                    Err(err) => error_response(err, &auth_path),
+                }
+            }
             AuthResult::Ok(principal, streaming_context) => {
+                let ctx = build_request_context(&state, &req, Some(&principal));
                 if let Err(err) = authorize_request(
                     &state,
                     Some(&principal),
@@ -588,6 +604,7 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
                     &auth_path,
                     &query,
                     copy_source.as_deref(),
+                    &ctx,
                 )
                 .await
                 {
@@ -607,7 +624,7 @@ pub async fn auth_layer(State(state): State<AppState>, mut req: Request, next: N
                         &mut req,
                         state.config.strict_streaming_sigv4,
                     );
-                    next.run(req).await
+                    REQUEST_CONTEXT.scope(ctx, next.run(req)).await
                 }
             }
             AuthResult::Denied(err) => error_response(err, &auth_path),
@@ -768,6 +785,7 @@ async fn authorize_request(
     path: &str,
     query: &str,
     copy_source: Option<&str>,
+    ctx: &RequestContext,
 ) -> Result<(), S3Error> {
     if path == "/myfsio/health" {
         return Ok(());
@@ -782,10 +800,14 @@ async fn authorize_request(
     }
     if path == "/" {
         if let Some(principal) = principal {
-            if state
-                .iam
-                .authorize(principal, None, "list", Some("s3:ListAllMyBuckets"), None)
-            {
+            if state.iam.authorize_with_context(
+                principal,
+                None,
+                "list",
+                Some("s3:ListAllMyBuckets"),
+                None,
+                ctx,
+            ) {
                 return Ok(());
             }
             return Err(S3Error::new(S3ErrorCode::AccessDenied, "Access denied"));
@@ -855,6 +877,7 @@ async fn authorize_request(
             Some(s3_action),
             None,
             method_access(method),
+            ctx,
         )
         .await;
     }
@@ -890,6 +913,7 @@ async fn authorize_request(
                     Some("s3:GetObject"),
                     Some(&src_key),
                     Some(false),
+                    ctx,
                 )
                 .await
                 .is_ok();
@@ -901,6 +925,7 @@ async fn authorize_request(
                     Some("s3:PutObject"),
                     Some(&object_key),
                     Some(true),
+                    ctx,
                 )
                 .await
                 .is_ok();
@@ -921,6 +946,7 @@ async fn authorize_request(
         Some(s3_action),
         Some(&object_key),
         method_access(method),
+        ctx,
     )
     .await
 }
@@ -933,6 +959,7 @@ pub async fn ui_authorize(
     s3_action: Option<&str>,
     object_key: Option<&str>,
 ) -> Result<(), String> {
+    let ctx = RequestContext::for_principal(Some(principal));
     authorize_action(
         state,
         Some(principal),
@@ -941,6 +968,7 @@ pub async fn ui_authorize(
         s3_action,
         object_key,
         None,
+        &ctx,
     )
     .await
     .map_err(|err| err.message)
@@ -952,21 +980,25 @@ pub async fn ui_authorize_list(
     bucket: &str,
     prefix: &str,
 ) -> Result<(), String> {
-    let iam_allowed = state.iam.authorize(
+    let mut ctx = RequestContext::for_principal(Some(principal));
+    ctx.set("s3:prefix", prefix.to_string());
+    let iam_allowed = state.iam.authorize_with_context(
         principal,
         Some(bucket),
         "list",
         Some("s3:ListBucket"),
         Some(prefix),
+        &ctx,
     );
     let policy_decision = evaluate_bucket_policy(
         state,
-        Some(principal.access_key.as_str()),
+        Some(principal),
         bucket,
         "list",
+        Some("s3:ListBucket"),
         None,
         None,
-        None,
+        &ctx,
     )
     .await;
 
@@ -991,18 +1023,24 @@ pub async fn ui_authorize_list(
 }
 
 pub async fn ui_can_see_bucket(state: &AppState, principal: &Principal, bucket: &str) -> bool {
-    let iam_allowed =
-        state
-            .iam
-            .authorize(principal, Some(bucket), "list", Some("s3:ListBucket"), None);
+    let ctx = RequestContext::for_principal(Some(principal));
+    let iam_allowed = state.iam.authorize_with_context(
+        principal,
+        Some(bucket),
+        "list",
+        Some("s3:ListBucket"),
+        None,
+        &ctx,
+    );
     let policy_decision = evaluate_bucket_policy(
         state,
-        Some(principal.access_key.as_str()),
+        Some(principal),
         bucket,
         "list",
+        Some("s3:ListBucket"),
         None,
         None,
-        None,
+        &ctx,
     )
     .await;
 
@@ -1022,6 +1060,7 @@ pub async fn ui_can_see_bucket(state: &AppState, principal: &Principal, bucket: 
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn authorize_action(
     state: &AppState,
     principal: Option<&Principal>,
@@ -1030,22 +1069,30 @@ pub(crate) async fn authorize_action(
     s3_action: Option<&str>,
     object_key: Option<&str>,
     write: Option<bool>,
+    ctx: &RequestContext,
 ) -> Result<(), S3Error> {
+    let enriched;
+    let ctx = match object_key {
+        Some(key) if conditions_need_existing_tags(state, principal, bucket).await => {
+            enriched = with_existing_object_tags(state, bucket, key, ctx).await?;
+            &enriched
+        }
+        _ => ctx,
+    };
     let iam_allowed = principal
         .map(|principal| {
-            state
-                .iam
-                .authorize(principal, Some(bucket), action, s3_action, object_key)
+            state.iam.authorize_with_context(
+                principal,
+                Some(bucket),
+                action,
+                s3_action,
+                object_key,
+                ctx,
+            )
         })
         .unwrap_or(false);
     let policy_decision = evaluate_bucket_policy(
-        state,
-        principal.map(|principal| principal.access_key.as_str()),
-        bucket,
-        action,
-        s3_action,
-        object_key,
-        write,
+        state, principal, bucket, action, s3_action, object_key, write, ctx,
     )
     .await;
 
@@ -1108,14 +1155,222 @@ enum PolicyDecision {
     Neutral,
 }
 
+const EXISTING_TAG_KEY_PREFIX: &str = "s3:existingobjecttag/";
+
+fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+}
+
+pub(crate) fn build_request_context(
+    state: &AppState,
+    req: &Request,
+    principal: Option<&Principal>,
+) -> RequestContext {
+    let mut ctx = RequestContext::for_principal(principal);
+    let headers = req.headers();
+    let trusted_proxies = state.config.num_trusted_proxies;
+
+    if let Some(ip) = crate::middleware::ratelimit::client_ip(req, trusted_proxies) {
+        ctx.set("aws:SourceIp", ip.to_string());
+    }
+
+    let forwarded_https = trusted_proxies > 0
+        && header_str(headers, "x-forwarded-proto")
+            .map(|value| {
+                value
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("https")
+            })
+            .unwrap_or(false);
+    let scheme_https = req
+        .uri()
+        .scheme()
+        .map(|scheme| *scheme == axum::http::uri::Scheme::HTTPS)
+        .unwrap_or(false);
+    ctx.set(
+        "aws:SecureTransport",
+        if forwarded_https || scheme_https {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    ctx.set("aws:RequestedRegion", state.config.region.clone());
+
+    if let Some(value) = header_str(headers, "referer") {
+        ctx.set("aws:Referer", value);
+    }
+    if let Some(value) = header_str(headers, "user-agent") {
+        ctx.set("aws:UserAgent", value);
+    }
+
+    for (name, value) in headers.iter() {
+        let name = name.as_str();
+        if !name.starts_with("x-amz-") {
+            continue;
+        }
+        if let Ok(value) = value.to_str() {
+            ctx.set(&format!("s3:{}", name), value.trim().to_string());
+        }
+    }
+    if let Some(value) = header_str(headers, "x-amz-object-lock-mode") {
+        ctx.set("s3:object-lock-mode", value);
+    }
+    if let Some(value) = header_str(headers, "x-amz-object-lock-retain-until-date") {
+        ctx.set("s3:object-lock-retain-until-date", value);
+    }
+    if let Some(value) = header_str(headers, "x-amz-object-lock-legal-hold") {
+        ctx.set("s3:object-lock-legal-hold", value);
+    }
+
+    if let Some(raw) = header_str(headers, "x-amz-tagging") {
+        let pairs = parse_query_params(&raw);
+        let keys: Vec<String> = pairs.iter().map(|(key, _)| key.clone()).collect();
+        for (key, value) in &pairs {
+            ctx.set(&format!("s3:RequestObjectTag/{}", key), value.clone());
+            ctx.set(&format!("aws:RequestTag/{}", key), value.clone());
+        }
+        ctx.set_multi("s3:RequestObjectTagKeys", keys.clone());
+        ctx.set_multi("aws:TagKeys", keys);
+    }
+
+    let query = req.uri().query().unwrap_or("");
+    let mut signed_query = false;
+    let mut query_amz_date: Option<String> = None;
+    for (key, value) in parse_query_params(query) {
+        match key.as_str() {
+            "prefix" => ctx.set("s3:prefix", value),
+            "delimiter" => ctx.set("s3:delimiter", value),
+            "max-keys" => ctx.set("s3:max-keys", value),
+            "versionId" => ctx.set("s3:VersionId", value),
+            "X-Amz-Algorithm" => signed_query = true,
+            "X-Amz-Date" => query_amz_date = Some(value),
+            _ => {}
+        }
+    }
+
+    if principal.is_some() {
+        let header_auth = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.starts_with("AWS4-HMAC-SHA256 "))
+            .unwrap_or(false);
+        if header_auth || signed_query {
+            ctx.set(
+                "s3:authType",
+                if header_auth {
+                    "REST-HEADER"
+                } else {
+                    "REST-QUERY-STRING"
+                },
+            );
+            ctx.set("s3:signatureversion", "AWS4-HMAC-SHA256");
+            let amz_date = header_str(headers, "x-amz-date").or(query_amz_date);
+            if let Some(signed_at) = amz_date
+                .as_deref()
+                .and_then(|value| NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ").ok())
+            {
+                let age_ms = Utc::now()
+                    .signed_duration_since(signed_at.and_utc())
+                    .num_milliseconds()
+                    .max(0);
+                ctx.set("s3:signatureAge", age_ms.to_string());
+            }
+        } else {
+            ctx.set("s3:authType", "REST-HEADER");
+        }
+    }
+
+    ctx
+}
+
+fn bucket_policy_references_key_prefix(policy: &Value, prefix: &str) -> bool {
+    let statements: Vec<&Value> = match policy.get("Statement") {
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(other) => vec![other],
+        None => return false,
+    };
+    statements.into_iter().any(|statement| {
+        statement
+            .get("Condition")
+            .is_some_and(|condition| policy::condition_references_key_prefix(condition, prefix))
+    })
+}
+
+async fn conditions_need_existing_tags(
+    state: &AppState,
+    principal: Option<&Principal>,
+    bucket: &str,
+) -> bool {
+    if let Some(principal) = principal {
+        if !principal.is_admin
+            && state
+                .iam
+                .user_conditions_reference(principal, EXISTING_TAG_KEY_PREFIX)
+        {
+            return true;
+        }
+    }
+    match state.storage.get_bucket_config(bucket).await {
+        Ok(config) => config.policy.as_ref().is_some_and(|policy| {
+            bucket_policy_references_key_prefix(policy, EXISTING_TAG_KEY_PREFIX)
+        }),
+        Err(_) => false,
+    }
+}
+
+async fn with_existing_object_tags(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    ctx: &RequestContext,
+) -> Result<RequestContext, S3Error> {
+    use myfsio_storage::error::StorageError;
+    let mut enriched = ctx.clone();
+    match state.storage.get_object_tags(bucket, key).await {
+        Ok(tags) => {
+            for tag in tags {
+                enriched.set(&format!("s3:ExistingObjectTag/{}", tag.key), tag.value);
+            }
+        }
+        Err(
+            StorageError::ObjectNotFound { .. }
+            | StorageError::BucketNotFound(_)
+            | StorageError::VersionNotFound { .. }
+            | StorageError::DeleteMarker { .. },
+        ) => {}
+        Err(err) => {
+            tracing::warn!(
+                bucket,
+                key,
+                error = %err,
+                "Unable to load object tags for policy condition evaluation; denying"
+            );
+            return Err(S3Error::new(
+                S3ErrorCode::AccessDenied,
+                "Unable to evaluate object tag conditions",
+            ));
+        }
+    }
+    Ok(enriched)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn evaluate_bucket_policy(
     state: &AppState,
-    access_key: Option<&str>,
+    principal: Option<&Principal>,
     bucket: &str,
     action: &str,
     s3_action: Option<&str>,
     object_key: Option<&str>,
     write: Option<bool>,
+    ctx: &RequestContext,
 ) -> PolicyDecision {
     let config = match state.storage.get_bucket_config(bucket).await {
         Ok(config) => config,
@@ -1124,17 +1379,17 @@ async fn evaluate_bucket_policy(
     if config.unreadable {
         return PolicyDecision::Deny;
     }
-    let policy: &Value = match config.policy.as_ref() {
+    let policy_doc: &Value = match config.policy.as_ref() {
         Some(policy) => policy,
         None => return PolicyDecision::Neutral,
     };
     let mut decision = PolicyDecision::Neutral;
 
-    match policy.get("Statement") {
+    match policy_doc.get("Statement") {
         Some(Value::Array(items)) => {
             for statement in items.iter() {
                 match evaluate_policy_statement(
-                    statement, access_key, bucket, action, s3_action, object_key, write,
+                    statement, principal, bucket, action, s3_action, object_key, write, ctx,
                 ) {
                     PolicyDecision::Deny => return PolicyDecision::Deny,
                     PolicyDecision::Allow => decision = PolicyDecision::Allow,
@@ -1144,7 +1399,7 @@ async fn evaluate_bucket_policy(
         }
         Some(statement) => {
             return evaluate_policy_statement(
-                statement, access_key, bucket, action, s3_action, object_key, write,
+                statement, principal, bucket, action, s3_action, object_key, write, ctx,
             );
         }
         None => return PolicyDecision::Neutral,
@@ -1153,14 +1408,16 @@ async fn evaluate_bucket_policy(
     decision
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_policy_statement(
     statement: &Value,
-    access_key: Option<&str>,
+    principal: Option<&Principal>,
     bucket: &str,
     action: &str,
     s3_action: Option<&str>,
     object_key: Option<&str>,
     write: Option<bool>,
+    ctx: &RequestContext,
 ) -> PolicyDecision {
     let effect = match statement
         .get("Effect")
@@ -1173,16 +1430,16 @@ fn evaluate_policy_statement(
         _ => return PolicyDecision::Neutral,
     };
 
-    let unsupported = statement_has_unsupported_clause(statement);
-
-    if unsupported && matches!(effect, PolicyDecision::Deny) {
-        return if unsupported_deny_may_apply(
-            statement, access_key, bucket, action, s3_action, object_key,
-        ) {
-            PolicyDecision::Deny
-        } else {
-            PolicyDecision::Neutral
-        };
+    let principal_ok = match (
+        statement.get("Principal").filter(|v| !v.is_null()),
+        statement.get("NotPrincipal").filter(|v| !v.is_null()),
+    ) {
+        (Some(value), _) => policy::principal_matches(value, principal),
+        (None, Some(value)) => !policy::principal_matches(value, principal),
+        (None, None) => false,
+    };
+    if !principal_ok {
+        return PolicyDecision::Neutral;
     }
 
     let action_gate = if matches!(effect, PolicyDecision::Allow) {
@@ -1190,40 +1447,46 @@ fn evaluate_policy_statement(
     } else {
         None
     };
-
-    if !statement_matches_principal(statement, access_key)
-        || !statement_matches_action(statement, action, s3_action, action_gate)
-        || !statement_matches_resource(statement, bucket, object_key)
-    {
+    let action_ok = match (
+        statement.get("Action").filter(|v| !v.is_null()),
+        statement.get("NotAction").filter(|v| !v.is_null()),
+    ) {
+        (Some(value), _) => action_list_matches(value, action, s3_action, action_gate),
+        (None, Some(value)) => !action_list_matches(value, action, s3_action, None),
+        (None, None) => false,
+    };
+    if !action_ok {
         return PolicyDecision::Neutral;
     }
 
-    if unsupported {
+    let resource_ok = match (
+        statement.get("Resource").filter(|v| !v.is_null()),
+        statement.get("NotResource").filter(|v| !v.is_null()),
+    ) {
+        (Some(value), _) => resource_list_matches(value, bucket, object_key, ctx),
+        (None, Some(value)) => !resource_list_matches(value, bucket, object_key, ctx),
+        (None, None) => false,
+    };
+    if !resource_ok {
         return PolicyDecision::Neutral;
+    }
+
+    if let Some(condition) = statement.get("Condition").filter(|v| !v.is_null()) {
+        match policy::evaluate_condition_checked(condition, ctx) {
+            Ok(true) => {}
+            Ok(false) => return PolicyDecision::Neutral,
+            Err(_) => {
+                return if matches!(effect, PolicyDecision::Deny) {
+                    PolicyDecision::Deny
+                } else {
+                    PolicyDecision::Neutral
+                };
+            }
+        }
     }
 
     effect
 }
-
-fn unsupported_deny_may_apply(
-    statement: &Value,
-    access_key: Option<&str>,
-    bucket: &str,
-    action: &str,
-    s3_action: Option<&str>,
-    object_key: Option<&str>,
-) -> bool {
-    let principal_ok =
-        statement.get("Principal").is_none() || statement_matches_principal(statement, access_key);
-    let action_ok = statement.get("Action").is_none()
-        || statement_matches_action(statement, action, s3_action, None);
-    let resource_ok = statement.get("Resource").is_none()
-        || statement_matches_resource(statement, bucket, object_key);
-    principal_ok && action_ok && resource_ok
-}
-
-pub const UNSUPPORTED_POLICY_CLAUSES: &[&str] =
-    &["Condition", "NotPrincipal", "NotAction", "NotResource"];
 
 const PRESIGNED_UNSIGNED_HEADER_ALLOWLIST: &[&str] = &[
     "x-amz-content-sha256",
@@ -1231,41 +1494,15 @@ const PRESIGNED_UNSIGNED_HEADER_ALLOWLIST: &[&str] = &[
     "x-amz-decoded-content-length",
 ];
 
-fn statement_has_unsupported_clause(statement: &Value) -> bool {
-    UNSUPPORTED_POLICY_CLAUSES
-        .iter()
-        .any(|name| statement.get(name).is_some_and(|value| !value.is_null()))
-}
-
-fn statement_matches_principal(statement: &Value, access_key: Option<&str>) -> bool {
-    match statement.get("Principal") {
-        Some(principal) => principal_value_matches(principal, access_key),
-        None => false,
-    }
-}
-
-fn principal_value_matches(value: &Value, access_key: Option<&str>) -> bool {
-    match value {
-        Value::String(token) => token == "*" || access_key == Some(token.as_str()),
-        Value::Array(items) => items
-            .iter()
-            .any(|item| principal_value_matches(item, access_key)),
-        Value::Object(map) => map
-            .values()
-            .any(|item| principal_value_matches(item, access_key)),
-        _ => false,
-    }
-}
-
-fn statement_matches_action(
-    statement: &Value,
+fn action_list_matches(
+    value: &Value,
     action: &str,
     s3_action: Option<&str>,
     write: Option<bool>,
 ) -> bool {
-    match statement.get("Action") {
-        Some(Value::String(value)) => action_grant_matches(value, action, s3_action, write),
-        Some(Value::Array(items)) => items.iter().any(|item| {
+    match value {
+        Value::String(item) => action_grant_matches(item, action, s3_action, write),
+        Value::Array(items) => items.iter().any(|item| {
             item.as_str()
                 .map(|value| action_grant_matches(value, action, s3_action, write))
                 .unwrap_or(false)
@@ -1319,19 +1556,39 @@ fn policy_action_matches(
     myfsio_auth::s3_action::action_matches(policy_action, requested_action, requested_s3_action)
 }
 
-fn statement_matches_resource(statement: &Value, bucket: &str, object_key: Option<&str>) -> bool {
-    match statement.get("Resource") {
-        Some(Value::String(resource)) => resource_matches(resource, bucket, object_key),
-        Some(Value::Array(items)) => items.iter().any(|item| {
+fn resource_list_matches(
+    value: &Value,
+    bucket: &str,
+    object_key: Option<&str>,
+    ctx: &RequestContext,
+) -> bool {
+    match value {
+        Value::String(resource) => resource_matches_with_context(resource, bucket, object_key, ctx),
+        Value::Array(items) => items.iter().any(|item| {
             item.as_str()
-                .map(|resource| resource_matches(resource, bucket, object_key))
+                .map(|resource| resource_matches_with_context(resource, bucket, object_key, ctx))
                 .unwrap_or(false)
         }),
         _ => false,
     }
 }
 
+fn resource_matches_with_context(
+    resource: &str,
+    bucket: &str,
+    object_key: Option<&str>,
+    ctx: &RequestContext,
+) -> bool {
+    match policy::substitute_variables(resource, ctx) {
+        Some(resolved) => resource_matches(&resolved, bucket, object_key),
+        None => false,
+    }
+}
+
 fn resource_matches(resource: &str, bucket: &str, object_key: Option<&str>) -> bool {
+    if resource.trim() == "*" {
+        return true;
+    }
     let remainder = match resource.strip_prefix("arn:aws:s3:::") {
         Some(value) => value,
         None => return false,
@@ -2034,7 +2291,9 @@ mod tests {
     fn s3_put_star_matches_write_and_share_policy_lifecycle() {
         assert!(policy_action_matches("s3:Put*", "write", None));
         assert!(policy_action_matches("s3:PutObject*", "write", None));
-        assert!(policy_action_matches("s3:PutBucket*", "write", None));
+        assert!(policy_action_matches("s3:PutBucket*", "versioning", None));
+        assert!(policy_action_matches("s3:PutBucket*", "tagging", None));
+        assert!(!policy_action_matches("s3:PutBucket*", "write", None));
     }
 
     #[test]
@@ -2294,5 +2553,276 @@ mod tests {
         assert!(wildcard_match_case_sensitive("abc", "*"));
         assert!(!wildcard_match_case_sensitive("abc", "abcd"));
         assert!(wildcard_match("public/AB.txt", "public/?b*"));
+    }
+
+    mod statements {
+        use super::super::{evaluate_policy_statement, PolicyDecision};
+        use myfsio_auth::policy::RequestContext;
+        use myfsio_common::types::Principal;
+        use serde_json::{json, Value};
+
+        fn alice() -> Principal {
+            Principal::new("AKALICE".into(), "u-alice".into(), "alice".into(), false)
+        }
+
+        fn eval(
+            statement: Value,
+            principal: Option<&Principal>,
+            action: &str,
+            s3: &str,
+            key: Option<&str>,
+            ctx: &RequestContext,
+        ) -> PolicyDecision {
+            evaluate_policy_statement(
+                &statement,
+                principal,
+                "docs",
+                action,
+                Some(s3),
+                key,
+                None,
+                ctx,
+            )
+        }
+
+        #[test]
+        fn not_action_not_resource_not_principal() {
+            let alice = alice();
+            let ctx = RequestContext::for_principal(Some(&alice));
+            let deny_all_but_get = json!({
+                "Effect": "Deny", "Principal": "*", "NotAction": ["s3:GetObject", "s3:ListBucket"],
+                "Resource": ["arn:aws:s3:::docs", "arn:aws:s3:::docs/*"]
+            });
+            assert_eq!(
+                eval(
+                    deny_all_but_get.clone(),
+                    Some(&alice),
+                    "read",
+                    "s3:GetObject",
+                    Some("k"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            assert_eq!(
+                eval(
+                    deny_all_but_get.clone(),
+                    Some(&alice),
+                    "write",
+                    "s3:PutObject",
+                    Some("k"),
+                    &ctx
+                ),
+                PolicyDecision::Deny
+            );
+            assert_eq!(
+                eval(
+                    deny_all_but_get,
+                    Some(&alice),
+                    "list",
+                    "s3:ListBucket",
+                    None,
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+
+            let deny_outside_public = json!({
+                "Effect": "Deny", "Principal": "*", "Action": "s3:GetObject",
+                "NotResource": "arn:aws:s3:::docs/public/*"
+            });
+            assert_eq!(
+                eval(
+                    deny_outside_public.clone(),
+                    Some(&alice),
+                    "read",
+                    "s3:GetObject",
+                    Some("public/a"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            assert_eq!(
+                eval(
+                    deny_outside_public,
+                    Some(&alice),
+                    "read",
+                    "s3:GetObject",
+                    Some("private/a"),
+                    &ctx
+                ),
+                PolicyDecision::Deny
+            );
+
+            let deny_everyone_but_alice = json!({
+                "Effect": "Deny", "NotPrincipal": {"AWS": "arn:aws:iam::myfsio:user/u-alice"},
+                "Action": "s3:*", "Resource": "arn:aws:s3:::docs/*"
+            });
+            assert_eq!(
+                eval(
+                    deny_everyone_but_alice.clone(),
+                    Some(&alice),
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            let bob = Principal::new("AKBOB".into(), "u-bob".into(), "bob".into(), false);
+            let bob_ctx = RequestContext::for_principal(Some(&bob));
+            assert_eq!(
+                eval(
+                    deny_everyone_but_alice.clone(),
+                    Some(&bob),
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &bob_ctx
+                ),
+                PolicyDecision::Deny
+            );
+            let anon_ctx = RequestContext::for_principal(None);
+            assert_eq!(
+                eval(
+                    deny_everyone_but_alice,
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &anon_ctx
+                ),
+                PolicyDecision::Deny
+            );
+        }
+
+        #[test]
+        fn conditions_and_variables_in_statements() {
+            let alice = alice();
+            let mut ctx = RequestContext::for_principal(Some(&alice));
+            ctx.set("aws:SourceIp", "10.0.0.5");
+            let home = json!({
+                "Effect": "Allow", "Principal": {"AWS": "*"}, "Action": "s3:*",
+                "Resource": "arn:aws:s3:::docs/home/${aws:username}/*",
+                "Condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
+            });
+            assert_eq!(
+                eval(
+                    home.clone(),
+                    Some(&alice),
+                    "read",
+                    "s3:GetObject",
+                    Some("home/alice/x"),
+                    &ctx
+                ),
+                PolicyDecision::Allow
+            );
+            assert_eq!(
+                eval(
+                    home.clone(),
+                    Some(&alice),
+                    "read",
+                    "s3:GetObject",
+                    Some("home/bob/x"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            ctx.set("aws:SourceIp", "192.0.2.1");
+            assert_eq!(
+                eval(
+                    home.clone(),
+                    Some(&alice),
+                    "read",
+                    "s3:GetObject",
+                    Some("home/alice/x"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            let anon = RequestContext::for_principal(None);
+            assert_eq!(
+                eval(
+                    home,
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("home/alice/x"),
+                    &anon
+                ),
+                PolicyDecision::Neutral
+            );
+        }
+
+        #[test]
+        fn statements_without_required_elements_are_neutral() {
+            let ctx = RequestContext::for_principal(None);
+            assert_eq!(
+                eval(
+                    json!({"Effect": "Allow", "Action": "s3:*", "Resource": "*"}),
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            assert_eq!(
+                eval(
+                    json!({"Effect": "Allow", "Principal": "*", "Resource": "arn:aws:s3:::docs/*"}),
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            assert_eq!(
+                eval(
+                    json!({"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject"}),
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            assert_eq!(
+                eval(
+                    json!({"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::docs/*", "Condition": {"Bogus": {"k": "v"}}}),
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &ctx
+                ),
+                PolicyDecision::Neutral
+            );
+            assert_eq!(
+                eval(
+                    json!({"Effect": "Deny", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::docs/*", "Condition": {"Bogus": {"k": "v"}}}),
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &ctx
+                ),
+                PolicyDecision::Deny
+            );
+            assert_eq!(
+                eval(
+                    json!({"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "*"}),
+                    None,
+                    "read",
+                    "s3:GetObject",
+                    Some("a"),
+                    &ctx
+                ),
+                PolicyDecision::Allow
+            );
+        }
     }
 }

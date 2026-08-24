@@ -614,20 +614,24 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
         Ok(v) => v,
         Err(_) => {
             return xml_error_response(S3Error::new(
-                S3ErrorCode::InvalidArgument,
+                S3ErrorCode::MalformedPolicy,
                 "Policy document must be JSON",
             ));
         }
     };
 
-    if let Some(clause) = policy_unsupported_clause(&policy) {
+    if body_bytes.len() > BUCKET_POLICY_MAX_BYTES {
         return xml_error_response(S3Error::new(
-            S3ErrorCode::InvalidArgument,
+            S3ErrorCode::MalformedPolicy,
             format!(
-                "Policy statements containing '{}' are not supported by this server",
-                clause
+                "Bucket policy exceeds the maximum size of {} bytes",
+                BUCKET_POLICY_MAX_BYTES
             ),
         ));
+    }
+
+    if let Err(reason) = validate_bucket_policy(&policy, bucket) {
+        return xml_error_response(S3Error::new(S3ErrorCode::MalformedPolicy, reason));
     }
 
     mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, move |config| {
@@ -636,18 +640,206 @@ pub async fn put_policy(state: &AppState, bucket: &str, body: Body) -> Response 
     .await
 }
 
-pub(crate) fn policy_unsupported_clause(policy: &serde_json::Value) -> Option<&'static str> {
-    let statements: Vec<&serde_json::Value> = match policy.get("Statement") {
-        Some(serde_json::Value::Array(items)) => items.iter().collect(),
-        Some(other) => vec![other],
-        None => return None,
+pub const BUCKET_POLICY_MAX_BYTES: usize = 20 * 1024;
+
+const STATEMENT_FIELDS: &[&str] = &[
+    "Sid",
+    "Effect",
+    "Principal",
+    "NotPrincipal",
+    "Action",
+    "NotAction",
+    "Resource",
+    "NotResource",
+    "Condition",
+];
+
+fn string_or_string_array(value: &serde_json::Value) -> Option<Vec<&str>> {
+    match value {
+        serde_json::Value::String(s) => Some(vec![s.as_str()]),
+        serde_json::Value::Array(items) => items.iter().map(|item| item.as_str()).collect(),
+        _ => None,
+    }
+}
+
+fn validate_principal_value(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(_) => Ok(()),
+        serde_json::Value::Array(items) => {
+            if items.iter().all(|item| item.is_string()) {
+                Ok(())
+            } else {
+                Err("Principal entries must be strings".to_string())
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                return Err("Principal must not be empty".to_string());
+            }
+            for (kind, inner) in map {
+                match kind.to_ascii_lowercase().as_str() {
+                    "aws" | "canonicaluser" => {}
+                    other => {
+                        return Err(format!(
+                            "Unsupported principal type '{}' (only AWS and CanonicalUser principals can match on this server)",
+                            other
+                        ))
+                    }
+                }
+                if string_or_string_array(inner).is_none() {
+                    return Err(format!(
+                        "Principal '{}' must be a string or array of strings",
+                        kind
+                    ));
+                }
+            }
+            Ok(())
+        }
+        _ => Err("Principal must be a string, array, or object".to_string()),
+    }
+}
+
+fn validate_statement(statement: &serde_json::Value, bucket: &str) -> Result<(), String> {
+    let serde_json::Value::Object(fields) = statement else {
+        return Err("Statement entries must be JSON objects".to_string());
     };
-    statements.into_iter().find_map(|statement| {
-        crate::middleware::UNSUPPORTED_POLICY_CLAUSES
-            .iter()
-            .find(|name| statement.get(**name).is_some_and(|value| !value.is_null()))
-            .copied()
-    })
+    for field in fields.keys() {
+        if !STATEMENT_FIELDS.contains(&field.as_str()) {
+            return Err(format!("Unknown statement field '{}'", field));
+        }
+    }
+    match fields.get("Effect").and_then(|v| v.as_str()) {
+        Some(effect)
+            if effect.eq_ignore_ascii_case("allow") || effect.eq_ignore_ascii_case("deny") => {}
+        Some(other) => return Err(format!("Effect must be Allow or Deny, got '{}'", other)),
+        None => return Err("Statement is missing Effect".to_string()),
+    }
+    if let Some(sid) = fields.get("Sid") {
+        if !sid.is_string() {
+            return Err("Sid must be a string".to_string());
+        }
+    }
+
+    let has = |name: &str| fields.get(name).is_some_and(|v| !v.is_null());
+    match (has("Principal"), has("NotPrincipal")) {
+        (true, true) => {
+            return Err("Statement may not have both Principal and NotPrincipal".to_string())
+        }
+        (false, false) => return Err("Statement is missing Principal".to_string()),
+        _ => {}
+    }
+    match (has("Action"), has("NotAction")) {
+        (true, true) => return Err("Statement may not have both Action and NotAction".to_string()),
+        (false, false) => return Err("Statement is missing Action".to_string()),
+        _ => {}
+    }
+    match (has("Resource"), has("NotResource")) {
+        (true, true) => {
+            return Err("Statement may not have both Resource and NotResource".to_string())
+        }
+        (false, false) => return Err("Statement is missing Resource".to_string()),
+        _ => {}
+    }
+
+    for name in ["Principal", "NotPrincipal"] {
+        if let Some(value) = fields.get(name).filter(|v| !v.is_null()) {
+            validate_principal_value(value).map_err(|e| format!("{}: {}", name, e))?;
+        }
+    }
+    for name in ["Action", "NotAction"] {
+        if let Some(value) = fields.get(name).filter(|v| !v.is_null()) {
+            let actions = string_or_string_array(value)
+                .ok_or_else(|| format!("{} must be a string or array of strings", name))?;
+            if actions.is_empty() {
+                return Err(format!("{} must not be empty", name));
+            }
+            for action in actions {
+                let trimmed = action.trim();
+                if trimmed.is_empty() {
+                    return Err(format!("{} entries must not be empty", name));
+                }
+                let lower = trimmed.to_ascii_lowercase();
+                let known_coarse = myfsio_auth::s3_action::S3_ACTION_TABLE
+                    .iter()
+                    .any(|(_, internal)| *internal == lower);
+                if !(trimmed == "*"
+                    || lower.starts_with("s3:")
+                    || known_coarse
+                    || lower == "create_bucket"
+                    || lower == "delete_bucket")
+                {
+                    return Err(format!("Unsupported action '{}'", trimmed));
+                }
+            }
+        }
+    }
+    for name in ["Resource", "NotResource"] {
+        if let Some(value) = fields.get(name).filter(|v| !v.is_null()) {
+            let resources = string_or_string_array(value)
+                .ok_or_else(|| format!("{} must be a string or array of strings", name))?;
+            if resources.is_empty() {
+                return Err(format!("{} must not be empty", name));
+            }
+            for resource in resources {
+                let trimmed = resource.trim();
+                let remainder = match trimmed {
+                    "*" => continue,
+                    other => other
+                        .strip_prefix("arn:aws:s3:::")
+                        .ok_or_else(|| format!("Invalid resource '{}'", trimmed))?,
+                };
+                let resource_bucket = remainder.split('/').next().unwrap_or("");
+                if resource_bucket.is_empty() {
+                    return Err(format!("Invalid resource '{}'", trimmed));
+                }
+                if !myfsio_auth::s3_action::wildcard_match(bucket, resource_bucket) {
+                    return Err(format!(
+                        "Resource '{}' does not belong to bucket '{}'",
+                        trimmed, bucket
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(condition) = fields.get("Condition").filter(|v| !v.is_null()) {
+        myfsio_auth::policy::validate_condition(condition)
+            .map_err(|e| format!("Condition: {}", e))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_bucket_policy(
+    policy: &serde_json::Value,
+    bucket: &str,
+) -> Result<(), String> {
+    let serde_json::Value::Object(fields) = policy else {
+        return Err("Policy document must be a JSON object".to_string());
+    };
+    for field in fields.keys() {
+        if !matches!(field.as_str(), "Version" | "Id" | "Statement") {
+            return Err(format!("Unknown policy field '{}'", field));
+        }
+    }
+    if let Some(version) = fields.get("Version") {
+        match version.as_str() {
+            Some("2012-10-17") | Some("2008-10-17") => {}
+            _ => return Err("Version must be \"2012-10-17\" or \"2008-10-17\"".to_string()),
+        }
+    }
+    let statements: Vec<&serde_json::Value> = match fields.get("Statement") {
+        Some(serde_json::Value::Array(items)) => items.iter().collect(),
+        Some(item @ serde_json::Value::Object(_)) => vec![item],
+        Some(_) => return Err("Statement must be an object or array of objects".to_string()),
+        None => return Err("Policy is missing Statement".to_string()),
+    };
+    if statements.is_empty() {
+        return Err("Statement must not be empty".to_string());
+    }
+    for (index, statement) in statements.into_iter().enumerate() {
+        validate_statement(statement, bucket)
+            .map_err(|e| format!("Statement {}: {}", index + 1, e))?;
+    }
+    Ok(())
 }
 
 pub async fn delete_policy(state: &AppState, bucket: &str) -> Response {
@@ -740,11 +932,24 @@ fn is_allow_public_statement(statement: &serde_json::Value) -> bool {
         return false;
     }
 
-    match statement.get("Principal") {
+    let principal_public = match statement.get("Principal") {
         Some(serde_json::Value::String(s)) => s == "*",
-        Some(serde_json::Value::Object(obj)) => obj.values().any(|v| v == "*"),
-        _ => false,
+        Some(serde_json::Value::Array(items)) => items.iter().any(|v| v == "*"),
+        Some(serde_json::Value::Object(obj)) => obj.values().any(|v| match v {
+            serde_json::Value::String(s) => s == "*",
+            serde_json::Value::Array(items) => items.iter().any(|item| item == "*"),
+            _ => false,
+        }),
+        _ => statement.get("NotPrincipal").is_some_and(|v| !v.is_null()),
+    };
+    if !principal_public {
+        return false;
     }
+
+    !statement
+        .get("Condition")
+        .filter(|v| !v.is_null())
+        .is_some_and(myfsio_auth::policy::condition_restricts_principal)
 }
 
 pub async fn get_acl(state: &AppState, bucket: &str) -> Response {

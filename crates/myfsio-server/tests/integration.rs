@@ -13,6 +13,13 @@ const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
 fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::TempDir) {
+    test_app_with_iam_and(iam_json, |_| {})
+}
+
+fn test_app_with_iam_and(
+    iam_json: serde_json::Value,
+    adjust: impl FnOnce(&mut myfsio_server::config::ServerConfig),
+) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::TempDir::new().unwrap();
     let iam_path = tmp.path().join(".myfsio.sys").join("config");
     std::fs::create_dir_all(&iam_path).unwrap();
@@ -64,6 +71,8 @@ fn test_app_with_iam(iam_json: serde_json::Value) -> (axum::Router, tempfile::Te
         allow_legacy_header_auth: true,
         ..myfsio_server::config::ServerConfig::default()
     };
+    let mut config = config;
+    adjust(&mut config);
     let state = myfsio_server::state::AppState::new(config);
     let app = myfsio_server::create_router(state);
     (app, tmp)
@@ -14213,5 +14222,514 @@ async fn test_ui_upload_translates_s3_error_to_json() {
         message.contains("QuotaExceeded"),
         "the S3 error code and message must reach the UI caller, got: {}",
         body
+    );
+}
+
+const COND_ACCESS_KEY: &str = "AKCONDUSER0000000000";
+const COND_SECRET_KEY: &str = "cond-user-secret";
+
+fn policy_test_iam() -> serde_json::Value {
+    serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-admin",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            {
+                "user_id": "u-cond",
+                "display_name": "cond",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": COND_ACCESS_KEY,
+                    "secret_key": COND_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [
+                    {"bucket": "cond-bucket", "actions": ["list", "read", "write", "delete"]},
+                    {"bucket": "cond-bucket", "actions": ["delete"], "effect": "Deny", "prefix": "keep/"},
+                    {"bucket": "glob-*", "actions": ["list", "read", "write"]},
+                    {
+                        "bucket": "ip-bucket",
+                        "actions": ["read"],
+                        "condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
+                    }
+                ]
+            }
+        ]
+    })
+}
+
+fn cond_request(method: Method, uri: &str, body: Body) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", COND_ACCESS_KEY)
+        .header("x-secret-key", COND_SECRET_KEY)
+        .body(body)
+        .unwrap()
+}
+
+fn anon_request(method: Method, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn anon_request_from(method: Method, uri: &str, forwarded_for: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-forwarded-for", forwarded_for)
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn put_policy_doc(
+    app: &axum::Router,
+    bucket: &str,
+    policy: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/{}?policy", bucket))
+                .header("x-access-key", TEST_ACCESS_KEY)
+                .header("x-secret-key", TEST_SECRET_KEY)
+                .header("content-type", "application/json")
+                .body(Body::from(policy.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn seed_object(app: &axum::Router, bucket: &str, key: &str) {
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            &format!("/{}/{}", bucket, key),
+            Body::from("payload"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "seed {}/{}", bucket, key);
+}
+
+#[tokio::test]
+async fn test_bucket_policy_source_ip_condition_gates_anonymous_reads() {
+    let (app, _tmp) = test_app_with_iam_and(policy_test_iam(), |cfg| cfg.num_trusted_proxies = 1);
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/ip-bucket", Body::empty()))
+        .await
+        .unwrap();
+    seed_object(&app, "ip-bucket", "public/a.txt").await;
+    seed_object(&app, "ip-bucket", "private/b.txt").await;
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Allow",
+        "Principal": "*",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::ip-bucket/public/*",
+        "Condition": {"IpAddress": {"aws:SourceIp": ["10.0.0.0/8", "192.168.1.0/24"]}}
+      }]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "ip-bucket", policy).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let inside = app
+        .clone()
+        .oneshot(anon_request_from(
+            Method::GET,
+            "/ip-bucket/public/a.txt",
+            "10.20.30.40, 127.0.0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inside.status(), StatusCode::OK);
+
+    let outside = app
+        .clone()
+        .oneshot(anon_request_from(
+            Method::GET,
+            "/ip-bucket/public/a.txt",
+            "203.0.113.7, 127.0.0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+
+    let no_ip = app
+        .clone()
+        .oneshot(anon_request(Method::GET, "/ip-bucket/public/a.txt"))
+        .await
+        .unwrap();
+    assert_eq!(no_ip.status(), StatusCode::FORBIDDEN);
+
+    let private = app
+        .clone()
+        .oneshot(anon_request_from(
+            Method::GET,
+            "/ip-bucket/private/b.txt",
+            "10.20.30.40, 127.0.0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(private.status(), StatusCode::FORBIDDEN);
+
+    let iam_inside = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ip-bucket/private/b.txt")
+                .header("x-access-key", COND_ACCESS_KEY)
+                .header("x-secret-key", COND_SECRET_KEY)
+                .header("x-forwarded-for", "10.1.1.1, 127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(iam_inside.status(), StatusCode::OK);
+
+    let iam_outside = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ip-bucket/private/b.txt")
+                .header("x-access-key", COND_ACCESS_KEY)
+                .header("x-secret-key", COND_SECRET_KEY)
+                .header("x-forwarded-for", "198.51.100.9, 127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(iam_outside.status(), StatusCode::FORBIDDEN);
+
+    let status = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/ip-bucket?policyStatus",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(
+        status
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("<IsPublic>FALSE</IsPublic>"), "{}", body);
+}
+
+#[tokio::test]
+async fn test_bucket_policy_prefix_condition_and_secure_transport() {
+    let (app, _tmp) = test_app_with_iam(policy_test_iam());
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/prefix-bucket", Body::empty()))
+        .await
+        .unwrap();
+    seed_object(&app, "prefix-bucket", "public/a.txt").await;
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ListPublicOnly",
+          "Effect": "Allow",
+          "Principal": {"AWS": "*"},
+          "Action": "s3:ListBucket",
+          "Resource": "arn:aws:s3:::prefix-bucket",
+          "Condition": {"StringLike": {"s3:prefix": "public/*"}}
+        },
+        {
+          "Sid": "ReadRequiresTls",
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:GetObject",
+          "Resource": "arn:aws:s3:::prefix-bucket/public/*",
+          "Condition": {"Bool": {"aws:SecureTransport": "true"}}
+        }
+      ]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "prefix-bucket", policy).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let ok = app
+        .clone()
+        .oneshot(anon_request(
+            Method::GET,
+            "/prefix-bucket?list-type=2&prefix=public/",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    let wrong_prefix = app
+        .clone()
+        .oneshot(anon_request(
+            Method::GET,
+            "/prefix-bucket?list-type=2&prefix=private/",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_prefix.status(), StatusCode::FORBIDDEN);
+
+    let no_prefix = app
+        .clone()
+        .oneshot(anon_request(Method::GET, "/prefix-bucket?list-type=2"))
+        .await
+        .unwrap();
+    assert_eq!(no_prefix.status(), StatusCode::FORBIDDEN);
+
+    let plain = app
+        .clone()
+        .oneshot(anon_request(Method::GET, "/prefix-bucket/public/a.txt"))
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_bucket_policy_not_action_with_principal_arn() {
+    let (app, _tmp) = test_app_with_iam(policy_test_iam());
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/cond-bucket", Body::empty()))
+        .await
+        .unwrap();
+    seed_object(&app, "cond-bucket", "a.txt").await;
+
+    let policy = r#"{
+      "Version": "2012-10-17",
+      "Statement": [{
+        "Effect": "Deny",
+        "Principal": {"AWS": "arn:aws:iam::123456789012:user/u-cond"},
+        "NotAction": ["s3:GetObject", "s3:ListBucket"],
+        "Resource": ["arn:aws:s3:::cond-bucket", "arn:aws:s3:::cond-bucket/*"]
+      }]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "cond-bucket", policy).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let get = app
+        .clone()
+        .oneshot(cond_request(
+            Method::GET,
+            "/cond-bucket/a.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+
+    let list = app
+        .clone()
+        .oneshot(cond_request(
+            Method::GET,
+            "/cond-bucket?list-type=2",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+
+    let put = app
+        .clone()
+        .oneshot(cond_request(
+            Method::PUT,
+            "/cond-bucket/new.txt",
+            Body::from("x"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::FORBIDDEN);
+
+    let admin_put = app
+        .clone()
+        .oneshot(signed_request(
+            Method::PUT,
+            "/cond-bucket/new.txt",
+            Body::from("x"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(admin_put.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_iam_deny_statements_and_bucket_globs() {
+    let (app, _tmp) = test_app_with_iam(policy_test_iam());
+    for bucket in ["cond-bucket", "glob-2026", "other"] {
+        app.clone()
+            .oneshot(signed_request(
+                Method::PUT,
+                &format!("/{}", bucket),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+    }
+    seed_object(&app, "cond-bucket", "keep/x.txt").await;
+    seed_object(&app, "cond-bucket", "tmp/y.txt").await;
+
+    let kept = app
+        .clone()
+        .oneshot(cond_request(
+            Method::DELETE,
+            "/cond-bucket/keep/x.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(kept.status(), StatusCode::FORBIDDEN);
+
+    let tmp_delete = app
+        .clone()
+        .oneshot(cond_request(
+            Method::DELETE,
+            "/cond-bucket/tmp/y.txt",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(tmp_delete.status(), StatusCode::NO_CONTENT);
+
+    let glob_put = app
+        .clone()
+        .oneshot(cond_request(
+            Method::PUT,
+            "/glob-2026/a.txt",
+            Body::from("x"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(glob_put.status(), StatusCode::OK);
+
+    let other_put = app
+        .clone()
+        .oneshot(cond_request(Method::PUT, "/other/a.txt", Body::from("x")))
+        .await
+        .unwrap();
+    assert_eq!(other_put.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_put_bucket_policy_validation() {
+    let (app, _tmp) = test_app();
+    app.clone()
+        .oneshot(signed_request(Method::PUT, "/val-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    async fn rejected(app: &axum::Router, policy: &str, needle: &str) {
+        let resp = put_policy_doc(app, "val-bucket", policy).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{}", policy);
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("<Code>MalformedPolicy</Code>"), "{}", body);
+        assert!(body.contains(needle), "expected {:?} in {}", needle, body);
+    }
+
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*","Condition":{"StringEqualz":{"s3:prefix":"x"}}}]}"#,
+        "Unsupported condition operator",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::other-bucket/*"}]}"#,
+        "does not belong to bucket",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","NotAction":"s3:PutObject","Resource":"arn:aws:s3:::val-bucket/*"}]}"#,
+        "both Action and NotAction",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Permit","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*"}]}"#,
+        "Effect must be Allow or Deny",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*"}]}"#,
+        "missing Principal",
+    )
+    .await;
+    rejected(
+        &app,
+        r#"{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*","Condition":{"IpAddress":{"aws:SourceIp":"10.0.0.0/33"}}}]}"#,
+        "invalid IP address",
+    )
+    .await;
+
+    let padding = "x".repeat(21 * 1024);
+    let oversized = format!(
+        r#"{{"Statement":[{{"Sid":"{}","Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::val-bucket/*"}}]}}"#,
+        padding
+    );
+    rejected(&app, &oversized, "maximum size").await;
+
+    let accepted = r#"{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Deny",
+          "NotPrincipal": {"AWS": ["arn:aws:iam::myfsio:user/u-test1234"]},
+          "Action": "s3:*",
+          "NotResource": "arn:aws:s3:::val-bucket/public/*",
+          "Condition": {
+            "Bool": {"aws:SecureTransport": false},
+            "ForAnyValue:StringEqualsIfExists": {"aws:TagKeys": ["env"]},
+            "DateLessThan": {"aws:CurrentTime": "2030-01-01T00:00:00Z"},
+            "NumericLessThanEquals": {"s3:max-keys": 100},
+            "Null": {"s3:x-amz-server-side-encryption": "true"},
+            "StringLike": {"s3:prefix": "home/${aws:username}/*"}
+          }
+        }
+      ]
+    }"#;
+    assert_eq!(
+        put_policy_doc(&app, "val-bucket", accepted).await.status(),
+        StatusCode::NO_CONTENT
     );
 }

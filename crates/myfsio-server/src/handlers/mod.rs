@@ -5557,6 +5557,7 @@ async fn delete_objects_handler(
                     Some("s3:DeleteObject"),
                     Some(&obj.key),
                     Some(true),
+                    &crate::middleware::current_request_context(principal.as_ref()),
                 )
                 .await
                 {
@@ -6334,6 +6335,7 @@ pub(crate) async fn governance_bypass_authorized(
         Some("s3:BypassGovernanceRetention"),
         key,
         None,
+        &crate::middleware::current_request_context(Some(principal)),
     )
     .await
     .is_ok()
