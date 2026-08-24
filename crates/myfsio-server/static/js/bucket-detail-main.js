@@ -3901,9 +3901,7 @@
         if (!resp.ok) throw new Error('Failed to fetch stats');
         const data = await resp.json();
 
-        // Handle endpoint health status
         if (data.endpoint_healthy === false) {
-          // Show warning and hide success alert
           if (endpointWarning) {
             endpointWarning.classList.remove('d-none');
             if (endpointErrorEl && data.endpoint_error) {
@@ -3912,7 +3910,6 @@
           }
           if (statusAlert) statusAlert.classList.add('d-none');
 
-          // Update status badge to show "Paused" with warning styling
           if (statusBadge) {
             statusBadge.className = 'badge bg-warning-subtle text-warning px-3 py-2';
             statusBadge.innerHTML = `
@@ -3922,14 +3919,11 @@
               <span>Paused (Endpoint Unavailable)</span>`;
           }
 
-          // Hide the pause button since replication is effectively already paused
           if (pauseForm) pauseForm.classList.add('d-none');
         } else {
-          // Hide warning and show success alert
           if (endpointWarning) endpointWarning.classList.add('d-none');
           if (statusAlert) statusAlert.classList.remove('d-none');
 
-          // Restore status badge to show "Enabled"
           if (statusBadge) {
             statusBadge.className = 'badge bg-success-subtle text-success px-3 py-2';
             statusBadge.innerHTML = `
@@ -3939,7 +3933,6 @@
               <span>Enabled</span>`;
           }
 
-          // Show the pause button
           if (pauseForm) pauseForm.classList.remove('d-none');
         }
 
@@ -4056,10 +4049,12 @@
           if (total > 5 && !failuresExpanded) {
             failuresPagination.style.display = '';
             failuresShownCount.textContent = `Showing ${Math.min(5, total)} of ${total}`;
-          } else {
+          } 
+          else {
             failuresPagination.style.display = 'none';
           }
-        } else {
+        } 
+        else {
           failuresCard.style.display = 'none';
         }
       } catch (err) {

@@ -60,6 +60,28 @@ fn require_iam_action(state: &AppState, principal: &Principal, action: &str) -> 
     None
 }
 
+fn require_manageable_user(
+    state: &AppState,
+    principal: &Principal,
+    identifier: &str,
+) -> Option<Response> {
+    if state.iam.can_manage_user(principal, identifier) {
+        return None;
+    }
+    Some(json_error(
+        "AccessDenied",
+        myfsio_auth::iam::MANAGE_USER_DENIED,
+        StatusCode::FORBIDDEN,
+    ))
+}
+
+fn iam_mutation_error(message: &str) -> Response {
+    if message == myfsio_auth::iam::MANAGE_USER_DENIED {
+        return json_error("AccessDenied", message, StatusCode::FORBIDDEN);
+    }
+    json_error("InvalidRequest", message, StatusCode::BAD_REQUEST)
+}
+
 async fn read_json_body(body: Body) -> Result<Option<serde_json::Value>, Response> {
     let bytes = match super::collect_body_capped(body, super::JSON_API_BODY_LIMIT).await {
         Ok(bytes) => bytes,
@@ -251,7 +273,13 @@ pub async fn update_local_site(
         created_at: existing.and_then(|e| e.created_at),
     };
 
-    registry.set_local_site(site.clone());
+    if let Err(err) = registry.try_set_local_site(site.clone()) {
+        return json_error(
+            "InternalError",
+            &format!("Failed to persist local site configuration: {}", err),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
     json_response(StatusCode::OK, serde_json::to_value(&site).unwrap())
 }
 
@@ -397,7 +425,13 @@ pub async fn register_peer_site(
         last_health_check: None,
     };
 
-    registry.add_peer(peer.clone());
+    if let Err(err) = registry.try_add_peer(peer.clone()) {
+        return json_error(
+            "InternalError",
+            &format!("Failed to persist peer site '{}': {}", site_id, err),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
     json_response(StatusCode::CREATED, serde_json::to_value(&peer).unwrap())
 }
 
@@ -533,7 +567,13 @@ pub async fn update_peer_site(
         last_health_check: existing.last_health_check,
     };
 
-    registry.update_peer(peer.clone());
+    if let Err(err) = registry.try_update_peer(peer.clone()) {
+        return json_error(
+            "InternalError",
+            &format!("Failed to persist peer site '{}': {}", site_id, err),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
     json_response(StatusCode::OK, serde_json::to_value(&peer).unwrap())
 }
 
@@ -556,14 +596,22 @@ pub async fn delete_peer_site(
         }
     };
 
-    if !registry.delete_peer(&site_id) {
-        return json_error(
+    match registry.try_delete_peer(&site_id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => json_error(
             "NotFound",
             &format!("Peer site '{}' not found", site_id),
             StatusCode::NOT_FOUND,
-        );
+        ),
+        Err(err) => json_error(
+            "InternalError",
+            &format!(
+                "Failed to persist removal of peer site '{}': {}",
+                site_id, err
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
     }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn check_peer_health(
@@ -1035,9 +1083,12 @@ pub async fn iam_create_access_key(
     if let Some(err) = require_iam_action(&state, &principal, "iam:create_key") {
         return err;
     }
-    match state.iam.create_access_key(&identifier) {
+    if let Some(err) = require_manageable_user(&state, &principal, &identifier) {
+        return err;
+    }
+    match state.iam.create_access_key(&principal, &identifier) {
         Ok(result) => json_response(StatusCode::CREATED, result),
-        Err(e) => json_error("InvalidRequest", &e, StatusCode::BAD_REQUEST),
+        Err(e) => iam_mutation_error(&e),
     }
 }
 
@@ -1049,9 +1100,12 @@ pub async fn iam_delete_access_key(
     if let Some(err) = require_iam_action(&state, &principal, "iam:delete_key") {
         return err;
     }
-    match state.iam.delete_access_key(&access_key) {
+    if let Some(err) = require_manageable_user(&state, &principal, &access_key) {
+        return err;
+    }
+    match state.iam.delete_access_key(&principal, &access_key) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => json_error("InvalidRequest", &e, StatusCode::BAD_REQUEST),
+        Err(e) => iam_mutation_error(&e),
     }
 }
 
@@ -1063,9 +1117,16 @@ pub async fn iam_disable_user(
     if let Some(err) = require_iam_action(&state, &principal, "iam:disable_user") {
         return err;
     }
-    match state.iam.set_user_enabled(&identifier, false).await {
+    if let Some(err) = require_manageable_user(&state, &principal, &identifier) {
+        return err;
+    }
+    match state
+        .iam
+        .set_user_enabled(&principal, &identifier, false)
+        .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"status": "disabled"})),
-        Err(e) => json_error("InvalidRequest", &e, StatusCode::BAD_REQUEST),
+        Err(e) => iam_mutation_error(&e),
     }
 }
 
@@ -1077,9 +1138,16 @@ pub async fn iam_enable_user(
     if let Some(err) = require_iam_action(&state, &principal, "iam:disable_user") {
         return err;
     }
-    match state.iam.set_user_enabled(&identifier, true).await {
+    if let Some(err) = require_manageable_user(&state, &principal, &identifier) {
+        return err;
+    }
+    match state
+        .iam
+        .set_user_enabled(&principal, &identifier, true)
+        .await
+    {
         Ok(()) => json_response(StatusCode::OK, serde_json::json!({"status": "enabled"})),
-        Err(e) => json_error("InvalidRequest", &e, StatusCode::BAD_REQUEST),
+        Err(e) => iam_mutation_error(&e),
     }
 }
 
@@ -1187,7 +1255,13 @@ pub async fn create_website_domain(
         );
     }
 
-    store.set_mapping(&domain, &bucket);
+    if let Err(err) = store.try_set_mapping(&domain, &bucket) {
+        return json_error(
+            "InternalError",
+            &format!("Failed to persist mapping for domain '{}': {}", domain, err),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
     json_response(
         StatusCode::CREATED,
         serde_json::json!({"domain": domain, "bucket": bucket}),
@@ -1297,7 +1371,13 @@ pub async fn update_website_domain(
         );
     }
 
-    store.set_mapping(&domain, &bucket);
+    if let Err(err) = store.try_set_mapping(&domain, &bucket) {
+        return json_error(
+            "InternalError",
+            &format!("Failed to persist mapping for domain '{}': {}", domain, err),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
     json_response(
         StatusCode::OK,
         serde_json::json!({"domain": domain, "bucket": bucket}),
@@ -1324,14 +1404,22 @@ pub async fn delete_website_domain(
     };
 
     let domain = normalize_domain(&domain);
-    if !store.delete_mapping(&domain) {
-        return json_error(
+    match store.try_delete_mapping(&domain) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => json_error(
             "NotFound",
             &format!("No mapping found for domain '{}'", domain),
             StatusCode::NOT_FOUND,
-        );
+        ),
+        Err(err) => json_error(
+            "InternalError",
+            &format!(
+                "Failed to persist removal of mapping for domain '{}': {}",
+                domain, err
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
     }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1794,4 +1882,236 @@ pub async fn get_sync_stats(
             "stats": stats,
         }),
     )
+}
+
+#[cfg(test)]
+mod config_persistence_tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::services::website_domains::WebsiteDomainStore;
+    use http_body_util::BodyExt;
+
+    fn admin_principal() -> Principal {
+        Principal::new(
+            "AKIAADMINEXAMPLE".to_string(),
+            "u-admin000".to_string(),
+            "admin".to_string(),
+            true,
+        )
+    }
+
+    fn test_state(tmp: &tempfile::TempDir) -> AppState {
+        let config_dir = tmp.path().join(".myfsio.sys").join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        AppState::new(ServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+            storage_root: tmp.path().to_path_buf(),
+            iam_config_path: config_dir.join("iam.json"),
+            website_hosting_enabled: true,
+            allow_internal_endpoints: true,
+            ..ServerConfig::default()
+        })
+    }
+
+    fn occupy_config_path(tmp: &tempfile::TempDir, file_name: &str) {
+        let blocked = tmp
+            .path()
+            .join(".myfsio.sys")
+            .join("config")
+            .join(file_name);
+        let _ = std::fs::remove_file(&blocked);
+        std::fs::create_dir_all(&blocked).expect("occupy the config path with a directory");
+    }
+
+    fn registry_of(state: &AppState) -> Arc<crate::services::site_registry::SiteRegistry> {
+        state.site_registry.clone().expect("site registry")
+    }
+
+    fn domains_of(state: &AppState) -> Arc<WebsiteDomainStore> {
+        state.website_domains.clone().expect("website domain store")
+    }
+
+    fn sample_peer(site_id: &str) -> PeerSite {
+        PeerSite {
+            site_id: site_id.to_string(),
+            endpoint: "http://127.0.0.1:5050".to_string(),
+            region: "us-east-1".to_string(),
+            priority: 100,
+            display_name: site_id.to_string(),
+            connection_id: None,
+            peer_inbound_access_key: None,
+            created_at: None,
+            is_healthy: false,
+            last_health_check: None,
+        }
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    #[tokio::test]
+    async fn update_local_site_reports_a_server_error_when_the_registry_cannot_be_written() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+        occupy_config_path(&tmp, "site_registry.json");
+
+        let response = update_local_site(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Body::from(r#"{"site_id":"site-a","endpoint":"http://127.0.0.1:5000"}"#),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(response).await;
+        assert!(body.contains("InternalError"), "{}", body);
+        assert!(
+            body.contains("Failed to persist local site configuration"),
+            "{}",
+            body
+        );
+        assert!(registry_of(&state).get_local_site().is_none());
+    }
+
+    #[tokio::test]
+    async fn register_peer_site_still_answers_created_when_the_registry_is_writable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+
+        let response = register_peer_site(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Body::from(r#"{"site_id":"peer-a","endpoint":"http://127.0.0.1:5050"}"#),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(registry_of(&state).get_peer("peer-a").is_some());
+    }
+
+    #[tokio::test]
+    async fn register_peer_site_reports_a_server_error_instead_of_created_when_the_write_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+        occupy_config_path(&tmp, "site_registry.json");
+
+        let response = register_peer_site(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Body::from(r#"{"site_id":"peer-a","endpoint":"http://127.0.0.1:5050"}"#),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(response).await;
+        assert!(
+            body.contains("Failed to persist peer site 'peer-a'"),
+            "{}",
+            body
+        );
+        assert!(registry_of(&state).get_peer("peer-a").is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_peer_site_keeps_deleted_and_absent_apart_and_flags_write_failures() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+        let registry = registry_of(&state);
+        registry
+            .try_add_peer(sample_peer("peer-a"))
+            .expect("seed peer");
+
+        let absent = delete_peer_site(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Path("peer-missing".to_string()),
+        )
+        .await;
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+        let deleted = delete_peer_site(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Path("peer-a".to_string()),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+
+        registry
+            .try_add_peer(sample_peer("peer-b"))
+            .expect("seed peer");
+        occupy_config_path(&tmp, "site_registry.json");
+
+        let unwritable = delete_peer_site(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Path("peer-b".to_string()),
+        )
+        .await;
+        assert_eq!(unwritable.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(unwritable).await;
+        assert!(
+            body.contains("Failed to persist removal of peer site 'peer-b'"),
+            "{}",
+            body
+        );
+        assert!(registry.get_peer("peer-b").is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_website_domain_keeps_removed_and_absent_apart_and_flags_write_failures() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+        let store = domains_of(&state);
+        store
+            .try_set_mapping("site.example.com", "site-bucket")
+            .expect("seed mapping");
+
+        let absent = delete_website_domain(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Path("absent.example.com".to_string()),
+        )
+        .await;
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+        let removed = delete_website_domain(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Path("site.example.com".to_string()),
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+
+        store
+            .try_set_mapping("kept.example.com", "site-bucket")
+            .expect("seed mapping");
+        occupy_config_path(&tmp, "website_domains.json");
+
+        let unwritable = delete_website_domain(
+            State(state.clone()),
+            Extension(admin_principal()),
+            Path("kept.example.com".to_string()),
+        )
+        .await;
+        assert_eq!(unwritable.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(unwritable).await;
+        assert!(
+            body.contains("Failed to persist removal of mapping for domain 'kept.example.com'"),
+            "{}",
+            body
+        );
+        assert_eq!(
+            store.get_bucket("kept.example.com"),
+            Some("site-bucket".to_string())
+        );
+    }
 }

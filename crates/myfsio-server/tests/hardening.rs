@@ -48,6 +48,13 @@ fn app() -> (axum::Router, tempfile::TempDir) {
     (app, tmp)
 }
 
+fn md5_hex(bytes: &[u8]) -> String {
+    use md5::{Digest, Md5};
+    let mut hasher = Md5::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 fn request(method: Method, uri: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -495,6 +502,7 @@ async fn conditional_complete_multipart_respects_if_none_match() {
         .unwrap()
         .to_str()
         .unwrap()
+        .replace("&quot;", "")
         .trim_matches('"')
         .to_string();
 
@@ -602,6 +610,7 @@ async fn sse_s3_streaming_roundtrip_full_and_range() {
         .unwrap()
         .to_str()
         .unwrap()
+        .replace("&quot;", "")
         .trim_matches('"')
         .to_string();
     let expected_md5 = format!("{:x}", md5::Md5::digest(&payload));
@@ -740,6 +749,7 @@ async fn failed_conditional_single_part_complete_preserves_part_for_retry() {
         .unwrap()
         .to_str()
         .unwrap()
+        .replace("&quot;", "")
         .trim_matches('"')
         .to_string();
     let complete_xml = format!(
@@ -884,6 +894,7 @@ async fn upload_part_copy_range_from_middle_of_segmented_source() {
         .split("</ETag>")
         .next()
         .unwrap()
+        .replace("&quot;", "")
         .trim_matches('"')
         .to_string();
 
@@ -1331,4 +1342,267 @@ async fn read_only_selector_on_put_cannot_create_bucket() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn upload_part_copy_from_sse_s3_source_yields_plaintext_not_ciphertext() {
+    let (app, _tmp) = encrypted_app().await;
+    app.clone()
+        .oneshot(request(Method::PUT, "/enc-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let payload: Vec<u8> = (0..9_000u32).map(|i| (i % 251) as u8).collect();
+    let resp = app
+        .clone()
+        .oneshot(request_with(
+            Method::PUT,
+            "/enc-bucket/secret.bin",
+            Body::from(payload.clone()),
+            |b| b.header("x-amz-server-side-encryption", "AES256"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/enc-bucket/assembled.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .and_then(|s| s.split("</UploadId>").next())
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(request_with(
+            Method::PUT,
+            &format!(
+                "/enc-bucket/assembled.bin?uploadId={}&partNumber=1",
+                upload_id
+            ),
+            Body::empty(),
+            |b| b.header("x-amz-copy-source", "/enc-bucket/secret.bin"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let part_xml = String::from_utf8(body_bytes(resp).await).unwrap();
+    let part_etag = part_xml
+        .split("<ETag>")
+        .nth(1)
+        .and_then(|s| s.split("</ETag>").next())
+        .unwrap()
+        .replace("&quot;", "")
+        .trim_matches('"')
+        .to_string();
+    assert_eq!(
+        part_etag,
+        md5_hex(&payload),
+        "the copied part must be the plaintext, so its ETag is the plaintext MD5"
+    );
+
+    let complete = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+        part_etag
+    );
+    let resp = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/enc-bucket/assembled.bin?uploadId={}", upload_id),
+            Body::from(complete),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/enc-bucket/assembled.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let served = body_bytes(resp).await;
+    assert_eq!(
+        served, payload,
+        "UploadPartCopy from an encrypted source must copy plaintext, never the stored ciphertext"
+    );
+}
+
+#[tokio::test]
+async fn upload_part_copy_range_from_sse_s3_source_uses_plaintext_offsets() {
+    let (app, _tmp) = encrypted_app().await;
+    app.clone()
+        .oneshot(request(Method::PUT, "/enc-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let payload: Vec<u8> = (0..6_000u32).map(|i| (i % 97) as u8).collect();
+    app.clone()
+        .oneshot(request_with(
+            Method::PUT,
+            "/enc-bucket/ranged.bin",
+            Body::from(payload.clone()),
+            |b| b.header("x-amz-server-side-encryption", "AES256"),
+        ))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/enc-bucket/slice.bin?uploads",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let body = String::from_utf8(body_bytes(resp).await).unwrap();
+    let upload_id = body
+        .split("<UploadId>")
+        .nth(1)
+        .and_then(|s| s.split("</UploadId>").next())
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(request_with(
+            Method::PUT,
+            &format!("/enc-bucket/slice.bin?uploadId={}&partNumber=1", upload_id),
+            Body::empty(),
+            |b| {
+                b.header("x-amz-copy-source", "/enc-bucket/ranged.bin")
+                    .header("x-amz-copy-source-range", "bytes=1000-1999")
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let part_xml = String::from_utf8(body_bytes(resp).await).unwrap();
+    let part_etag = part_xml
+        .split("<ETag>")
+        .nth(1)
+        .and_then(|s| s.split("</ETag>").next())
+        .unwrap()
+        .replace("&quot;", "")
+        .trim_matches('"')
+        .to_string();
+    assert_eq!(
+        part_etag,
+        md5_hex(&payload[1000..2000]),
+        "a copy-source range must be resolved against plaintext offsets"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(request_with(
+            Method::PUT,
+            &format!("/enc-bucket/slice.bin?uploadId={}&partNumber=2", upload_id),
+            Body::empty(),
+            |b| {
+                b.header("x-amz-copy-source", "/enc-bucket/ranged.bin")
+                    .header("x-amz-copy-source-range", "bytes=5990-9999")
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::RANGE_NOT_SATISFIABLE,
+        "a range past the plaintext end must be rejected, not silently satisfied from ciphertext"
+    );
+}
+
+#[tokio::test]
+async fn zero_encryption_chunk_size_refuses_the_put_instead_of_storing_an_empty_object() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iam_path = tmp.path().join(".myfsio.sys").join("config");
+    std::fs::create_dir_all(&iam_path).unwrap();
+    std::fs::write(
+        iam_path.join("iam.json"),
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": TEST_ACCESS_KEY,
+                    "secret_key": TEST_SECRET_KEY,
+                    "status": "active"
+                }],
+                "policies": [{ "bucket": "*", "actions": ["*"], "prefix": "*" }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let config = myfsio_server::config::ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        storage_root: tmp.path().to_path_buf(),
+        iam_config_path: iam_path.join("iam.json"),
+        ui_enabled: false,
+        multipart_min_part_size: 1,
+        allow_legacy_header_auth: true,
+        encryption_enabled: true,
+        encryption_chunk_size_bytes: 0,
+        ..myfsio_server::config::ServerConfig::default()
+    };
+    let state = myfsio_server::state::AppState::new_with_encryption(config)
+        .await
+        .expect("encryption initialization should succeed");
+    let app = myfsio_server::create_router(state);
+
+    app.clone()
+        .oneshot(request(Method::PUT, "/enc-bucket", Body::empty()))
+        .await
+        .unwrap();
+
+    let payload = vec![42u8; 5_000];
+    let resp = app
+        .clone()
+        .oneshot(request_with(
+            Method::PUT,
+            "/enc-bucket/payload.bin",
+            Body::from(payload),
+            |b| b.header("x-amz-server-side-encryption", "AES256"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_server_error() || resp.status().is_client_error(),
+        "a misconfigured chunk size must fail the upload, got {}",
+        resp.status()
+    );
+
+    let resp = app
+        .oneshot(request(
+            Method::GET,
+            "/enc-bucket/payload.bin",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a refused encrypted upload must not leave an empty object behind"
+    );
 }

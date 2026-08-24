@@ -423,13 +423,14 @@ impl LifecycleService {
         let payload = json!({
             "executions": history,
         });
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Err(err) = myfsio_common::fs_util::atomic_write_json(&path, &payload) {
+            tracing::error!(
+                path = %path.display(),
+                error = %err,
+                "Failed to persist lifecycle execution history for bucket {}; the run itself completed but will not appear in the history",
+                result.bucket_name
+            );
         }
-        let _ = std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()),
-        );
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {

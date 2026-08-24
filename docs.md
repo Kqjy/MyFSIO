@@ -241,6 +241,12 @@ These limits gate S3 object data reads and writes only. Admin and UI requests, H
 
 ### Replication and site sync
 
+Replication rules live in `.myfsio.sys/config/replication_rules.json` and are created through the web UI's Replication tab or the management API, because a rule names a **remote connection** (endpoint plus credentials) and not just a bucket. The standard S3 subresource reflects that:
+
+- `PUT /<bucket>?replication` returns `501 NotImplemented`. A `ReplicationConfiguration` destination names only a bucket ARN, which cannot identify which configured connection to replicate through. Earlier releases accepted the XML with `200 OK` and stored it in the bucket configuration where nothing ever read it, so replication was reported as enabled while nothing replicated.
+- `GET /<bucket>?replication` renders the rule that is **actually in effect**, or `ReplicationConfigurationNotFoundError` when nothing is replicating. It no longer echoes back a stored blob that had no bearing on what the engine was doing.
+- `DELETE /<bucket>?replication` deletes the live rule, so it genuinely stops replication for the bucket. Earlier releases returned `204` while a UI-created rule kept replicating.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `REPLICATION_CONNECT_TIMEOUT_SECONDS` | `5` | Replication connect timeout |
@@ -473,6 +479,10 @@ A corrupt `_index.json` or sidecar now **fails closed**: affected objects return
 
 ### Durability model
 
+**Cluster configuration writes are atomic and acknowledged only after they land.** Replication rules, the site registry, website-domain mappings, the site-sync cursor and stats, per-bucket access-logging configuration, metrics snapshots and lifecycle history are written through `atomic_write_file` / `atomic_write_secret_file` (unique temp file, `write_all`, `sync_all`, rename, parent directory fsync) and their results are propagated instead of discarded; a mutator whose write fails rolls back its in-memory change so memory and disk cannot diverge. Previously each of these used `std::fs::write`, which truncates the live file before writing, with the result discarded — a disk-full write, an interruption, or two replication workers rewriting the rules file concurrently could leave unparseable JSON while every caller was told the change succeeded.
+
+On the read side these stores no longer treat "damaged" as "empty". A missing file still loads as an empty store silently (unchanged first-run behavior), but a file that exists and cannot be read or parsed is logged at `error!` and preserved as `<name>.corrupt-<timestamp>` instead of being silently replaced by defaults and then overwritten by the next write. Before this, a truncated `replication_rules.json` meant every replication rule in the cluster vanished at the next restart with the UI reporting "no rules configured" as though none had ever existed; the site registry and website-domain stores lost every peer and every domain mapping the same way.
+
 MyFSIO has an explicit durability deviation from Amazon S3 compatibility. PUT object file contents are fsynced before MyFSIO acknowledges the request. Namespace durability for the rename and directory entry remains platform-dependent. On Windows, directory fsync is a no-op, so the namespace portion of that durability sequence does not receive the same guarantee as it does on platforms that support directory fsync.
 
 A completed multipart upload in the default `segments` layout receives the same treatment: every part file is fsynced when it is uploaded, and the complete fsyncs the segment files' directory entries, the new segment directory's own entry, and the sparse stub before acknowledging. A failed fsync fails the CompleteMultipartUpload (which remains retryable) rather than acknowledging an upload whose namespace entries may not survive power loss.
@@ -615,12 +625,18 @@ ENCRYPTION_ENABLED=true KMS_ENABLED=true cargo run -p myfsio-server --
 
 Notes:
 
+- **Configuration is validated on every start, not only under `--check-config`.** `serve` runs the same validation and exits non-zero on any `CRITICAL:` issue, logging each one. Previously validation ran only when the operator explicitly asked for it, so a critical misconfiguration — a zero `ENCRYPTION_CHUNK_SIZE_BYTES`, a zero `KMS_GENERATE_DATA_KEY_MIN_BYTES` (which made `GenerateDataKey` return a zero-length key with `200 OK`), inverted presigned-URL or KMS min/max bounds, identical API and UI bind addresses, a non-positive `GC_INTERVAL_HOURS`, a negative `BUCKET_CONFIG_CACHE_TTL_SECONDS`, or an uncreatable storage root or IAM config directory — started a server that either crashed later or served requests wrongly. Warnings and informational issues remain `--check-config`-only.
 - If `ENCRYPTION_ENABLED=true` and `SECRET_KEY` is not configured, the server still starts, but `--check-config` warns that secure-at-rest config encryption is unavailable.
 - If `ENCRYPTION_ENABLED=true` or `KMS_ENABLED=true` and the corresponding subsystem fails to initialize, the server logs the reason and exits non-zero instead of starting. Starting without it would silently store objects unencrypted while still returning `200 OK`.
 - A bucket configured with default encryption fails its writes with `InternalError` if the encryption service is unavailable or its stored configuration cannot be parsed, rather than falling back to writing plaintext.
 - KMS and the object encryption master key live under `data/.myfsio.sys/keys/`.
 - Encrypted PUTs stream the client body straight through the encryptor into a temp file and commit the ciphertext atomically; plaintext is never installed at the live key path. Encrypted GETs (full, ranged, and SSE-C multipart) decrypt chunk-by-chunk while streaming the response instead of materializing a decrypted temp file. Objects written by older builds without `x-amz-encryption-plaintext-size` metadata fall back to temp-file decryption.
 - One remaining non-atomic window: SSE-S3/SSE-KMS multipart uploads encrypt after CompleteMultipartUpload commits the assembled object; a crash inside that window can leave the assembled plaintext live. Per-part SSE-C multipart uploads are not affected.
+- **Every reader that moves object bytes decrypts first.** Paths that read the physical backing file used to hand the stored ciphertext to a consumer that treated it as object content:
+  - `UploadPartCopy` from an encrypted source now decrypts the source (requiring the `x-amz-copy-source-server-side-encryption-customer-*` headers for an SSE-C source, exactly as `CopyObject` does) and stages plaintext as the part, so `x-amz-copy-source-range` is resolved against **plaintext** offsets and the part ETag is the plaintext MD5. Previously the raw ciphertext was copied byte-for-byte: the completed object's body was ciphertext under a plausible ETag, an encrypted destination encrypted it a second time, and the SSE-C "customer key required to read this object" gate could be bypassed by copying the stored bytes into an object with the SSE-C marker stripped.
+  - Replication decrypts an SSE-S3/SSE-KMS source before uploading it. Sources it cannot decrypt — SSE-C (the server holds no key), an encrypted object in the segments layout, or any encrypted object when the encryption service is unavailable — are **refused** and recorded as a replication failure with `EncryptedSourceUnsupported` rather than shipping ciphertext to the target. Previously an encrypted object replicated as raw ciphertext with the nonce and wrapped data key stripped, producing a replica nobody could decrypt, and the up-to-date check compared the plaintext MD5 against the target's ciphertext MD5 so every reconcile pass re-uploaded the whole object.
+  - Bidirectional site sync applies the destination bucket's default encryption to objects it pulls from a peer, through the same resolution the normal PUT path uses. A pull into a bucket configured for default encryption when the encryption service is unavailable fails rather than landing plaintext. Previously the pull wrote straight to storage and bypassed bucket encryption entirely.
+- `ENCRYPTION_CHUNK_SIZE_BYTES=0` is refused at the encryption boundary rather than silently producing empty objects. With a zero chunk size the encrypting reader allocated a zero-length buffer, reported EOF without ever reading the request body, and committed a 0-byte object with `200 OK` and the MD5 of the empty string while the client believed its upload succeeded. All three encrypt entry points now return an error, and `serve` refuses to start on the misconfiguration (see below).
 
 ### Write integrity and conditional writes
 
@@ -866,7 +882,7 @@ Each bucket subresource requires its own action: `share` (ACLs, `?acl`), `policy
 
 ### Namespaced actions
 
-- `iam:<op>` — delegated IAM reads/maintenance on the admin API: `iam:list_users`, `iam:get_user`, `iam:get_policy`, `iam:create_key`, `iam:delete_key`, `iam:disable_user`. `iam:*` grants the namespace.
+- `iam:<op>` — delegated IAM reads/maintenance on the admin API: `iam:list_users`, `iam:get_user`, `iam:get_policy`, `iam:create_key`, `iam:delete_key`, `iam:disable_user`. `iam:*` grants the namespace. The three **mutating** actions (`iam:create_key`, `iam:delete_key`, `iam:disable_user`, which also covers enable) are **self-scoped for non-admins**: the grant lets the holder manage their own credentials and nothing else. A non-admin targeting another user gets `403 Not permitted to manage this user`, and the refusal is uniform so it cannot be used to probe which user ids exist. Admins are unaffected and may still target any user. Without this scoping a delegated `iam:create_key` was full privilege escalation: the holder could mint an access key for the admin user, receive its secret in the `201` body, and inherit the admin's policies.
 - `system:<op>` — maintenance endpoints and their UI buttons: `system:gc_read`, `system:gc_run`, `system:integrity_read`, `system:integrity_run`. `system:*` grants the namespace.
 
 Namespaced and system-level actions are evaluated without a bucket, so they must appear in a statement whose `bucket` is `"*"` (statement prefix is ignored for them).

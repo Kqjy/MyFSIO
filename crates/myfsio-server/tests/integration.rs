@@ -6212,15 +6212,15 @@ async fn test_bucket_root_with_trailing_slash_works() {
 }
 
 #[tokio::test]
-async fn test_bucket_replication_roundtrip() {
-    let (app, _tmp) = test_app();
+async fn test_bucket_replication_reports_the_rule_actually_in_effect() {
+    let (app, state, _tmp) = test_app_and_state();
 
     app.clone()
         .oneshot(signed_request(Method::PUT, "/repl-bucket", Body::empty()))
         .await
         .unwrap();
 
-    let repl_xml = "<ReplicationConfiguration><Role>arn:aws:iam::123456789012:role/s3-repl</Role><Rule><ID>rule-1</ID></Rule></ReplicationConfiguration>";
+    let repl_xml = "<ReplicationConfiguration><Role>arn:aws:iam::123456789012:role/s3-repl</Role><Rule><ID>rule-1</ID><Status>Enabled</Status><Destination><Bucket>arn:aws:s3:::mirror</Bucket></Destination></Rule></ReplicationConfiguration>";
 
     let resp = app
         .clone()
@@ -6236,7 +6236,46 @@ async fn test_bucket_replication_roundtrip() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "PutBucketReplication must refuse rather than store XML that enables nothing"
+    );
+    assert!(
+        state.replication.get_rule("repl-bucket").is_none(),
+        "a refused PUT must not create a replication rule"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::GET,
+            "/repl-bucket?replication",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "GetBucketReplication must report no configuration when nothing is replicating"
+    );
+
+    state
+        .replication
+        .set_rule(myfsio_server::services::replication::ReplicationRule {
+            bucket_name: "repl-bucket".to_string(),
+            target_connection_id: "conn-1".to_string(),
+            target_bucket: "mirror".to_string(),
+            enabled: true,
+            mode: myfsio_server::services::replication::MODE_NEW_ONLY.to_string(),
+            created_at: None,
+            stats: Default::default(),
+            sync_deletions: true,
+            last_pull_at: None,
+            filter_prefix: Some("logs/".to_string()),
+        })
+        .expect("rule persists");
 
     let resp = app
         .clone()
@@ -6257,9 +6296,17 @@ async fn test_bucket_replication_roundtrip() {
             .to_vec(),
     )
     .unwrap();
-    assert!(body.contains("ReplicationConfiguration"));
+    assert!(body.contains("<ReplicationConfiguration"));
+    assert!(
+        body.contains("arn:aws:s3:::mirror"),
+        "the reported destination must be the live rule's target, got {}",
+        body
+    );
+    assert!(body.contains("<Status>Enabled</Status>"));
+    assert!(body.contains("<Prefix>logs/</Prefix>"));
 
     let resp = app
+        .clone()
         .oneshot(signed_request(
             Method::DELETE,
             "/repl-bucket?replication",
@@ -6268,6 +6315,20 @@ async fn test_bucket_replication_roundtrip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        state.replication.get_rule("repl-bucket").is_none(),
+        "DeleteBucketReplication must stop the replication that was actually running"
+    );
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::GET,
+            "/repl-bucket?replication",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -14732,4 +14793,198 @@ async fn test_put_bucket_policy_validation() {
         put_policy_doc(&app, "val-bucket", accepted).await.status(),
         StatusCode::NO_CONTENT
     );
+}
+
+const IAM_DELEGATE_AK: &str = "AKIAMDELEGATE0000000";
+const IAM_DELEGATE_SK: &str = "iam-delegate-secret-iam-delegate-secret";
+const IAM_ADMIN_SPARE_AK: &str = "AKIAMADMINSPARE00000";
+const IAM_ADMIN_SPARE_SK: &str = "iam-admin-spare-secret-iam-admin-spare";
+
+fn iam_delegation_app(delegated_actions: &[&str]) -> (axum::Router, tempfile::TempDir) {
+    test_app_with_iam(serde_json::json!({
+        "version": 2,
+        "users": [
+            {
+                "user_id": "u-test1234",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [
+                    {
+                        "access_key": TEST_ACCESS_KEY,
+                        "secret_key": TEST_SECRET_KEY,
+                        "status": "active"
+                    },
+                    {
+                        "access_key": IAM_ADMIN_SPARE_AK,
+                        "secret_key": IAM_ADMIN_SPARE_SK,
+                        "status": "active"
+                    }
+                ],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            },
+            {
+                "user_id": "u-delegate",
+                "display_name": "delegate",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": IAM_DELEGATE_AK,
+                    "secret_key": IAM_DELEGATE_SK,
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": delegated_actions, "prefix": "*"}]
+            }
+        ]
+    }))
+}
+
+fn delegate_request(method: Method, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-access-key", IAM_DELEGATE_AK)
+        .header("x-secret-key", IAM_DELEGATE_SK)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn iam_user_record(tmp: &tempfile::TempDir, user_id: &str) -> Value {
+    let raw = std::fs::read_to_string(
+        tmp.path()
+            .join(".myfsio.sys")
+            .join("config")
+            .join("iam.json"),
+    )
+    .unwrap();
+    let config: Value = serde_json::from_str(&raw).unwrap();
+    config["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|user| user["user_id"] == user_id)
+        .cloned()
+        .unwrap()
+}
+
+fn iam_access_keys(tmp: &tempfile::TempDir, user_id: &str) -> Vec<String> {
+    iam_user_record(tmp, user_id)["access_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key["access_key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn iam_create_key_delegate_cannot_mint_admin_credentials() {
+    let (app, tmp) = iam_delegation_app(&["iam:create_key"]);
+
+    let admin_targets = [
+        "/myfsio/admin/iam/users/u-test1234/access-keys".to_string(),
+        "/myfsio/admin/iam/users/u-test1234/keys".to_string(),
+        format!("/myfsio/admin/iam/users/{}/access-keys", TEST_ACCESS_KEY),
+    ];
+    for uri in admin_targets {
+        let resp = app
+            .clone()
+            .oneshot(delegate_request(Method::POST, &uri))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{}", uri);
+        let body = response_json(resp).await;
+        assert_eq!(body["error"]["code"], "AccessDenied", "{}", uri);
+        assert!(body.get("secret_key").is_none(), "{}", uri);
+    }
+
+    assert_eq!(
+        iam_access_keys(&tmp, "u-test1234"),
+        vec![TEST_ACCESS_KEY.to_string(), IAM_ADMIN_SPARE_AK.to_string()]
+    );
+}
+
+#[tokio::test]
+async fn iam_create_key_delegate_can_still_create_own_key() {
+    let (app, tmp) = iam_delegation_app(&["iam:create_key"]);
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-delegate/access-keys",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = response_json(resp).await;
+    let minted = body["access_key"].as_str().unwrap().to_string();
+    assert!(!body["secret_key"].as_str().unwrap().is_empty());
+
+    let keys = iam_access_keys(&tmp, "u-delegate");
+    assert_eq!(keys.len(), 2);
+    assert!(keys.contains(&minted));
+}
+
+#[tokio::test]
+async fn iam_create_key_admin_can_target_any_user() {
+    let (app, tmp) = iam_delegation_app(&["iam:create_key"]);
+
+    let resp = app
+        .clone()
+        .oneshot(signed_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-delegate/access-keys",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(iam_access_keys(&tmp, "u-delegate").len(), 2);
+
+    let resp = app
+        .oneshot(signed_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-test1234/access-keys",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(iam_access_keys(&tmp, "u-test1234").len(), 3);
+}
+
+#[tokio::test]
+async fn iam_delete_key_delegate_cannot_rotate_admin_keys() {
+    let (app, tmp) = iam_delegation_app(&["iam:delete_key"]);
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::DELETE,
+            &format!(
+                "/myfsio/admin/iam/users/u-test1234/access-keys/{}",
+                TEST_ACCESS_KEY
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "AccessDenied");
+
+    assert!(iam_access_keys(&tmp, "u-test1234").contains(&TEST_ACCESS_KEY.to_string()));
+}
+
+#[tokio::test]
+async fn iam_disable_user_delegate_cannot_lock_out_admin() {
+    let (app, tmp) = iam_delegation_app(&["iam:disable_user"]);
+
+    let resp = app
+        .oneshot(delegate_request(
+            Method::POST,
+            "/myfsio/admin/iam/users/u-test1234/disable",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body = response_json(resp).await;
+    assert_eq!(body["error"]["code"], "AccessDenied");
+
+    assert_eq!(iam_user_record(&tmp, "u-test1234")["enabled"], true);
 }

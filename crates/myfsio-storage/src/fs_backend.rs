@@ -13,7 +13,7 @@ use lru::LruCache;
 use md5::{Digest, Md5};
 #[cfg(test)]
 use parking_lot::Condvar;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -307,6 +307,22 @@ struct ShallowCacheEntry {
 
 const OBJECT_LOCK_STRIPES: usize = 2048;
 
+const DIRECTORY_PUBLISH_STRIPES: usize = 512;
+
+const DISK_CASING_RESOLVE_ATTEMPTS: usize = 8;
+
+const DIRECTORY_PUBLISH_ATTEMPTS: usize = 16;
+
+const DIRECTORY_PUBLISH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskCasingVerdict {
+    PathVerified,
+    ComponentVerified,
+    Aliased,
+    Unlinked,
+}
+
 #[derive(Debug, Default)]
 pub struct MetaMigrationPreflight {
     pub index_files: usize,
@@ -596,6 +612,7 @@ pub struct FsStorageBackend {
     bucket_config_cache_ttl: std::time::Duration,
     meta_read_cache: Mutex<LruCache<(String, String), Option<HashMap<String, Value>>>>,
     meta_index_locks: DashMap<String, Arc<Mutex<()>>>,
+    directory_publish_stripes: Box<[RwLock<()>]>,
     bucket_config_locks: DashMap<String, Arc<Mutex<()>>>,
     quota_locks: DashMap<String, Arc<Mutex<()>>>,
     object_lock_stripes: Box<[RwLock<()>]>,
@@ -619,6 +636,8 @@ pub struct FsStorageBackend {
 struct ManifestPart {
     etag: String,
     size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    part_file_mtime_nanos: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -736,6 +755,10 @@ impl FsStorageBackend {
             .map(|_| RwLock::new(()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let directory_publish_stripes = (0..DIRECTORY_PUBLISH_STRIPES)
+            .map(|_| RwLock::new(()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let mut backend = Self {
             root,
             canonical_root: None,
@@ -756,6 +779,7 @@ impl FsStorageBackend {
             bucket_config_locks: DashMap::new(),
             quota_locks: DashMap::new(),
             object_lock_stripes,
+            directory_publish_stripes,
             stats_cache: DashMap::new(),
             stats_cache_ttl: std::time::Duration::from_secs(60),
             list_cache: DashMap::new(),
@@ -804,47 +828,107 @@ impl FsStorageBackend {
         if !self.case_insensitive_fs {
             return Ok(true);
         }
+        let canonical_root = match &self.canonical_root {
+            Some(path) => path.clone(),
+            None => std::fs::canonicalize(&self.root).map_err(StorageError::Io)?,
+        };
         let mut probe = expected;
-        let existing = loop {
+        loop {
             if !probe.starts_with(&self.root) {
                 return Ok(false);
             }
             if probe == self.root.as_path() {
                 return Ok(true);
             }
-            match std::fs::symlink_metadata(probe) {
-                Ok(_) => break probe,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => match probe.parent() {
-                    Some(parent) => probe = parent,
-                    None => return Ok(true),
-                },
-                Err(err) => return Err(StorageError::Io(err)),
+            match self.resolve_disk_casing(probe, &canonical_root)? {
+                DiskCasingVerdict::PathVerified => return Ok(true),
+                DiskCasingVerdict::Aliased => return Ok(false),
+                DiskCasingVerdict::ComponentVerified | DiskCasingVerdict::Unlinked => {
+                    match probe.parent() {
+                        Some(parent) => probe = parent,
+                        None => return Ok(true),
+                    }
+                }
             }
+        }
+    }
+
+    fn resolve_disk_casing(
+        &self,
+        probe: &Path,
+        canonical_root: &Path,
+    ) -> StorageResult<DiskCasingVerdict> {
+        for _ in 0..DISK_CASING_RESOLVE_ATTEMPTS {
+            let canonical = match std::fs::canonicalize(probe) {
+                Ok(canonical) => canonical,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(DiskCasingVerdict::Unlinked);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Self::listed_entry_casing(probe);
+                }
+                Err(err) => return Err(StorageError::Io(err)),
+            };
+            let Ok(actual_rel) = canonical.strip_prefix(canonical_root) else {
+                if Self::disk_entry_is_gone(probe) {
+                    return Ok(DiskCasingVerdict::Unlinked);
+                }
+                continue;
+            };
+            let Ok(expected_rel) = probe.strip_prefix(&self.root) else {
+                return Ok(DiskCasingVerdict::Aliased);
+            };
+            return Ok(if Self::path_components_match(expected_rel, actual_rel) {
+                DiskCasingVerdict::PathVerified
+            } else {
+                DiskCasingVerdict::Aliased
+            });
+        }
+        Ok(DiskCasingVerdict::Aliased)
+    }
+
+    fn listed_entry_casing(probe: &Path) -> StorageResult<DiskCasingVerdict> {
+        let (Some(parent), Some(name)) = (probe.parent(), probe.file_name()) else {
+            return Ok(DiskCasingVerdict::Aliased);
         };
-        let canonical_root = match &self.canonical_root {
-            Some(path) => path.clone(),
-            None => std::fs::canonicalize(&self.root).map_err(StorageError::Io)?,
+        let entries = match std::fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DiskCasingVerdict::Unlinked);
+            }
+            Err(err) => return Err(StorageError::Io(err)),
         };
-        let canonical = std::fs::canonicalize(existing).map_err(StorageError::Io)?;
-        let expected_rel = match existing.strip_prefix(&self.root) {
-            Ok(rel) => rel,
-            Err(_) => return Ok(false),
-        };
-        let actual_rel = match canonical.strip_prefix(&canonical_root) {
-            Ok(rel) => rel,
-            Err(_) => return Ok(false),
-        };
+        for entry in entries.flatten() {
+            if entry.file_name() == name {
+                return Ok(DiskCasingVerdict::ComponentVerified);
+            }
+        }
+        Ok(if Self::disk_entry_is_gone(probe) {
+            DiskCasingVerdict::Unlinked
+        } else {
+            DiskCasingVerdict::Aliased
+        })
+    }
+
+    fn disk_entry_is_gone(probe: &Path) -> bool {
+        matches!(
+            std::fs::symlink_metadata(probe),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
+    fn path_components_match(expected_rel: &Path, actual_rel: &Path) -> bool {
         let mut expected_parts = expected_rel.components();
         let mut actual_parts = actual_rel.components();
         loop {
             match (expected_parts.next(), actual_parts.next()) {
-                (Some(e), Some(a)) => {
-                    if e.as_os_str() != a.as_os_str() {
-                        return Ok(false);
+                (Some(expected), Some(actual)) => {
+                    if expected.as_os_str() != actual.as_os_str() {
+                        return false;
                     }
                 }
-                (None, None) => return Ok(true),
-                _ => return Ok(false),
+                (None, None) => return true,
+                _ => return false,
             }
         }
     }
@@ -1416,11 +1500,7 @@ impl FsStorageBackend {
         let mut current = bucket_root.to_path_buf();
         for seg in &segments[..intermediate_count] {
             let next = current.join(seg);
-            let meta = match std::fs::symlink_metadata(&next) {
-                Ok(m) => Some(m),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-                Err(err) => return Err(err),
-            };
+            let meta = Self::stat_settled_entry_sync(&next)?;
             if let Some(meta) = meta {
                 if meta.file_type().is_file() {
                     let temp_path =
@@ -1911,7 +1991,7 @@ impl FsStorageBackend {
 impl FsStorageBackend {
     fn atomic_write_json_sync(path: &Path, data: &Value, sync: bool) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            Self::create_publish_dir_sync(parent)?;
         }
         let tmp_path = path.with_extension("tmp");
         let result = (|| {
@@ -1941,6 +2021,32 @@ impl FsStorageBackend {
         upload_dir.join(format!("part-{:05}.json", part_number))
     }
 
+    fn part_data_path(upload_dir: &Path, part_number: u32) -> PathBuf {
+        upload_dir.join(format!("part-{:05}.part", part_number))
+    }
+
+    fn part_file_mtime_nanos(part_file: &Path) -> Option<u64> {
+        std::fs::metadata(part_file)
+            .and_then(|meta| meta.modified())
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since_epoch| since_epoch.as_nanos() as u64)
+    }
+
+    fn part_record_describes_file(record: &ManifestPart, part_file: &Path, file_size: u64) -> bool {
+        if record.size != file_size {
+            return false;
+        }
+        match (
+            record.part_file_mtime_nanos,
+            Self::part_file_mtime_nanos(part_file),
+        ) {
+            (Some(recorded), Some(current)) => recorded == current,
+            _ => false,
+        }
+    }
+
     fn publish_part_record_sync(
         &self,
         upload_dir: &Path,
@@ -1953,6 +2059,10 @@ impl FsStorageBackend {
         let record = serde_json::to_value(ManifestPart {
             etag: etag.to_string(),
             size,
+            part_file_mtime_nanos: Self::part_file_mtime_nanos(&Self::part_data_path(
+                upload_dir,
+                part_number,
+            )),
         })
         .map_err(std::io::Error::other)?;
         Self::atomic_write_json_sync(
@@ -1960,6 +2070,89 @@ impl FsStorageBackend {
             &record,
             true,
         )
+    }
+
+    fn read_part_record_sync(upload_dir: &Path, part_number: u32) -> Option<Value> {
+        let content =
+            std::fs::read_to_string(Self::part_record_path(upload_dir, part_number)).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    fn restore_displaced_part_record(
+        upload_dir: &Path,
+        part_number: u32,
+        displaced_record: Option<Value>,
+    ) {
+        let Some(record) = displaced_record else {
+            return;
+        };
+        if !Self::part_data_path(upload_dir, part_number).exists() {
+            return;
+        }
+        if let Err(error) = Self::atomic_write_json_sync(
+            &Self::part_record_path(upload_dir, part_number),
+            &record,
+            true,
+        ) {
+            tracing::error!(
+                upload_dir = %upload_dir.display(),
+                part_number,
+                "failed to restore the displaced part record after a failed replacement; the \
+                 part's bytes are intact but it will not be listed until it is re-uploaded: {}",
+                error
+            );
+        }
+    }
+
+    fn retract_part_record_sync(
+        root: &Path,
+        upload_dir: &Path,
+        part_number: u32,
+    ) -> std::io::Result<()> {
+        let _ = root;
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(root, "mpu:part-record-retract")?;
+        match std::fs::remove_file(Self::part_record_path(upload_dir, part_number)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Self::retract_legacy_manifest_part_sync(root, upload_dir, part_number)?;
+        Self::fsync_dir(upload_dir)
+    }
+
+    fn retract_legacy_manifest_part_sync(
+        root: &Path,
+        upload_dir: &Path,
+        part_number: u32,
+    ) -> std::io::Result<()> {
+        let _ = root;
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        let content = match std::fs::read_to_string(&manifest_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let Ok(mut manifest) = serde_json::from_str::<Value>(&content) else {
+            return Ok(());
+        };
+        let Some(parts) = manifest.get_mut("parts").and_then(Value::as_object_mut) else {
+            return Ok(());
+        };
+        let stale_keys: Vec<String> = parts
+            .keys()
+            .filter(|key| key.parse::<u32>().ok() == Some(part_number))
+            .cloned()
+            .collect();
+        if stale_keys.is_empty() {
+            return Ok(());
+        }
+        for key in stale_keys {
+            parts.remove(&key);
+        }
+        #[cfg(any(test, feature = "failpoints"))]
+        crate::failpoints::hit(root, "mpu:part-record-retract-manifest")?;
+        Self::atomic_write_json_sync(&manifest_path, &manifest, true)
     }
 
     fn read_index_entry_sync(
@@ -2572,12 +2765,12 @@ impl FsStorageBackend {
     ) -> std::io::Result<()> {
         let (sidecar_path, _) = self.sidecar_file_for_key(bucket_name, key);
         if let Some(parent) = sidecar_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            Self::create_publish_dir_sync(parent)?;
         }
         {
             let lock = self.get_meta_index_lock(&sidecar_path.to_string_lossy());
             let _guard = lock.lock();
-            std::fs::rename(staged_path, &sidecar_path)?;
+            self.publish_by_rename_sync(staged_path, &sidecar_path)?;
             if let Some(parent) = sidecar_path.parent() {
                 Self::fsync_dir(parent)?;
             }
@@ -3107,7 +3300,7 @@ impl FsStorageBackend {
                 crate::failpoints::hit(&fp_root, "mpu:during-assembly")
                     .map_err(StorageError::Io)?;
                 let part_file =
-                    upload_dir_owned.join(format!("part-{:05}.part", part_info.part_number));
+                    FsStorageBackend::part_data_path(&upload_dir_owned, part_info.part_number);
                 let file_size = std::fs::metadata(&part_file)
                     .map_err(StorageError::Io)?
                     .len();
@@ -3138,8 +3331,7 @@ impl FsStorageBackend {
                         part_info.part_number
                     )));
                 }
-                let digest =
-                    parse_md5_hex(&manifest_part.etag).unwrap_or_else(|| hasher.finalize().into());
+                let digest: [u8; 16] = hasher.finalize().into();
                 digest_concat.extend_from_slice(&digest);
                 total_size += file_size;
                 part_sizes.push(file_size);
@@ -3510,12 +3702,94 @@ impl FsStorageBackend {
         Ok(())
     }
 
-    fn cleanup_empty_parents(path: &Path, stop_at: &Path) {
+    fn directory_publish_stripe(&self, directory: &Path) -> &RwLock<()> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        directory.hash(&mut hasher);
+        let index = (hasher.finish() as usize) % self.directory_publish_stripes.len();
+        &self.directory_publish_stripes[index]
+    }
+
+    fn directory_publish_guard(&self, directory: &Path) -> RwLockReadGuard<'_, ()> {
+        self.directory_publish_stripe(directory).read()
+    }
+
+    fn try_lock_directory_for_prune(&self, directory: &Path) -> Option<RwLockWriteGuard<'_, ()>> {
+        self.directory_publish_stripe(directory).try_write()
+    }
+
+    fn directory_may_be_vanishing(err: &std::io::Error) -> bool {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::AlreadyExists
+        )
+    }
+
+    fn stat_settled_entry_sync(path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+        let mut attempt = 0;
+        loop {
+            let err = match std::fs::symlink_metadata(path) {
+                Ok(metadata) => return Ok(Some(metadata)),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => err,
+            };
+            attempt += 1;
+            if attempt >= DIRECTORY_PUBLISH_ATTEMPTS || !Self::directory_may_be_vanishing(&err) {
+                return Err(err);
+            }
+            std::thread::sleep(DIRECTORY_PUBLISH_RETRY_DELAY);
+        }
+    }
+
+    fn create_publish_dir_sync(directory: &Path) -> std::io::Result<()> {
+        let mut attempt = 0;
+        loop {
+            let err = match std::fs::create_dir_all(directory) {
+                Ok(()) => return Ok(()),
+                Err(err) => err,
+            };
+            attempt += 1;
+            if attempt >= DIRECTORY_PUBLISH_ATTEMPTS || !Self::directory_may_be_vanishing(&err) {
+                return Err(err);
+            }
+            std::thread::sleep(DIRECTORY_PUBLISH_RETRY_DELAY);
+        }
+    }
+
+    fn publish_by_rename_sync(&self, source: &Path, destination: &Path) -> std::io::Result<()> {
+        let Some(parent) = destination.parent() else {
+            return std::fs::rename(source, destination);
+        };
+        let _guard = self.directory_publish_guard(parent);
+        let mut attempt = 0;
+        loop {
+            let err = match std::fs::rename(source, destination) {
+                Ok(()) => return Ok(()),
+                Err(err) => err,
+            };
+            attempt += 1;
+            if attempt >= DIRECTORY_PUBLISH_ATTEMPTS
+                || !Self::directory_may_be_vanishing(&err)
+                || Self::disk_entry_is_gone(source)
+            {
+                return Err(err);
+            }
+            let _ = std::fs::create_dir_all(parent);
+            std::thread::sleep(DIRECTORY_PUBLISH_RETRY_DELAY);
+        }
+    }
+
+    fn cleanup_empty_parents(&self, path: &Path, stop_at: &Path) {
         let mut parent = path.parent();
         while let Some(p) = parent {
             if p == stop_at {
                 break;
             }
+            let Some(_guard) = self.try_lock_directory_for_prune(p) else {
+                break;
+            };
             if std::fs::remove_dir(p).is_err() {
                 break;
             }
@@ -3627,7 +3901,7 @@ impl FsStorageBackend {
         let manifest_path = version_dir.join(format!("{}.json", version_id));
         if let Err(error) = Self::atomic_write_json_sync(&manifest_path, &record, true) {
             let _ = Self::safe_unlink(&data_path);
-            Self::cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
+            self.cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
             return Err(error);
         }
 
@@ -3729,7 +4003,7 @@ impl FsStorageBackend {
         self.write_metadata_sync(bucket_name, key, &meta)?;
 
         Self::safe_unlink(&manifest_path)?;
-        Self::cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
+        self.cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
 
         let logical_size = record.get("size").and_then(Value::as_u64).unwrap_or(0);
         Ok(Some(VersionMutation {
@@ -3823,7 +4097,7 @@ impl FsStorageBackend {
             Self::safe_unlink(&data_path)?;
         }
         let versions_root = self.bucket_versions_root(bucket_name);
-        Self::cleanup_empty_parents(&manifest_path, &versions_root);
+        self.cleanup_empty_parents(&manifest_path, &versions_root);
         Ok(logical_size.map(|logical_size| VersionMutation {
             version_id: "null".to_string(),
             kind: if delete_marker {
@@ -3867,7 +4141,7 @@ impl FsStorageBackend {
                     }
                 }
             }
-            Self::cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
+            self.cleanup_empty_parents(&manifest_path, &self.bucket_versions_root(bucket_name));
         }
         self.invalidate_bucket_caches(bucket_name);
         self.update_listing_index_after_commit(bucket_name, key);
@@ -5682,11 +5956,14 @@ impl FsStorageBackend {
                 key
             )));
         }
+        let destination = self.object_live_path(bucket_name, key);
+        let _publish_guard = destination
+            .parent()
+            .map(|parent| self.directory_publish_guard(parent));
         self.ensure_writable_parents_sync(&bucket_root, key)
             .map_err(StorageError::Io)?;
-        let destination = self.object_live_path(bucket_name, key);
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+            Self::create_publish_dir_sync(parent).map_err(StorageError::Io)?;
         }
 
         let is_overwrite = destination.exists();
@@ -5938,7 +6215,7 @@ impl FsStorageBackend {
                     let _ = std::fs::remove_file(&staged);
                     return Err(abort_commit(err));
                 }
-                if let Err(err) = std::fs::rename(tmp_path, &destination) {
+                if let Err(err) = self.publish_by_rename_sync(tmp_path, &destination) {
                     let _ = std::fs::remove_file(&staged);
                     return Err(abort_commit(err));
                 }
@@ -5993,7 +6270,8 @@ impl FsStorageBackend {
                 }
                 self.write_index_entry_sync(bucket_name, key, &entry)
                     .map_err(abort_commit)?;
-                std::fs::rename(tmp_path, &destination).map_err(abort_commit)?;
+                self.publish_by_rename_sync(tmp_path, &destination)
+                    .map_err(abort_commit)?;
                 if let Some(parent) = destination.parent() {
                     Self::fsync_dir(parent).map_err(StorageError::Io)?;
                 }
@@ -6683,7 +6961,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     Self::safe_unlink(&path).map_err(StorageError::Io)?;
                     self.delete_metadata_sync(bucket, key)
                         .map_err(StorageError::Io)?;
-                    Self::cleanup_empty_parents(&path, &bucket_path);
+                    self.cleanup_empty_parents(&path, &bucket_path);
                 } else {
                     let stored_meta = self.read_metadata_sync(bucket, key);
                     if !stored_meta.is_empty() {
@@ -6746,7 +7024,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             self.delete_metadata_sync(bucket, key)
                 .map_err(StorageError::Io)?;
 
-            Self::cleanup_empty_parents(&path, &bucket_path);
+            self.cleanup_empty_parents(&path, &bucket_path);
             self.invalidate_bucket_caches(bucket);
             self.update_listing_index_after_commit(bucket, key);
             Ok(DeleteOutcome {
@@ -6798,7 +7076,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     Self::safe_unlink(&live_path).map_err(StorageError::Io)?;
                     self.delete_metadata_sync(bucket, key)
                         .map_err(StorageError::Io)?;
-                    Self::cleanup_empty_parents(&live_path, &bucket_path);
+                    self.cleanup_empty_parents(&live_path, &bucket_path);
                     let version_mutations = self
                         .promote_latest_archived_to_live_sync(bucket, key)
                         .map_err(StorageError::Io)?
@@ -6887,7 +7165,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             Self::safe_unlink(&data_path).map_err(StorageError::Io)?;
             Self::safe_unlink(&manifest_path).map_err(StorageError::Io)?;
             let versions_root = self.bucket_versions_root(bucket);
-            Self::cleanup_empty_parents(&manifest_path, &versions_root);
+            self.cleanup_empty_parents(&manifest_path, &versions_root);
 
             let mut was_active_dm = false;
             if is_delete_marker {
@@ -7304,7 +7582,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
+        let part_file = Self::part_data_path(&upload_dir, part_number);
         let tmp_file = upload_dir.join(format!("part-{:05}.{}.tmp", part_number, Uuid::new_v4()));
 
         let chunk_size = self.stream_chunk_size;
@@ -7360,8 +7638,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _ = std::fs::remove_file(&tmp_file);
             return Err(StorageError::Io(error));
         }
+        let displaced_record = Self::read_part_record_sync(&upload_dir, part_number);
+        if let Err(error) = Self::retract_part_record_sync(&self.root, &upload_dir, part_number) {
+            let _ = std::fs::remove_file(&tmp_file);
+            Self::restore_displaced_part_record(&upload_dir, part_number, displaced_record);
+            return Err(StorageError::Io(error));
+        }
         if let Err(error) = std::fs::rename(&tmp_file, &part_file) {
             let _ = std::fs::remove_file(&tmp_file);
+            Self::restore_displaced_part_record(&upload_dir, part_number, displaced_record);
             return Err(StorageError::Io(error));
         }
         self.publish_part_record_sync(&upload_dir, part_number, &etag, part_size)
@@ -7386,7 +7671,7 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             return Err(StorageError::UploadNotFound(upload_id.to_string()));
         }
 
-        let part_file = upload_dir.join(format!("part-{:05}.part", part_number));
+        let part_file = Self::part_data_path(&upload_dir, part_number);
         let tmp_file = upload_dir.join(format!("part-{:05}.{}.tmp", part_number, Uuid::new_v4()));
         let chunk_size = self.stream_chunk_size;
         let src_version_id = src_version_id.map(str::to_string);
@@ -7499,8 +7784,15 @@ impl crate::traits::StorageEngine for FsStorageBackend {
             let _ = std::fs::remove_file(&tmp_file);
             return Err(StorageError::Io(error));
         }
+        let displaced_record = Self::read_part_record_sync(&upload_dir, part_number);
+        if let Err(error) = Self::retract_part_record_sync(&self.root, &upload_dir, part_number) {
+            let _ = std::fs::remove_file(&tmp_file);
+            Self::restore_displaced_part_record(&upload_dir, part_number, displaced_record);
+            return Err(StorageError::Io(error));
+        }
         if let Err(error) = std::fs::rename(&tmp_file, &part_file) {
             let _ = std::fs::remove_file(&tmp_file);
+            Self::restore_displaced_part_record(&upload_dir, part_number, displaced_record);
             return Err(StorageError::Io(error));
         }
         self.publish_part_record_sync(&upload_dir, part_number, &etag, length)
@@ -7580,14 +7872,21 @@ impl crate::traits::StorageEngine for FsStorageBackend {
                     let file_size = std::fs::metadata(&source_file)
                         .map_err(StorageError::Io)?
                         .len();
-                    let manifest_entry = manifest_parts.get(&part_info.part_number);
-                    let manifest_etag = manifest_entry.map(|e| e.etag.as_str());
-                    let manifest_size = manifest_entry.map(|e| e.size);
-                    match (manifest_etag.and_then(parse_md5_hex), manifest_size) {
-                        (Some(digest), Some(size)) if size == file_size => {
+                    let proven_digest = manifest_parts
+                        .get(&part_info.part_number)
+                        .filter(|record| {
+                            FsStorageBackend::part_record_describes_file(
+                                record,
+                                &source_file,
+                                file_size,
+                            )
+                        })
+                        .and_then(|record| parse_md5_hex(&record.etag));
+                    match proven_digest {
+                        Some(digest) => {
                             md5_digest_concat.extend_from_slice(&digest);
                         }
-                        _ => {
+                        None => {
                             let reader =
                                 std::fs::File::open(&source_file).map_err(StorageError::Io)?;
                             let mut reader = std::io::BufReader::with_capacity(chunk_size, reader);
@@ -8191,6 +8490,251 @@ mod tests {
         backend.case_insensitive_fs = true;
         let outside = dir.path().parent().unwrap().join("outside-case-probe");
         assert!(!backend.verify_disk_casing(&outside).unwrap());
+    }
+
+    #[test]
+    fn disk_casing_reports_a_removed_entry_as_unlinked() {
+        let (dir, mut backend) = create_test_backend();
+        backend.case_insensitive_fs = true;
+        let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
+        let removed = dir.path().join("bkt").join("gone.bin");
+        assert_eq!(
+            backend
+                .resolve_disk_casing(&removed, &canonical_root)
+                .unwrap(),
+            DiskCasingVerdict::Unlinked
+        );
+        assert!(
+            backend.verify_disk_casing(&removed).unwrap(),
+            "a key whose entry is not on disk has no casing to violate"
+        );
+    }
+
+    #[test]
+    fn disk_casing_reports_a_case_aliased_entry_as_aliased() {
+        let (dir, backend) = create_test_backend();
+        if !backend.case_insensitive_fs {
+            return;
+        }
+        let canonical_root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("Docs")).unwrap();
+        std::fs::write(dir.path().join("Docs").join("secret.txt"), b"payload").unwrap();
+        assert_eq!(
+            backend
+                .resolve_disk_casing(&dir.path().join("Docs").join("secret.txt"), &canonical_root)
+                .unwrap(),
+            DiskCasingVerdict::PathVerified
+        );
+        assert_eq!(
+            backend
+                .resolve_disk_casing(&dir.path().join("docs").join("secret.txt"), &canonical_root)
+                .unwrap(),
+            DiskCasingVerdict::Aliased
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn versioned_key_ops_survive_a_concurrently_unlinked_data_file() {
+        let _stress = filesystem_stress_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("unlink-race").await.unwrap();
+        backend
+            .set_versioning_status("unlink-race", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        const WORKERS: usize = 12;
+        const OPS: usize = 200;
+        let anchor: AsyncReadStream = Box::pin(std::io::Cursor::new(b"anchor".to_vec()));
+        backend
+            .put_object("unlink-race", "race/never-deleted", anchor, None)
+            .await
+            .unwrap();
+        let keys: std::sync::Arc<Vec<String>> =
+            std::sync::Arc::new((0..4).map(|i| format!("race/k{:02}", i)).collect());
+
+        let mut handles = Vec::new();
+        for worker in 0..WORKERS {
+            let backend = backend.clone();
+            let keys = keys.clone();
+            handles.push(tokio::spawn(async move {
+                let mut rng: u64 = 0xA24BAED4963EE407u64.wrapping_mul(worker as u64 + 1);
+                for op in 0..OPS {
+                    let roll = storm_rng_next(&mut rng);
+                    let key = &keys[(roll % keys.len() as u64) as usize];
+                    match (roll >> 8) % 4 {
+                        0 => {
+                            let body = format!("w{worker}-o{op}").into_bytes();
+                            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+                            backend
+                                .put_object("unlink-race", key, stream, None)
+                                .await
+                                .unwrap();
+                        }
+                        1 => {
+                            let outcome = backend
+                                .delete_object("unlink-race", key)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    panic!("a versioned delete must not fail with {e:?}")
+                                });
+                            assert!(
+                                outcome.is_delete_marker,
+                                "a versioned delete must record a delete marker"
+                            );
+                            assert!(outcome.version_id.is_some());
+                        }
+                        2 => {
+                            backend
+                                .list_object_versions("unlink-race", key)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    panic!("listing versions of {key} must not fail with {e:?}")
+                                });
+                        }
+                        _ => {
+                            if let Ok((_, mut stream)) =
+                                backend.get_object("unlink-race", key).await
+                            {
+                                tokio::task::yield_now().await;
+                                let mut body = Vec::new();
+                                let _ = stream.read_to_end(&mut body).await;
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        for key in keys.iter() {
+            let outcome = backend.delete_object("unlink-race", key).await.unwrap();
+            assert!(outcome.is_delete_marker);
+        }
+    }
+
+    #[test]
+    fn publish_by_rename_recreates_a_pruned_destination_directory() {
+        let (dir, backend) = create_test_backend();
+        let source = dir.path().join("staged.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        let destination = dir.path().join("pruned").join("deep").join("obj.bin");
+        backend
+            .publish_by_rename_sync(&source, &destination)
+            .expect("a publish must recreate the directory a concurrent prune removed");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn publish_by_rename_reports_a_missing_source() {
+        let (dir, backend) = create_test_backend();
+        let source = dir.path().join("never-staged.bin");
+        let destination = dir.path().join("obj.bin");
+        let err = backend
+            .publish_by_rename_sync(&source, &destination)
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "a missing staged file must be reported, not retried away"
+        );
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn cleanup_empty_parents_spares_a_directory_with_a_publish_in_flight() {
+        let (dir, backend) = create_test_backend();
+        let prefix = dir.path().join("held").join("deep");
+        std::fs::create_dir_all(&prefix).unwrap();
+        let published = prefix.join("obj.bin");
+
+        let guard = backend.directory_publish_guard(&prefix);
+        backend.cleanup_empty_parents(&published, dir.path());
+        assert!(
+            prefix.is_dir(),
+            "pruning must skip a directory a publisher is writing into"
+        );
+        drop(guard);
+
+        backend.cleanup_empty_parents(&published, dir.path());
+        assert!(
+            !prefix.exists(),
+            "pruning resumes once the publish has finished"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn put_survives_a_sibling_delete_pruning_the_shared_prefix() {
+        let _stress = filesystem_stress_test_guard();
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("prefix-prune").await.unwrap();
+
+        const WORKERS: usize = 12;
+        const OPS: usize = 200;
+        let keys: std::sync::Arc<Vec<String>> =
+            std::sync::Arc::new((0..4).map(|i| format!("prune/deep/k{:02}", i)).collect());
+
+        let mut handles = Vec::new();
+        for worker in 0..WORKERS {
+            let backend = backend.clone();
+            let keys = keys.clone();
+            handles.push(tokio::spawn(async move {
+                let mut rng: u64 = 0xC2B2AE3D27D4EB4Fu64.wrapping_mul(worker as u64 + 1);
+                for op in 0..OPS {
+                    let roll = storm_rng_next(&mut rng);
+                    let key = &keys[(roll % keys.len() as u64) as usize];
+                    match (roll >> 8) % 4 {
+                        0 | 1 => {
+                            let body = format!("w{worker}-o{op}").into_bytes();
+                            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+                            backend
+                                .put_object("prefix-prune", key, stream, None)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    panic!("a put into {key} must not fail with {e:?}")
+                                });
+                        }
+                        2 => {
+                            backend
+                                .delete_object("prefix-prune", key)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    panic!("a delete of {key} must not fail with {e:?}")
+                                });
+                        }
+                        _ => match backend.get_object("prefix-prune", key).await {
+                            Ok((_, mut stream)) => {
+                                let mut body = Vec::new();
+                                stream.read_to_end(&mut body).await.unwrap();
+                            }
+                            Err(StorageError::ObjectNotFound { .. }) => {}
+                            Err(e) => panic!("unexpected get error under load: {e}"),
+                        },
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        for key in keys.iter() {
+            let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(b"final".to_vec()));
+            backend
+                .put_object("prefix-prune", key, stream, None)
+                .await
+                .unwrap();
+            let (_, mut stream) = backend.get_object("prefix-prune", key).await.unwrap();
+            let mut body = Vec::new();
+            stream.read_to_end(&mut body).await.unwrap();
+            assert_eq!(body, b"final");
+        }
     }
 
     #[tokio::test]
@@ -9246,6 +9790,288 @@ mod tests {
                 .unwrap();
             assert!(!upload_dir.exists());
         }
+    }
+
+    #[tokio::test]
+    async fn a_failed_replacement_keeps_the_previously_acknowledged_part_listed() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("keep-mpu").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("keep-mpu", "kept.bin", None)
+            .await
+            .unwrap();
+
+        let original = vec![b'a'; 4096];
+        let replacement = vec![b'b'; 4096];
+        assert_eq!(original.len(), replacement.len());
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(original.clone()));
+        let original_etag = backend
+            .upload_part("keep-mpu", &upload_id, 1, stream)
+            .await
+            .unwrap();
+
+        let upload_dir = backend
+            .multipart_upload_dir("keep-mpu", &upload_id)
+            .unwrap();
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["parts"]["1"] = serde_json::json!({
+            "etag": original_etag.clone(),
+            "size": original.len(),
+        });
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:part-record-retract-manifest",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(replacement.clone()));
+        let result = backend.upload_part("keep-mpu", &upload_id, 1, stream).await;
+        crate::failpoints::clear(&backend.root, "mpu:part-record-retract-manifest");
+        assert_storage_full(result);
+
+        assert_eq!(
+            std::fs::read(FsStorageBackend::part_data_path(&upload_dir, 1)).unwrap(),
+            original,
+            "a failed replacement must not disturb the previously acknowledged bytes"
+        );
+
+        let listed = backend.list_parts("keep-mpu", &upload_id).await.unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "the previously acknowledged part must still be listed after a failed replacement"
+        );
+        assert_eq!(listed[0].part_number, 1);
+        assert_eq!(
+            listed[0].etag, original_etag,
+            "the restored record must still describe the bytes that are on disk"
+        );
+
+        let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(replacement.clone()));
+        let retried_etag = backend
+            .upload_part("keep-mpu", &upload_id, 1, stream)
+            .await
+            .expect("retrying the replacement succeeds");
+        assert_ne!(retried_etag, original_etag);
+        assert_eq!(
+            std::fs::read(FsStorageBackend::part_data_path(&upload_dir, 1)).unwrap(),
+            replacement
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_part_replacement_never_leaves_a_stale_digest_for_the_new_bytes() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("replace-mpu").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("replace-mpu", "replaced.bin", None)
+            .await
+            .unwrap();
+
+        let original_first = vec![b'a'; 4096];
+        let replacement_first = vec![b'b'; 4096];
+        let second = vec![b'c'; 2048];
+        assert_eq!(original_first.len(), replacement_first.len());
+
+        let stale_first_etag = backend
+            .upload_part(
+                "replace-mpu",
+                &upload_id,
+                1,
+                Box::pin(std::io::Cursor::new(original_first.clone())),
+            )
+            .await
+            .unwrap();
+        let second_etag = backend
+            .upload_part(
+                "replace-mpu",
+                &upload_id,
+                2,
+                Box::pin(std::io::Cursor::new(second.clone())),
+            )
+            .await
+            .unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:part-record-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let replacement = backend
+            .upload_part(
+                "replace-mpu",
+                &upload_id,
+                1,
+                Box::pin(std::io::Cursor::new(replacement_first.clone())),
+            )
+            .await;
+        crate::failpoints::clear(&backend.root, "mpu:part-record-write");
+        assert_storage_full(replacement);
+
+        let upload_dir = backend
+            .multipart_upload_dir("replace-mpu", &upload_id)
+            .unwrap();
+        let first_on_disk =
+            std::fs::read(FsStorageBackend::part_data_path(&upload_dir, 1)).unwrap();
+        assert_ne!(first_on_disk, original_first);
+
+        let listed = backend.list_parts("replace-mpu", &upload_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].part_number, 2);
+
+        let completed = backend
+            .complete_multipart(
+                "replace-mpu",
+                &upload_id,
+                &[
+                    PartInfo {
+                        part_number: 1,
+                        etag: stale_first_etag,
+                    },
+                    PartInfo {
+                        part_number: 2,
+                        etag: second_etag,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.etag.as_deref(),
+            Some(expected_composite_etag(&[first_on_disk.clone(), second.clone()]).as_str())
+        );
+        assert_eq!(
+            object_bytes(&backend, "replace-mpu", "replaced.bin").await,
+            [first_on_disk, second].concat()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_part_replacement_retracts_a_legacy_manifest_entry_too() {
+        let _fp = failpoint_test_guard();
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("legacy-replace").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("legacy-replace", "legacy.bin", None)
+            .await
+            .unwrap();
+        let upload_dir = backend
+            .multipart_upload_dir("legacy-replace", &upload_id)
+            .unwrap();
+
+        let original = vec![b'a'; 1024];
+        let replacement = vec![b'b'; 1024];
+        let stale_etag = backend
+            .upload_part(
+                "legacy-replace",
+                &upload_id,
+                1,
+                Box::pin(std::io::Cursor::new(original.clone())),
+            )
+            .await
+            .unwrap();
+
+        let manifest_path = upload_dir.join(MANIFEST_FILE);
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["parts"]["1"] = serde_json::json!({
+            "etag": stale_etag,
+            "size": original.len(),
+            "filename": "part-00001.part"
+        });
+        FsStorageBackend::atomic_write_json_sync(&manifest_path, &manifest, true).unwrap();
+
+        crate::failpoints::set(
+            &backend.root,
+            "mpu:part-record-write",
+            crate::failpoints::FailAction::Error(std::io::ErrorKind::StorageFull),
+        );
+        let result = backend
+            .upload_part(
+                "legacy-replace",
+                &upload_id,
+                1,
+                Box::pin(std::io::Cursor::new(replacement.clone())),
+            )
+            .await;
+        crate::failpoints::clear(&backend.root, "mpu:part-record-write");
+        assert_storage_full(result);
+
+        assert!(backend
+            .list_parts("legacy-replace", &upload_id)
+            .await
+            .unwrap()
+            .is_empty());
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert!(manifest["parts"].get("1").is_none());
+    }
+
+    #[tokio::test]
+    async fn part_records_without_mtime_are_recomputed_instead_of_trusted() {
+        let (_dir, backend) = create_test_backend();
+        backend.create_bucket("legacy-digest").await.unwrap();
+        let upload_id = backend
+            .initiate_multipart("legacy-digest", "legacy.bin", None)
+            .await
+            .unwrap();
+        let body = vec![b'z'; 1024];
+        let etag = backend
+            .upload_part(
+                "legacy-digest",
+                &upload_id,
+                1,
+                Box::pin(std::io::Cursor::new(body.clone())),
+            )
+            .await
+            .unwrap();
+
+        let upload_dir = backend
+            .multipart_upload_dir("legacy-digest", &upload_id)
+            .unwrap();
+        let legacy_record = serde_json::json!({
+            "etag": "00000000000000000000000000000000",
+            "size": body.len(),
+        });
+        FsStorageBackend::atomic_write_json_sync(
+            &FsStorageBackend::part_record_path(&upload_dir, 1),
+            &legacy_record,
+            true,
+        )
+        .unwrap();
+
+        let listed = backend
+            .list_parts("legacy-digest", &upload_id)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].size, body.len() as u64);
+
+        let completed = backend
+            .complete_multipart(
+                "legacy-digest",
+                &upload_id,
+                &[PartInfo {
+                    part_number: 1,
+                    etag,
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.etag.as_deref(),
+            Some(expected_composite_etag(&[body]).as_str())
+        );
     }
 
     #[tokio::test]

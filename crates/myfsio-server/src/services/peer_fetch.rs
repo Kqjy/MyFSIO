@@ -26,6 +26,7 @@ pub struct PeerFetcher {
     connections: Arc<ConnectionStore>,
     replication: Arc<ReplicationManager>,
     client_options: ClientOptions,
+    encryption: Option<Arc<myfsio_crypto::encryption::EncryptionService>>,
 }
 
 #[derive(Debug)]
@@ -43,12 +44,14 @@ impl PeerFetcher {
         connections: Arc<ConnectionStore>,
         replication: Arc<ReplicationManager>,
         client_options: ClientOptions,
+        encryption: Option<Arc<myfsio_crypto::encryption::EncryptionService>>,
     ) -> Self {
         Self {
             storage,
             connections,
             replication,
             client_options,
+            encryption,
         }
     }
 
@@ -163,19 +166,63 @@ impl PeerFetcher {
         }
         drop(tmp_file);
 
-        if looks_like_md5_etag(&expected_etag) {
-            let actual = format!("{:x}", hasher.finalize());
-            if actual != expected_etag {
+        let body_md5 = format!("{:x}", hasher.finalize());
+        if looks_like_md5_etag(&expected_etag) && body_md5 != expected_etag {
+            tracing::error!(
+                "Pull ETag mismatch for {}/{}: expected {}, got {}",
+                local_bucket,
+                key,
+                expected_etag,
+                body_md5
+            );
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return false;
+        }
+
+        let default_encryption = match crate::handlers::resolve_bucket_default_encryption(
+            &*self.storage,
+            self.encryption.is_some(),
+            local_bucket,
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(err) => {
                 tracing::error!(
-                    "Pull ETag mismatch for {}/{}: expected {}, got {}",
+                    "Refusing to store pulled object {}/{}: {}",
                     local_bucket,
                     key,
-                    expected_etag,
-                    actual
+                    err.message
                 );
                 let _ = tokio::fs::remove_file(&tmp_path).await;
                 return false;
             }
+        };
+
+        if let Some(enc_ctx) = default_encryption {
+            let result = self
+                .store_encrypted_pull(local_bucket, key, &tmp_path, body_md5, metadata, &enc_ctx)
+                .await;
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return match result {
+                Ok(()) => {
+                    tracing::debug!(
+                        "Pulled object {}/{} from remote under bucket default encryption",
+                        local_bucket,
+                        key
+                    );
+                    true
+                }
+                Err(err) => {
+                    tracing::error!(
+                        "Store pulled object failed {}/{}: {}",
+                        local_bucket,
+                        key,
+                        err
+                    );
+                    false
+                }
+            };
         }
 
         let opened = match tokio::fs::File::open(&tmp_path).await {
@@ -214,6 +261,59 @@ impl PeerFetcher {
                 false
             }
         }
+    }
+
+    async fn store_encrypted_pull(
+        &self,
+        local_bucket: &str,
+        key: &str,
+        plaintext_path: &Path,
+        plaintext_md5: String,
+        metadata: Option<HashMap<String, String>>,
+        enc_ctx: &myfsio_crypto::encryption::EncryptionContext,
+    ) -> Result<(), String> {
+        let enc_svc = self
+            .encryption
+            .as_ref()
+            .ok_or_else(|| "encryption service is unavailable".to_string())?;
+        let prepared = self
+            .storage
+            .allocate_prepared_tmp_path()
+            .map_err(|e| e.to_string())?;
+        let enc_meta = match enc_svc
+            .encrypt_object(plaintext_path, &prepared, enc_ctx)
+            .await
+        {
+            Ok(meta) => meta,
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&prepared).await;
+                return Err(err.to_string());
+            }
+        };
+        let stored_size = match tokio::fs::metadata(&prepared).await {
+            Ok(m) => m.len(),
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&prepared).await;
+                return Err(err.to_string());
+            }
+        };
+        let mut full_metadata = metadata.unwrap_or_default();
+        for (k, v) in enc_meta.to_metadata_map() {
+            full_metadata.insert(k, v);
+        }
+        self.storage
+            .put_object_prepared(
+                local_bucket,
+                key,
+                &prepared,
+                stored_size,
+                plaintext_md5,
+                Some(full_metadata),
+                myfsio_storage::traits::PutCommitOptions::default(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     pub async fn fetch_for_heal(
@@ -470,6 +570,73 @@ impl PeerFetcher {
 #[cfg(test)]
 mod tests {
     use myfsio_storage::fs_backend::is_multipart_etag;
+    use myfsio_storage::fs_backend::FsStorageBackend;
+    use myfsio_storage::traits::StorageEngine;
+
+    async fn backend_with_default_encryption(
+        encryption: Option<serde_json::Value>,
+    ) -> (FsStorageBackend, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = FsStorageBackend::new(tmp.path().to_path_buf());
+        storage.create_bucket("pull").await.expect("create bucket");
+        if let Some(encryption) = encryption {
+            let mut config = storage
+                .get_bucket_config("pull")
+                .await
+                .expect("read bucket config");
+            config.encryption = Some(encryption);
+            storage
+                .set_bucket_config("pull", &config)
+                .await
+                .expect("write bucket config");
+        }
+        (storage, tmp)
+    }
+
+    #[tokio::test]
+    async fn peer_pull_into_a_default_encrypted_bucket_refuses_without_an_encryption_service() {
+        let (storage, _tmp) = backend_with_default_encryption(Some(serde_json::json!({
+            "sse_algorithm": "AES256"
+        })))
+        .await;
+        let resolved =
+            crate::handlers::resolve_bucket_default_encryption(&storage, false, "pull").await;
+        let error = match resolved {
+            Ok(_) => panic!("a default-encrypted bucket must not accept a plaintext peer pull"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("server-side encryption is"),
+            "unexpected refusal: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_pull_into_a_default_encrypted_bucket_resolves_the_bucket_algorithm() {
+        let (storage, _tmp) = backend_with_default_encryption(Some(serde_json::json!({
+            "sse_algorithm": "AES256"
+        })))
+        .await;
+        let context = crate::handlers::resolve_bucket_default_encryption(&storage, true, "pull")
+            .await
+            .expect("bucket default encryption resolves")
+            .expect("a default-encrypted bucket yields an encryption context");
+        assert_eq!(
+            context.algorithm,
+            myfsio_crypto::encryption::SseAlgorithm::Aes256
+        );
+        assert!(context.customer_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn peer_pull_into_an_unencrypted_bucket_stays_unencrypted() {
+        let (storage, _tmp) = backend_with_default_encryption(None).await;
+        let context = crate::handlers::resolve_bucket_default_encryption(&storage, true, "pull")
+            .await
+            .expect("bucket without default encryption resolves");
+        assert!(context.is_none());
+    }
 
     #[test]
     fn detects_multipart_etags() {

@@ -364,7 +364,13 @@ impl MetricsService {
 
     fn take_snapshot(&self) {
         if self.take_snapshot_inner() {
-            self.save_snapshots();
+            if let Err(err) = self.save_snapshots() {
+                tracing::error!(
+                    path = %self.snapshots_path.display(),
+                    error = %err,
+                    "Failed to persist operation metrics history; the window just closed is live-only and will be lost on restart"
+                );
+            }
         }
     }
 
@@ -426,17 +432,10 @@ impl MetricsService {
         should_save
     }
 
-    fn save_snapshots(&self) {
+    fn save_snapshots(&self) -> std::io::Result<()> {
         let snapshots = { self.inner.lock().snapshots.clone() };
-        if let Some(parent) = self.snapshots_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let data = json!({ "snapshots": snapshots });
-        let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
-        let tmp = self.snapshots_path.with_extension("json.tmp");
-        if std::fs::write(&tmp, serialized).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.snapshots_path);
-        }
+        myfsio_common::fs_util::atomic_write_json(&self.snapshots_path, &data)
     }
 
     pub fn start_background(self: Arc<Self>) -> tokio::task::JoinHandle<()> {

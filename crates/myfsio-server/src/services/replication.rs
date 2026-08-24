@@ -199,12 +199,25 @@ impl ReplicationFailureStore {
     }
 
     fn load_path(path: &Path) -> Vec<ReplicationFailure> {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Vec::new();
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                tracing::error!(
+                    path = %path.display(),
+                    "replication failure log exists but could not be read ({}); continuing with \
+                     an empty log for this bucket and leaving the file untouched",
+                    error
+                );
+                return Vec::new();
+            }
         };
         let parsed: serde_json::Value = match serde_json::from_str(&text) {
             Ok(value) => value,
-            Err(_) => return Vec::new(),
+            Err(error) => {
+                quarantine_unreadable_state(path, &format!("could not be parsed: {}", error));
+                return Vec::new();
+            }
         };
         parsed
             .get("failures")
@@ -245,13 +258,13 @@ impl ReplicationFailureStore {
         }
         let trimmed = &failures[..failures.len().min(max_failures_per_bucket)];
         let data = serde_json::json!({ "failures": trimmed });
-        let serialized = serde_json::to_string_pretty(&data).unwrap_or_default();
-        let mut tmp = path.clone();
-        tmp.set_extension("json.tmp");
-        if std::fs::write(&tmp, serialized.as_bytes()).is_ok()
-            && std::fs::rename(&tmp, &path).is_err()
-        {
-            let _ = std::fs::remove_file(&tmp);
+        if let Err(error) = myfsio_common::fs_util::atomic_write_json(&path, &data) {
+            tracing::error!(
+                path = %path.display(),
+                "could not persist the replication failure log ({}); queued retries for this \
+                 bucket may be lost on restart",
+                error
+            );
         }
     }
 
@@ -471,6 +484,29 @@ impl BatchRun {
             && self.in_flight.load(Ordering::Acquire) == 0
             && self.completed.load(Ordering::Acquire) + self.failed.load(Ordering::Acquire)
                 >= self.total_queued.load(Ordering::Acquire)
+    }
+}
+
+const SSE_C_KEY_MD5_METADATA: &str = "x-amz-server-side-encryption-customer-key-MD5";
+
+struct EncryptedSourceRefusal {
+    reason: String,
+    retryable: bool,
+}
+
+impl EncryptedSourceRefusal {
+    fn permanent(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            retryable: false,
+        }
+    }
+
+    fn retryable(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            retryable: true,
+        }
     }
 }
 
@@ -712,6 +748,7 @@ pub struct ReplicationManager {
     healer_last_pass_at: Arc<Mutex<Option<f64>>>,
     healer_last_pass_healed: Arc<AtomicUsize>,
     healer_last_pass_skipped: Arc<AtomicUsize>,
+    encryption: Option<Arc<myfsio_crypto::encryption::EncryptionService>>,
 }
 
 impl ReplicationManager {
@@ -730,6 +767,7 @@ impl ReplicationManager {
         replication_concurrency: usize,
         replication_queue_capacity: usize,
         full_reconcile_interval: Option<Duration>,
+        encryption: Option<Arc<myfsio_crypto::encryption::EncryptionService>>,
     ) -> Self {
         let rules_path = storage_root
             .join(".myfsio.sys")
@@ -782,6 +820,7 @@ impl ReplicationManager {
             healer_last_pass_at: Arc::new(Mutex::new(None)),
             healer_last_pass_healed: Arc::new(AtomicUsize::new(0)),
             healer_last_pass_skipped: Arc::new(AtomicUsize::new(0)),
+            encryption,
         }
     }
 
@@ -1141,6 +1180,66 @@ impl ReplicationManager {
         self.rules.lock().values().cloned().collect()
     }
 
+    fn replication_tmp_dir(&self) -> PathBuf {
+        self.rules_path
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".myfsio.sys"))
+            .join("tmp")
+    }
+
+    async fn decrypt_source_for_replication(
+        &self,
+        bucket: &str,
+        object_key: &str,
+        stored_meta: &HashMap<String, String>,
+        enc_info: &myfsio_crypto::encryption::EncryptionMetadata,
+        segmented: bool,
+    ) -> Result<(ReplicationSource, TmpFileGuard), EncryptedSourceRefusal> {
+        if stored_meta.contains_key(SSE_C_KEY_MD5_METADATA) {
+            return Err(EncryptedSourceRefusal::permanent(
+                "source object is encrypted with a customer-provided key; the server holds no \
+                 key to decrypt it for replication",
+            ));
+        }
+        if segmented {
+            return Err(EncryptedSourceRefusal::permanent(
+                "source object is encrypted and stored in the segments layout; replication \
+                 cannot decrypt it",
+            ));
+        }
+        let Some(enc_svc) = self.encryption.as_ref() else {
+            return Err(EncryptedSourceRefusal::retryable(
+                "source object is encrypted but server-side encryption is unavailable on this \
+                 server",
+            ));
+        };
+        let cipher_path = self
+            .storage
+            .get_object_path(bucket, object_key)
+            .await
+            .map_err(|e| {
+                EncryptedSourceRefusal::retryable(format!("source object is not readable: {}", e))
+            })?;
+        let tmp_dir = self.replication_tmp_dir();
+        tokio::fs::create_dir_all(&tmp_dir).await.map_err(|e| {
+            EncryptedSourceRefusal::retryable(format!(
+                "replication temp directory unavailable: {}",
+                e
+            ))
+        })?;
+        let plaintext_path = tmp_dir.join(format!("repl-dec-{}", uuid::Uuid::new_v4()));
+        let guard = TmpFileGuard(Some(plaintext_path.clone()));
+        enc_svc
+            .decrypt_object(&cipher_path, &plaintext_path, enc_info, None)
+            .await
+            .map_err(|e| {
+                EncryptedSourceRefusal::retryable(format!("source decryption failed: {}", e))
+            })?;
+        Ok((ReplicationSource::File(plaintext_path), guard))
+    }
+
     pub fn get_rule(&self, bucket: &str) -> Option<ReplicationRule> {
         self.rules.lock().get(bucket).cloned()
     }
@@ -1157,11 +1256,22 @@ impl ReplicationManager {
         }
         let bucket = rule.bucket_name.clone();
         let active_rule_id = rule.enabled.then(|| replication_rule_id(&rule));
-        {
+        let replaced = {
             let mut guard = self.rules.lock();
-            guard.insert(rule.bucket_name.clone(), rule);
+            guard.insert(rule.bucket_name.clone(), rule)
+        };
+        if let Err(error) = self.save_rules() {
+            let mut guard = self.rules.lock();
+            match replaced {
+                Some(previous) => {
+                    guard.insert(bucket.clone(), previous);
+                }
+                None => {
+                    guard.remove(&bucket);
+                }
+            }
+            return Err(error);
         }
-        self.save_rules();
         match self.ledger.load(&bucket, active_rule_id.as_deref()) {
             Ok(_) => {}
             Err(error) => {
@@ -1184,14 +1294,20 @@ impl ReplicationManager {
         Ok(())
     }
 
-    pub fn delete_rule(&self, bucket: &str) {
-        {
+    pub fn delete_rule(&self, bucket: &str) -> Result<(), String> {
+        let removed = {
             let mut guard = self.rules.lock();
-            guard.remove(bucket);
+            guard.remove(bucket)
+        };
+        if let Err(error) = self.save_rules() {
+            if let Some(previous) = removed {
+                let mut guard = self.rules.lock();
+                guard.insert(bucket.to_string(), previous);
+            }
+            return Err(error);
         }
-        self.save_rules();
         if myfsio_storage::validation::bucket_name_rejection(bucket).is_some() {
-            return;
+            return Ok(());
         }
         if let Err(error) = self.ledger.reset(bucket) {
             tracing::error!(
@@ -1200,6 +1316,7 @@ impl ReplicationManager {
                 error
             );
         }
+        Ok(())
     }
 
     fn prune_ledgers_for_current_rules(&self) {
@@ -1222,13 +1339,23 @@ impl ReplicationManager {
         }
     }
 
-    pub fn save_rules(&self) {
+    pub fn save_rules(&self) -> Result<(), String> {
         let snapshot: HashMap<String, ReplicationRule> = self.rules.lock().clone();
-        if let Some(parent) = self.rules_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
-            let _ = std::fs::write(&self.rules_path, text);
+        let mut text = serde_json::to_vec_pretty(&snapshot)
+            .map_err(|e| format!("could not serialize replication rules: {}", e))?;
+        text.push(b'\n');
+        myfsio_common::fs_util::atomic_write_file(&self.rules_path, &text).map_err(|e| {
+            format!(
+                "could not persist replication rules to {}: {}",
+                self.rules_path.display(),
+                e
+            )
+        })
+    }
+
+    fn save_rules_logged(&self) {
+        if let Err(error) = self.save_rules() {
+            tracing::error!("{}", error);
         }
     }
 
@@ -1283,7 +1410,7 @@ impl ReplicationManager {
                 rule.stats.last_sync_key = Some(key.to_string());
             }
         }
-        self.save_rules();
+        self.save_rules_logged();
     }
 
     pub async fn trigger(
@@ -1781,7 +1908,51 @@ impl ReplicationManager {
             .await
             .unwrap_or_default();
         let segmented = stored_meta.contains_key(myfsio_storage::segments::META_KEY_SEGMENTS);
-        let (source, _materialized_guard) = if segmented {
+        let source_encryption =
+            myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&stored_meta);
+        let (source, _materialized_guard) = if let Some(enc_info) = source_encryption {
+            match self
+                .decrypt_source_for_replication(
+                    bucket,
+                    object_key,
+                    &stored_meta,
+                    &enc_info,
+                    segmented,
+                )
+                .await
+            {
+                Ok(pair) => pair,
+                Err(refusal) => {
+                    tracing::error!(
+                        "Replication refused for {}/{}: {}",
+                        bucket,
+                        object_key,
+                        refusal.reason
+                    );
+                    if refusal.retryable {
+                        self.failures.add(
+                            bucket,
+                            ReplicationFailure {
+                                object_key: object_key.to_string(),
+                                error_message: refusal.reason,
+                                timestamp: now_secs(),
+                                failure_count: 1,
+                                bucket_name: bucket.to_string(),
+                                action: action.to_string(),
+                                last_error_code: Some("EncryptedSourceUnsupported".to_string()),
+                                pending_upload_id: None,
+                                pending_source_size: None,
+                                pending_source_etag: None,
+                                pending_part_size: None,
+                            },
+                        );
+                    }
+                    self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
+                        .await;
+                    return ReplicateOutcome::Failed;
+                }
+            }
+        } else if segmented {
             let snapshot_path = self
                 .rules_path
                 .parent()
@@ -2321,7 +2492,7 @@ impl ReplicationManager {
                 rule.last_pull_at = Some(at);
             }
         }
-        self.save_rules();
+        self.save_rules_logged();
     }
 
     pub fn client_options(&self) -> &ClientOptions {
@@ -3464,8 +3635,13 @@ fn load_rules(path: &Path) -> HashMap<String, ReplicationRule> {
     }
     match std::fs::read_to_string(path) {
         Ok(text) => {
-            let rules: HashMap<String, ReplicationRule> =
-                serde_json::from_str(&text).unwrap_or_default();
+            let rules: HashMap<String, ReplicationRule> = match serde_json::from_str(&text) {
+                Ok(rules) => rules,
+                Err(error) => {
+                    quarantine_unreadable_rules(path, &format!("could not be parsed: {}", error));
+                    return HashMap::new();
+                }
+            };
             rules
                 .into_iter()
                 .filter(|(key, rule)| {
@@ -3496,7 +3672,42 @@ fn load_rules(path: &Path) -> HashMap<String, ReplicationRule> {
                 })
                 .collect()
         }
-        Err(_) => HashMap::new(),
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                "replication rules file exists but could not be read ({}); starting with no \
+                 replication rules and leaving the file untouched. Replication is inactive until \
+                 this is resolved.",
+                error
+            );
+            HashMap::new()
+        }
+    }
+}
+
+fn quarantine_unreadable_rules(path: &Path, reason: &str) {
+    quarantine_unreadable_state(path, reason)
+}
+
+fn quarantine_unreadable_state(path: &Path, reason: &str) {
+    let quarantined = path.with_extension(format!("json.corrupt-{}", uuid::Uuid::new_v4()));
+    match std::fs::rename(path, &quarantined) {
+        Ok(()) => tracing::error!(
+            path = %path.display(),
+            preserved_as = %quarantined.display(),
+            "{} {}; the damaged file was preserved and this state is starting empty. Restore \
+             the preserved file or recreate the state.",
+            path.display(),
+            reason
+        ),
+        Err(error) => tracing::error!(
+            path = %path.display(),
+            "{} {}; it could not be preserved either ({}). This state is starting empty and \
+             the next write will overwrite it.",
+            path.display(),
+            reason,
+            error
+        ),
     }
 }
 
@@ -3717,6 +3928,161 @@ mod tests {
         }
     }
 
+    fn encrypted_source_metadata(sse_c: bool) -> HashMap<String, String> {
+        let mut meta = HashMap::new();
+        meta.insert(
+            "x-amz-server-side-encryption".to_string(),
+            "AES256".to_string(),
+        );
+        meta.insert("x-amz-encryption-nonce".to_string(), "bm9uY2U=".to_string());
+        if sse_c {
+            meta.insert(SSE_C_KEY_MD5_METADATA.to_string(), "a2V5bWQ1".to_string());
+        }
+        meta
+    }
+
+    #[tokio::test]
+    async fn replication_refuses_a_customer_key_encrypted_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = build_test_manager_at(tmp.path());
+        let meta = encrypted_source_metadata(true);
+        let enc = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta)
+            .expect("encryption metadata");
+        let error = manager
+            .decrypt_source_for_replication("bucket", "key", &meta, &enc, false)
+            .await;
+        let error = match error {
+            Ok(_) => panic!("an SSE-C source must not be replicated"),
+            Err(error) => error,
+        };
+        assert!(
+            error.reason.contains("customer-provided key") && !error.retryable,
+            "unexpected refusal: {}",
+            error.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn replication_refuses_an_encrypted_source_without_an_encryption_service() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = build_test_manager_at(tmp.path());
+        let meta = encrypted_source_metadata(false);
+        let enc = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta)
+            .expect("encryption metadata");
+        let error = manager
+            .decrypt_source_for_replication("bucket", "key", &meta, &enc, false)
+            .await;
+        let error = match error {
+            Ok(_) => panic!("an encrypted source must not be replicated as ciphertext"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .reason
+                .contains("server-side encryption is unavailable")
+                && error.retryable,
+            "unexpected refusal: {}",
+            error.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn replication_refuses_an_encrypted_segmented_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = build_test_manager_at(tmp.path());
+        let meta = encrypted_source_metadata(false);
+        let enc = myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&meta)
+            .expect("encryption metadata");
+        let error = manager
+            .decrypt_source_for_replication("bucket", "key", &meta, &enc, true)
+            .await;
+        let error = match error {
+            Ok(_) => {
+                panic!("an encrypted segmented source must not be replicated as ciphertext")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.reason.contains("segments layout") && !error.retryable,
+            "unexpected refusal: {}",
+            error.reason
+        );
+    }
+
+    #[test]
+    fn corrupt_rules_file_is_quarantined_instead_of_silently_emptied() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("replication_rules.json");
+        std::fs::write(&path, b"{ this is not json").expect("write damaged rules");
+        let rules = load_rules(&path);
+        assert!(rules.is_empty());
+        assert!(
+            !path.exists(),
+            "the damaged rules file must be moved aside, not left to be overwritten"
+        );
+        let preserved: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("corrupt"))
+            .collect();
+        assert_eq!(
+            preserved.len(),
+            1,
+            "the damaged rules file must be preserved for recovery, found {:?}",
+            preserved
+        );
+    }
+
+    #[test]
+    fn missing_rules_file_loads_empty_without_quarantine() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("replication_rules.json");
+        assert!(load_rules(&path).is_empty());
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(entries.is_empty(), "first run must not create artifacts");
+    }
+
+    #[test]
+    fn saved_rules_round_trip_and_leave_no_temp_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = build_test_manager_at(tmp.path());
+        manager
+            .set_rule(ReplicationRule {
+                bucket_name: "bucket".to_string(),
+                target_connection_id: "connection".to_string(),
+                target_bucket: "mirror".to_string(),
+                enabled: true,
+                mode: MODE_NEW_ONLY.to_string(),
+                created_at: None,
+                stats: ReplicationStats::default(),
+                sync_deletions: true,
+                last_pull_at: None,
+                filter_prefix: None,
+            })
+            .expect("rule persists");
+
+        let config_dir = tmp.path().join(".myfsio.sys").join("config");
+        let leftovers: Vec<_> = std::fs::read_dir(&config_dir)
+            .expect("read config dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {:?}",
+            leftovers
+        );
+
+        let reloaded = load_rules(&config_dir.join("replication_rules.json"));
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded["bucket"].target_bucket, "mirror");
+    }
+
     fn build_test_manager() -> ReplicationManager {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manager = build_test_manager_at(tmp.path());
@@ -3754,6 +4120,7 @@ mod tests {
             Duration::from_secs(300),
             4,
             10_000,
+            None,
             None,
         )
     }

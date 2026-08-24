@@ -283,8 +283,11 @@ mod tests {
         assert_eq!(key.len(), 32);
     }
 
+    static SIGNING_KEY_CACHE_TEST_GUARD: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_derive_signing_key_cached() {
+        let _serialized = SIGNING_KEY_CACHE_TEST_GUARD.lock();
         clear_signing_key_cache();
         let key1 = derive_signing_key("secret", "20240101", "us-east-1", "s3");
         let key2 = derive_signing_key("secret", "20240101", "us-east-1", "s3");
@@ -305,6 +308,7 @@ mod tests {
 
     #[test]
     fn signing_key_cache_shards_distinct_components() {
+        let _serialized = SIGNING_KEY_CACHE_TEST_GUARD.lock();
         clear_signing_key_cache();
         let first = derive_signing_key("secret-a", "20240101", "us-east-1", "s3");
         let second = derive_signing_key("secret-b", "20240101", "us-east-1", "s3");

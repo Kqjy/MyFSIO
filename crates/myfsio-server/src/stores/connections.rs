@@ -187,17 +187,29 @@ impl ConnectionStore {
             .join("config")
             .join("connections.json");
         let encryption_key = load_or_create_key(storage_root);
-        let inner = Arc::new(RwLock::new(load_from_disk(&path, &encryption_key)));
+        let connections = match load_from_disk(&path, &encryption_key) {
+            Ok(connections) => connections,
+            Err(err) => {
+                preserve_unreadable_connections(&path, &err.to_string());
+                Vec::new()
+            }
+        };
         Self {
             path,
             encryption_key,
-            inner,
+            inner: Arc::new(RwLock::new(connections)),
         }
     }
 
     pub fn reload(&self) {
-        let loaded = load_from_disk(&self.path, &self.encryption_key);
-        *self.inner.write() = loaded;
+        match load_from_disk(&self.path, &self.encryption_key) {
+            Ok(loaded) => *self.inner.write() = loaded,
+            Err(err) => tracing::error!(
+                path = %self.path.display(),
+                error = %err,
+                "Remote connection store is unreadable; kept the connections already in memory instead of dropping every replication target"
+            ),
+        }
     }
 
     pub fn list(&self) -> Vec<RemoteConnection> {
@@ -286,15 +298,36 @@ fn load_or_create_key(storage_root: &Path) -> String {
     encoded
 }
 
-fn load_from_disk(path: &Path, encryption_key: &str) -> Vec<RemoteConnection> {
-    if !path.exists() {
-        return Vec::new();
+fn preserve_unreadable_connections(path: &Path, reason: &str) {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("connections.json");
+    let preserved =
+        path.with_file_name(format!("{name}.corrupt-{}", chrono::Utc::now().timestamp()));
+    match std::fs::rename(path, &preserved) {
+        Ok(()) => tracing::error!(
+            path = %path.display(),
+            preserved_path = %preserved.display(),
+            reason,
+            "Remote connection store is unreadable; preserved it and started with no connections. Every replication target and its credentials must be re-created."
+        ),
+        Err(rename_error) => tracing::error!(
+            path = %path.display(),
+            reason,
+            rename_error = %rename_error,
+            "Remote connection store is unreadable and could not be preserved; started with no connections"
+        ),
     }
+}
+
+fn load_from_disk(path: &Path, encryption_key: &str) -> std::io::Result<Vec<RemoteConnection>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(_) => return Vec::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
     };
-    let raw: Vec<RemoteConnection> = serde_json::from_str(&text).unwrap_or_default();
+    let raw: Vec<RemoteConnection> = serde_json::from_str(&text).map_err(std::io::Error::other)?;
     let mut connections = Vec::with_capacity(raw.len());
     for mut conn in raw {
         if let Some(token) = conn.secret_key.strip_prefix(ENCRYPTED_PREFIX) {
@@ -323,7 +356,7 @@ fn load_from_disk(path: &Path, encryption_key: &str) -> Vec<RemoteConnection> {
         }
         connections.push(conn);
     }
-    connections
+    Ok(connections)
 }
 
 #[cfg(test)]
@@ -359,6 +392,53 @@ mod tests {
 
         let reopened = ConnectionStore::new(dir.path());
         assert_eq!(reopened.get("c1").unwrap().secret_key, "super-secret");
+    }
+
+    #[test]
+    fn absent_connection_file_loads_empty_without_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        assert!(store.list().is_empty());
+
+        let path = dir
+            .path()
+            .join(".myfsio.sys")
+            .join("config")
+            .join("connections.json");
+        assert!(!path.exists());
+        assert!(load_from_disk(&path, "unused").unwrap().is_empty());
+    }
+
+    #[test]
+    fn damaged_connection_file_is_preserved_instead_of_silently_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        store.add(sample_connection("c1", "super-secret")).unwrap();
+
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        let path = config_dir.join("connections.json");
+        std::fs::write(&path, "[{not json").unwrap();
+
+        assert!(load_from_disk(&path, &store.encryption_key).is_err());
+
+        store.reload();
+        assert_eq!(
+            store.get("c1").unwrap().secret_key,
+            "super-secret",
+            "a damaged file must not wipe the in-memory targets"
+        );
+
+        let reopened = ConnectionStore::new(dir.path());
+        assert!(reopened.list().is_empty());
+        assert!(!path.exists());
+        let names: Vec<String> = std::fs::read_dir(&config_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(names
+            .iter()
+            .any(|name| name.starts_with("connections.json.corrupt-")));
     }
 
     #[test]

@@ -868,18 +868,15 @@ pub async fn get_policy_status(state: &AppState, bucket: &str) -> Response {
 }
 
 pub async fn get_replication(state: &AppState, bucket: &str) -> Response {
-    match state.storage.get_bucket_config(bucket).await {
-        Ok(config) => {
-            if let Some(replication) = &config.replication {
-                xml_response(StatusCode::OK, stored_xml(replication))
-            } else {
-                xml_error_response(S3Error::new(
-                    S3ErrorCode::ReplicationConfigurationNotFoundError,
-                    "The replication configuration was not found",
-                ))
-            }
-        }
-        Err(e) => storage_err(e),
+    if let Err(e) = state.storage.get_bucket_config(bucket).await {
+        return storage_err(e);
+    }
+    match state.replication.get_rule(bucket) {
+        Some(rule) => xml_response(StatusCode::OK, replication_configuration_xml(&rule)),
+        None => xml_error_response(S3Error::new(
+            S3ErrorCode::ReplicationConfigurationNotFoundError,
+            "The replication configuration was not found",
+        )),
     }
 }
 
@@ -896,18 +893,59 @@ pub async fn put_replication(state: &AppState, bucket: &str, body: Body) -> Resp
         ));
     }
 
-    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-    mutate_bucket_config(state, bucket, StatusCode::OK, move |config| {
-        config.replication = Some(serde_json::Value::String(body_str));
-    })
-    .await
+    if let Err(e) = state.storage.get_bucket_config(bucket).await {
+        return storage_err(e);
+    }
+
+    xml_error_response(S3Error::new(
+        S3ErrorCode::NotImplemented,
+        "Replication rules cannot be created through this API because a ReplicationConfiguration \
+         destination names only a bucket, while this server replicates to a named remote \
+         connection carrying its own endpoint and credentials. Create the rule through the \
+         management API or the bucket's Replication tab; GET and DELETE of this subresource \
+         report and remove the rule that is actually in effect.",
+    ))
 }
 
 pub async fn delete_replication(state: &AppState, bucket: &str) -> Response {
+    if let Err(e) = state.storage.get_bucket_config(bucket).await {
+        return storage_err(e);
+    }
+    if state.replication.get_rule(bucket).is_some() {
+        if let Err(reason) = state.replication.delete_rule(bucket) {
+            return xml_error_response(S3Error::new(S3ErrorCode::InternalError, reason));
+        }
+    }
     mutate_bucket_config(state, bucket, StatusCode::NO_CONTENT, |config| {
         config.replication = None;
     })
     .await
+}
+
+fn replication_configuration_xml(rule: &crate::services::replication::ReplicationRule) -> String {
+    let status = if rule.enabled { "Enabled" } else { "Disabled" };
+    let prefix = rule.filter_prefix.clone().unwrap_or_default();
+    let delete_marker_status = if rule.sync_deletions {
+        "Enabled"
+    } else {
+        "Disabled"
+    };
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<ReplicationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+            "<Role></Role><Rule><ID>{}</ID><Status>{}</Status>",
+            "<Filter><Prefix>{}</Prefix></Filter>",
+            "<DeleteMarkerReplication><Status>{}</Status></DeleteMarkerReplication>",
+            "<Destination><Bucket>arn:aws:s3:::{}</Bucket></Destination>",
+            "</Rule></ReplicationConfiguration>"
+        ),
+        xml_escape(&rule.target_connection_id),
+        status,
+        xml_escape(&prefix),
+        delete_marker_status,
+        xml_escape(&rule.target_bucket),
+    )
 }
 
 fn policy_is_public(policy: &serde_json::Value) -> bool {

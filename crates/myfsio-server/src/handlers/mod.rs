@@ -4284,6 +4284,22 @@ async fn upload_part_copy_handler(
         None => None,
     };
 
+    if myfsio_crypto::encryption::EncryptionMetadata::is_encrypted(&source_meta.internal_metadata) {
+        return upload_part_copy_from_encrypted_source(
+            state,
+            dst_bucket,
+            upload_id,
+            part_number,
+            &src_bucket,
+            &src_key,
+            src_version_id.as_deref(),
+            range,
+            headers,
+            &pending,
+        )
+        .await;
+    }
+
     match state
         .storage
         .upload_part_copy(
@@ -4303,6 +4319,168 @@ async fn upload_part_copy_handler(
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("content-type", "application/xml".parse().unwrap());
             apply_pending_mpu_sse_headers(&mut resp_headers, &pending);
+            (StatusCode::OK, resp_headers, xml).into_response()
+        }
+        Err(e) => storage_err_response(e),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_part_copy_from_encrypted_source(
+    state: &AppState,
+    dst_bucket: &str,
+    upload_id: &str,
+    part_number: u32,
+    src_bucket: &str,
+    src_key: &str,
+    src_version_id: Option<&str>,
+    range: Option<(u64, u64)>,
+    headers: &HeaderMap,
+    pending: &HashMap<String, String>,
+) -> Response {
+    let tmp_dir = state.config.storage_root.join(".myfsio.sys").join("tmp");
+    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
+        return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+    }
+
+    let src_snap = tmp_dir.join(format!("upc-src-{}", uuid::Uuid::new_v4()));
+    let snapshot = match src_version_id {
+        Some(version_id) => {
+            state
+                .storage
+                .snapshot_object_version_to_link(src_bucket, src_key, version_id, &src_snap)
+                .await
+        }
+        None => {
+            state
+                .storage
+                .snapshot_object_to_link(src_bucket, src_key, &src_snap)
+                .await
+        }
+    };
+    let (snap_meta, snap_source) = match snapshot {
+        Ok(pair) => pair,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&src_snap).await;
+            return storage_err_response(e);
+        }
+    };
+
+    let ciphertext_path = match snap_source {
+        myfsio_storage::traits::SnapshotSource::LinkedFile(_) => src_snap.clone(),
+        segments => {
+            let dest = tmp_dir.join(format!("upc-mat-{}", uuid::Uuid::new_v4()));
+            let materialized = async {
+                let mut reader = segments
+                    .into_range_stream(0, None)
+                    .await
+                    .map_err(myfsio_storage::error::StorageError::Io)?;
+                let mut out = tokio::fs::File::create(&dest)
+                    .await
+                    .map_err(myfsio_storage::error::StorageError::Io)?;
+                tokio::io::copy(&mut reader, &mut out)
+                    .await
+                    .map_err(myfsio_storage::error::StorageError::Io)?;
+                Ok::<(), myfsio_storage::error::StorageError>(())
+            }
+            .await;
+            let _ = tokio::fs::remove_file(&src_snap).await;
+            if let Err(e) = materialized {
+                let _ = tokio::fs::remove_file(&dest).await;
+                return storage_err_response(e);
+            }
+            dest
+        }
+    };
+
+    let Some(enc_info) =
+        myfsio_crypto::encryption::EncryptionMetadata::from_metadata(&snap_meta.internal_metadata)
+    else {
+        let _ = tokio::fs::remove_file(&ciphertext_path).await;
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Source object is marked encrypted but carries no encryption metadata",
+        ));
+    };
+    let Some(enc_svc) = state.encryption.as_ref() else {
+        let _ = tokio::fs::remove_file(&ciphertext_path).await;
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            "Source object is encrypted but encryption service is disabled",
+        ));
+    };
+    let customer_key = match extract_copy_source_sse_c_key(headers) {
+        Ok(key) => key,
+        Err(response) => {
+            let _ = tokio::fs::remove_file(&ciphertext_path).await;
+            return response;
+        }
+    };
+
+    let plaintext_path = tmp_dir.join(format!("upc-dec-{}", uuid::Uuid::new_v4()));
+    let decrypted = enc_svc
+        .decrypt_object(
+            &ciphertext_path,
+            &plaintext_path,
+            &enc_info,
+            customer_key.as_deref(),
+        )
+        .await;
+    let _ = tokio::fs::remove_file(&ciphertext_path).await;
+    if let Err(e) = decrypted {
+        let _ = tokio::fs::remove_file(&plaintext_path).await;
+        return s3_error_response(S3Error::new(
+            S3ErrorCode::InternalError,
+            format!("Source decryption failed: {}", e),
+        ));
+    }
+
+    let plaintext_size = match tokio::fs::metadata(&plaintext_path).await {
+        Ok(m) => m.len(),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&plaintext_path).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    };
+    let (start, length) = match range {
+        Some((s, e)) => {
+            if s >= plaintext_size || e >= plaintext_size || s > e {
+                let _ = tokio::fs::remove_file(&plaintext_path).await;
+                return storage_err_response(myfsio_storage::error::StorageError::InvalidRange);
+            }
+            (s, e - s + 1)
+        }
+        None => (0, plaintext_size),
+    };
+
+    let mut file = match open_self_deleting(plaintext_path.clone()).await {
+        Ok(file) => file,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&plaintext_path).await;
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    };
+    if start > 0 {
+        if let Err(e) =
+            tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start)).await
+        {
+            return storage_err_response(myfsio_storage::error::StorageError::Io(e));
+        }
+    }
+    let stream: myfsio_storage::traits::AsyncReadStream =
+        Box::pin(tokio::io::AsyncReadExt::take(file, length));
+
+    match state
+        .storage
+        .upload_part(dst_bucket, upload_id, part_number, stream)
+        .await
+    {
+        Ok(etag) => {
+            let lm = myfsio_xml::response::format_s3_datetime(&chrono::Utc::now());
+            let xml = myfsio_xml::response::copy_part_result_xml(&etag, &lm);
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert("content-type", "application/xml".parse().unwrap());
+            apply_pending_mpu_sse_headers(&mut resp_headers, pending);
             (StatusCode::OK, resp_headers, xml).into_response()
         }
         Err(e) => storage_err_response(e),
@@ -6568,29 +6746,42 @@ async fn resolve_encryption_context(
         return Ok(None);
     }
 
-    if let Ok(config) = state.storage.get_bucket_config(bucket).await {
+    resolve_bucket_default_encryption(&*state.storage, state.encryption.is_some(), bucket)
+        .await
+        .map_err(s3_error_response)
+}
+
+pub(crate) async fn resolve_bucket_default_encryption<S>(
+    storage: &S,
+    encryption_available: bool,
+    bucket: &str,
+) -> Result<Option<myfsio_crypto::encryption::EncryptionContext>, S3Error>
+where
+    S: myfsio_storage::traits::StorageEngine + ?Sized,
+{
+    if let Ok(config) = storage.get_bucket_config(bucket).await {
         if config.unreadable {
-            return Err(s3_error_response(S3Error::new(
+            return Err(S3Error::new(
                 S3ErrorCode::InternalError,
                 "Bucket configuration is unreadable; refusing to store an object whose encryption \
                  requirements cannot be determined",
-            )));
+            ));
         }
         if let Some(enc_val) = &config.encryption {
             let Some((algorithm, kms_key_id)) =
                 crate::handlers::config::parse_encryption_config(enc_val)
             else {
-                return Err(s3_error_response(S3Error::new(
+                return Err(S3Error::new(
                     S3ErrorCode::InternalError,
                     "Bucket default encryption configuration could not be parsed",
-                )));
+                ));
             };
-            if state.encryption.is_none() {
-                return Err(s3_error_response(S3Error::new(
+            if !encryption_available {
+                return Err(S3Error::new(
                     S3ErrorCode::InternalError,
                     "Bucket default encryption is configured but server-side encryption is \
                      unavailable on this server",
-                )));
+                ));
             }
             match algorithm.as_str() {
                 "AES256" => {
@@ -6608,10 +6799,10 @@ async fn resolve_encryption_context(
                     }));
                 }
                 _ => {
-                    return Err(s3_error_response(S3Error::new(
+                    return Err(S3Error::new(
                         S3ErrorCode::InvalidArgument,
                         "Bucket default encryption specifies an unsupported algorithm",
-                    )));
+                    ));
                 }
             }
         }

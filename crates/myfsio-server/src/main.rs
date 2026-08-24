@@ -92,6 +92,18 @@ async fn main() {
         Command::Serve => {}
     }
 
+    let critical_issues: Vec<String> = validate_config(&config)
+        .into_iter()
+        .filter(|issue| issue.starts_with("CRITICAL:"))
+        .collect();
+    if !critical_issues.is_empty() {
+        for issue in &critical_issues {
+            tracing::error!("{}", issue);
+        }
+        tracing::error!("refusing to start with an invalid configuration");
+        std::process::exit(1);
+    }
+
     myfsio_server::handlers::ui_api::init_server_start_time();
 
     #[cfg(feature = "failpoints")]

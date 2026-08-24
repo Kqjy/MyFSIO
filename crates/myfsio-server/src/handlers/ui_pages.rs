@@ -1867,7 +1867,18 @@ pub async fn update_local_site(
         },
         created_at: existing.and_then(|site| site.created_at),
     };
-    registry.set_local_site(site);
+    if let Err(err) = registry.try_set_local_site(site) {
+        let message = format!("Failed to save local site configuration: {}", err);
+        if wants_json {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response();
+        }
+        session.write(|s| s.push_flash("danger", message));
+        return Redirect::to("/ui/sites").into_response();
+    }
 
     let message = "Local site configuration updated".to_string();
     if wants_json {
@@ -2007,7 +2018,18 @@ pub async fn add_peer_site(
         is_healthy: false,
         last_health_check: None,
     };
-    registry.add_peer(peer);
+    if let Err(err) = registry.try_add_peer(peer) {
+        let message = format!("Failed to save peer site '{}': {}", site_id, err);
+        if wants_json {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response();
+        }
+        session.write(|s| s.push_flash("danger", message));
+        return Redirect::to("/ui/sites").into_response();
+    }
 
     let message = format!("Peer site '{}' added.", site_id);
     if wants_json {
@@ -2147,7 +2169,18 @@ pub async fn update_peer_site(
         is_healthy: existing.is_healthy,
         last_health_check: existing.last_health_check,
     };
-    registry.update_peer(peer);
+    if let Err(err) = registry.try_update_peer(peer) {
+        let message = format!("Failed to save peer site '{}': {}", site_id, err);
+        if wants_json {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response();
+        }
+        session.write(|s| s.push_flash("danger", message));
+        return Redirect::to("/ui/sites").into_response();
+    }
 
     let message = format!("Peer site '{}' updated.", site_id);
     if wants_json {
@@ -2178,22 +2211,36 @@ pub async fn delete_peer_site(
         return Redirect::to("/ui/sites").into_response();
     };
 
-    if registry.delete_peer(&site_id) {
-        let message = format!("Peer site '{}' deleted.", site_id);
-        if wants_json {
-            return axum::Json(json!({ "ok": true, "message": message })).into_response();
+    match registry.try_delete_peer(&site_id) {
+        Ok(true) => {
+            let message = format!("Peer site '{}' deleted.", site_id);
+            if wants_json {
+                return axum::Json(json!({ "ok": true, "message": message })).into_response();
+            }
+            session.write(|s| s.push_flash("success", message));
         }
-        session.write(|s| s.push_flash("success", message));
-    } else {
-        let message = format!("Peer site '{}' not found.", site_id);
-        if wants_json {
-            return (
-                StatusCode::NOT_FOUND,
-                axum::Json(json!({ "error": message })),
-            )
-                .into_response();
+        Ok(false) => {
+            let message = format!("Peer site '{}' not found.", site_id);
+            if wants_json {
+                return (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
         }
-        session.write(|s| s.push_flash("danger", message));
+        Err(err) => {
+            let message = format!("Failed to delete peer site '{}': {}", site_id, err);
+            if wants_json {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({ "error": message })),
+                )
+                    .into_response();
+            }
+            session.write(|s| s.push_flash("danger", message));
+        }
     }
 
     Redirect::to("/ui/sites").into_response()
@@ -3227,7 +3274,14 @@ pub async fn update_bucket_replication(
 
     match form.action.as_str() {
         "delete" => {
-            state.replication.delete_rule(&bucket_name);
+            if let Err(reason) = state.replication.delete_rule(&bucket_name) {
+                return respond(
+                    false,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    reason.clone(),
+                    json!({ "error": reason }),
+                );
+            }
             respond(
                 true,
                 StatusCode::OK,
@@ -3898,7 +3952,15 @@ pub async fn create_website_domain(
         session.write(|s| s.push_flash("danger", website_hosting_required_message(&bucket)));
         return Redirect::to("/ui/website-domains").into_response();
     }
-    store.set_mapping(&domain, &bucket);
+    if let Err(err) = store.try_set_mapping(&domain, &bucket) {
+        session.write(|s| {
+            s.push_flash(
+                "danger",
+                format!("Failed to save mapping for domain '{}': {}", domain, err),
+            )
+        });
+        return Redirect::to("/ui/website-domains").into_response();
+    }
     session.write(|s| {
         s.push_flash(
             "success",
@@ -3944,7 +4006,15 @@ pub async fn update_website_domain(
         session.write(|s| s.push_flash("danger", format!("Domain '{}' was not found.", domain)));
         return Redirect::to("/ui/website-domains").into_response();
     }
-    store.set_mapping(&domain, &bucket);
+    if let Err(err) = store.try_set_mapping(&domain, &bucket) {
+        session.write(|s| {
+            s.push_flash(
+                "danger",
+                format!("Failed to save mapping for domain '{}': {}", domain, err),
+            )
+        });
+        return Redirect::to("/ui/website-domains").into_response();
+    }
     session.write(|s| s.push_flash("success", format!("Domain '{}' updated.", domain)));
     Redirect::to("/ui/website-domains").into_response()
 }
@@ -3961,10 +4031,22 @@ pub async fn delete_website_domain(
     };
 
     let domain = crate::services::website_domains::normalize_domain(&domain);
-    if store.delete_mapping(&domain) {
-        session.write(|s| s.push_flash("success", format!("Domain '{}' removed.", domain)));
-    } else {
-        session.write(|s| s.push_flash("danger", format!("Domain '{}' was not found.", domain)));
+    match store.try_delete_mapping(&domain) {
+        Ok(true) => {
+            session.write(|s| s.push_flash("success", format!("Domain '{}' removed.", domain)));
+        }
+        Ok(false) => {
+            session
+                .write(|s| s.push_flash("danger", format!("Domain '{}' was not found.", domain)));
+        }
+        Err(err) => {
+            session.write(|s| {
+                s.push_flash(
+                    "danger",
+                    format!("Failed to remove mapping for domain '{}': {}", domain, err),
+                )
+            });
+        }
     }
     Redirect::to("/ui/website-domains").into_response()
 }
@@ -4639,5 +4721,189 @@ mod history_format_tests {
         assert_eq!(format_execution_duration(Some(59.999)), "1m 00s");
         assert_eq!(format_execution_duration(Some(62.4)), "1m 02s");
         assert_eq!(format_execution_duration(Some(3_723.0)), "1h 02m 03s");
+    }
+}
+
+#[cfg(test)]
+mod config_persistence_tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::session::SessionData;
+
+    fn test_state(tmp: &tempfile::TempDir) -> AppState {
+        let config_dir = tmp.path().join(".myfsio.sys").join("config");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        AppState::new(ServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ui_bind_addr: "127.0.0.1:0".parse().unwrap(),
+            storage_root: tmp.path().to_path_buf(),
+            iam_config_path: config_dir.join("iam.json"),
+            website_hosting_enabled: true,
+            allow_internal_endpoints: true,
+            ..ServerConfig::default()
+        })
+    }
+
+    fn occupy_config_path(tmp: &tempfile::TempDir, file_name: &str) {
+        let blocked = tmp
+            .path()
+            .join(".myfsio.sys")
+            .join("config")
+            .join(file_name);
+        let _ = std::fs::remove_file(&blocked);
+        std::fs::create_dir_all(&blocked).expect("occupy the config path with a directory");
+    }
+
+    fn test_session() -> SessionHandle {
+        SessionHandle::new("test-session".to_string(), SessionData::new())
+    }
+
+    fn json_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-requested-with", "XMLHttpRequest".parse().unwrap());
+        headers
+    }
+
+    fn peer_form(site_id: &str) -> PeerSiteForm {
+        PeerSiteForm {
+            site_id: site_id.to_string(),
+            endpoint: "http://127.0.0.1:5050".to_string(),
+            region: "us-east-1".to_string(),
+            priority: 100,
+            display_name: String::new(),
+            connection_id: String::new(),
+            peer_inbound_access_key: String::new(),
+            csrf_token: String::new(),
+        }
+    }
+
+    fn flashes(session: &SessionHandle) -> Vec<(String, String)> {
+        session.read(|data| {
+            data.flash
+                .iter()
+                .map(|flash| (flash.category.clone(), flash.message.clone()))
+                .collect()
+        })
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    #[tokio::test]
+    async fn add_peer_site_still_reports_success_when_the_registry_is_writable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+
+        let response = add_peer_site(
+            State(state.clone()),
+            Extension(test_session()),
+            json_headers(),
+            Form(peer_form("peer-a")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains("\"ok\":true"), "{}", body);
+        assert!(body.contains("Peer site 'peer-a' added."), "{}", body);
+        assert!(state
+            .site_registry
+            .as_ref()
+            .expect("site registry")
+            .get_peer("peer-a")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn add_peer_site_reports_a_server_error_when_the_registry_cannot_be_written() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+        occupy_config_path(&tmp, "site_registry.json");
+
+        let response = add_peer_site(
+            State(state.clone()),
+            Extension(test_session()),
+            json_headers(),
+            Form(peer_form("peer-a")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(response).await;
+        assert!(
+            body.contains("Failed to save peer site 'peer-a'"),
+            "{}",
+            body
+        );
+        assert!(!body.contains("\"ok\":true"), "{}", body);
+        assert!(state
+            .site_registry
+            .as_ref()
+            .expect("site registry")
+            .get_peer("peer-a")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_website_domain_flashes_the_failure_instead_of_success() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = test_state(&tmp);
+        let store = state.website_domains.clone().expect("website domain store");
+        store
+            .try_set_mapping("site.example.com", "site-bucket")
+            .expect("seed mapping");
+
+        let removed_session = test_session();
+        let removed = delete_website_domain(
+            State(state.clone()),
+            Extension(removed_session.clone()),
+            Path("site.example.com".to_string()),
+            Form(WebsiteDomainDeleteForm::default()),
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            flashes(&removed_session),
+            vec![(
+                "success".to_string(),
+                "Domain 'site.example.com' removed.".to_string()
+            )]
+        );
+
+        store
+            .try_set_mapping("kept.example.com", "site-bucket")
+            .expect("seed mapping");
+        occupy_config_path(&tmp, "website_domains.json");
+
+        let blocked_session = test_session();
+        let blocked = delete_website_domain(
+            State(state.clone()),
+            Extension(blocked_session.clone()),
+            Path("kept.example.com".to_string()),
+            Form(WebsiteDomainDeleteForm::default()),
+        )
+        .await;
+        assert_eq!(blocked.status(), StatusCode::SEE_OTHER);
+        let messages = flashes(&blocked_session);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "danger");
+        assert!(
+            messages[0]
+                .1
+                .starts_with("Failed to remove mapping for domain 'kept.example.com'"),
+            "{}",
+            messages[0].1
+        );
+        assert_eq!(
+            store.get_bucket("kept.example.com"),
+            Some("site-bucket".to_string())
+        );
     }
 }

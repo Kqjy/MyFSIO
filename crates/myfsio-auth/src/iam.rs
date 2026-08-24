@@ -252,6 +252,13 @@ pub fn validate_policies(policies: &[IamPolicy]) -> Result<(), String> {
     Ok(())
 }
 
+pub const MANAGE_USER_DENIED: &str = "Not permitted to manage this user";
+
+pub fn grants_root_admin(policies: &[IamPolicy]) -> bool {
+    policies.iter().any(IamPolicy::is_unconditional_full_grant)
+        && !policies.iter().any(IamPolicy::is_deny)
+}
+
 struct IamState {
     key_secrets: HashMap<String, String>,
     key_index: HashMap<String, String>,
@@ -543,11 +550,7 @@ impl IamService {
             ));
         }
 
-        let is_admin = user
-            .policies
-            .iter()
-            .any(IamPolicy::is_unconditional_full_grant)
-            && !user.policies.iter().any(IamPolicy::is_deny);
+        let is_admin = grants_root_admin(&user.policies);
 
         Some(Principal {
             access_key: access_key.to_string(),
@@ -939,7 +942,32 @@ impl IamService {
         }))
     }
 
-    pub async fn set_user_enabled(&self, identifier: &str, enabled: bool) -> Result<(), String> {
+    pub fn can_manage_user(&self, caller: &Principal, identifier: &str) -> bool {
+        if caller.is_admin {
+            return true;
+        }
+        self.reload_if_needed();
+        let state = self.state.read();
+        let Some(target) = state.user_records.get(identifier).or_else(|| {
+            state
+                .key_index
+                .get(identifier)
+                .and_then(|uid| state.user_records.get(uid))
+        }) else {
+            return false;
+        };
+        target.user_id == caller.user_id && !grants_root_admin(&target.policies)
+    }
+
+    pub async fn set_user_enabled(
+        &self,
+        caller: &Principal,
+        identifier: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if !self.can_manage_user(caller, identifier) {
+            return Err(MANAGE_USER_DENIED.to_string());
+        }
         self.mutate_config(|config| {
             let user = config
                 .users
@@ -987,7 +1015,14 @@ impl IamService {
         )
     }
 
-    pub fn create_access_key(&self, identifier: &str) -> Result<serde_json::Value, String> {
+    pub fn create_access_key(
+        &self,
+        caller: &Principal,
+        identifier: &str,
+    ) -> Result<serde_json::Value, String> {
+        if !self.can_manage_user(caller, identifier) {
+            return Err(MANAGE_USER_DENIED.to_string());
+        }
         let new_ak = format!("AK{}", uuid::Uuid::new_v4().simple());
         let new_sk = format!("SK{}", uuid::Uuid::new_v4().simple());
 
@@ -1019,7 +1054,10 @@ impl IamService {
         }))
     }
 
-    pub fn delete_access_key(&self, access_key: &str) -> Result<(), String> {
+    pub fn delete_access_key(&self, caller: &Principal, access_key: &str) -> Result<(), String> {
+        if !self.can_manage_user(caller, access_key) {
+            return Err(MANAGE_USER_DENIED.to_string());
+        }
         self.mutate_config(|config| {
             let mut found = false;
             for user in &mut config.users {
