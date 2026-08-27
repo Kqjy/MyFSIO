@@ -60,6 +60,21 @@ fn require_iam_action(state: &AppState, principal: &Principal, action: &str) -> 
     None
 }
 
+fn require_viewable_user(
+    state: &AppState,
+    principal: &Principal,
+    identifier: &str,
+) -> Option<Response> {
+    if state.iam.can_view_user(principal, identifier) {
+        return None;
+    }
+    Some(json_error(
+        "AccessDenied",
+        myfsio_auth::iam::VIEW_USER_DENIED,
+        StatusCode::FORBIDDEN,
+    ))
+}
+
 fn require_manageable_user(
     state: &AppState,
     principal: &Principal,
@@ -1035,7 +1050,7 @@ pub async fn iam_list_users(
     if let Some(err) = require_iam_action(&state, &principal, "iam:list_users") {
         return err;
     }
-    let users = state.iam.list_users().await;
+    let users = state.iam.list_users_visible_to(&principal).await;
     json_response(StatusCode::OK, serde_json::json!({"users": users}))
 }
 
@@ -1045,6 +1060,9 @@ pub async fn iam_get_user(
     Path(identifier): Path<String>,
 ) -> Response {
     if let Some(err) = require_iam_action(&state, &principal, "iam:get_user") {
+        return err;
+    }
+    if let Some(err) = require_viewable_user(&state, &principal, &identifier) {
         return err;
     }
     match state.iam.get_user(&identifier).await {
@@ -1063,6 +1081,9 @@ pub async fn iam_get_user_policies(
     Path(identifier): Path<String>,
 ) -> Response {
     if let Some(err) = require_iam_action(&state, &principal, "iam:get_policy") {
+        return err;
+    }
+    if let Some(err) = require_viewable_user(&state, &principal, &identifier) {
         return err;
     }
     match state.iam.get_user_policies(&identifier) {

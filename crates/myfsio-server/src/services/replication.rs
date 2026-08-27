@@ -103,6 +103,8 @@ pub struct ReplicationFailure {
     pub pending_source_etag: Option<String>,
     #[serde(default)]
     pub pending_part_size: Option<u64>,
+    #[serde(default)]
+    pub permanent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +335,7 @@ impl ReplicationFailureStore {
                 existing.error_message = failure.error_message.clone();
                 existing.last_error_code = failure.last_error_code.clone();
                 existing.action = failure.action.clone();
+                existing.permanent = failure.permanent;
                 if failure.pending_upload_id.is_some() {
                     existing.pending_upload_id = failure.pending_upload_id.clone();
                     existing.pending_source_size = failure.pending_source_size;
@@ -361,6 +364,7 @@ impl ReplicationFailureStore {
                 existing.error_message = "replication delete queued".to_string();
                 existing.action = "delete".to_string();
                 existing.last_error_code = Some("ReplicationQueued".to_string());
+                existing.permanent = false;
                 existing.pending_upload_id = None;
                 existing.pending_source_size = None;
                 existing.pending_source_etag = None;
@@ -380,6 +384,7 @@ impl ReplicationFailureStore {
                         pending_source_size: None,
                         pending_source_etag: None,
                         pending_part_size: None,
+                        permanent: false,
                     },
                 );
             }
@@ -865,8 +870,11 @@ impl ReplicationManager {
             self.live_replicated_total.clone(),
             self.live_failed_total.clone(),
         );
-        let outcome = self
-            .replicate_task(
+        let rule_still_active = self.get_rule(&work.bucket).is_some_and(|current| {
+            current.enabled && replication_rule_id(&current) == replication_rule_id(&work.rule)
+        });
+        let outcome = if rule_still_active {
+            self.replicate_task(
                 &work.bucket,
                 &work.key,
                 &work.rule,
@@ -874,7 +882,15 @@ impl ReplicationManager {
                 &work.action,
                 &work.ledger_identity,
             )
-            .await;
+            .await
+        } else {
+            tracing::debug!(
+                "Replication skipped for {}/{}: rule removed, disabled or replaced while queued",
+                work.bucket,
+                work.key
+            );
+            ReplicateOutcome::Skipped
+        };
         if let Some(run) = work.run.as_ref() {
             *run.last_object.lock() = Some(work.key);
         }
@@ -909,6 +925,7 @@ impl ReplicationManager {
                 pending_source_size: None,
                 pending_source_etag: None,
                 pending_part_size: None,
+                permanent: false,
             },
         );
         if let Some(run) = work.run {
@@ -1798,6 +1815,7 @@ impl ReplicationManager {
                                 pending_source_size: None,
                                 pending_source_etag: None,
                                 pending_part_size: None,
+                                permanent: false,
                             },
                         );
                         self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
@@ -1830,6 +1848,7 @@ impl ReplicationManager {
                     pending_source_size: None,
                     pending_source_etag: None,
                     pending_part_size: None,
+                    permanent: false,
                 },
             );
             self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
@@ -1884,6 +1903,7 @@ impl ReplicationManager {
                             pending_source_size: None,
                             pending_source_etag: None,
                             pending_part_size: None,
+                            permanent: false,
                         },
                     );
                     return ReplicateOutcome::Failed;
@@ -1929,24 +1949,23 @@ impl ReplicationManager {
                         object_key,
                         refusal.reason
                     );
-                    if refusal.retryable {
-                        self.failures.add(
-                            bucket,
-                            ReplicationFailure {
-                                object_key: object_key.to_string(),
-                                error_message: refusal.reason,
-                                timestamp: now_secs(),
-                                failure_count: 1,
-                                bucket_name: bucket.to_string(),
-                                action: action.to_string(),
-                                last_error_code: Some("EncryptedSourceUnsupported".to_string()),
-                                pending_upload_id: None,
-                                pending_source_size: None,
-                                pending_source_etag: None,
-                                pending_part_size: None,
-                            },
-                        );
-                    }
+                    self.failures.add(
+                        bucket,
+                        ReplicationFailure {
+                            object_key: object_key.to_string(),
+                            error_message: refusal.reason,
+                            timestamp: now_secs(),
+                            failure_count: 1,
+                            bucket_name: bucket.to_string(),
+                            action: action.to_string(),
+                            last_error_code: Some("EncryptedSourceUnsupported".to_string()),
+                            pending_upload_id: None,
+                            pending_source_size: None,
+                            pending_source_etag: None,
+                            pending_part_size: None,
+                            permanent: !refusal.retryable,
+                        },
+                    );
                     self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
                         .await;
                     return ReplicateOutcome::Failed;
@@ -2220,6 +2239,7 @@ impl ReplicationManager {
                         pending_source_size,
                         pending_source_etag,
                         pending_part_size,
+                        permanent: false,
                     },
                 );
                 self.set_replication_status(bucket, object_key, REPLICATION_STATUS_FAILED)
@@ -2537,7 +2557,7 @@ impl ReplicationManager {
                 continue;
             }
             for f in failures {
-                if f.failure_count >= max_attempts {
+                if healer_should_skip(&f, max_attempts) {
                     skipped += 1;
                     continue;
                 }
@@ -2592,6 +2612,10 @@ impl ReplicationManager {
             );
         }
     }
+}
+
+fn healer_should_skip(failure: &ReplicationFailure, max_attempts: u32) -> bool {
+    failure.permanent || failure.failure_count >= max_attempts
 }
 
 fn healer_backoff_seconds(failure_count: u32) -> u64 {
@@ -4401,7 +4425,41 @@ mod tests {
             pending_source_size: None,
             pending_source_etag: None,
             pending_part_size: None,
+            permanent: false,
         }
+    }
+
+    #[test]
+    fn failure_store_tracks_permanent_flag_across_updates() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = ReplicationFailureStore::new(tmp.path().to_path_buf(), 50);
+        let mut refusal = empty_failure("k");
+        refusal.permanent = true;
+        store.add("b", refusal);
+        assert!(store.get("b", "k").expect("present").permanent);
+
+        store.add("b", empty_failure("k"));
+        assert!(!store.get("b", "k").expect("present").permanent);
+
+        let mut refusal = empty_failure("k");
+        refusal.permanent = true;
+        store.add("b", refusal);
+        store.record_queued_delete("b", "k");
+        assert!(!store.get("b", "k").expect("present").permanent);
+    }
+
+    #[test]
+    fn healer_skips_permanent_refusals_regardless_of_attempts() {
+        let mut failure = empty_failure("k");
+        failure.failure_count = 1;
+        assert!(!healer_should_skip(&failure, 12));
+
+        failure.permanent = true;
+        assert!(healer_should_skip(&failure, 12));
+
+        failure.permanent = false;
+        failure.failure_count = 12;
+        assert!(healer_should_skip(&failure, 12));
     }
 
     fn upload_err(code: Option<&str>, transient_msg: &str) -> ReplicationUploadError {

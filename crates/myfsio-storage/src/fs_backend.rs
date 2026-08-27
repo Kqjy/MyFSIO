@@ -8286,31 +8286,41 @@ impl crate::traits::StorageEngine for FsStorageBackend {
         bucket: &str,
         key: &str,
     ) -> StorageResult<Vec<VersionInfo>> {
-        self.require_bucket(bucket)?;
-        self.validate_key(key)?;
-        self.guard_versioned_key_casing(bucket, key)?;
-        let version_dir = self.version_dir(bucket, key);
-        if !version_dir.exists() {
-            return Ok(Vec::new());
-        }
+        run_blocking(|| {
+            let _guard = self.get_object_lock(bucket, key).read();
+            self.require_bucket(bucket)?;
+            self.validate_key(key)?;
+            self.guard_versioned_key_casing(bucket, key)?;
+            let version_dir = self.version_dir(bucket, key);
 
-        let mut versions = Vec::new();
-        let entries = std::fs::read_dir(&version_dir).map_err(StorageError::Io)?;
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".json") {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                if let Ok(record) = serde_json::from_str::<Value>(&content) {
-                    versions.push(self.version_info_from_record(key, &record));
+            let mut versions = Vec::new();
+            let entries = match std::fs::read_dir(&version_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) if Self::directory_may_be_vanishing(&error) => {
+                    if version_dir.exists() {
+                        return Err(StorageError::Io(error));
+                    }
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(StorageError::Io(error)),
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".json") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if let Ok(record) = serde_json::from_str::<Value>(&content) {
+                        versions.push(self.version_info_from_record(key, &record));
+                    }
                 }
             }
-        }
 
-        versions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+            versions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
 
-        Ok(versions)
+            Ok(versions)
+        })
     }
 
     async fn list_bucket_object_versions(
@@ -11538,6 +11548,57 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[tokio::test]
+    async fn version_listing_never_fails_while_the_key_is_being_deleted() {
+        let (_dir, backend) = create_test_backend();
+        let backend = std::sync::Arc::new(backend);
+        backend.create_bucket("ver-race").await.unwrap();
+        backend
+            .set_versioning_status("ver-race", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+
+        let writer = {
+            let backend = backend.clone();
+            tokio::spawn(async move {
+                for round in 0..150 {
+                    let body = format!("body-{round}").into_bytes();
+                    let stream: AsyncReadStream = Box::pin(std::io::Cursor::new(body));
+                    backend
+                        .put_object("ver-race", "racy.bin", stream, None)
+                        .await
+                        .unwrap();
+                    backend.delete_object("ver-race", "racy.bin").await.unwrap();
+                    let versions = backend
+                        .list_object_versions("ver-race", "racy.bin")
+                        .await
+                        .unwrap();
+                    for version in versions {
+                        let _ = backend
+                            .delete_object_version("ver-race", "racy.bin", &version.version_id)
+                            .await;
+                    }
+                }
+            })
+        };
+
+        let lister = {
+            let backend = backend.clone();
+            tokio::spawn(async move {
+                for _ in 0..600 {
+                    backend
+                        .list_object_versions("ver-race", "racy.bin")
+                        .await
+                        .expect("listing versions must tolerate a concurrent delete");
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        writer.await.unwrap();
+        lister.await.unwrap();
     }
 
     #[tokio::test]

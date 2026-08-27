@@ -18,7 +18,13 @@ pub fn create_secret_file(path: &Path) -> io::Result<File> {
 pub fn write_secret_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = create_secret_file(path)?;
     file.write_all(contents)?;
-    file.flush()
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    match path.parent() {
+        Some(parent) => fsync_dir(parent),
+        None => Ok(()),
+    }
 }
 
 pub fn fsync_dir(dir: &Path) -> io::Result<()> {

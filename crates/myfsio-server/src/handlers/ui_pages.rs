@@ -482,12 +482,30 @@ pub async fn bucket_detail(
         return Redirect::to("/ui/buckets").into_response();
     }
 
+    let principal = crate::handlers::ui::current_principal(&state, &session);
+    let visible = match principal.as_ref() {
+        Some(principal) if principal.is_admin => true,
+        Some(principal) => {
+            crate::middleware::ui_can_see_bucket(&state, principal, &bucket_name).await
+        }
+        None => false,
+    };
+    if !visible {
+        session.write(|s| {
+            s.push_flash(
+                "danger",
+                format!("Bucket '{}' does not exist.", bucket_name),
+            )
+        });
+        return Redirect::to("/ui/buckets").into_response();
+    }
+
     let mut ctx = page_context(&state, &session, "ui.bucket_detail");
     ctx.insert("request_args", &request_args);
-    let can_delete_bucket = match crate::handlers::ui::current_principal(&state, &session) {
+    let can_delete_bucket = match principal.as_ref() {
         Some(principal) => crate::middleware::ui_authorize(
             &state,
-            &principal,
+            principal,
             &bucket_name,
             "delete_bucket",
             Some("s3:DeleteBucket"),

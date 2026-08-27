@@ -97,7 +97,6 @@ pub fn parse_complete_multipart_upload(xml: &str) -> Result<CompleteMultipartUpl
         buf.clear();
     }
 
-    result.parts.sort_by_key(|p| p.part_number);
     Ok(result)
 }
 
@@ -200,7 +199,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_complete_multipart() {
+    fn test_parse_complete_multipart_preserves_client_order() {
         let xml = r#"<CompleteMultipartUpload>
             <Part><PartNumber>2</PartNumber><ETag>"etag2"</ETag></Part>
             <Part><PartNumber>1</PartNumber><ETag>"etag1"</ETag></Part>
@@ -208,10 +207,10 @@ mod tests {
 
         let result = parse_complete_multipart_upload(xml).unwrap();
         assert_eq!(result.parts.len(), 2);
-        assert_eq!(result.parts[0].part_number, 1);
-        assert_eq!(result.parts[0].etag, "etag1");
-        assert_eq!(result.parts[1].part_number, 2);
-        assert_eq!(result.parts[1].etag, "etag2");
+        assert_eq!(result.parts[0].part_number, 2);
+        assert_eq!(result.parts[0].etag, "etag2");
+        assert_eq!(result.parts[1].part_number, 1);
+        assert_eq!(result.parts[1].etag, "etag1");
     }
 
     #[test]

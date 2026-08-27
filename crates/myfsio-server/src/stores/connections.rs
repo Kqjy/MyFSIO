@@ -265,26 +265,65 @@ impl ConnectionStore {
     }
 }
 
+fn ephemeral_connection_key() -> String {
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    tracing::error!(
+        "Using an in-memory connection encryption key; connection secrets saved now cannot be decrypted after a restart"
+    );
+    URL_SAFE.encode(key)
+}
+
 fn load_or_create_key(storage_root: &Path) -> String {
     let key_path = storage_root
         .join(".myfsio.sys")
         .join("config")
         .join(".connections_key");
-    if let Ok(text) = std::fs::read_to_string(&key_path) {
+    let existing = match std::fs::read_to_string(&key_path) {
+        Ok(text) => Some(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::error!(
+                path = %key_path.display(),
+                "Connection encryption key could not be read ({}); refusing to replace it. Fix the file's permissions and restart, or move it aside to start over with new connections.",
+                err
+            );
+            return ephemeral_connection_key();
+        }
+    };
+    if let Some(text) = existing {
         let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            if let Ok(decoded) = URL_SAFE.decode(trimmed) {
-                if decoded.len() == 32 {
-                    if let Err(err) = myfsio_common::fs_util::restrict_secret_permissions(&key_path)
-                    {
-                        tracing::debug!(
-                            "Failed to restrict permissions on {}: {}",
-                            key_path.display(),
-                            err
-                        );
-                    }
-                    return trimmed.to_string();
-                }
+        let valid = URL_SAFE
+            .decode(trimmed)
+            .map(|decoded| decoded.len() == 32)
+            .unwrap_or(false);
+        if valid {
+            if let Err(err) = myfsio_common::fs_util::restrict_secret_permissions(&key_path) {
+                tracing::debug!(
+                    "Failed to restrict permissions on {}: {}",
+                    key_path.display(),
+                    err
+                );
+            }
+            return trimmed.to_string();
+        }
+        let preserved = key_path.with_file_name(format!(
+            ".connections_key.corrupt-{}",
+            chrono::Utc::now().timestamp()
+        ));
+        match std::fs::rename(&key_path, &preserved) {
+            Ok(()) => tracing::error!(
+                path = %key_path.display(),
+                preserved_path = %preserved.display(),
+                "Connection encryption key is not valid 32-byte material; preserved it and generated a new key. Existing encrypted connection secrets can no longer be decrypted; restore the preserved file to recover them."
+            ),
+            Err(rename_error) => {
+                tracing::error!(
+                    path = %key_path.display(),
+                    rename_error = %rename_error,
+                    "Connection encryption key is not valid 32-byte material and could not be preserved; refusing to overwrite it"
+                );
+                return ephemeral_connection_key();
             }
         }
     }
@@ -294,7 +333,15 @@ fn load_or_create_key(storage_root: &Path) -> String {
     if let Some(parent) = key_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = myfsio_common::fs_util::atomic_write_secret_file(&key_path, encoded.as_bytes());
+    if let Err(err) =
+        myfsio_common::fs_util::atomic_write_secret_file(&key_path, encoded.as_bytes())
+    {
+        tracing::error!(
+            path = %key_path.display(),
+            "Failed to persist the connection encryption key ({}); connection secrets will not survive a restart",
+            err
+        );
+    }
     encoded
 }
 
@@ -439,6 +486,37 @@ mod tests {
         assert!(names
             .iter()
             .any(|name| name.starts_with("connections.json.corrupt-")));
+    }
+
+    #[test]
+    fn damaged_connection_key_is_preserved_instead_of_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        store.add(sample_connection("c1", "super-secret")).unwrap();
+
+        let config_dir = dir.path().join(".myfsio.sys").join("config");
+        let key_path = config_dir.join(".connections_key");
+        let original = std::fs::read_to_string(&key_path).unwrap();
+        std::fs::write(&key_path, "not-valid-key-material").unwrap();
+
+        let reopened = ConnectionStore::new(dir.path());
+        assert!(
+            reopened.get("c1").is_none(),
+            "entries encrypted with the lost key cannot be decrypted"
+        );
+
+        let preserved: Vec<String> = std::fs::read_dir(&config_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".connections_key.corrupt-"))
+            .collect();
+        assert_eq!(preserved.len(), 1, "the damaged key file must be preserved");
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join(&preserved[0])).unwrap(),
+            "not-valid-key-material"
+        );
+        assert_ne!(std::fs::read_to_string(&key_path).unwrap(), original);
     }
 
     #[test]

@@ -4070,7 +4070,7 @@
             <code class="small">${escapeHtml(f.object_key)}</code>
           </td>
           <td class="small text-muted" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(f.error_message)}">
-            ${escapeHtml(f.error_message)}
+            ${f.permanent ? '<span class="badge bg-warning text-dark me-1">Not retried</span>' : ''}${escapeHtml(f.error_message)}
           </td>
           <td class="small text-muted">${new Date(f.timestamp * 1000).toLocaleString()}</td>
           <td class="text-center"><span class="badge bg-secondary">${f.failure_count}</span></td>

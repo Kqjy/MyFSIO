@@ -113,7 +113,7 @@ fn is_allowed_redirect(target: &str, allowed_hosts: &[String]) -> bool {
 }
 
 pub async fn logout(Extension(session): Extension<SessionHandle>) -> Response {
-    session.write(|s| {
+    session.write_authoritative(|s| {
         s.user_id = None;
         s.display_name = None;
         s.flash.clear();

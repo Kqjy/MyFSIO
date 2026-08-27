@@ -311,15 +311,18 @@ async fn main() {
     }
 
     if config.lifecycle_enabled {
-        let lifecycle =
-            std::sync::Arc::new(myfsio_server::services::lifecycle::LifecycleService::new(
+        let lifecycle = std::sync::Arc::new(
+            myfsio_server::services::lifecycle::LifecycleService::new(
                 state.storage.clone(),
                 config.storage_root.clone(),
                 myfsio_server::services::lifecycle::LifecycleConfig {
                     interval_seconds: 3600,
                     max_history_per_bucket: config.lifecycle_max_history_per_bucket,
+                    ..Default::default()
                 },
-            ));
+            )
+            .with_replication(state.replication.clone()),
+        );
         bg_handles.push(lifecycle.start_background());
         tracing::info!("Lifecycle manager background service started");
     }
@@ -723,16 +726,25 @@ fn sync_directory(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 fn load_env_files() {
+    let inherited: std::collections::HashMap<std::ffi::OsString, std::ffi::OsString> =
+        std::env::vars_os().collect();
     let cwd = std::env::current_dir().ok();
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     candidates.push(std::path::PathBuf::from("/opt/myfsio/myfsio.env"));
     if let Some(ref dir) = cwd {
-        candidates.push(dir.join(".env"));
-        candidates.push(dir.join("myfsio.env"));
-        for ancestor in dir.ancestors().skip(1).take(4) {
+        for ancestor in dir
+            .ancestors()
+            .skip(1)
+            .take(4)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+        {
             candidates.push(ancestor.join(".env"));
             candidates.push(ancestor.join("myfsio.env"));
         }
+        candidates.push(dir.join(".env"));
+        candidates.push(dir.join("myfsio.env"));
     }
 
     let mut seen = std::collections::HashSet::new();
@@ -746,6 +758,21 @@ fn load_env_files() {
                 Err(e) => eprintln!("Failed to load env file {}: {}", path.display(), e),
             }
         }
+    }
+
+    let mut overridden: Vec<String> = Vec::new();
+    for (key, value) in inherited {
+        if std::env::var_os(&key).as_ref() != Some(&value) {
+            overridden.push(key.to_string_lossy().into_owned());
+            std::env::set_var(&key, &value);
+        }
+    }
+    if !overridden.is_empty() {
+        overridden.sort();
+        eprintln!(
+            "Ignored env-file values for variables already set in the process environment: {}",
+            overridden.join(", ")
+        );
     }
 }
 

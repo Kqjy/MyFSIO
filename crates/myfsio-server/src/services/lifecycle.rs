@@ -10,9 +10,12 @@ use tokio::sync::RwLock;
 
 use crate::services::object_lock;
 
+const LIFECYCLE_PAGE_SIZE: usize = 1_000;
+
 pub struct LifecycleConfig {
     pub interval_seconds: u64,
     pub max_history_per_bucket: usize,
+    pub page_size: usize,
 }
 
 impl Default for LifecycleConfig {
@@ -20,6 +23,7 @@ impl Default for LifecycleConfig {
         Self {
             interval_seconds: 3600,
             max_history_per_bucket: 50,
+            page_size: LIFECYCLE_PAGE_SIZE,
         }
     }
 }
@@ -62,6 +66,7 @@ pub struct LifecycleService {
     storage_root: PathBuf,
     config: LifecycleConfig,
     running: Arc<RwLock<bool>>,
+    replication: Option<Arc<crate::services::replication::ReplicationManager>>,
 }
 
 impl LifecycleService {
@@ -75,7 +80,48 @@ impl LifecycleService {
             storage_root: storage_root.into(),
             config,
             running: Arc::new(RwLock::new(false)),
+            replication: None,
         }
+    }
+
+    pub fn with_replication(
+        mut self,
+        replication: Arc<crate::services::replication::ReplicationManager>,
+    ) -> Self {
+        self.replication = Some(replication);
+        self
+    }
+
+    fn page_size(&self) -> usize {
+        if self.config.page_size == 0 {
+            LIFECYCLE_PAGE_SIZE
+        } else {
+            self.config.page_size
+        }
+    }
+
+    async fn propagate_delete(
+        &self,
+        bucket: &str,
+        key: &str,
+        outcome: &myfsio_common::types::DeleteOutcome,
+    ) {
+        let Some(replication) = self.replication.clone() else {
+            return;
+        };
+        let action = if outcome.is_delete_marker {
+            "delete-marker"
+        } else {
+            "delete"
+        };
+        replication
+            .trigger(
+                bucket.to_string(),
+                key.to_string(),
+                action.to_string(),
+                outcome.version_id.clone(),
+            )
+            .await;
     }
 
     pub async fn run_cycle(&self) -> Result<Value, String> {
@@ -197,49 +243,62 @@ impl LifecycleService {
             }
         };
 
-        let params = myfsio_common::types::ListParams {
-            max_keys: 10_000,
-            prefix: if rule.prefix.is_empty() {
-                None
-            } else {
-                Some(rule.prefix.clone())
-            },
-            ..Default::default()
+        let prefix = if rule.prefix.is_empty() {
+            None
+        } else {
+            Some(rule.prefix.clone())
         };
-        match self.storage.list_objects(bucket, &params).await {
-            Ok(objects) => {
-                for object in &objects.objects {
-                    if object.last_modified < cutoff
-                        && self
-                            .object_matches_tag_filter(bucket, &object.key, rule)
-                            .await
-                    {
-                        let metadata = self
-                            .storage
-                            .get_object_metadata(bucket, &object.key)
-                            .await
-                            .unwrap_or_default();
-                        if let Err(message) = object_lock::can_delete_object(&metadata, false) {
-                            tracing::info!(
-                                bucket = bucket,
-                                key = %object.key,
-                                "lifecycle skip locked: {}",
-                                message
-                            );
-                            continue;
-                        }
-                        if let Err(err) = self.storage.delete_object(bucket, &object.key).await {
-                            result
-                                .errors
-                                .push(format!("{}:{}: {}", bucket, object.key, err));
-                        } else {
-                            result.objects_deleted += 1;
-                        }
-                    }
+        let mut continuation_token = None;
+        loop {
+            let params = myfsio_common::types::ListParams {
+                max_keys: self.page_size(),
+                prefix: prefix.clone(),
+                continuation_token: continuation_token.clone(),
+                ..Default::default()
+            };
+            let page = match self.storage.list_objects(bucket, &params).await {
+                Ok(page) => page,
+                Err(err) => return Some(format!("Failed to list objects for {}: {}", bucket, err)),
+            };
+            for object in &page.objects {
+                if object.last_modified >= cutoff
+                    || !self
+                        .object_matches_tag_filter(bucket, &object.key, rule)
+                        .await
+                {
+                    continue;
                 }
-                None
+                let metadata = self
+                    .storage
+                    .get_object_metadata(bucket, &object.key)
+                    .await
+                    .unwrap_or_default();
+                if let Err(message) = object_lock::can_delete_object(&metadata, false) {
+                    tracing::info!(
+                        bucket = bucket,
+                        key = %object.key,
+                        "lifecycle skip locked: {}",
+                        message
+                    );
+                    continue;
+                }
+                match self.storage.delete_object(bucket, &object.key).await {
+                    Ok(outcome) => {
+                        result.objects_deleted += 1;
+                        self.propagate_delete(bucket, &object.key, &outcome).await;
+                    }
+                    Err(err) => result
+                        .errors
+                        .push(format!("{}:{}: {}", bucket, object.key, err)),
+                }
             }
-            Err(err) => Some(format!("Failed to list objects for {}: {}", bucket, err)),
+            if !page.is_truncated {
+                return None;
+            }
+            match page.next_continuation_token {
+                Some(token) => continuation_token = Some(token),
+                None => return None,
+            }
         }
     }
 
@@ -1046,6 +1105,68 @@ mod tests {
             LifecycleService::new(storage.clone(), tmp.path(), LifecycleConfig::default());
         let result = service.run_cycle().await.unwrap();
         (storage, result, tmp)
+    }
+
+    #[tokio::test]
+    async fn expiration_walks_past_the_first_listing_page() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(FsStorageBackend::new(tmp.path().to_path_buf()));
+        storage.create_bucket("docs").await.unwrap();
+
+        let page_size = 10;
+        let total = page_size * 3 + 4;
+        for index in 0..total {
+            storage
+                .put_object(
+                    "docs",
+                    &format!("logs/file-{:05}.txt", index),
+                    Box::pin(std::io::Cursor::new(b"payload".to_vec())),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let lifecycle_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+            <LifecycleConfiguration>
+              <Rule>
+                <Status>Enabled</Status>
+                <Filter><Prefix>logs/</Prefix></Filter>
+                <Expiration><Date>{}</Date></Expiration>
+              </Rule>
+            </LifecycleConfiguration>"#,
+            (Utc::now() - Duration::days(1)).to_rfc3339()
+        );
+        let mut config = storage.get_bucket_config("docs").await.unwrap();
+        config.lifecycle = Some(Value::String(lifecycle_xml));
+        storage.set_bucket_config("docs", &config).await.unwrap();
+
+        let service = LifecycleService::new(
+            storage.clone(),
+            tmp.path(),
+            LifecycleConfig {
+                page_size,
+                ..LifecycleConfig::default()
+            },
+        );
+        let result = service.run_cycle().await.unwrap();
+
+        assert_eq!(
+            result["objects_deleted"], total as u64,
+            "every eligible object must expire, not just the first listing page"
+        );
+        let params = myfsio_common::types::ListParams {
+            max_keys: 10,
+            prefix: Some("logs/".to_string()),
+            ..Default::default()
+        };
+        assert!(storage
+            .list_objects("docs", &params)
+            .await
+            .unwrap()
+            .objects
+            .is_empty());
     }
 
     #[tokio::test]

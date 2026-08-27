@@ -25,6 +25,7 @@ pub struct SessionHandle {
     pub id: String,
     inner: Arc<Mutex<SessionData>>,
     dirty: Arc<Mutex<bool>>,
+    authoritative: Arc<Mutex<bool>>,
     rotated_id: Arc<Mutex<Option<String>>>,
     destroy_old: Arc<Mutex<Option<String>>>,
 }
@@ -35,6 +36,7 @@ impl SessionHandle {
             id,
             inner: Arc::new(Mutex::new(data)),
             dirty: Arc::new(Mutex::new(false)),
+            authoritative: Arc::new(Mutex::new(false)),
             rotated_id: Arc::new(Mutex::new(None)),
             destroy_old: Arc::new(Mutex::new(None)),
         }
@@ -58,6 +60,16 @@ impl SessionHandle {
 
     pub fn is_dirty(&self) -> bool {
         *self.dirty.lock()
+    }
+
+    pub fn write_authoritative<R>(&self, f: impl FnOnce(&mut SessionData) -> R) -> R {
+        let out = self.write(f);
+        *self.authoritative.lock() = true;
+        out
+    }
+
+    pub fn is_authoritative(&self) -> bool {
+        *self.authoritative.lock()
     }
 
     pub fn rotate_id(&self) {
@@ -99,7 +111,16 @@ pub async fn session_layer(
     let dirty = handle.is_dirty();
 
     if dirty {
-        state.store.save(&effective_id, handle.snapshot());
+        if handle.is_authoritative() {
+            state
+                .store
+                .save_authoritative(&effective_id, handle.snapshot());
+        } else if !state.store.save(&effective_id, handle.snapshot()) {
+            tracing::debug!(
+                "Discarded a stale session write for {}; a newer request already saved it",
+                effective_id
+            );
+        }
     }
 
     if let Some(old) = destroy_old {

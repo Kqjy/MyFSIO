@@ -2956,7 +2956,14 @@ pub async fn get_object(
             .await;
     }
     if query.attributes.is_some() {
-        return object_attributes_handler(&state, &bucket, &key, &headers).await;
+        return object_attributes_handler(
+            &state,
+            &bucket,
+            &key,
+            query.version_id.as_deref(),
+            &headers,
+        )
+        .await;
     }
     if let Some(ref upload_id) = query.upload_id {
         return list_parts_handler(&state, &bucket, &key, upload_id, &query).await;
@@ -4409,7 +4416,7 @@ async fn upload_part_copy_from_encrypted_source(
             "Source object is encrypted but encryption service is disabled",
         ));
     };
-    let customer_key = match extract_copy_source_sse_c_key(headers) {
+    let customer_key = match resolve_copy_source_sse_c_key(headers, &snap_meta.internal_metadata) {
         Ok(key) => key,
         Err(response) => {
             let _ = tokio::fs::remove_file(&ciphertext_path).await;
@@ -5186,11 +5193,22 @@ async fn object_attributes_handler(
     state: &AppState,
     bucket: &str,
     key: &str,
+    version_id: Option<&str>,
     headers: &HeaderMap,
 ) -> Response {
-    let meta = match state.storage.head_object(bucket, key).await {
-        Ok(m) => m,
-        Err(e) => return storage_err_response(e),
+    let meta = match version_id {
+        Some(version_id) => match state
+            .storage
+            .head_object_version(bucket, key, version_id)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
+        None => match state.storage.head_object(bucket, key).await {
+            Ok(m) => m,
+            Err(e) => return storage_err_response(e),
+        },
     };
 
     let requested = headers
@@ -5204,11 +5222,18 @@ async fn object_attributes_handler(
         .collect();
     let all = attrs.is_empty();
 
-    let stored_meta = state
-        .storage
-        .get_object_metadata(bucket, key)
-        .await
-        .unwrap_or_default();
+    let stored_meta = match version_id {
+        Some(version_id) => state
+            .storage
+            .get_object_version_metadata(bucket, key, version_id)
+            .await
+            .unwrap_or_default(),
+        None => state
+            .storage
+            .get_object_metadata(bucket, key)
+            .await
+            .unwrap_or_default(),
+    };
 
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     xml.push_str("<GetObjectAttributesResponse xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
@@ -5224,7 +5249,10 @@ async fn object_attributes_handler(
         xml.push_str(&format!("<StorageClass>{}</StorageClass>", xml_escape(sc)));
     }
     if all || attrs.contains("objectsize") {
-        xml.push_str(&format!("<ObjectSize>{}</ObjectSize>", meta.size));
+        xml.push_str(&format!(
+            "<ObjectSize>{}</ObjectSize>",
+            object_read::plaintext_size(&meta)
+        ));
     }
     if all || attrs.contains("checksum") {
         let mut checksum_xml = String::new();
@@ -5258,7 +5286,14 @@ async fn object_attributes_handler(
     }
 
     xml.push_str("</GetObjectAttributesResponse>");
-    (StatusCode::OK, [("content-type", "application/xml")], xml).into_response()
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert("content-type", "application/xml".parse().unwrap());
+    if let Some(version_id) = meta.version_id.as_deref() {
+        if let Ok(value) = version_id.parse() {
+            resp_headers.insert("x-amz-version-id", value);
+        }
+    }
+    (StatusCode::OK, resp_headers, xml).into_response()
 }
 
 async fn copy_object_handler(
@@ -5526,7 +5561,7 @@ async fn copy_object_handler(
                 "Source object is encrypted but encryption service is disabled",
             ));
         };
-        let customer_key = match extract_copy_source_sse_c_key(headers) {
+        let customer_key = match resolve_copy_source_sse_c_key(headers, snap_internal) {
             Ok(k) => k,
             Err(resp) => {
                 let _ = tokio::fs::remove_file(&source_path).await;
@@ -6944,6 +6979,29 @@ fn strip_storage_managed_keys(metadata: &mut HashMap<String, String>) {
     for k in STORAGE_MANAGED_METADATA_KEYS {
         metadata.remove(*k);
     }
+}
+
+fn resolve_copy_source_sse_c_key(
+    headers: &HeaderMap,
+    stored_metadata: &HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, Response> {
+    let provided = extract_copy_source_sse_c_key(headers)?;
+    let Some(stored_md5) = stored_metadata.get(SSE_C_KEY_MD5_META) else {
+        return Ok(provided);
+    };
+    let Some(key) = provided else {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::InvalidRequest,
+            "Copy source was created with SSE-C; the copy-source SSE-C key headers are required",
+        )));
+    };
+    if !constant_time_eq(sse_c_key_md5(&key).as_bytes(), stored_md5.as_bytes()) {
+        return Err(s3_error_response(S3Error::new(
+            S3ErrorCode::AccessDenied,
+            "The copy-source SSE-C customer key does not match the key used to encrypt this object",
+        )));
+    }
+    Ok(Some(key))
 }
 
 fn extract_copy_source_sse_c_key(headers: &HeaderMap) -> Result<Option<Vec<u8>>, Response> {

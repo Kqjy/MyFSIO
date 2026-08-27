@@ -252,7 +252,10 @@ pub fn validate_policies(policies: &[IamPolicy]) -> Result<(), String> {
     Ok(())
 }
 
+const TRANSIENT_RELOAD_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub const MANAGE_USER_DENIED: &str = "Not permitted to manage this user";
+pub const VIEW_USER_DENIED: &str = "Not permitted to view this user";
 
 pub fn grants_root_admin(policies: &[IamPolicy]) -> bool {
     policies.iter().any(IamPolicy::is_unconditional_full_grant)
@@ -266,6 +269,7 @@ struct IamState {
     user_records: HashMap<String, IamUser>,
     file_mtime: Option<SystemTime>,
     last_check: Instant,
+    load_failed_since: Option<Instant>,
 }
 
 pub struct IamService {
@@ -301,6 +305,7 @@ impl IamService {
                 user_records: HashMap::new(),
                 file_mtime: None,
                 last_check: Instant::now(),
+                load_failed_since: None,
             })),
             check_interval: std::time::Duration::from_secs(2),
             fernet_key,
@@ -392,6 +397,47 @@ impl IamService {
         self.state.write().last_check = Instant::now();
     }
 
+    fn invalidate_credentials(&self, reason: &str) {
+        let mut state = self.state.write();
+        let had_credentials = !state.key_secrets.is_empty() || !state.user_records.is_empty();
+        state.key_secrets.clear();
+        state.key_index.clear();
+        state.key_status.clear();
+        state.user_records.clear();
+        state.file_mtime = None;
+        state.load_failed_since = Some(Instant::now());
+        drop(state);
+        if had_credentials {
+            tracing::error!(
+                "IAM configuration is unusable ({}); cleared all cached credentials. Every request                  will be rejected until a valid configuration is readable again.",
+                reason
+            );
+        }
+    }
+
+    fn note_transient_failure(&self, reason: &str) {
+        let expired = {
+            let mut state = self.state.write();
+            match state.load_failed_since {
+                Some(since) => since.elapsed() >= TRANSIENT_RELOAD_GRACE,
+                None => {
+                    state.load_failed_since = Some(Instant::now());
+                    false
+                }
+            }
+        };
+        if expired {
+            self.invalidate_credentials(reason);
+        } else {
+            tracing::warn!(
+                "Failed to read IAM config {}: {}; keeping cached credentials for up to {}s",
+                self.config_path.display(),
+                reason,
+                TRANSIENT_RELOAD_GRACE.as_secs()
+            );
+        }
+    }
+
     fn reload(&self) {
         let content = match std::fs::read_to_string(&self.config_path) {
             Ok(c) => c,
@@ -400,14 +446,11 @@ impl IamService {
                     "IAM config {} does not exist yet",
                     self.config_path.display()
                 );
+                self.invalidate_credentials("configuration file does not exist");
                 return;
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to read IAM config {}: {}",
-                    self.config_path.display(),
-                    e
-                );
+                self.note_transient_failure(&e.to_string());
                 return;
             }
         };
@@ -418,20 +461,25 @@ impl IamService {
                     Ok(plaintext) => match String::from_utf8(plaintext) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::error!("Decrypted IAM config is not valid UTF-8: {}", e);
+                            self.invalidate_credentials(&format!(
+                                "decrypted configuration is not valid UTF-8: {}",
+                                e
+                            ));
                             return;
                         }
                     },
                     Err(e) => {
-                        tracing::error!(
-                            "Failed to decrypt IAM config: {}. SECRET_KEY may have changed.",
+                        self.invalidate_credentials(&format!(
+                            "configuration could not be decrypted ({}); SECRET_KEY may have changed",
                             e
-                        );
+                        ));
                         return;
                     }
                 },
                 None => {
-                    tracing::error!("IAM config is encrypted but no SECRET_KEY configured");
+                    self.invalidate_credentials(
+                        "configuration is encrypted but no SECRET_KEY is configured",
+                    );
                     return;
                 }
             }
@@ -442,7 +490,7 @@ impl IamService {
         let raw_config: RawIamConfig = match serde_json::from_str(&raw) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("Failed to parse IAM config: {}", e);
+                self.invalidate_credentials(&format!("configuration could not be parsed: {}", e));
                 return;
             }
         };
@@ -478,6 +526,7 @@ impl IamService {
         state.user_records = user_records;
         state.file_mtime = file_mtime;
         state.last_check = Instant::now();
+        state.load_failed_since = None;
 
         tracing::info!(
             "IAM config reloaded: {} users, {} keys",
@@ -887,6 +936,20 @@ impl IamService {
         })
     }
 
+    pub async fn list_users_visible_to(&self, caller: &Principal) -> Vec<serde_json::Value> {
+        let users = self.list_users().await;
+        if caller.is_admin {
+            return users;
+        }
+        users
+            .into_iter()
+            .filter(|user| {
+                user.get("user_id").and_then(|value| value.as_str())
+                    == Some(caller.user_id.as_str())
+            })
+            .collect()
+    }
+
     pub async fn list_users(&self) -> Vec<serde_json::Value> {
         self.reload_if_needed();
         let state = self.state.read();
@@ -940,6 +1003,23 @@ impl IamService {
             }).collect::<Vec<_>>(),
             "policies": user.policies,
         }))
+    }
+
+    pub fn can_view_user(&self, caller: &Principal, identifier: &str) -> bool {
+        if caller.is_admin {
+            return true;
+        }
+        self.reload_if_needed();
+        let state = self.state.read();
+        let Some(target) = state.user_records.get(identifier).or_else(|| {
+            state
+                .key_index
+                .get(identifier)
+                .and_then(|uid| state.user_records.get(uid))
+        }) else {
+            return false;
+        };
+        target.peer_site_id.is_none() && target.user_id == caller.user_id
     }
 
     pub fn can_manage_user(&self, caller: &Principal, identifier: &str) -> bool {
@@ -1481,6 +1561,85 @@ fn prefix_match(policy_prefix: &str, object_key: &str, case_insensitive_fs: bool
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn service_with_config(dir: &std::path::Path, contents: &str) -> IamService {
+        let path = dir.join("iam.json");
+        std::fs::write(&path, contents).unwrap();
+        IamService::new(path)
+    }
+
+    fn valid_config() -> String {
+        serde_json::json!({
+            "version": 2,
+            "users": [{
+                "user_id": "u-1",
+                "display_name": "admin",
+                "enabled": true,
+                "access_keys": [{
+                    "access_key": "AKIATEST000000000000",
+                    "secret_key": "secret",
+                    "status": "active"
+                }],
+                "policies": [{"bucket": "*", "actions": ["*"], "prefix": "*"}]
+            }]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn deleted_config_revokes_cached_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = service_with_config(tmp.path(), &valid_config());
+        assert!(service.get_secret_key("AKIATEST000000000000").is_some());
+
+        std::fs::remove_file(tmp.path().join("iam.json")).unwrap();
+        service.reload();
+
+        assert!(
+            service.get_secret_key("AKIATEST000000000000").is_none(),
+            "credentials must not survive a configuration that no longer exists"
+        );
+        assert!(service.get_principal("AKIATEST000000000000").is_none());
+    }
+
+    #[test]
+    fn malformed_config_revokes_cached_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = service_with_config(tmp.path(), &valid_config());
+        assert!(service.get_secret_key("AKIATEST000000000000").is_some());
+
+        std::fs::write(tmp.path().join("iam.json"), "{ not json").unwrap();
+        service.reload();
+
+        assert!(service.get_secret_key("AKIATEST000000000000").is_none());
+    }
+
+    #[test]
+    fn undecryptable_config_revokes_cached_credentials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("iam.json");
+        std::fs::write(&path, valid_config()).unwrap();
+        let service = IamService::new_with_secret(path.clone(), Some("a-test-secret".to_string()));
+        assert!(service.get_secret_key("AKIATEST000000000000").is_some());
+
+        std::fs::write(&path, "MYFSIO_IAM_ENC:not-a-valid-token").unwrap();
+        service.reload();
+
+        assert!(service.get_secret_key("AKIATEST000000000000").is_none());
+    }
+
+    #[test]
+    fn a_valid_reload_restores_credentials_after_a_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = service_with_config(tmp.path(), &valid_config());
+        std::fs::write(tmp.path().join("iam.json"), "{ not json").unwrap();
+        service.reload();
+        assert!(service.get_secret_key("AKIATEST000000000000").is_none());
+
+        std::fs::write(tmp.path().join("iam.json"), valid_config()).unwrap();
+        service.reload();
+        assert!(service.get_secret_key("AKIATEST000000000000").is_some());
+    }
 
     fn actions(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
